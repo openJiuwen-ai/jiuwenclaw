@@ -26,6 +26,15 @@ logger = logging.getLogger(__name__)
 
 
 _CHART_CANDIDATE_TYPES = {"data", "comparison", "technology", "trend"}
+# designer.md L869 扩展词表（与原文一致，不增词）
+_CHART_CANDIDATE_SEMANTIC_SIGNALS = (
+    "数据需求",
+    "图表",
+    "趋势",
+    "对比",
+    "指标",
+    "基准测试",
+)
 # P8.2：只读校验 / 单页 fix 硬超时，避免 read_file 或 bash 挂死拖死 gather。
 _P82_READ_TIMEOUT_SECONDS = 60.0
 _P82_FIX_ONE_TIMEOUT_SECONDS = 360.0
@@ -70,6 +79,15 @@ def _extract_designer_section(
             )
             if chart_section:
                 parts.append(chart_section)
+            activation_section = _extract_bounded_section(
+                "### 激活 content-template",
+                (
+                    "\n### custom 模式的图表骨架",
+                    "\n### ECharts JavaScript",
+                ),
+            )
+            if activation_section:
+                parts.append(activation_section)
         return "\n\n".join(parts)
 
     if not text:
@@ -134,8 +152,8 @@ _CONTENT_FILL_DENSITY_CHECKLIST = """### PAGE_CONTENT 密度硬约束（填槽�
 - 主区须填满：禁止大块空 `flex-1` 纯色或仅一行点缀。
 - 高度链：可伸展容器带 `min-h-0`；子块用 `flex-shrink-0` / `flex-1 min-h-0` 分工。
 - 数量与字号：卡片/要点克制（常见 ≤6 卡、核心点 ≤6）；正文 ≥14px，说明 ≥11px。
-- 图表候选页优先激活模板内 `CHART_SCAFFOLD`，禁止另起第二套初始化框架。
-- 只替换三处占位符；禁止先写 YAML 预算、开 subagent 或重写整页骨架。"""
+- 图表候选页须完成 CHART_SCAFFOLD 三步激活（见 designer §激活）；非图表页保持 scaffold 注释 dormant。
+- 禁止先写 YAML 预算、开 subagent 或重写整页骨架。"""
 
 
 
@@ -723,6 +741,79 @@ _REPAIRABLE_CONTENT_TEMPLATE_REASONS = frozenset({
 })
 
 
+def _is_chart_candidate_page(
+    page_type: str,
+    *,
+    outline_page: str = "",
+    research_page: str = "",
+) -> bool:
+    """pptx-craft designer L869：默认四类 + outline/research 语义扩展；结构页永不升格。"""
+    normalized = (page_type or "").strip().lower()
+    if normalized in _STRUCTURAL_TEMPLATE_PAGE_TYPES:
+        return False
+    if normalized in _CHART_CANDIDATE_TYPES:
+        return True
+    combined = f"{outline_page}\n{research_page}"
+    return any(signal in combined for signal in _CHART_CANDIDATE_SEMANTIC_SIGNALS)
+
+
+def _filled_chart_scaffold_is_progressed(filled_html: str) -> bool:
+    """filled 中 scaffold 已填 option 或已暴露为活跃 script（非纯 dormant）。"""
+    if not filled_html:
+        return False
+    for match in _COMMENTED_CHART_SCAFFOLD_BLOCK_RE.finditer(filled_html):
+        body = match.group(2) or ""
+        if _chart_scaffold_option_populated(body):
+            return True
+    html_no_comments = _HTML_COMMENT_RE.sub("", filled_html)
+    for match in _SCRIPT_BODY_RE.finditer(html_no_comments):
+        body = match.group(1) or ""
+        if "echarts.init" in body.lower() and _chart_scaffold_option_populated(body):
+            return True
+    return False
+
+
+def _extract_chart_scaffold_region(filled_html: str) -> str | None:
+    """从 filled 提取可合并的 scaffold 区域（注释内已填 option 或已激活 script）。"""
+    for match in _COMMENTED_CHART_SCAFFOLD_BLOCK_RE.finditer(filled_html):
+        body = match.group(2) or ""
+        if _chart_scaffold_option_populated(body):
+            return body.strip()
+    html_no_comments = _HTML_COMMENT_RE.sub("", filled_html)
+    body_close = filled_html.lower().rfind("</body>")
+    prefix = html_no_comments[:body_close] if body_close != -1 else html_no_comments
+    for match in reversed(list(_SCRIPT_BODY_RE.finditer(prefix))):
+        body = match.group(1) or ""
+        if "echarts.init" in body.lower() and _chart_scaffold_option_populated(body):
+            return match.group(0).strip()
+    return None
+
+
+def _merge_chart_scaffold_from_filled(seed_html: str, filled_html: str) -> str:
+    """chrome repair 时保留 filled 对 scaffold 的激活/填 option 进度，避免回滚 seed dormant。"""
+    if not _filled_chart_scaffold_is_progressed(filled_html):
+        return seed_html
+    filled_scaffold = _extract_chart_scaffold_region(filled_html)
+    if not filled_scaffold:
+        return seed_html
+    match = _COMMENTED_CHART_SCAFFOLD_BLOCK_RE.search(seed_html)
+    if match:
+        return seed_html[:match.start()] + filled_scaffold + seed_html[match.end():]
+    body_close = seed_html.lower().rfind("</body>")
+    if body_close == -1:
+        return seed_html
+    prefix = seed_html[:body_close]
+    for script_match in reversed(list(_SCRIPT_BODY_RE.finditer(prefix))):
+        body = script_match.group(1) or ""
+        if "echarts.init" in body.lower():
+            return (
+                seed_html[:script_match.start()]
+                + filled_scaffold
+                + seed_html[script_match.end():]
+            )
+    return seed_html[:body_close] + filled_scaffold + seed_html[body_close:]
+
+
 def _repair_content_template_chrome(seed_html: str, filled_html: str) -> str | None:
     """Restore Page Chrome from seed; keep filled title/content/footer slot values.
 
@@ -781,6 +872,7 @@ def _repair_content_template_chrome(seed_html: str, filled_html: str) -> str | N
         )
         out = out.replace(seed_footer, repaired_footer, 1)
 
+    out = _merge_chart_scaffold_from_filled(out, filled_html)
     return out
 
 
@@ -849,7 +941,10 @@ def _repair_structural_page_chrome(seed_html: str, filled_html: str) -> str | No
 
 
 def _validate_content_template_fill_output(seed_html: str, filled_html: str) -> tuple[bool, str]:
-    """Stage 6 软门禁：内容页必须基于 seed 填槽，不能改 chrome。"""
+    """Stage 6 软门禁：内容页须基于 seed 填槽；head/header/footer 骨架不可改。
+
+    图表候选页允许修改 footer 之后的 CHART_SCAFFOLD（不在 head/header/footer 比对范围内）。
+    """
     if not _is_valid_html(filled_html):
         return False, "invalid_html"
     if _has_unfilled_placeholders(filled_html):
@@ -971,6 +1066,11 @@ def _build_content_template_fill_prompt(
     # outline_full 故意不注入：本页 outline_page + research 已够；全文易胀 prompt、诱长推理。
     _ = outline_full
     page_type = _detect_page_type(outline_page)
+    is_chart_candidate = _is_chart_candidate_page(
+        page_type,
+        outline_page=outline_page,
+        research_page=research_page,
+    )
     page_number_rule = _build_visible_page_number_rule(
         user_query,
         page_number,
@@ -979,17 +1079,19 @@ def _build_content_template_fill_prompt(
     designer_section = ""
     designer_md = _extract_designer_section(
         designer_md_text or "",
-        include_charts=page_type in _CHART_CANDIDATE_TYPES,
+        include_charts=is_chart_candidate,
         for_content_template_fill=True,
     )
-    if style_id == "custom" and designer_md:
-        designer_md = designer_md.replace(
-            "- 只替换三处占位符；禁止先写 YAML 预算、开 subagent 或重写整页骨架。",
-            "- 替换模板中实际出现的占位符（含 THEME_* 与 PAGE_*）；"
-            "禁止先写 YAML 预算、开 subagent 或重写整页骨架。",
-        )
     if designer_md:
-        designer_section = f"\n## skill designer 约束（仅作用于 `{{PAGE_CONTENT}}`）\n{designer_md}\n"
+        if is_chart_candidate:
+            designer_section = (
+                f"\n## skill designer 约束（PAGE_CONTENT 布局 + CHART_SCAFFOLD 激活）\n"
+                f"{designer_md}\n"
+            )
+        else:
+            designer_section = (
+                f"\n## skill designer 约束（PAGE_CONTENT 布局）\n{designer_md}\n"
+            )
     layout_template = _build_content_layout_template(page_type)
     rewrite_section = ""
     if rewrite_hint:
@@ -998,6 +1100,17 @@ def _build_content_template_fill_prompt(
             f"{rewrite_hint}\n"
             "⚠️ 仅修复上述不通过项，不要改动其他正常部分。\n"
         )
+        if is_chart_candidate:
+            if style_id == "custom":
+                rewrite_section += (
+                    "图表候选页重填时：`CHART_SCAFFOLD` 内 formatter/IIFE/init 包装不得改写，"
+                    "仅替换 `const option = null` 与 `CHART_FONT_FAMILY`。\n"
+                )
+            else:
+                rewrite_section += (
+                    "图表候选页重填时：`CHART_SCAFFOLD` 内 formatter/IIFE/init 包装不得改写，"
+                    "仅替换 `const option = null`。\n"
+                )
     if style_id == "custom":
         page_content_rule = (
             "5. `{{PAGE_CONTENT}}` 必须作为 `<main class=\"page-main\">` 的至少两个直接子块"
@@ -1008,34 +1121,68 @@ def _build_content_template_fill_prompt(
         task_line = (
             f"## 任务：填充第 {page_number} 页 custom content-template 官方模板\n"
         )
+        custom_rule_2 = (
+            "2. 仅替换实际出现的占位符：`{{THEME_CSS_VARIABLES}}`、`{{THEME_CSS_RULES}}`、"
+            "`{{PAGE_TITLE}}`、`{{PAGE_CONTENT}}`、`{{PAGE_FOOTER}}`；未提供的主题槽替换为空；"
+            "图表候选页还须编辑 `</body>` 前 `CHART_SCAFFOLD` 块（删定界符、填 option）\n"
+            if is_chart_candidate
+            else
+            "2. 仅替换实际出现的占位符：`{{THEME_CSS_VARIABLES}}`、`{{THEME_CSS_RULES}}`、"
+            "`{{PAGE_TITLE}}`、`{{PAGE_CONTENT}}`、`{{PAGE_FOOTER}}`；未提供的主题槽替换为空\n"
+        )
+        custom_rule_8 = (
+            "8. 图表候选页：按 designer §激活 完成 scaffold；"
+            "除 option 与 `CHART_FONT_FAMILY` 外不得改动骨架代码；"
+            "禁止在 `{{PAGE_CONTENT}}` 另写第二套 `echarts.init`\n"
+            if is_chart_candidate
+            else
+            "8. 非图表候选页：`CHART_SCAFFOLD` 保持 dormant 注释，禁止修改 scaffold\n"
+        )
         fill_rules = (
             "## 填充规则（对齐 Stage 6 §3.6，严格遵守）\n"
             "1. 已预铺 `custom/content-template.html` 脚手架：逐字保留 `.ppt-slide` 硬约束、"
             "`.content-safe` / `.page-header` / `.page-main` / `.page-footer`、"
             "`@layer utilities` 与 theme-contract 插槽结构\n"
-            "2. 仅替换实际出现的占位符：`{{THEME_CSS_VARIABLES}}`、`{{THEME_CSS_RULES}}`、"
-            "`{{PAGE_TITLE}}`、`{{PAGE_CONTENT}}`、`{{PAGE_FOOTER}}`；未提供的主题槽替换为空\n"
+            f"{custom_rule_2}"
             "3. `{{PAGE_TITLE}}` 只填写本页标题文字；不得改 `<h1>` / `.page-title` 的 class\n"
             "4. `{{PAGE_FOOTER}}` 只填写来源/备注；不得追加运行页码\n"
             f"{page_content_rule}"
             "6. 不得修改预铺模板 `<main>` 的 class；所有布局变化仅在 `{{PAGE_CONTENT}}` 内完成\n"
             "7. PAGE_* 占位符须填有意义内容；THEME 槽无内容时替换为空；"
             "禁止用 `—`/`–`/`-`、`N/A`、`TBD`、`暂无`、`待补充`、`待定`、`占位` 敷衍 PAGE_*\n"
-            "8. 图表候选页必须优先激活模板内 `CHART_SCAFFOLD`，按模板注释填充 option；"
-            "禁止额外手写第二套图表初始化框架\n"
+            f"{custom_rule_8}"
             "9. 直接输出完整 HTML，禁止 Markdown 代码块包裹与解释文字\n\n"
         )
-        chrome_section = (
-            "## 框架约束\n"
-            "- 框架与 `@layer utilities`、theme-contract **插槽结构**逐字保留；"
-            "允许填入 `{{THEME_CSS_VARIABLES}}` / `{{THEME_CSS_RULES}}`\n"
-            "- 允许改动：主题槽、`<title>`/`<h1>` 文字、`<main>` 内部、footer 首个 `<p>` 文字\n"
-            "- 禁止增删/重排框架节点，禁止改框架 class，禁止把内容挪到 header/footer/`<head>`\n"
-            "- 不要“重新生成一版更美观的同款页面”\n\n"
-        )
-        seed_caption = (
-            "## 预铺模板 HTML（只填槽，勿重写框架；须填满模板中实际出现的 {{...}}）\n"
-        )
+        if is_chart_candidate:
+            chrome_section = (
+                "## 框架约束\n"
+                "- 框架与 `@layer utilities`、theme-contract **插槽结构**逐字保留；"
+                "允许填入 `{{THEME_CSS_VARIABLES}}` / `{{THEME_CSS_RULES}}`\n"
+                "- 允许改动：主题槽、`<title>`/`<h1>` 文字、`<main>` 内部、footer 首个 `<p>` 文字、"
+                "`CHART_SCAFFOLD` 块（删定界符 + 填 option + 替换 `CHART_FONT_FAMILY`）\n"
+                "- `CHART_SCAFFOLD` 不在 Page Chrome 锁内\n"
+                "- 禁止增删/重排框架节点，禁止改框架 class，禁止把内容挪到 header/footer/`<head>`\n"
+                "- 不要“重新生成一版更美观的同款页面”\n\n"
+            )
+        else:
+            chrome_section = (
+                "## 框架约束\n"
+                "- 框架与 `@layer utilities`、theme-contract **插槽结构**逐字保留；"
+                "允许填入 `{{THEME_CSS_VARIABLES}}` / `{{THEME_CSS_RULES}}`\n"
+                "- 允许改动：主题槽、`<title>`/`<h1>` 文字、`<main>` 内部、footer 首个 `<p>` 文字\n"
+                "- 禁止增删/重排框架节点，禁止改框架 class，禁止把内容挪到 header/footer/`<head>`\n"
+                "- 不要“重新生成一版更美观的同款页面”\n\n"
+            )
+        if is_chart_candidate:
+            seed_caption = (
+                "## 预铺模板 HTML（只填槽，勿重写框架；须填满模板中实际出现的 {{...}}；"
+                "骨架代码除 option 与 `CHART_FONT_FAMILY`（须按风格文件 frontmatter 完整字体栈替换）"
+                "外不得改动）\n"
+            )
+        else:
+            seed_caption = (
+                "## 预铺模板 HTML（只填槽，勿重写框架；须填满模板中实际出现的 {{...}}）\n"
+            )
     else:
         page_content_rule = (
             "5. `{{PAGE_CONTENT}}` 必须替换为一个且仅一个首层根容器，"
@@ -1044,36 +1191,77 @@ def _build_content_template_fill_prompt(
         task_line = (
             f"## 任务：填充第 {page_number} 页预设风格 content-template 官方模板\n"
         )
+        preset_rule_2 = (
+            "2. **允许替换的可编辑区**：`{{PAGE_TITLE}}`、`{{PAGE_CONTENT}}`、`{{PAGE_FOOTER}}`；"
+            "图表候选页还须编辑 `</body>` 前 `CHART_SCAFFOLD` 块（删定界符、填 `const option = {…}`）\n"
+            if is_chart_candidate
+            else
+            "2. **只允许替换 3 类占位符**：`{{PAGE_TITLE}}`、`{{PAGE_CONTENT}}`、`{{PAGE_FOOTER}}`\n"
+        )
+        preset_rule_8 = (
+            "8. 图表候选页：按 designer §激活 完成 scaffold；"
+            "除 option 外不得改动骨架代码；"
+            "预设模板 `CHART_FONT_FAMILY` 已按 style.md 预置，**禁止修改**；"
+            "禁止在 `{{PAGE_CONTENT}}` 另写第二套 `echarts.init`\n"
+            if is_chart_candidate
+            else
+            "8. 非图表候选页：`CHART_SCAFFOLD` 保持 dormant 注释，禁止修改 scaffold\n"
+        )
         fill_rules = (
             "## 填充规则（对齐 Stage 6 §3.5，严格遵守）\n"
             "1. **字面拷贝已完成**：下方 HTML 即官方 `content-template.html` 预铺结果；"
             "禁止重写整页、禁止改标题栏/页脚/CSS/`@layer utilities`/装饰/SVG/Tailwind class 顺序\n"
-            "2. **只允许替换 3 类占位符**：`{{PAGE_TITLE}}`、`{{PAGE_CONTENT}}`、`{{PAGE_FOOTER}}`\n"
+            f"{preset_rule_2}"
             "3. `{{PAGE_TITLE}}` 只填写本页标题文字；不得改 `<h1>` 的 class、字号、字重、字体、装饰线、padding\n"
             "4. `{{PAGE_FOOTER}}` 只填写来源/备注；不得追加运行页码\n"
             f"{page_content_rule}"
             "6. 不得修改预铺模板 `<main>` 的 class；所有布局变化仅在 `{{PAGE_CONTENT}}` 内完成\n"
             "7. 每个占位符必须填有意义内容；禁止空串、`—`/`–`/`-`、`N/A`、`TBD`、`暂无`、`待补充`、`待定`、`占位`\n"
-            "8. 图表候选页必须优先激活模板内 `CHART_SCAFFOLD`，按模板注释填充 option；禁止额外手写第二套图表初始化框架\n"
+            f"{preset_rule_8}"
             "9. 直接输出完整 HTML，禁止 Markdown 代码块包裹与解释文字\n\n"
         )
-        chrome_section = (
-            "## Page Chrome 硬锁（违反将导致校验失败 `content_template_chrome_changed`）\n"
-            "- **Chrome = 除 `{{PAGE_CONTENT}}` 以外的一切**：`<head>`（含 script/link/style/`tailwind.config`）、"
-            "`.content-safe` 到 `<main>` 之前的 header 带、`<main>` 开标签、footer 骨架\n"
-            "- **允许改动的仅是占位符文本**：\n"
-            "  - `<title>` / `<h1>` 内文字 ← `{{PAGE_TITLE}}`\n"
-            "  - footer 内首个 `<p>` 文字 ← `{{PAGE_FOOTER}}`\n"
-            "  - `<main>` **内部** HTML ← `{{PAGE_CONTENT}}`\n"
-            "- **禁止**增删/重排 chrome 节点，禁止改 chrome 上的 class/style/属性/注释/空白结构，"
-            "禁止把图表、卡片、遮罩、装饰线挪到 header/footer/`<head>`\n"
-            "- **操作方式**：以预铺 HTML 为底稿，只做三处字符串级替换后原样输出；"
-            "不要“重新生成一版更美观的同款页面”\n"
-            "- **自检**：输出前对比预铺稿——若除上述三处文本/main 内部外仍有任何差异，必须撤回重填\n\n"
-        )
-        seed_caption = (
-            "## 预铺模板 HTML（只填槽，勿重写；Chrome 必须与下方稿逐字节一致，除三处占位符外）\n"
-        )
+        if is_chart_candidate:
+            chrome_section = (
+                "## Page Chrome 硬锁（违反将导致校验失败 `content_template_chrome_changed`）\n"
+                "- **Chrome = 除可编辑区以外的一切**：`<head>`（含 script/link/style/`tailwind.config`）、"
+                "`.content-safe` 到 `<main>` 之前的 header 带、`<main>` 开标签、"
+                "footer 骨架（`</main>` 后至 `CHART_SCAFFOLD` 之前的 footer div）。"
+                "**不含** `CHART_SCAFFOLD_BEGIN … END` 块\n"
+                "- **允许改动的可编辑区**：\n"
+                "  - `<title>` / `<h1>` 内文字 ← `{{PAGE_TITLE}}`\n"
+                "  - footer 内首个 `<p>` 文字 ← `{{PAGE_FOOTER}}`\n"
+                "  - `<main>` **内部** HTML ← `{{PAGE_CONTENT}}`\n"
+                "  - `CHART_SCAFFOLD` 块：删定界符 + 填 option（`CHART_FONT_FAMILY` 已预置，禁止改）\n"
+                "- `CHART_SCAFFOLD` 不在 Chrome 锁内\n"
+                "- **禁止**增删/重排 chrome 节点，禁止改 chrome 上的 class/style/属性/注释/空白结构，"
+                "禁止把图表、卡片、遮罩、装饰线挪到 header/footer/`<head>`\n"
+                "- **操作方式**：以预铺 HTML 为底稿，填可编辑区后原样输出；"
+                "不要“重新生成一版更美观的同款页面”\n"
+                "- **自检**：输出前对比预铺稿——若除上述可编辑区外仍有任何差异，必须撤回重填\n\n"
+            )
+            seed_caption = (
+                "## 预铺模板 HTML（只填槽，勿重写；Chrome 须与下方稿一致，"
+                "除三槽与 CHART_SCAFFOLD 激活外；骨架代码除 option 外不得改动）\n"
+            )
+        else:
+            chrome_section = (
+                "## Page Chrome 硬锁（违反将导致校验失败 `content_template_chrome_changed`）\n"
+                "- **Chrome = 除 `{{PAGE_CONTENT}}` 以外的一切**：`<head>`（含 script/link/style/`tailwind.config`）、"
+                "`.content-safe` 到 `<main>` 之前的 header 带、`<main>` 开标签、footer 骨架及 "
+                "`CHART_SCAFFOLD` dormant 注释块\n"
+                "- **允许改动的仅是占位符文本**：\n"
+                "  - `<title>` / `<h1>` 内文字 ← `{{PAGE_TITLE}}`\n"
+                "  - footer 内首个 `<p>` 文字 ← `{{PAGE_FOOTER}}`\n"
+                "  - `<main>` **内部** HTML ← `{{PAGE_CONTENT}}`\n"
+                "- **禁止**增删/重排 chrome 节点，禁止改 chrome 上的 class/style/属性/注释/空白结构，"
+                "禁止把图表、卡片、遮罩、装饰线挪到 header/footer/`<head>`\n"
+                "- **操作方式**：以预铺 HTML 为底稿，只做三处字符串级替换后原样输出；"
+                "不要“重新生成一版更美观的同款页面”\n"
+                "- **自检**：输出前对比预铺稿——若除上述三处文本/main 内部外仍有任何差异，必须撤回重填\n\n"
+            )
+            seed_caption = (
+                "## 预铺模板 HTML（只填槽，勿重写；Chrome 必须与下方稿逐字节一致，除三处占位符外）\n"
+            )
     return (
         f"{user_query_section}"
         f"{task_line}"
@@ -1095,6 +1283,56 @@ def _build_content_template_fill_prompt(
         f"{seed_caption}"
         f"{seed_html}\n"
     )
+
+
+def _build_content_template_fill_system_prompt(
+    *,
+    style_id: str,
+    page_type: str,
+    outline_page: str = "",
+    research_page: str = "",
+) -> str:
+    """Stage 6 填槽 system prompt；图表候选页显式豁免 CHART_SCAFFOLD 出 Chrome 锁。"""
+    is_chart = _is_chart_candidate_page(
+        page_type,
+        outline_page=outline_page,
+        research_page=research_page,
+    )
+    if style_id == "custom":
+        prompt = (
+            "你是 PPT 内容页模板填充师，不是设计师。"
+            "替换预铺 HTML 中实际出现的占位符（含 {{THEME_CSS_VARIABLES}}、"
+            "{{THEME_CSS_RULES}}、{{PAGE_TITLE}}、{{PAGE_CONTENT}}、{{PAGE_FOOTER}}；"
+            "未提供的主题槽填空）。保留框架 class/@layer/theme-contract 插槽结构；"
+        )
+        if is_chart:
+            prompt += (
+                "图表候选页还须编辑 </body> 前 CHART_SCAFFOLD（删定界符、填 option）；"
+                "CHART_SCAFFOLD 不在 Page Chrome 锁内。"
+            )
+        prompt += "只输出完整 HTML 原文，不要解释、不要 Markdown 代码块。"
+        return prompt
+    prompt = (
+        "你是 PPT 内容页模板填充师，不是设计师。"
+        "唯一任务：在预铺 HTML 上替换 {{PAGE_TITLE}}、{{PAGE_CONTENT}}、{{PAGE_FOOTER}} 三处占位符。"
+    )
+    if is_chart:
+        prompt += (
+            "图表候选页还须编辑 </body> 前 CHART_SCAFFOLD（删定界符、填 option）。"
+            "Page Chrome（head/header/`<main>` 开标签/footer 骨架）须与预铺稿一致；"
+            "CHART_SCAFFOLD 不在 Chrome 锁内。"
+        )
+    else:
+        prompt += (
+            "Page Chrome（head/header/`<main>` 开标签/footer 骨架/class/script/style）"
+            "必须与预铺稿保持一致；"
+        )
+    prompt += (
+        "改 chrome 会触发 content_template_chrome_changed 校验失败。"
+        "只输出完整 HTML 原文，不要解释、不要 Markdown 代码块。"
+    )
+    return prompt
+
 
 _VISIBLE_PAGE_NUMBER_RULE = (
     "- 可见运行页码禁令（所有页型）：页码只用于文件名、任务定位和完整性校验，"
@@ -3279,18 +3517,83 @@ _REWRITE_ACTIONS = {
     "llm_failed": "重新生成完整页面 HTML，确保输出可解析",
 }
 
+# 图表候选页 chrome 重试：与对齐-1 一致，CHART_SCAFFOLD 不在 Chrome 锁内。
+_CHART_CANDIDATE_CHROME_REWRITE_REASONS = frozenset({
+    "content_template_chrome_changed",
+    "head_chrome_changed",
+    "header_chrome_changed",
+    "footer_chrome_changed",
+})
+_CHART_CANDIDATE_REWRITE_ACTIONS: dict[str, str] = {
+    "content_template_chrome_changed": (
+        "禁止改动模板 chrome（<head>、header 结构、footer 骨架）；"
+        "可编辑区：PAGE_TITLE / PAGE_CONTENT / PAGE_FOOTER 三槽，"
+        "以及 </body> 前 CHART_SCAFFOLD（删定界符 + 填 option）；"
+        "CHART_SCAFFOLD 不在 Chrome 锁内"
+    ),
+    "head_chrome_changed": (
+        "禁止改动 <head> 块（script/style/link 引用）；"
+        "可填 body 内三槽与 CHART_SCAFFOLD（图表候选页）；"
+        "<title> 文字属于 PAGE_TITLE 可编辑区"
+    ),
+    "header_chrome_changed": (
+        "禁止改动 header 结构（content-safe 到 main 之间）；"
+        "仅替换 PAGE_TITLE；图表 scaffold 在 footer 之后单独可编辑"
+    ),
+    "footer_chrome_changed": (
+        "禁止改动 footer 结构（main 之后的 flex-shrink-0 div）；"
+        "仅替换 PAGE_FOOTER 文字；CHART_SCAFFOLD 在其后、不在 footer 锁内"
+    ),
+}
 
-def _build_rewrite_hint(failed_items: list[str]) -> str:
+
+def _rewrite_action_for(
+    reason: str,
+    *,
+    page_type: str = "",
+    outline_page: str = "",
+    research_page: str = "",
+) -> str:
+    if (
+        _is_chart_candidate_page(
+            page_type,
+            outline_page=outline_page,
+            research_page=research_page,
+        )
+        and reason in _CHART_CANDIDATE_CHROME_REWRITE_REASONS
+    ):
+        return _CHART_CANDIDATE_REWRITE_ACTIONS[reason]
+    return _REWRITE_ACTIONS.get(reason, "针对性优化该项")
+
+
+def _build_rewrite_hint(
+    failed_items: list[str],
+    *,
+    page_type: str = "",
+    outline_page: str = "",
+    research_page: str = "",
+) -> str:
     if not failed_items:
         return ""
     lines = ["不通过项与补救动作："]
     for item in failed_items:
-        action = _REWRITE_ACTIONS.get(item, "针对性优化该项")
+        action = _rewrite_action_for(
+            item,
+            page_type=page_type,
+            outline_page=outline_page,
+            research_page=research_page,
+        )
         lines.append(f"- {item} → {action}")
     return "\n".join(lines)
 
 
-def _build_page_gen_rewrite_hint(reason: str) -> str:
+def _build_page_gen_rewrite_hint(
+    reason: str,
+    *,
+    page_type: str = "",
+    outline_page: str = "",
+    research_page: str = "",
+) -> str:
     """定向重试指引：按真实校验 reason 生成，避免一律导向图表高度链。"""
     reason = (reason or "").strip()
     if not reason:
@@ -3298,7 +3601,12 @@ def _build_page_gen_rewrite_hint(reason: str) -> str:
             "上一轮生成的 HTML 校验失败。"
             "请对照模板填槽/DOM/图表高度链等校验规则修复后重试。"
         )
-    body = _build_rewrite_hint([reason])
+    body = _build_rewrite_hint(
+        [reason],
+        page_type=page_type,
+        outline_page=outline_page,
+        research_page=research_page,
+    )
     return f"上一轮生成的 HTML 校验失败（reason={reason}）。\n{body}"
 
 
@@ -3525,9 +3833,21 @@ def _check_layout_timeout_seconds(page_count: int) -> int:
     return max(30, batches * 3 + 15)
 
 
-def _build_check_layout_rewrite_hint(page_num: int, issues: list[str]) -> str:
+def _build_check_layout_rewrite_hint(
+    page_num: int,
+    issues: list[str],
+    *,
+    page_type: str = "",
+    outline_page: str = "",
+    research_page: str = "",
+) -> str:
     issue_lines = "\n".join(f"- {issue}" for issue in issues if issue)
-    next_steps = _build_rewrite_hint(issues)
+    next_steps = _build_rewrite_hint(
+        issues,
+        page_type=page_type,
+        outline_page=outline_page,
+        research_page=research_page,
+    )
     parts = [
         f"check-layout 渲染检测未通过（page-{page_num}，density={_CHECK_LAYOUT_DENSITY}）。",
         "硬项问题：",
@@ -3980,7 +4300,11 @@ def _build_page_prompt(
     if designer_md_text:
         designer_md = _extract_designer_section(
             designer_md_text,
-            include_charts=page_type in _CHART_CANDIDATE_TYPES,
+            include_charts=_is_chart_candidate_page(
+                page_type,
+                outline_page=outline_page,
+                research_page=research_page,
+            ),
         )
         if designer_md:
             designer_section = f"\n### skill designer 约束（必须遵守）\n{designer_md}\n"
@@ -4458,10 +4782,16 @@ class PageWorkerNode(DisableThinkingMixin, PlanNode):
             issues = failures.get(page_num) or []
             path = f"{pages_dir}/page-{page_num}.pptx.html"
             previous_html = await self._read_file(path)
-            rewrite_hint = _build_check_layout_rewrite_hint(page_num, issues)
-
             outline_page = str(outline_pages.get(page_num) or outline_full)
             research_page = str(research_pages.get(page_num) or "")
+            rewrite_hint = _build_check_layout_rewrite_hint(
+                page_num,
+                issues,
+                page_type=_detect_page_type(outline_page),
+                outline_page=outline_page,
+                research_page=research_page,
+            )
+
             page_images = image_map.get(str(page_num), [])
             image_map_page = ""
             if page_images:
@@ -4639,7 +4969,12 @@ class PageWorkerNode(DisableThinkingMixin, PlanNode):
             if attempt > 0:
                 logger.info("[P8.1] 页面 %d 第 %d 轮生成重试", page_num, attempt + 1)
                 if last_raw_html or last_fail_reason:
-                    rewrite_hint = _build_page_gen_rewrite_hint(last_fail_reason)
+                    rewrite_hint = _build_page_gen_rewrite_hint(
+                        last_fail_reason,
+                        page_type=_detect_page_type(ctx.outline_page),
+                        outline_page=ctx.outline_page,
+                        research_page=ctx.research_page,
+                    )
                     original_html = last_raw_html
             html, last_raw_html, gen_fail_reason = await self._generate_one(
                 ctx, rewrite_hint=rewrite_hint, original_html=original_html
@@ -4883,22 +5218,11 @@ class PageWorkerNode(DisableThinkingMixin, PlanNode):
                     total_pages=ctx.total_pages,
                     rewrite_hint=rewrite_hint,
                 ),
-                system_prompt=(
-                    (
-                        "你是 PPT 内容页模板填充师，不是设计师。"
-                        "替换预铺 HTML 中实际出现的占位符（含 {{THEME_CSS_VARIABLES}}、"
-                        "{{THEME_CSS_RULES}}、{{PAGE_TITLE}}、{{PAGE_CONTENT}}、{{PAGE_FOOTER}}；"
-                        "未提供的主题槽填空）。保留框架 class/@layer/theme-contract 插槽结构；"
-                        "只输出完整 HTML 原文，不要解释、不要 Markdown 代码块。"
-                    )
-                    if ctx.style_id == "custom"
-                    else (
-                        "你是 PPT 内容页模板填充师，不是设计师。"
-                        "唯一任务：在预铺 HTML 上替换 {{PAGE_TITLE}}、{{PAGE_CONTENT}}、{{PAGE_FOOTER}} 三处占位符。"
-                        "Page Chrome（head/header/`<main>` 开标签/footer 骨架/class/script/style）必须与预铺稿保持一致；"
-                        "改 chrome 会触发 content_template_chrome_changed 校验失败。"
-                        "只输出完整 HTML 原文，不要解释、不要 Markdown 代码块。"
-                    )
+                system_prompt=_build_content_template_fill_system_prompt(
+                    style_id=ctx.style_id,
+                    page_type=_detect_page_type(ctx.outline_page),
+                    outline_page=ctx.outline_page,
+                    research_page=ctx.research_page,
                 ),
                 node_name=f"p8_1_content_fill_{ctx.page_num}",
                 concurrent=True,
