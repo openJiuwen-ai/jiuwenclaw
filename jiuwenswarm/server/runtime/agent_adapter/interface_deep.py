@@ -10143,6 +10143,117 @@ class JiuWenSwarmDeepAdapter:
 
         return restore
 
+    async def prepare_interrupt_artifacts_for_request(
+        self, request: AgentRequest
+    ) -> None:
+        """兜底：中断后下一轮请求注入 SkillTurbo 节点产物摘要到 supplementary_info。
+
+        dev-stable 没有 enterprise_dev 的 plan_pause / interrupt_resume prepare hook 链
+        （依赖 openjiuwen.harness.tools.todo_resume，dev-stable 分支无此模块），
+        所以这里只做最小子集：读取上一轮 SkillTurbo 中断时保存的节点产物，
+        格式化成摘要，注入 request.params['supplementary_info']，让 LLM 知道
+        「已完成的工作」而非盲目从头重跑。
+
+        无 plan_pause / interrupt_resume 哨兵机制：dev-stable 不存在那两条路径，
+        不会并发注入，故无需去重哨兵。若后续补齐 enterprise_dev 的完整 prepare
+        hook 链，应在此处开头加 is_interrupt_recovery_injected(session) 早返回，
+        避免重复注入。
+        """
+        if self._instance is None:
+            return
+
+        session_id = str(request.session_id or "").strip()
+        if not session_id:
+            return
+
+        params = (
+            request.params
+            if isinstance(getattr(request, "params", None), dict)
+            else None
+        )
+        if params is None:
+            return
+
+        from openjiuwen.core.session.agent import create_agent_session
+
+        # SkillTurbo 节点产物存在独立 __skill_turbo checkpointer key 下，
+        # 需用单独的 session 读写（与 _try_skill_turbo_resume 同一套 id 机制）。
+        skill_turbo_session = create_agent_session(
+            session_id=session_id, card=self._instance.card,
+        )
+        _skill_turbo_set_agent_id(skill_turbo_session, self._instance.card)
+        # pre_run 在 try 内部：失败时直接 return，但仍走 finally 的 post_run，
+        # 避免 checkpointer 状态泄漏（与 load_resume_ctx 的 pre_run 包裹策略一致）。
+        try:
+            await skill_turbo_session.pre_run(inputs=None)
+            summary = await self._read_skill_turbo_node_artifacts_summary(skill_turbo_session)
+            if not summary:
+                return
+
+            # 构建中断恢复提示词（内联，避免依赖 plan_pause_helpers）。
+            language = self._resolve_runtime_language()
+            template = (
+                "[Interrupt recovery hint]\n"
+                "The previous task was interrupted and cancelled. "
+                "Here is a summary of completed work artifacts before the interruption:\n\n"
+                "{summary}\n\n"
+                "Based on this, judge the current task state:\n"
+                "- If artifacts show the target file already exists with substantial content, "
+                "read_file first before deciding to supplement or rebuild from scratch\n"
+                "- If artifacts show the target file was not created or has minimal content, "
+                "you may create it anew\n"
+                "- Do not blindly write_file to rebuild a file that already exists and is complete"
+            ) if language in ("en", "english") else (
+                "【中断恢复提示】之前的任务被中断取消。"
+                "以下是中断前已完成的工作产物摘要：\n\n"
+                "{summary}\n\n"
+                "请据此判断当前任务状态：\n"
+                "- 如果产物显示目标文件已存在且内容较完整，请先 read_file 查看当前状态，"
+                "再决定是补充完善还是从头重建\n"
+                "- 如果产物显示目标文件尚未创建或内容很少，可以重新创建\n"
+                "- 不要盲目从头 write_file 重建一个已存在的完整文件"
+            )
+            prompt = template.format(summary=summary.strip() or "(empty)")
+
+            # 注入到 supplementary_info（与 enterprise_dev merge_supplementary_into_request_params
+            # 行为一致：已存在则追加，不存在则设置）。
+            supplementary = prompt.strip()
+            if not supplementary:
+                return
+            existing = params.get("supplementary_info")
+            if isinstance(existing, str) and existing.strip():
+                params["supplementary_info"] = f"{existing.strip()}\n\n{supplementary}"
+            else:
+                params["supplementary_info"] = supplementary
+
+            # 一次性使用：注入后清除 SkillTurbo 节点产物记录，避免下一轮再次注入。
+            from jiuwenswarm.server.runtime.skill_turbo.node_artifact_store import (
+                clear_node_artifacts,
+            )
+            await clear_node_artifacts(skill_turbo_session)
+
+            logger.info(
+                "[JiuWenSwarmDeepAdapter] SkillTurbo interrupt artifacts summary "
+                "injected session=%s",
+                session_id,
+            )
+        except Exception as exc:
+            logger.warning(
+                "[JiuWenSwarmDeepAdapter] prepare_interrupt_artifacts_for_request failed "
+                "session_id=%s: %s",
+                session_id,
+                exc,
+                exc_info=True,
+            )
+        finally:
+            try:
+                await skill_turbo_session.post_run()
+            except Exception:
+                logger.debug(
+                    "[JiuWenSwarmDeepAdapter] prepare_interrupt_artifacts post_run failed",
+                    exc_info=True,
+                )
+
     @staticmethod
     async def _read_skill_turbo_node_artifacts_summary(session: Any) -> str | None:
         """读取 SkillTurbo 节点产物记录，格式化为可读摘要文本。"""

@@ -2430,6 +2430,20 @@ class JiuWenSwarm:
 
         tenant_tokens, mem_token = self._bind_tenant_request_context()
         try:
+            # 兜底：注入上一轮 SkillTurbo 中断时保存的节点产物摘要，让 LLM 知道
+            # 「已完成的工作」而非盲目从头重跑。失败不阻断主流程。
+            # dev-stable 无 plan_pause / interrupt_resume prepare 链，此处只做最小子集。
+            prepare_interrupt_artifacts = getattr(
+                adapter, "prepare_interrupt_artifacts_for_request", None
+            )
+            if callable(prepare_interrupt_artifacts):
+                try:
+                    await prepare_interrupt_artifacts(request)
+                except Exception as exc:
+                    logger.warning(
+                        "[JiuWenSwarm] prepare_interrupt_artifacts failed "
+                        "session_id=%s: %s", session_id, exc, exc_info=True,
+                    )
             try:
                 inputs, memory_mode, raw_query = self._build_inputs(request)
             except _TeamPlanApprovalPayloadError as exc:
@@ -2710,6 +2724,20 @@ class JiuWenSwarm:
         rid = request.request_id
         cid = request.channel_id
         try:
+            # 兜底：注入上一轮 SkillTurbo 中断时保存的节点产物摘要，让 LLM 知道
+            # 「已完成的工作」而非盲目从头重跑。失败不阻断主流程。
+            # dev-stable 无 plan_pause / interrupt_resume prepare 链，此处只做最小子集。
+            prepare_interrupt_artifacts = getattr(
+                adapter, "prepare_interrupt_artifacts_for_request", None
+            )
+            if callable(prepare_interrupt_artifacts):
+                try:
+                    await prepare_interrupt_artifacts(request)
+                except Exception as exc:
+                    logger.warning(
+                        "[JiuWenSwarm] prepare_interrupt_artifacts failed "
+                        "session_id=%s: %s", session_id, exc, exc_info=True,
+                    )
             inputs, memory_mode, raw_query = self._build_inputs(request)
         except _TeamPlanApprovalPayloadError as exc:
             yield AgentResponseChunk(
