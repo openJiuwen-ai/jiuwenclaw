@@ -578,6 +578,8 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
   const isAutoHarnessMode = mode === 'auto_harness';
   const isWorkContextLocked = Boolean(activeSessionId && activeSessionId !== NEW_CONVERSATION_ID);
   const showWorkContextRow = !isEnterprise() && activeSessionId === NEW_CONVERSATION_ID;
+  const enterpriseLocked = isEnterprise();
+  const modeLocked = enterpriseLocked || hasHistory || isProcessing;
   /** Goal 入口是否适用于当前上下文（agent 模式 + 已接入 onSetGoal，如欢迎页新会话就不适用） */
   const canUseGoalMenu = isAgentMode && Boolean(onSetGoal);
   // 只跟 armed 挂钩：这个 tag 是"下一条消息将用于设置目标"的过渡态指示，发送后 armed 变 false
@@ -2247,7 +2249,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
               type="button"
               className="chat-mode-select__trigger"
               onClick={() => {
-                if (hasHistory || isProcessing) return;
+                if (modeLocked) return;
                 if (!isModeMenuOpen && modeMenuRef.current) {
                   const rect = modeMenuRef.current.getBoundingClientRect();
                   const spaceBelow = window.innerHeight - rect.bottom;
@@ -2260,7 +2262,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
               aria-haspopup="menu"
               aria-expanded={isModeMenuOpen}
               data-testid={`chat-mode-${currentMode.value}`}
-              style={(hasHistory || isProcessing) ? { cursor: 'default' } : undefined}
+              style={modeLocked ? { cursor: 'default' } : undefined}
             >
               <span className="chat-mode-select__value">
                 <span className="chat-mode-select__icon" aria-hidden="true">
@@ -2268,7 +2270,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                 </span>
                 <span className="chat-mode-select__label">{t(currentMode.i18nKey)}</span>
               </span>
-              {!hasHistory && !isProcessing && (
+              {!modeLocked && (
                 <svg className="chat-mode-select__chevron" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth={1.8} aria-hidden="true">
                   <path strokeLinecap="round" strokeLinejoin="round" d="M6 8l4 4 4-4" />
                 </svg>
@@ -2329,7 +2331,9 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
               document.body
             )}
           </div>
-          <PermissionSelector permissionsEnabled={permissionsEnabled} onSavePermission={onSavePermission} />
+          {!isEnterprise() && (
+            <PermissionSelector permissionsEnabled={permissionsEnabled} onSavePermission={onSavePermission} />
+          )}
 
           {!isTeamMode && <SkillSelector
             onNavigateToSkills={onNavigateToSkills}
@@ -2398,8 +2402,8 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
           )} */}
 
           <ModelSelector
-            disabled={isTeamMode || isProcessing}
-            lockedToDefault={isTeamMode}
+            disabled={enterpriseLocked || isTeamMode || isProcessing}
+            lockedToDefault={enterpriseLocked || isTeamMode}
           />
 
           <button

@@ -154,7 +154,6 @@ uninstall_gateway() {
     local gateway_name="${DEPLOY_VARS["GATEWAY_NAME"]}"
     local gateway_file="${CONFIG["GATEWAY_FILE"]}"
     local mount_type="${DEPLOY_VARS["CLAW_MOUNT_TYPE"]}"
-    local is_external_pvc="${DEPLOY_VARS["ENABLE_EXTERNAL_PVC"]}"
     local pvc_file="${CONFIG["CLAW_PVC_FILE"]}"
 
     local env_yaml_file="${CONFIG["GATEWAY_ENV_YAML_FILE"]}"
@@ -173,7 +172,9 @@ uninstall_gateway() {
     exec_cmd kubectl delete -f "${env_yaml_file}" --ignore-not-found=true
     exec_cmd kubectl delete -f "${conf_yaml_file}" --ignore-not-found=true
 
-    if [[ "${mount_type}" == "pvc" && "${is_external_pvc}" == "false" ]]; then
+    # down 不经过 check_if_nfs_sc_up，ENABLE_EXTERNAL_PVC 仍为默认 false；
+    # 与 0.0.9 一致：仅在内置 PVC（.env 未指定 CLAW_PVC）时删 claw-pvc.yaml。
+    if [[ "${mount_type}" == "pvc" && -z "${DEPLOY_VARS["CLAW_PVC"]:-}" && -f "${pvc_file}" ]]; then
         exec_cmd kubectl delete -f "${pvc_file}" --ignore-not-found=true
     fi
     uninstall_secret_configmap
