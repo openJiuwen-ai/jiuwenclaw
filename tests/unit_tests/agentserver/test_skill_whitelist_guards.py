@@ -1,12 +1,15 @@
-"""Skill 白名单：租户 ID / 路径逃生通道回归；预制 sync 直写 DB."""
+"""Skill 白名单：租户 ID / 路径逃生通道回归；预制 sync 以本地 manifest + 磁盘为准."""
 
 import asyncio
+import json
 from pathlib import Path
-from typing import Any
 
 import pytest
 
-from jiuwenswarm.server.runtime.skill.skill_whitelist import is_skill_whitelist_tenant
+from jiuwenswarm.server.runtime.skill.skill_whitelist import (
+    MANIFEST_FILENAME,
+    is_skill_whitelist_tenant,
+)
 from jiuwenswarm.common.utils import (
     get_agent_skills_dir,
     get_multi_tenant_skill_dirs,
@@ -22,6 +25,24 @@ def agent_runtime_env(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.delenv("JIUWENSWARM_EDITION", raising=False)
 
 
+def _read_manifest(skills_dir: Path) -> dict:
+    path = skills_dir / MANIFEST_FILENAME
+    if not path.is_file():
+        return {}
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _patch_skill_manager(monkeypatch: pytest.MonkeyPatch, install_fn) -> None:
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.skill.skill_whitelist.SkillManager",
+        lambda **kwargs: type(
+            "FakeSkillManager",
+            (),
+            {"install_skill_sync": staticmethod(install_fn)},
+        )(),
+    )
+
+
 def test_is_skill_whitelist_tenant_rejects_empty_ids(agent_runtime_env) -> None:
     assert is_skill_whitelist_tenant("", "") is False
     assert is_skill_whitelist_tenant("  ", "bot") is False
@@ -29,7 +50,8 @@ def test_is_skill_whitelist_tenant_rejects_empty_ids(agent_runtime_env) -> None:
 
 
 def test_is_skill_whitelist_tenant_legacy_tenants(agent_runtime_env) -> None:
-    assert is_skill_whitelist_tenant("default", "default") is False
+    # default 租户仍走白名单；仅 ACP 全局租户排除
+    assert is_skill_whitelist_tenant("default", "default") is True
     assert is_skill_whitelist_tenant("acp", "global_acp") is False
     assert is_skill_whitelist_tenant("real-agent", "real-svc") is True
 
@@ -87,44 +109,6 @@ def test_parse_agent_skill_whitelist_skips_invalid_items() -> None:
     )
 
 
-class _FakeSkillDb:
-    """内存假账本，供 sync 单测替代 Gateway DB."""
-
-    def __init__(self) -> None:
-        self.rows: dict[str, dict[str, Any]] = {}
-
-    async def list_installed_skills(self, **_kwargs: Any) -> list[dict[str, Any]]:
-        return list(self.rows.values())
-
-    async def list_enabled_skill_names(self, **_kwargs: Any) -> list[str]:
-        return list(self.rows.keys())
-
-    async def get_installed_skill(self, *, skill_name: str, **_kwargs: Any) -> dict[str, Any] | None:
-        return self.rows.get(skill_name)
-
-    async def upsert_installed_skill(self, **kwargs: Any) -> dict[str, Any]:
-        name = str(kwargs["skill_name"])
-        row = {
-            "skill_name": name,
-            "source_type": kwargs.get("source_type"),
-            "skill_source": kwargs.get("skill_source"),
-            "skill_version": kwargs.get("skill_version"),
-            "skill_id": kwargs.get("skill_id"),
-        }
-        self.rows[name] = row
-        return row
-
-    async def delete_installed_skill(self, *, skill_name: str, **_kwargs: Any) -> bool:
-        return self.rows.pop(skill_name, None) is not None
-
-
-def _patch_skill_db(monkeypatch: pytest.MonkeyPatch, db: _FakeSkillDb) -> None:
-    mod = "jiuwenswarm.server.runtime.skill.skill_whitelist"
-    monkeypatch.setattr(f"{mod}.list_installed_skills", db.list_installed_skills)
-    monkeypatch.setattr(f"{mod}.upsert_installed_skill", db.upsert_installed_skill)
-    monkeypatch.setattr(f"{mod}.delete_installed_skill", db.delete_installed_skill)
-
-
 def test_multi_id_same_source_version_skips_second_download(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -140,9 +124,6 @@ def test_multi_id_same_source_version_skips_second_download(
 
     source = "https://example.com/pkg.zip"
     version = "1.0.0"
-    db = _FakeSkillDb()
-    _patch_skill_db(monkeypatch, db)
-
     install_called = {"count": 0}
 
     def _fake_install(_url: str, _force: bool, _mirror: None) -> dict:
@@ -152,14 +133,7 @@ def test_multi_id_same_source_version_skips_second_download(
         (skill_dir / "SKILL.md").write_text("---\nname: shared-skill\n---\n", encoding="utf-8")
         return {"ok": True, "skill_name": "shared-skill"}
 
-    monkeypatch.setattr(
-        "jiuwenswarm.server.runtime.skill.skill_whitelist.SkillManager",
-        lambda **kwargs: type(
-            "FakeSkillManager",
-            (),
-            {"install_skill_sync": staticmethod(_fake_install)},
-        )(),
-    )
+    _patch_skill_manager(monkeypatch, _fake_install)
 
     sync = SkillWhitelistSynchronizer(workspace, "svc", "bot")
     config = AgentSkillWhitelistConfig(
@@ -175,11 +149,14 @@ def test_multi_id_same_source_version_skips_second_download(
     assert install_called["count"] == 1
     assert result.enabled_skill_dirs == ["shared-skill"]
     assert result.ok is True
-    assert "shared-skill" in db.rows
-    assert db.rows["shared-skill"]["skill_id"] == "id-b"
+    manifest = _read_manifest(skills_dir)
+    assert manifest["id-a"]["skill_name"] == "shared-skill"
+    assert manifest["id-b"]["skill_name"] == "shared-skill"
+    assert manifest["id-b"]["version"] == version
+    assert manifest["id-b"]["source"] == source
 
 
-def test_db_skips_redownload_on_second_sync(
+def test_manifest_skips_redownload_on_second_sync(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from jiuwenswarm.server.runtime.skill.skill_whitelist import (
@@ -198,9 +175,6 @@ def test_db_skips_redownload_on_second_sync(
         service_id="svc",
         skills=[SkillWhitelistItem(id="id-a", version=version, source=source)],
     )
-    db = _FakeSkillDb()
-    _patch_skill_db(monkeypatch, db)
-
     install_called = {"count": 0}
 
     def _fake_install(_url: str, _force: bool, _mirror: None) -> dict:
@@ -210,28 +184,21 @@ def test_db_skips_redownload_on_second_sync(
         (skill_dir / "SKILL.md").write_text("---\nname: cached-skill\n---\n", encoding="utf-8")
         return {"ok": True, "skill_name": "cached-skill"}
 
-    monkeypatch.setattr(
-        "jiuwenswarm.server.runtime.skill.skill_whitelist.SkillManager",
-        lambda **kwargs: type(
-            "FakeSkillManager",
-            (),
-            {"install_skill_sync": staticmethod(_fake_install)},
-        )(),
-    )
+    _patch_skill_manager(monkeypatch, _fake_install)
 
     sync = SkillWhitelistSynchronizer(workspace, "svc", "bot")
     asyncio.run(sync.sync(config))
     assert install_called["count"] == 1
+    assert _read_manifest(skills_dir)["id-a"]["skill_name"] == "cached-skill"
 
     asyncio.run(sync.sync(config))
     assert install_called["count"] == 1
 
 
-def test_db_same_version_with_disk_missing_redownloads(
+def test_manifest_same_version_with_disk_missing_redownloads(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """库有同版本但盘缺失时仍会重下补盘（不做库有盘无的成功兜底）。"""
-    from jiuwenswarm.agents.harness.common.installed_skill import SOURCE_PREBUILT
+    """manifest 有同版本但盘缺失时仍会重下补盘。"""
     from jiuwenswarm.server.runtime.skill.skill_whitelist import (
         AgentSkillWhitelistConfig,
         SkillWhitelistItem,
@@ -243,21 +210,26 @@ def test_db_same_version_with_disk_missing_redownloads(
     skills_dir.mkdir(parents=True)
     source = "https://example.com/pkg.zip"
     version = "1.0.0"
+    (skills_dir / MANIFEST_FILENAME).write_text(
+        json.dumps(
+            {
+                "id-a": {
+                    "skill_name": "cached-skill",
+                    "version": version,
+                    "source": source,
+                }
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
     config = AgentSkillWhitelistConfig(
         agent_id="bot",
         service_id="svc",
         skills=[SkillWhitelistItem(id="id-a", version=version, source=source)],
     )
-    db = _FakeSkillDb()
-    db.rows["cached-skill"] = {
-        "skill_name": "cached-skill",
-        "source_type": SOURCE_PREBUILT,
-        "skill_source": source,
-        "skill_version": version,
-        "skill_id": "id-a",
-    }
-    _patch_skill_db(monkeypatch, db)
-
     install_called = {"count": 0}
 
     def _fake_install(_url: str, _force: bool, _mirror: None) -> dict:
@@ -267,26 +239,19 @@ def test_db_same_version_with_disk_missing_redownloads(
         (skill_dir / "SKILL.md").write_text("---\nname: cached-skill\n---\n", encoding="utf-8")
         return {"ok": True, "skill_name": "cached-skill"}
 
-    monkeypatch.setattr(
-        "jiuwenswarm.server.runtime.skill.skill_whitelist.SkillManager",
-        lambda **kwargs: type(
-            "FakeSkillManager",
-            (),
-            {"install_skill_sync": staticmethod(_fake_install)},
-        )(),
-    )
+    _patch_skill_manager(monkeypatch, _fake_install)
 
     result = asyncio.run(SkillWhitelistSynchronizer(workspace, "svc", "bot").sync(config))
     assert install_called["count"] == 1
     assert result.ok is True
-    assert "cached-skill" in db.rows
+    assert "cached-skill" in result.enabled_skill_dirs
+    assert _read_manifest(skills_dir)["id-a"]["skill_name"] == "cached-skill"
 
 
-def test_disk_skill_missing_from_db_reconciled_on_sync(
+def test_disk_ready_skill_included_in_enabled_on_sync(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """盘有库无：sync 时补 SOURCE_USER 账本并进入启用集。"""
-    from jiuwenswarm.agents.harness.common.installed_skill import SOURCE_USER
+    """盘上已有就绪目录（用户自装等）进入启用集；保留名不纳入。"""
     from jiuwenswarm.server.runtime.skill.skill_whitelist import (
         AgentSkillWhitelistConfig,
         SkillWhitelistSynchronizer,
@@ -302,20 +267,9 @@ def test_disk_skill_missing_from_db_reconciled_on_sync(
     reserved.mkdir(parents=True)
     (reserved / "SKILL.md").write_text("---\nname: marketplace\n---\n", encoding="utf-8")
 
-    db = _FakeSkillDb()
-    _patch_skill_db(monkeypatch, db)
-
-    monkeypatch.setattr(
-        "jiuwenswarm.server.runtime.skill.skill_whitelist.SkillManager",
-        lambda **kwargs: type(
-            "FakeSkillManager",
-            (),
-            {
-                "install_skill_sync": staticmethod(
-                    lambda *_a, **_k: {"ok": False, "detail": "unused"}
-                )
-            },
-        )(),
+    _patch_skill_manager(
+        monkeypatch,
+        lambda *_a, **_k: {"ok": False, "detail": "unused"},
     )
 
     result = asyncio.run(
@@ -326,18 +280,15 @@ def test_disk_skill_missing_from_db_reconciled_on_sync(
         ).sync(AgentSkillWhitelistConfig(agent_id="bot", service_id="svc"))
     )
 
-    assert "orphan-skill" in db.rows
-    assert db.rows["orphan-skill"]["source_type"] == SOURCE_USER
-    assert "_marketplace" not in db.rows
     assert result.enabled_skill_dirs == ["orphan-skill"]
-    assert "reconciled_disk:orphan-skill" in result.succeeded
+    assert "_marketplace" not in result.enabled_skill_dirs
+    assert _read_manifest(skills_dir) == {}
 
 
-def test_reconcile_disk_does_not_overwrite_prebuilt(
+def test_reconcile_disk_lists_ready_skills_only(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """账本已是 prefbuilt 的技能，盘→库对账不得改成 user。"""
-    from jiuwenswarm.agents.harness.common.installed_skill import SOURCE_PREBUILT
+    """热刷新：只扫盘上就绪目录，不写 installed_skill / 不改 manifest。"""
     from jiuwenswarm.server.runtime.skill.skill_whitelist import SkillWhitelistSynchronizer
 
     workspace = tmp_path / "tenant_ws"
@@ -346,15 +297,21 @@ def test_reconcile_disk_does_not_overwrite_prebuilt(
     skill_dir.mkdir(parents=True)
     (skill_dir / "SKILL.md").write_text("---\nname: prebuilt-skill\n---\n", encoding="utf-8")
 
-    db = _FakeSkillDb()
-    db.rows["prebuilt-skill"] = {
-        "skill_name": "prebuilt-skill",
-        "source_type": SOURCE_PREBUILT,
-        "skill_source": "https://example.com/pre.zip",
-        "skill_version": "1.0.0",
-        "skill_id": "pre-1",
-    }
-    _patch_skill_db(monkeypatch, db)
+    (skills_dir / MANIFEST_FILENAME).write_text(
+        json.dumps(
+            {
+                "pre-1": {
+                    "skill_name": "prebuilt-skill",
+                    "version": "1.0.0",
+                    "source": "https://example.com/pre.zip",
+                }
+            },
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    before = _read_manifest(skills_dir)
 
     result = asyncio.run(
         SkillWhitelistSynchronizer(
@@ -365,16 +322,13 @@ def test_reconcile_disk_does_not_overwrite_prebuilt(
     )
 
     assert result.ok is True
-    assert db.rows["prebuilt-skill"]["source_type"] == SOURCE_PREBUILT
     assert result.enabled_skill_dirs == ["prebuilt-skill"]
-    assert not any(s.startswith("reconciled_disk:") for s in result.succeeded)
+    assert result.succeeded == []
+    assert _read_manifest(skills_dir) == before
 
 
-def test_reconcile_disk_into_ledger_only(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """热刷新路径：只跑盘→库对账，不依赖预制模板。"""
-    from jiuwenswarm.agents.harness.common.installed_skill import SOURCE_USER
+def test_reconcile_disk_into_ledger_only(tmp_path: Path) -> None:
+    """热刷新路径：只返回盘上就绪技能，不依赖预制模板。"""
     from jiuwenswarm.server.runtime.skill.skill_whitelist import SkillWhitelistSynchronizer
 
     workspace = tmp_path / "tenant_ws"
@@ -383,9 +337,6 @@ def test_reconcile_disk_into_ledger_only(
     skill_dir.mkdir(parents=True)
     (skill_dir / "SKILL.md").write_text("---\nname: disk-only\n---\n", encoding="utf-8")
 
-    db = _FakeSkillDb()
-    _patch_skill_db(monkeypatch, db)
-
     result = asyncio.run(
         SkillWhitelistSynchronizer(
             workspace,
@@ -395,9 +346,9 @@ def test_reconcile_disk_into_ledger_only(
     )
 
     assert result.ok is True
-    assert db.rows["disk-only"]["source_type"] == SOURCE_USER
     assert result.enabled_skill_dirs == ["disk-only"]
-    assert "reconciled_disk:disk-only" in result.succeeded
+    assert result.succeeded == []
+    assert not (skills_dir / MANIFEST_FILENAME).is_file()
 
 
 def test_multi_tenant_skill_dirs_requires_ids_for_tenant_path() -> None:

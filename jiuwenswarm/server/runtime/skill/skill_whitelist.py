@@ -1,31 +1,24 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
-"""Skill 白名单：按租户同步预制技能到盘 + ``installed_skill``，启用只信 DB."""
+"""Skill 白名单：按租户同步预制技能到盘；启用集以磁盘为准（暂不依赖 installed_skill 表）."""
 
 from __future__ import annotations
-from jiuwenswarm.common.local_env_config import is_enterprise
 
 import asyncio
+import json
 import logging
-import os
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from jiuwenswarm.agents.harness.common.installed_skill import (
-    SOURCE_PREBUILT,
-    SOURCE_USER,
-    delete_installed_skill,
-    list_installed_skills,
-    upsert_installed_skill,
-)
+from jiuwenswarm.common.local_env_config import is_enterprise
 from jiuwenswarm.common.utils import _require_tenant_ids
 from jiuwenswarm.server.runtime.skill.skill_manager import SkillManager, _safe_rmtree
 
 logger = logging.getLogger(__name__)
 
-MANIFEST_FILENAME = ".skill_whitelist_manifest.json"  # 仅占位防误删；不再读写
+MANIFEST_FILENAME = ".skill_whitelist_manifest.json"
 _RESERVED_SKILL_DIR_NAMES = frozenset({MANIFEST_FILENAME, "_marketplace", "skills_state.json"})
 
 _SKILLS_DIR_SYNC_LOCKS: dict[str, asyncio.Lock] = {}
@@ -75,8 +68,18 @@ class SkillWhitelistSyncResult:
     ok: bool = True
 
 
+@dataclass
+class _PrebuiltSyncState:
+    """单次 sync 过程中共享的 manifest / 保留集 / 结果."""
+
+    manifest: dict[str, dict[str, str]]
+    kept_ids: set[str]
+    kept_names: set[str]
+    result: SkillWhitelistSyncResult
+
+
 def is_skill_whitelist_tenant(agent_id: str | None, service_id: str | None) -> bool:
-    """ACP/default 或 ID 缺失的租户不启用白名单逻辑；仅企业版下生效."""
+    """ACP 或 ID 缺失的租户不启用白名单逻辑；仅企业版下生效."""
     if not is_enterprise():
         return False
     try:
@@ -84,8 +87,6 @@ def is_skill_whitelist_tenant(agent_id: str | None, service_id: str | None) -> b
     except ValueError:
         return False
     if aid == "acp" and sid == "global_acp":
-        return False
-    if aid == "default" and sid == "default":
         return False
     return True
 
@@ -114,7 +115,7 @@ def parse_agent_skill_whitelist(
 
 
 class SkillWhitelistSynchronizer:
-    """将预制技能同步到租户 skills/，并写入 ``installed_skill``（按 skill 原子）."""
+    """将预制技能同步到租户 skills/；以本地 manifest + 磁盘为准，不读写 installed_skill."""
 
     def __init__(
         self,
@@ -132,6 +133,7 @@ class SkillWhitelistSynchronizer:
         self._bot_id = bot_id
         self._skills_dir = workspace / "skills"
         self._skills_dir.mkdir(parents=True, exist_ok=True)
+        self._manifest_path = self._skills_dir / MANIFEST_FILENAME
         self._manager = SkillManager(
             workspace_dir=str(workspace),
             persist_skills_state=False,
@@ -153,43 +155,96 @@ class SkillWhitelistSynchronizer:
         path = skills_dir / skill_name
         return path.is_dir() and (path / "SKILL.md").is_file()
 
+    def _load_manifest(self) -> dict[str, dict[str, str]]:
+        """manifest: skill_id -> {skill_name, version, source}."""
+        if not self._manifest_path.is_file():
+            return {}
+        try:
+            raw = json.loads(self._manifest_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            logger.warning("[SkillWhitelist] load manifest failed: %s", exc)
+            return {}
+        if not isinstance(raw, dict):
+            return {}
+        out: dict[str, dict[str, str]] = {}
+        for skill_id, meta in raw.items():
+            sid = str(skill_id or "").strip()
+            if not sid or not isinstance(meta, dict):
+                continue
+            out[sid] = {
+                "skill_name": str(meta.get("skill_name") or "").strip(),
+                "version": str(meta.get("version") or "").strip(),
+                "source": str(meta.get("source") or "").strip(),
+            }
+        return out
+
+    def _save_manifest(self, manifest: dict[str, dict[str, str]]) -> None:
+        payload = {
+            sid: {
+                "skill_name": meta.get("skill_name", ""),
+                "version": meta.get("version", ""),
+                "source": meta.get("source", ""),
+            }
+            for sid, meta in manifest.items()
+            if str(sid).strip()
+        }
+        try:
+            self._manifest_path.write_text(
+                json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+        except OSError as exc:
+            logger.warning("[SkillWhitelist] save manifest failed: %s", exc)
+
+    def _list_ready_skill_dirs(self) -> list[str]:
+        if not self._skills_dir.is_dir():
+            return []
+        names: list[str] = []
+        try:
+            children = sorted(self._skills_dir.iterdir(), key=lambda p: p.name.lower())
+        except OSError as exc:
+            logger.warning("[SkillWhitelist] list skills dir failed: %s", exc)
+            return []
+        for child in children:
+            name = child.name
+            if name in _RESERVED_SKILL_DIR_NAMES or not child.is_dir():
+                continue
+            if self._skill_dir_ready(self._skills_dir, name):
+                names.append(name)
+        return names
+
     def _should_download_prebuilt(
         self,
         item: SkillWhitelistItem,
-        installed_skills_map: dict[str, dict[str, Any]],
+        manifest: dict[str, dict[str, str]],
     ) -> tuple[bool, str]:
-        """是否需要下载预制包。返回 (need_download, db_skill_name)."""
-        by_source: dict[str, Any] | None = None
-        source = str(item.source or "").strip()
-        db_row: dict[str, Any] | None = None
-        for row in installed_skills_map.values():
-            if str(row.get("source_type")) != SOURCE_PREBUILT:
-                continue
-            if str(row.get("skill_id") or "").strip() == item.id:
-                db_row = row
-                break
-            if (
-                by_source is None
-                and source
-                and str(row.get("skill_source") or "").strip() == source
-            ):
-                by_source = row
-        else:
-            db_row = by_source
+        """是否需要下载预制包。返回 (need_download, disk_skill_name)."""
+        meta = manifest.get(item.id)
+        if meta is None:
+            # 同 source 已装过时复用目录名，避免重复下载
+            source = str(item.source or "").strip()
+            if source:
+                for other in manifest.values():
+                    if str(other.get("source") or "").strip() == source:
+                        name = str(other.get("skill_name") or "").strip()
+                        if name and self._skill_dir_ready(self._skills_dir, name):
+                            same_version = (
+                                str(other.get("version") or "").strip() == item.version.strip()
+                            )
+                            if same_version:
+                                return False, name
+                            return True, name
+            return True, ""
 
-        if db_row is None:
+        disk_skill_name = str(meta.get("skill_name") or "").strip()
+        if not disk_skill_name:
             return True, ""
-        db_skill_name = str(db_row.get("skill_name") or "").strip()
-        if not db_skill_name:
-            return True, ""
-        if not self._skill_dir_ready(self._skills_dir, db_skill_name):
-            return True, db_skill_name
-        same_version = (
-            str(db_row.get("skill_version") or "").strip() == item.version.strip()
-        )
+        if not self._skill_dir_ready(self._skills_dir, disk_skill_name):
+            return True, disk_skill_name
+        same_version = str(meta.get("version") or "").strip() == item.version.strip()
         if same_version:
-            return False, db_skill_name
-        return True, db_skill_name
+            return False, disk_skill_name
+        return True, disk_skill_name
 
     @staticmethod
     def _mark_failed(
@@ -216,211 +271,126 @@ class SkillWhitelistSynchronizer:
             return await self._run_sync(config)
 
     async def _run_sync(self, config: AgentSkillWhitelistConfig) -> SkillWhitelistSyncResult:
-        """持锁同步：对齐模板预制 → 剔除多余 → 刷新启用集."""
-        result = SkillWhitelistSyncResult()
-        installed_skills_map = await self._fetch_installed_skills_map(result)
-        if installed_skills_map is None:
-            return result
+        """持锁同步：下载落盘 → 更新 manifest → 启用集=磁盘就绪目录."""
+        state = _PrebuiltSyncState(
+            manifest=self._load_manifest(),
+            kept_ids=set(),
+            kept_names=set(),
+            result=SkillWhitelistSyncResult(),
+        )
 
-        kept_prebuilt_names: set[str] = set()
         for item in config.items_with_source:
             try:
-                outcome = await self._ensure_prebuilt_installed(item, installed_skills_map)
+                outcome = await self._ensure_prebuilt_installed(item, state.manifest)
             except Exception as exc:  # noqa: BLE001
                 msg = f"sync failed id={item.id} source={item.source}: {exc}"
                 logger.warning("[SkillWhitelist] %s", msg)
                 self._mark_failed(
-                    result,
+                    state.result,
                     skill_name="",
                     error_code="sync_exception",
                     error_message=msg,
                 )
                 continue
-            self._apply_prebuilt_outcome(
-                outcome, installed_skills_map, kept_prebuilt_names, result
-            )
+            self._apply_prebuilt_outcome(outcome, item, state)
 
-        await self._remove_prebuilt_not_in_template(
-            installed_skills_map, kept_prebuilt_names, result
+        self._remove_prebuilt_not_in_template(state)
+        self._save_manifest(state.manifest)
+        # 启用集：白名单成功落盘的 + 盘上其它就绪目录（用户自装等）
+        enabled = list(dict.fromkeys([*state.kept_names, *self._list_ready_skill_dirs()]))
+        state.result.enabled_skill_dirs = enabled
+        logger.info(
+            "[SkillWhitelist] disk sync done agent=%s service=%s enabled=%s succeeded=%s errors=%s",
+            self._agent_id,
+            self._service_id,
+            enabled,
+            state.result.succeeded,
+            state.result.errors,
         )
-        await self._reconcile_disk_skills_missing_from_db(installed_skills_map, result)
-        result.enabled_skill_dirs = list(installed_skills_map.keys())
-        return result
+        return state.result
 
     async def reconcile_disk_into_ledger(self) -> SkillWhitelistSyncResult:
-        """仅做盘→库对账并重算启用集（供热刷新路径复用，不跑预制模板 sync）."""
+        """扫描磁盘就绪技能作为启用集（不再写 installed_skill）."""
         lock = await _skills_dir_sync_lock_for(self._skills_dir)
         async with lock:
             result = SkillWhitelistSyncResult()
-            installed_skills_map = await self._fetch_installed_skills_map(result)
-            if installed_skills_map is None:
-                return result
-            await self._reconcile_disk_skills_missing_from_db(installed_skills_map, result)
-            result.enabled_skill_dirs = [
-                name
-                for name in installed_skills_map.keys()
-                if self._skill_dir_ready(self._skills_dir, name)
-            ]
+            result.enabled_skill_dirs = self._list_ready_skill_dirs()
             return result
-
-    async def _fetch_installed_skills_map(
-        self, result: SkillWhitelistSyncResult
-    ) -> dict[str, dict[str, Any]] | None:
-        """查询租户已装技能，返回 skill_name -> 行；失败时写 result 并返回 None."""
-        try:
-            existing_rows = await list_installed_skills(
-                service_id=self._service_id,
-                agent_id=self._agent_id,
-            )
-        except Exception as exc:
-            msg = f"list installed_skill failed: {exc}"
-            logger.warning("[SkillWhitelist] %s", msg)
-            self._mark_failed(
-                result,
-                skill_name="",
-                error_code="db_list_failed",
-                error_message=msg,
-            )
-            return None
-        return {
-            str(r.get("skill_name") or "").strip(): r
-            for r in existing_rows
-            if str(r.get("skill_name") or "").strip()
-        }
 
     def _apply_prebuilt_outcome(
         self,
         outcome: dict[str, Any],
-        installed_skills_map: dict[str, dict[str, Any]],
-        kept_prebuilt_names: set[str],
-        result: SkillWhitelistSyncResult,
+        item: SkillWhitelistItem,
+        state: _PrebuiltSyncState,
     ) -> None:
-        """根据单项 sync 结果更新 kept 集合与本地索引（不再回读 DB）."""
         if outcome.get("ok"):
             name = str(outcome.get("skill_name") or "").strip()
             if not name:
                 return
-            kept_prebuilt_names.add(name)
-            result.succeeded.append(name)
-            row = outcome.get("row")
-            if isinstance(row, dict) and row:
-                installed_skills_map[name] = row
+            state.kept_ids.add(item.id)
+            state.kept_names.add(name)
+            state.result.succeeded.append(name)
+            state.manifest[item.id] = {
+                "skill_name": name,
+                "version": item.version,
+                "source": item.source,
+            }
             return
 
         keep = str(outcome.get("skill_name") or "").strip()
-        if (
-            keep
-            and keep in installed_skills_map
-            and str(installed_skills_map[keep].get("source_type")) == SOURCE_PREBUILT
-        ):
-            kept_prebuilt_names.add(keep)
+        if keep and self._skill_dir_ready(self._skills_dir, keep):
+            state.kept_ids.add(item.id)
+            state.kept_names.add(keep)
+            if item.id not in state.manifest:
+                state.manifest[item.id] = {
+                    "skill_name": keep,
+                    "version": item.version,
+                    "source": item.source,
+                }
         self._mark_failed(
-            result,
+            state.result,
             skill_name=str(outcome.get("skill_name") or ""),
             error_code=str(outcome.get("error_code") or "sync_failed"),
             error_message=str(outcome.get("error_message") or "sync failed"),
         )
 
-    async def _remove_prebuilt_not_in_template(
-        self,
-        installed_skills_map: dict[str, dict[str, Any]],
-        kept_prebuilt_names: set[str],
-        result: SkillWhitelistSyncResult,
-    ) -> None:
-        """当前模板里没有的预制技能：硬删盘+库（不降回 user）."""
-        for name, row in list(installed_skills_map.items()):
-            if str(row.get("source_type")) != SOURCE_PREBUILT:
+    def _remove_prebuilt_not_in_template(self, state: _PrebuiltSyncState) -> None:
+        """当前模板里没有的预制：删盘 + 清 manifest."""
+        for skill_id in list(state.manifest.keys()):
+            if skill_id in state.kept_ids:
                 continue
-            if name in kept_prebuilt_names:
+            meta = state.manifest.pop(skill_id, {}) or {}
+            name = str(meta.get("skill_name") or "").strip()
+            if not name or name in state.kept_names:
+                continue
+            # 仍被其它 id 引用则保留目录
+            still_used = any(
+                str(m.get("skill_name") or "").strip() == name for m in state.manifest.values()
+            )
+            if still_used:
                 continue
             try:
                 self._remove_installed_dir(name)
-                await delete_installed_skill(
-                    service_id=self._service_id,
-                    agent_id=self._agent_id,
-                    skill_name=name,
-                )
-                result.succeeded.append(f"removed:{name}")
-                installed_skills_map.pop(name, None)
+                state.result.succeeded.append(f"removed:{name}")
             except Exception as exc:  # noqa: BLE001
                 msg = f"remove prebuilt failed name={name}: {exc}"
                 logger.warning("[SkillWhitelist] %s", msg)
                 self._mark_failed(
-                    result,
+                    state.result,
                     skill_name=name,
                     error_code="remove_failed",
                     error_message=msg,
                 )
 
-    async def _reconcile_disk_skills_missing_from_db(
-        self,
-        installed_skills_map: dict[str, dict[str, Any]],
-        result: SkillWhitelistSyncResult,
-    ) -> None:
-        """磁盘已有 SKILL.md，但账本没有 → 记为 SOURCE_USER 并纳入启用集。"""
-        if not self._skills_dir.is_dir():
-            return
-        try:
-            children = sorted(self._skills_dir.iterdir(), key=lambda p: p.name.lower())
-        except OSError as exc:
-            self._mark_failed(
-                result,
-                skill_name="",
-                error_code="reconcile_disk_listdir_failed",
-                error_message=f"list skills dir failed: {exc}",
-            )
-            return
-
-        for child in children:
-            name = child.name
-            if name in _RESERVED_SKILL_DIR_NAMES or not child.is_dir():
-                continue
-            if not self._skill_dir_ready(self._skills_dir, name):
-                continue
-            if name in installed_skills_map:
-                continue
-            try:
-                row = await upsert_installed_skill(
-                    service_id=self._service_id,
-                    agent_id=self._agent_id,
-                    skill_name=name,
-                    source_type=SOURCE_USER,
-                    group_id=self._group_id,
-                    bot_id=self._bot_id,
-                )
-                installed_skills_map[name] = (
-                    row
-                    if isinstance(row, dict)
-                    else {
-                        "skill_name": name,
-                        "source_type": SOURCE_USER,
-                    }
-                )
-                result.succeeded.append(f"reconciled_disk:{name}")
-                logger.info(
-                    "[SkillWhitelist] disk skill reconciled into ledger skill=%s agent=%s",
-                    name,
-                    self._agent_id,
-                )
-            except Exception as exc:  # noqa: BLE001
-                self._mark_failed(
-                    result,
-                    skill_name=name,
-                    error_code="reconcile_disk_failed",
-                    error_message=f"reconcile disk skill failed name={name}: {exc}",
-                )
-
     async def _ensure_prebuilt_installed(
         self,
         item: SkillWhitelistItem,
-        installed_skills_map: dict[str, dict[str, Any]],
+        manifest: dict[str, dict[str, str]],
     ) -> dict[str, Any]:
-        """确保模板项对应的预制已就绪：按需下载落盘 → 校验目录 → upsert 账本."""
-        need_download, db_skill_name = self._should_download_prebuilt(
-            item, installed_skills_map
-        )
+        """确保模板项对应的预制已就绪：按需下载落盘 → 校验目录."""
+        need_download, disk_skill_name = self._should_download_prebuilt(item, manifest)
 
-        installed_dir = db_skill_name
+        installed_dir = disk_skill_name
         if need_download:
             try:
                 install_result = await asyncio.to_thread(
@@ -432,7 +402,7 @@ class SkillWhitelistSynchronizer:
             except Exception as exc:
                 return {
                     "ok": False,
-                    "skill_name": db_skill_name,
+                    "skill_name": disk_skill_name,
                     "error_code": "download_failed",
                     "error_message": f"sync failed id={item.id} source={item.source}: {exc}",
                 }
@@ -440,7 +410,7 @@ class SkillWhitelistSynchronizer:
                 detail = install_result.get("detail") or "install failed"
                 return {
                     "ok": False,
-                    "skill_name": db_skill_name,
+                    "skill_name": disk_skill_name,
                     "error_code": "install_failed",
                     "error_message": f"sync failed id={item.id} source={item.source}: {detail}",
                 }
@@ -452,8 +422,14 @@ class SkillWhitelistSynchronizer:
                     "error_code": "empty_skill_name",
                     "error_message": f"sync failed id={item.id}: empty skill_name",
                 }
-            if db_skill_name and db_skill_name != installed_dir:
-                self._remove_installed_dir(db_skill_name)
+            if disk_skill_name and disk_skill_name != installed_dir:
+                still_used = any(
+                    sid != item.id
+                    and str(m.get("skill_name") or "").strip() == disk_skill_name
+                    for sid, m in manifest.items()
+                )
+                if not still_used:
+                    self._remove_installed_dir(disk_skill_name)
 
         if not self._skill_dir_ready(self._skills_dir, installed_dir):
             return {
@@ -465,37 +441,4 @@ class SkillWhitelistSynchronizer:
                 ),
             }
 
-        conflict = installed_skills_map.get(installed_dir)
-        if conflict is not None and str(conflict.get("source_type")) == SOURCE_USER:
-            logger.info(
-                "[SkillWhitelist] promote user→prebuilt skill_name=%s",
-                installed_dir,
-            )
-
-        try:
-            row = await upsert_installed_skill(
-                service_id=self._service_id,
-                agent_id=self._agent_id,
-                skill_name=installed_dir,
-                source_type=SOURCE_PREBUILT,
-                skill_source=item.source,
-                skill_version=item.version,
-                skill_id=item.id,
-                group_id=self._group_id,
-                bot_id=self._bot_id,
-                user_id=None,
-            )
-        except Exception as exc:
-            if need_download:
-                self._remove_installed_dir(installed_dir)
-            return {
-                "ok": False,
-                "skill_name": installed_dir,
-                "error_code": "db_write_failed",
-                "error_message": f"write DB failed id={item.id} name={installed_dir}: {exc}",
-            }
-
-        if db_skill_name and db_skill_name != installed_dir:
-            installed_skills_map.pop(db_skill_name, None)
-
-        return {"ok": True, "skill_name": installed_dir, "row": row}
+        return {"ok": True, "skill_name": installed_dir}

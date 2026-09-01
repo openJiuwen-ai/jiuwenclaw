@@ -1236,13 +1236,13 @@ class JiuWenSwarm:
         except Exception as exc:
             logger.warning("[JiuWenSwarm] team shared skill link refresh failed: %s", exc)
 
-    async def refresh_enabled_skills_from_db(self) -> None:
-        """企业账本变更后轻量刷新启用集（直读 DB + 重建 SkillUseRail）。
+    async def refresh_enabled_skills_from_disk(self) -> None:
+        """企业技能变更后轻量刷新启用集（扫盘 + 重建 SkillUseRail）。
 
         适配器不支持时回退 ``create_instance``。
         """
         adapter = self._ensure_adapter()
-        refresh = getattr(adapter, "refresh_enabled_skills_from_db", None)
+        refresh = getattr(adapter, "refresh_enabled_skills_from_disk", None)
         if callable(refresh):
             await refresh()
             return
@@ -1933,7 +1933,7 @@ class JiuWenSwarm:
                 _reload_after_skills = False
             if _enterprise_web_handler and payload.get("success") is not False:
                 if is_enterprise():
-                    await self.refresh_enabled_skills_from_db()
+                    await self.refresh_enabled_skills_from_disk()
             elif _reload_after_skills and payload.get("success") is not False:
                 await self.create_instance()
                 self._refresh_team_shared_skill_links(request.session_id)
