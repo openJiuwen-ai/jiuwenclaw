@@ -101,7 +101,6 @@ const
 
 var
   WebView2DownloadPage: TDownloadWizardPage;
-  WebView2InstallPage: TOutputMarqueeProgressWizardPage;
 
 procedure InitializeWizard;
 begin
@@ -112,10 +111,6 @@ begin
   );
   WebView2DownloadPage.ShowBaseNameInsteadOfUrl := True;
   WebView2DownloadPage.AbortButton.Caption := '取消下载';
-  WebView2InstallPage := CreateOutputMarqueeProgressPage(
-    '正在安装 Microsoft Edge WebView2 Runtime',
-    '请在弹出的微软安装窗口中查看进度或取消安装。'
-  );
 end;
 
 function GetWebView2RuntimeVersion(var Version: String): Boolean;
@@ -186,7 +181,11 @@ begin
       end;
     end;
   finally
-    WebView2DownloadPage.Hide;
+    { Keep the completed download page visible while signature verification
+      and the Microsoft child installer start. This avoids flashing back to
+      the main wizard and then showing a second progress page. }
+    if not Result then
+      WebView2DownloadPage.Hide;
   end;
 end;
 
@@ -267,22 +266,22 @@ begin
     exit;
   end;
 
-  if not VerifyDownloadedWebView2Installer(RuntimeInstaller) then
-  begin
-    DeleteFile(RuntimeInstaller);
-    ShowWebView2UnavailableMessage(
-      '下载的 Microsoft Edge WebView2 Runtime 未通过微软数字签名验证，已停止执行。'
-    );
-    exit;
-  end;
-
-  WebView2InstallPage.Show;
+  WebView2DownloadPage.AbortButton.Enabled := False;
+  WebView2DownloadPage.Caption := '正在验证 Microsoft Edge WebView2 Runtime';
+  WebView2DownloadPage.Description := '正在校验微软数字签名，请稍候…';
   try
-    WebView2InstallPage.SetText(
-      '正在安装 Microsoft Edge WebView2 Runtime…',
-      '请在弹出的微软安装窗口中查看进度或取消安装。'
-    );
-    WebView2InstallPage.Animate;
+    if not VerifyDownloadedWebView2Installer(RuntimeInstaller) then
+    begin
+      DeleteFile(RuntimeInstaller);
+      ShowWebView2UnavailableMessage(
+        '下载的 Microsoft Edge WebView2 Runtime 未通过微软数字签名验证，已停止执行。'
+      );
+      exit;
+    end;
+
+    WebView2DownloadPage.Caption := '正在打开 Microsoft Edge WebView2 Runtime 安装程序';
+    WebView2DownloadPage.Description :=
+      '请在即将弹出的微软安装窗口中查看进度或取消安装。';
     ResultCode := -1;
     if WizardSilent then
     begin
@@ -303,7 +302,7 @@ begin
       ResultCode
     );
   finally
-    WebView2InstallPage.Hide;
+    WebView2DownloadPage.Hide;
   end;
 
   { The Evergreen installer can return a non-zero code even when registration

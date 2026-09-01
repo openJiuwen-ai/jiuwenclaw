@@ -22,9 +22,12 @@ def test_installer_downloads_webview2_without_blocking_main_install():
     assert "WebView2DownloadPage.AbortedByUser" in installer
     assert "WebView2DownloadPage.AbortButton.Caption := '取消下载'" in installer
     assert "请检查网络、代理或防火墙设置" in installer
-    assert "CreateOutputMarqueeProgressPage" in installer
-    assert "WebView2InstallPage.Show" in installer
-    assert "WebView2InstallPage.Hide" in installer
+    assert "CreateOutputMarqueeProgressPage" not in installer
+    assert "WebView2InstallPage" not in installer
+    assert "WebView2DownloadPage.AbortButton.Enabled := False" in installer
+    assert "WebView2DownloadPage.Caption := '正在验证" in installer
+    assert "WebView2DownloadPage.Caption := '正在打开" in installer
+    assert "WebView2DownloadPage.Hide" in installer
     assert "{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}" in installer
     assert "GetWebView2RuntimeVersion" in installer
     assert "RegQueryStringValue(HKLM32, Key, 'pv', Version)" in installer
