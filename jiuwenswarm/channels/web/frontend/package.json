@@ -58,6 +58,7 @@
     "test:upload-document-block": "tsc src/utils/documentMessage.ts --target ES2020 --module ES2020 --moduleResolution Bundler --rootDir src --outDir node_modules/.cache/upload-document-block --skipLibCheck --noEmitOnError && node --test tests/uploadDocumentBlock.test.mjs",
     "test:share-image": "esbuild src/features/shareImageRaster.ts src/features/streamingPng.ts --bundle --platform=node --format=esm --outdir=node_modules/.cache/share-image && node --test tests/shareImageExport.test.mjs",
     "test:build-turn-timeline": "esbuild src/features/chatTimeline/buildTurnTimeline.ts --bundle --packages=external --platform=node --format=esm --loader:.svg=file --loader:.png=file --define:import.meta.env.DEV=false --outdir=node_modules/.cache/build-turn-timeline && node --test tests/buildTurnTimeline.test.mjs",
+    "test:pending-connector-flow": "node --test tests/pendingConnectorFlow.test.mjs",
     "lint": "eslint . --ext ts,tsx --report-unused-disable-directives --max-warnings 0",
     "preview": "vite preview"
   },
