@@ -6405,10 +6405,39 @@ class JiuWenSwarmDeepAdapter:
 
         resolved_language = self._resolve_runtime_language()
         evolution_triggers = get_passive_skill_evolution_triggers(self._config_cache)
-        if (
-            self._skill_evolution_rail is not None
-            and getattr(self._skill_evolution_rail, "_language", None) != resolved_language
+        # agent-core treats evolution rail configuration as immutable: asking
+        # configure_skill_evolution_runtime() to reuse a rail with different
+        # trigger flags raises ``Evolution rail config mismatch``.  Warm-pool
+        # preparation and the foreground request can straddle an env/config
+        # refresh, so reconcile every immutable field before configuring.
+        existing_rail = self._skill_evolution_rail
+        existing_language = getattr(existing_rail, "_language", resolved_language)
+        existing_review_trigger = getattr(
+            existing_rail,
+            "review_trigger",
+            evolution_triggers["review_trigger"],
+        )
+        existing_signal_trigger = getattr(
+            existing_rail,
+            "signal_trigger",
+            evolution_triggers["signal_trigger"],
+        )
+        if existing_rail is not None and (
+            existing_language != resolved_language
+            or bool(existing_review_trigger) != evolution_triggers["review_trigger"]
+            or bool(existing_signal_trigger) != evolution_triggers["signal_trigger"]
         ):
+            logger.info(
+                "[JiuWenSwarmDeepAdapter] rebuilding SkillEvolutionRail after "
+                "runtime config change: language=%s->%s review_trigger=%s->%s "
+                "signal_trigger=%s->%s",
+                existing_language,
+                resolved_language,
+                existing_review_trigger,
+                evolution_triggers["review_trigger"],
+                existing_signal_trigger,
+                evolution_triggers["signal_trigger"],
+            )
             await self._unconfigure_active_evolution_rails()
 
         disabled_skills = merge_evolution_disabled_skills(

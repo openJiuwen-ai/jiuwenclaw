@@ -39,6 +39,7 @@ from jiuwenswarm.common.utils import (
     get_agent_skills_dir,
     get_builtin_skills_dir,
     is_package_installation,
+    migrate_legacy_skills_to_default_tenant,
 )
 
 
@@ -502,6 +503,14 @@ class SkillManager:
         refresh_marketplaces = bool(params.get("refresh_marketplaces", False))
         if refresh_marketplaces:
             await self._sync_marketplace_repos()
+        # Keep the historical user-facing drop-in directory live. A Skill copied
+        # there after server startup becomes visible on the next frontend refresh.
+        try:
+            migrate_legacy_skills_to_default_tenant(
+                target_skills_dir=self._skills_dir,
+            )
+        except OSError as exc:
+            logger.warning("Legacy skill compatibility sync failed: %s", exc)
         # 每次列举前，把手动拷入 skills 目录、尚未登记的本地技能补登记为 local，
         # 使其无需重启 server、刷新"我的技能"即可显示（与导入本地技能一致）。
         self._register_unmanaged_local_skills()

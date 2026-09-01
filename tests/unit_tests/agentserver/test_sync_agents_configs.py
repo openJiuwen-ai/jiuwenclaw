@@ -25,6 +25,7 @@ from jiuwenswarm.common.local_env_config import (
     apply_env_overrides_to_active,
     bind_agent_env_ns,
     bind_task_env_overlay,
+    build_effective_env_overlay,
     export_agent_environ,
     get_active_env,
     get_local_config,
@@ -41,6 +42,7 @@ from jiuwenswarm.common.local_env_config import (
     reset_task_env_overlay,
     set_os_environ,
     stage_env_overrides,
+    update_process_baseline,
 )
 from jiuwenswarm.common.utils import resolve_tenant_sessions_dir
 
@@ -293,6 +295,30 @@ class TestMirrorBareBusinessEnv:
         assert get_local_config("WEB_SEARCH_API_KEY") == "sk-search"
         assert get_local_config("ACR_ACCESS_KEY") == "acr-key"
         assert get_local_config("SKILLNET_DOWNLOAD_TIMEOUT") == "90"
+
+    @staticmethod
+    def test_local_dotenv_evolution_value_wins_in_sealed_request(monkeypatch):
+        """Warm-up and request overlays must resolve the same local .env value."""
+        monkeypatch.delenv("JIUWENSWARM_EDITION", raising=False)
+        assert "EVOLUTION_AUTO_SCAN" in BUSINESS_MIRROR_KEYS
+
+        update_process_baseline({"EVOLUTION_AUTO_SCAN": "false"})
+        apply_env_overrides_to_active(
+            {"EVOLUTION_AUTO_SCAN": "true"},
+            service_id="default",
+            agent_id="default",
+        )
+        overlay = build_effective_env_overlay(
+            {"EVOLUTION_AUTO_SCAN": "true"},
+            service_id="default",
+            agent_id="default",
+        )
+
+        token = bind_task_env_overlay(overlay)
+        try:
+            assert get_local_config("EVOLUTION_AUTO_SCAN") == "false"
+        finally:
+            reset_task_env_overlay(token)
 
 
 # ---------------------------------------------------------------------------

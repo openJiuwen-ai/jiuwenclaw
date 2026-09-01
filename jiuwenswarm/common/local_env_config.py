@@ -7,7 +7,8 @@ Storage contract (acceptance)::
   resident as bare keys or ``sid__aid__*`` namespaced keys in ``os.environ``.
 - **Process baseline**: ``.env`` / bare Track B ingested into
   ``_process_baseline`` (shared). Readers do **not** fall through to baseline;
-  values reach tips only via hydrate (local) or sync gaps.
+  values reach tips via hydrate (local), sync gaps, or the authoritative local
+  default-agent request overlay.
 - **Legal child exits**: ``export_agent_environ`` and skill credential injection.
 - **Authority**: ``sync_agents_configs`` replaces per-agent tip then gaps
   baseline keys absent from the raw ``agents[].env`` object; ``shared_env``
@@ -93,6 +94,13 @@ BUSINESS_MIRROR_KEYS: frozenset[str] = frozenset(
         "API_BASE",
         "MEMORY_ENGINE",
         "EVOLUTION_ENABLED",
+        # Passive evolution switches are read through get_local_config().  They
+        # must therefore live in Track B; otherwise an unbound warm-up can see
+        # the bare .env value while a request-bound overlay sees the YAML
+        # fallback, producing two configurations for the same rail.
+        "EVOLUTION_AUTO_SCAN",
+        "EVOLUTION_SIGNAL_TRIGGER",
+        "EVOLUTION_REVIEW_TRIGGER",
         "EMBED_API_KEY",
         "EMBED_API_BASE",
         "EMBED_MODEL",
@@ -650,8 +658,17 @@ def build_effective_env_overlay(
     service_id: str | None = None,
     agent_id: str | None = None,
 ) -> dict[str, Any]:
-    """Formula B tip, then merge optional extras (extras win; ``None`` pops)."""
-    merged = effective_tip(service_id, agent_id)
+    """Build the sealed request environment for an agent.
+
+    Formula B remains authoritative for tenant namespaces.  For the local
+    personal ``default/default`` agent, values explicitly loaded from the
+    user's ``.env`` are applied last.  This preserves the long-standing local
+    contract that editing ``~/.jiuwenswarm/config/.env`` controls runtime
+    behaviour consistently across cold start, warm-pool preparation and the
+    real request, even when a config reload payload omits that key.
+    """
+    resolved_ns = resolve_env_ns(service_id, agent_id)
+    merged = effective_tip(*resolved_ns)
     for part in extra:
         if isinstance(part, dict):
             for key, value in normalize_product_env_aliases(part).items():
@@ -663,6 +680,14 @@ def build_effective_env_overlay(
                     if k in _EMPTY_OMIT_ENV_KEYS and not text.strip():
                         continue
                     merged[k] = text
+    if (
+        should_hydrate_default_tip()
+        and resolved_ns == (_DEFAULT_SERVICE_ID, _DEFAULT_AGENT_ID)
+    ):
+        # Local .env is the source of truth for the default personal agent.
+        # Apply it after sync/request extras so a transient replace_active_env()
+        # cannot make warm-up and foreground requests resolve different values.
+        merged.update(_process_baseline)
     # Drop empty credential keys already present in tip so seal does not pin "".
     for k in _EMPTY_OMIT_ENV_KEYS:
         if k in merged and not str(merged.get(k) or "").strip():

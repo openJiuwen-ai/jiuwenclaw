@@ -87,3 +87,54 @@ async def test_ensure_active_evolution_rails_passes_trajectory_span_processor(tm
     configure.assert_awaited_once()
     kwargs = configure.await_args.kwargs
     assert kwargs.get("trajectory_span_processor") is processor
+
+
+@pytest.mark.asyncio
+async def test_ensure_active_evolution_rails_rebuilds_when_trigger_changes(
+    tmp_path,
+):
+    """A warm-pool rail must be removed before foreground trigger changes."""
+    configure = AsyncMock()
+    unconfigure = AsyncMock()
+
+    adapter = JiuWenSwarmDeepAdapter()
+    adapter._instance = object()
+    adapter._model = object()
+    adapter._default_model_name = "gpt-test"
+    adapter._config_cache = {"evolution": {"enabled": True}}
+    adapter._skill_manager = SimpleNamespace(list_execution_disabled_skills=lambda: [])
+    adapter._skill_evolution_rail = SimpleNamespace(
+        _language="cn",
+        review_trigger=False,
+        signal_trigger=False,
+    )
+
+    async def _clear_existing_rails():
+        adapter._skill_evolution_rail = None
+        adapter._evolution_interrupt_rail = None
+
+    unconfigure.side_effect = _clear_existing_rails
+
+    with (
+        patch.object(adapter, "_resolve_runtime_language", return_value="cn"),
+        patch.object(
+            adapter,
+            "_resolve_skill_dirs",
+            return_value=[str(tmp_path / "skills")],
+        ),
+        patch.object(adapter, "_unconfigure_active_evolution_rails", unconfigure),
+        patch(
+            "jiuwenswarm.server.runtime.agent_adapter.interface_deep.get_passive_skill_evolution_triggers",
+            return_value={"review_trigger": False, "signal_trigger": True},
+        ),
+        patch(
+            "jiuwenswarm.server.runtime.agent_adapter.interface_deep.configure_skill_evolution_runtime",
+            configure,
+        ),
+        patch.object(adapter, "_refresh_active_evolution_rail_refs", MagicMock()),
+    ):
+        await adapter._ensure_active_evolution_rails_registered()
+
+    unconfigure.assert_awaited_once()
+    configure.assert_awaited_once()
+    assert configure.await_args.kwargs["signal_trigger"] is True

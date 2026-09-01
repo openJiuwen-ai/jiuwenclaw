@@ -39,6 +39,7 @@ import sys
 import datetime
 import shutil
 import socket
+import tempfile
 import time
 from collections import OrderedDict
 from collections.abc import Hashable
@@ -942,6 +943,130 @@ def _migrate_jiuwenclaw_workspace_to_workspace(workspace_dir: Path) -> None:
         print(f"[migration] Renamed: {old_workspace} -> {new_workspace}")
 
 
+def _skill_tree_manifest(skill_dir: Path) -> tuple[tuple[str, str, str], ...]:
+    """Build a content manifest used to verify a copied skill directory."""
+    manifest: list[tuple[str, str, str]] = []
+    for item in sorted(skill_dir.rglob("*"), key=lambda path: path.as_posix()):
+        relative_path = item.relative_to(skill_dir).as_posix()
+        if item.is_symlink():
+            manifest.append(("link", relative_path, os.readlink(item)))
+        elif item.is_dir():
+            manifest.append(("dir", relative_path, ""))
+        elif item.is_file():
+            digest = hashlib.sha256()
+            with item.open("rb") as file_obj:
+                for chunk in iter(lambda: file_obj.read(1024 * 1024), b""):
+                    digest.update(chunk)
+            manifest.append(("file", relative_path, digest.hexdigest()))
+    return tuple(manifest)
+
+
+def migrate_legacy_skills_to_default_tenant(
+    workspace_dir: Optional[Path] = None,
+    target_skills_dir: Optional[Path] = None,
+) -> list[str]:
+    """Synchronize new legacy-path skills into a tenant workspace.
+
+    This compatibility sync is intentionally non-destructive and idempotent:
+
+    - the legacy ``agent/workspace/skills`` directory is never changed;
+    - a skill is copied only when its top-level name is absent at the target;
+    - every staged copy is content-verified before it is moved into place.
+
+    Args:
+        workspace_dir: JiuWenSwarm data root. Defaults to the configured data root.
+        target_skills_dir: Optional explicit destination used by tests or callers.
+
+    Returns:
+        Names of skills copied during this invocation.
+    """
+    data_root = Path(workspace_dir) if workspace_dir is not None else get_user_workspace_dir()
+    legacy_skills_dir = data_root / "agent" / "workspace" / "skills"
+    if not legacy_skills_dir.is_dir():
+        return []
+
+    destination_root = (
+        Path(target_skills_dir)
+        if target_skills_dir is not None
+        else data_root
+        / "service_default"
+        / "agent_default"
+        / "agent"
+        / "workspace"
+        / "skills"
+    )
+    try:
+        if legacy_skills_dir.resolve() == destination_root.resolve():
+            return []
+    except OSError:
+        if legacy_skills_dir.absolute() == destination_root.absolute():
+            return []
+
+    destination_root.mkdir(parents=True, exist_ok=True)
+    copied: list[str] = []
+    for source_skill in sorted(legacy_skills_dir.iterdir(), key=lambda path: path.name):
+        # SkillManager scans top-level directories; root metadata files are managed
+        # independently in the tenant workspace and must not be overwritten here.
+        if not source_skill.is_dir():
+            continue
+
+        destination_skill = destination_root / source_skill.name
+        if destination_skill.exists():
+            logger.debug(
+                "[migration] Kept existing tenant skill, skipped legacy copy: %s",
+                destination_skill,
+            )
+            continue
+
+        try:
+            with tempfile.TemporaryDirectory(
+                prefix=".legacy-skill-",
+                dir=destination_root.parent,
+            ) as staging_dir:
+                staged_skill = Path(staging_dir) / source_skill.name
+                shutil.copytree(source_skill, staged_skill, symlinks=True)
+                if _skill_tree_manifest(source_skill) != _skill_tree_manifest(staged_skill):
+                    raise OSError(f"skill copy verification failed: {source_skill.name}")
+
+                # Recheck after staging so concurrently initialized processes never
+                # replace a skill that has appeared in the meantime.
+                if destination_skill.exists():
+                    logger.debug(
+                        "[migration] Tenant skill appeared during copy, kept target: %s",
+                        destination_skill,
+                    )
+                    continue
+                try:
+                    os.rename(staged_skill, destination_skill)
+                except OSError:
+                    if destination_skill.exists():
+                        logger.debug(
+                            "[migration] Tenant skill won concurrent migration, kept target: %s",
+                            destination_skill,
+                        )
+                        continue
+                    raise
+
+            if _skill_tree_manifest(source_skill) != _skill_tree_manifest(destination_skill):
+                raise OSError(f"installed skill verification failed: {source_skill.name}")
+            copied.append(source_skill.name)
+            logger.info(
+                "[migration] Copied and verified legacy skill: %s -> %s",
+                source_skill,
+                destination_skill,
+            )
+        except OSError as exc:
+            # One malformed/unreadable skill must not prevent the service from
+            # starting or other independent skills from being migrated.
+            logger.warning(
+                "[migration] Failed to copy legacy skill %s: %s",
+                source_skill,
+                exc,
+            )
+
+    return copied
+
+
 def _migrate_legacy_workspace(
     workspace_dir: Path,
     preferred_language: Optional[str] = None,
@@ -1443,6 +1568,12 @@ def prepare_workspace(
     # sessions is runtime-only (template may not include it)
     agent_sessions.mkdir(parents=True, exist_ok=True)
     default_project_workspace.mkdir(parents=True, exist_ok=True)
+    # Preserve the historical public drop-in path for new users. Runtime code
+    # synchronizes newly added skills from here into the active tenant workspace.
+    (workspace_dir / "agent" / "workspace" / "skills").mkdir(
+        parents=True,
+        exist_ok=True,
+    )
 
     from jiuwenswarm.common.config import set_preferred_language_in_config_file
 
@@ -1619,6 +1750,13 @@ def _resolve_paths(force=False) -> None:
         _root_dir = workspace_dir
         _config_dir = user_config_dir
         _workspace_dir = user_workspace_dir
+        try:
+            migrate_legacy_skills_to_default_tenant(
+                workspace_dir=workspace_dir,
+                target_skills_dir=user_workspace_dir / "skills",
+            )
+        except OSError as exc:
+            logger.warning("[migration] Legacy skill migration unavailable: %s", exc)
     else:
         # 尚未初始化 ~/.jiuwenswarm：从包内 resources 直读配置，工作区指向包内 agent/workspace
         package_root = _find_package_root()
@@ -1921,12 +2059,20 @@ def get_agent_memory_dir() -> Path:
 def get_agent_skills_dir() -> Path:
     """Get the agent skills directory path.
 
-    Uses DeepAgent standard workspace location for unified workspace.
+    Uses the DeepAgent standard workspace location and keeps the historical
+    ``~/.jiuwenswarm/agent/workspace/skills`` drop-in directory compatible.
+    Newly added legacy-path skills are copied on demand without replacing an
+    existing tenant skill of the same name.
 
     Returns:
-        Path to skills directory: ~/.jiuwenswarm/agent/workspace/skills
+        Request-bound tenant skills directory.
     """
-    return get_agent_workspace_dir() / "skills"
+    skills_dir = get_agent_workspace_dir() / "skills"
+    try:
+        migrate_legacy_skills_to_default_tenant(target_skills_dir=skills_dir)
+    except OSError as exc:
+        logger.warning("[migration] Legacy skill compatibility sync unavailable: %s", exc)
+    return skills_dir
 
 
 JIUWENSWARM_SHARED_SKILLS_DIRS_ENV = "JIUWENSWARM_SHARED_SKILLS_DIRS"

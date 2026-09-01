@@ -1,5 +1,8 @@
 """AgentServer 端到端启动预热。
 
+This module lives inside the ``prewarm`` package so it can coexist with the
+Dolores KV-cache prewarming implementation exported by the same package.
+
 进程启动时创建一个临时 JiuWenSwarm DeepAgent 并执行一次简单 query，触发模块
 import / checkpointer / 模型 client / DeepAgent 工厂全链路首次初始化，降低首个
 真实请求时延。后台执行，失败或超时仅告警不阻塞启动。

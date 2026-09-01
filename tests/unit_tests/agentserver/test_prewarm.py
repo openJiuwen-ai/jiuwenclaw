@@ -82,7 +82,7 @@ def _entry(provider: str = "OpenAI", with_mcc: bool = True) -> dict[str, Any]:
 class TestBuildWarmupConfigBase:
     def test_defaults_list_client_provider_overwritten(self) -> None:
         cfg = {"models": {"defaults": [_entry("OpenAI"), _entry("DashScope")]}}
-        with patch("jiuwenswarm.server.runtime.prewarm.get_config", return_value=cfg):
+        with patch("jiuwenswarm.server.runtime.prewarm.startup.get_config", return_value=cfg):
             out = _build_warmup_config_base()
         providers = [e["model_client_config"]["client_provider"] for e in out["models"]["defaults"]]
         assert providers == ["warmup", "warmup"]
@@ -91,38 +91,38 @@ class TestBuildWarmupConfigBase:
 
     def test_legacy_default_single_entry_overwritten(self) -> None:
         cfg = {"models": {"default": {"model_client_config": {"client_provider": "OpenAI"}}}}
-        with patch("jiuwenswarm.server.runtime.prewarm.get_config", return_value=cfg):
+        with patch("jiuwenswarm.server.runtime.prewarm.startup.get_config", return_value=cfg):
             out = _build_warmup_config_base()
         assert out["models"]["default"]["model_client_config"]["client_provider"] == "warmup"
 
     def test_react_section_client_provider_overwritten(self) -> None:
         cfg = {"react": {"model_client_config": {"client_provider": "OpenAI"}}}
-        with patch("jiuwenswarm.server.runtime.prewarm.get_config", return_value=cfg):
+        with patch("jiuwenswarm.server.runtime.prewarm.startup.get_config", return_value=cfg):
             out = _build_warmup_config_base()
         assert out["react"]["model_client_config"]["client_provider"] == "warmup"
 
     def test_defaults_entry_without_model_client_config_is_backfilled(self) -> None:
         """model_client_config 缺失时应回写 warmup，避免 mock 不生效。"""
         cfg = {"models": {"defaults": [_entry(with_mcc=False)]}}
-        with patch("jiuwenswarm.server.runtime.prewarm.get_config", return_value=cfg):
+        with patch("jiuwenswarm.server.runtime.prewarm.startup.get_config", return_value=cfg):
             out = _build_warmup_config_base()
         assert out["models"]["defaults"][0]["model_client_config"]["client_provider"] == "warmup"
 
     def test_legacy_default_without_model_client_config_skipped_safely(self) -> None:
         cfg = {"models": {"default": {}}}
-        with patch("jiuwenswarm.server.runtime.prewarm.get_config", return_value=cfg):
+        with patch("jiuwenswarm.server.runtime.prewarm.startup.get_config", return_value=cfg):
             out = _build_warmup_config_base()
         # 不应抛异常，default 段保持原样（无 model_client_config）
         assert out["models"]["default"] == {}
 
     def test_react_without_model_client_config_skipped_safely(self) -> None:
         cfg = {"react": {}}
-        with patch("jiuwenswarm.server.runtime.prewarm.get_config", return_value=cfg):
+        with patch("jiuwenswarm.server.runtime.prewarm.startup.get_config", return_value=cfg):
             out = _build_warmup_config_base()
         assert out["react"] == {}
 
     def test_empty_config_does_not_raise(self) -> None:
-        with patch("jiuwenswarm.server.runtime.prewarm.get_config", return_value={}):
+        with patch("jiuwenswarm.server.runtime.prewarm.startup.get_config", return_value={}):
             out = _build_warmup_config_base()
         assert "models" in out  # setdefault 保证存在
 
@@ -168,7 +168,7 @@ class TestCleanupPrewarmAgent:
         agent._adapter = adapter
         calls: list[str] = []
         monkeypatch.setattr(
-            "jiuwenswarm.server.runtime.prewarm.logger.warning",
+            "jiuwenswarm.server.runtime.prewarm.startup.logger.warning",
             lambda *a, **k: calls.append(a[0]),
         )
         await _cleanup_prewarm_agent(agent)
@@ -240,7 +240,7 @@ def _patch_phase3(monkeypatch: pytest.MonkeyPatch, *, jiuwen_exc=None, create_ex
     monkeypatch.setattr(
         "jiuwenswarm.server.runtime.agent_adapter.interface.JiuWenSwarm", fake_jws, raising=False
     )
-    import jiuwenswarm.server.runtime.prewarm as prewarm_mod
+    import jiuwenswarm.server.runtime.prewarm.startup as prewarm_mod
     monkeypatch.setattr(prewarm_mod, "get_config", lambda: {}, raising=False)
     return fake_agent
 
@@ -293,7 +293,7 @@ async def test_phase3_ok_completes(monkeypatch: pytest.MonkeyPatch) -> None:
 @pytest.mark.asyncio
 async def test_run_startup_warmup_backcompat_calls_both_phases(monkeypatch: pytest.MonkeyPatch) -> None:
     """run_startup_warmup 应依次调用 phase12 + phase3。"""
-    import jiuwenswarm.server.runtime.prewarm as prewarm_mod
+    import jiuwenswarm.server.runtime.prewarm.startup as prewarm_mod
     phase12 = AsyncMock()
     phase3 = AsyncMock()
     monkeypatch.setattr(prewarm_mod, "warmup_import_and_checkpointer", phase12, raising=False)

@@ -1415,9 +1415,10 @@ def get_runtime_state_path(session_id: str | None = None) -> Path:
 
 
 def get_workspace_dir() -> Path:
-    """Get the workspace directory path."""
-    _resolve_paths()
-    return _workspace_dir
+    """Use the stock default multi-tenant workspace path."""
+    from jiuwenswarm.common.utils import get_workspace_dir as resolve_workspace
+
+    return resolve_workspace()
 
 
 def get_root_dir() -> Path:
@@ -1429,13 +1430,12 @@ def get_root_dir() -> Path:
 def get_agent_workspace_dir() -> Path:
     """Get the agent workspace directory path.
 
-    This is the DeepAgent standard workspace directory under the agent root.
-    It contains standard nodes like skills, memory, todo, messages, etc.
-
-    Returns:
-        Path to agent workspace: ~/.jiuwenswarm/agent/workspace
+    Delegate to the dev-stable path resolver so Dolores and the stock frontend
+    always use the same request-bound multi-tenant workspace.
     """
-    return get_agent_root_dir() / "workspace"
+    from jiuwenswarm.common.utils import get_agent_workspace_dir as resolve_workspace
+
+    return resolve_workspace()
 
 
 def get_default_project_workspace_dir() -> Path:
@@ -1479,7 +1479,10 @@ def get_prompt_attachment_dir() -> Path:
 
 
 def get_agent_root_dir() -> Path:
-    return get_user_workspace_dir() / "agent"
+    """Use the stock multi-tenant/request-bound agent root."""
+    from jiuwenswarm.common.utils import get_agent_root_dir as resolve_agent_root
+
+    return resolve_agent_root()
 
 
 def get_agent_home_dir() -> Path:
@@ -1500,12 +1503,12 @@ def get_agent_memory_dir() -> Path:
 def get_agent_skills_dir() -> Path:
     """Get the agent skills directory path.
 
-    Uses DeepAgent standard workspace location for unified workspace.
-
-    Returns:
-        Path to skills directory: ~/.jiuwenswarm/agent/workspace/skills
+    This is deliberately delegated instead of recomputed so tenant binding and
+    future stock path changes are inherited by Dolores automatically.
     """
-    return get_agent_workspace_dir() / "skills"
+    from jiuwenswarm.common.utils import get_agent_skills_dir as resolve_skills
+
+    return resolve_skills()
 
 
 def get_interactions_dir() -> Path:
