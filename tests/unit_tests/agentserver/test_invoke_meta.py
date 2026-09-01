@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
@@ -22,7 +23,11 @@ from jiuwenswarm.agents.harness.common.tools.invoke_meta.plugin_skill_catalog im
     extract_seedance_query_state,
     extract_seedance_task_id,
     invoke_tool_description,
+    is_prod_plugin_runtime,
     normalize_plugin_skill_args,
+    plugin_skill_bundle,
+    seedream_lite_function_name,
+    seedream_pro_function_name,
     validate_plugin_skill_args,
     want_seedance_wait,
 )
@@ -93,6 +98,68 @@ def test_normalize_seedream_lite_keeps_max_images():
     assert err is None
     assert out["size"] == "2K"
     assert out["max_images"] == 3
+
+
+def test_normalize_seedream_pro_5_drops_max_images():
+    out, err = normalize_plugin_skill_args(
+        "SeedreamPro_5",
+        {"size": "1024x1024", "max_images": 4, "prompt": "logo"},
+    )
+    assert err is None
+    assert out["size"] == "1K"
+    assert "max_images" not in out
+
+
+def test_normalize_seedream_batch5_size_for_upstream_enum():
+    out, err = normalize_plugin_skill_args(
+        "seedreamBatch5",
+        {"size": "2K", "prompt": "cats"},
+    )
+    assert err is None
+    assert out["size"] == "2k"
+
+    out, err = normalize_plugin_skill_args(
+        "seedreamBatch5",
+        {"size": "1K", "prompt": "logo"},
+    )
+    assert err is None
+    assert out["size"] == "1024x1024"
+
+    out, err = normalize_plugin_skill_args(
+        "seedreamBatch5",
+        {"size": "4K", "prompt": "poster"},
+    )
+    assert err is None
+    assert out["size"] == "4k"
+
+    out, err = normalize_plugin_skill_args(
+        "seedreamBatch5",
+        {"size": "1920x1080", "prompt": "wide"},
+    )
+    assert err is None
+    assert out["size"] == "1920x1080"
+
+
+def test_normalize_seedream_batch5_rejects_invalid_size():
+    _out, err = normalize_plugin_skill_args(
+        "seedreamBatch5",
+        {"size": "8K", "prompt": "huge"},
+    )
+    assert err is not None
+    assert "2k" in err
+    assert "WIDTHxHEIGHT" in err
+
+
+def test_is_prod_plugin_runtime_hosts():
+    assert is_prod_plugin_runtime(
+        "wss://hag-drcn.op.dbankcloud.com/agent-runtime-service-ws/v1/mcp/run"
+    )
+    assert not is_prod_plugin_runtime(
+        "wss://lfhagmirror.hwcloudtest.cn:18449/agent-runtime-service-ws/v1/mcp/run"
+    )
+    assert not is_prod_plugin_runtime("ws://10.33.87.20:18449/agent-runtime-service-ws/v1/mcp/run")
+    assert not is_prod_plugin_runtime("wss://example.test/v1/mcp/run")
+    assert not is_prod_plugin_runtime("")
 
 
 @pytest.mark.asyncio
@@ -562,14 +629,14 @@ async def test_invoke_requires_business_credential_ignores_oa_key(monkeypatch):
         }
     )
     assert result.get("success") is False
-    assert "CLAW_BUSINESS_CREDENTIAL" in str(result.get("error") or "")
+    assert "密钥包缺少 businessCredential" in str(result.get("error") or "")
     from jiuwenswarm.agents.harness.common.tools.invoke_meta.useraccess_runtime import (
         build_runtime_headers,
     )
 
     headers = build_runtime_headers(extra={"x-plugin-session-id": "pluginabc"})
     assert "x-api-key" not in headers
-    assert "x-request-from" not in headers
+    assert headers["x-request-from"] == "openclaw"
     assert "x-sandbox-id" not in headers
     assert headers["x-plugin-session-id"] == "pluginabc"
 
@@ -604,7 +671,7 @@ def test_mcp_run_product_headers_prefer_business_credential(monkeypatch):
     assert headers["x-plugin-session-id"] == "pluginabc"
     assert "x-hag-trace-id" in headers
     assert "x-api-key" not in headers
-    assert "x-request-from" not in headers
+    assert headers["x-request-from"] == "openclaw"
     assert "x-sandbox-id" not in headers
     assert "x-relay-role" not in headers
 
@@ -1239,4 +1306,129 @@ def test_design_system_prompt_includes_video_workflow():
     assert "seedreamLite4Skill" in prompt
     assert "SeedreamPro4Skill" in prompt
     assert "# Doing tasks" not in prompt
+    assert "com.atomicservice.5765880207845681341" in prompt
+
+
+_PROD_MCP = "wss://hag-drcn.op.dbankcloud.com/agent-runtime-service-ws/v1/mcp/run"
+_PLUGIN_PLATFORM = "com.huawei.pluginPlatform"
+_LITE_BUNDLE = "com.example.aikitdemo"
+
+
+@pytest.mark.asyncio
+async def test_invoke_prod_seedream_batch5_reaches_plugin(monkeypatch):
+    monkeypatch.setenv("AGENT_RUNTIME_MCP_RUN", _PROD_MCP)
+    captured: dict[str, Any] = {}
+
+    class _FakeCloudClient:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            pass
+
+        async def invoke(self, spec: ExternalToolSpec, arguments: dict, **kwargs: Any):
+            captured["spec"] = spec
+            captured["arguments"] = arguments
+            return {"success": True, "content": '{"items":["https://x"]}'}
+
+    with patch(
+        "jiuwenswarm.agents.harness.common.tools.invoke_meta.cloud_plugin_client.CloudPluginClient",
+        _FakeCloudClient,
+    ):
+        tool = InvokeTool()
+        result = await tool.invoke(
+            {
+                "functionName": "PluginSkillExecTool",
+                "arguments": {
+                    "functionName": "seedreamBatch5",
+                    "bundleName": _LITE_BUNDLE,
+                    "prompt": "一只柯基",
+                    "size": "2K",
+                },
+            }
+        )
+
+    assert result.get("success") is True
+    spec = captured["spec"]
+    assert spec.plugin_id == _LITE_BUNDLE
+    assert spec.tool_name == "seedreamBatch5"
+    assert captured["arguments"]["size"] == "2k"
+
+
+@pytest.mark.asyncio
+async def test_invoke_prod_rejects_atomic_seedream(monkeypatch):
+    monkeypatch.setenv("AGENT_RUNTIME_MCP_RUN", _PROD_MCP)
+    tool = InvokeTool()
+    result = await tool.invoke(
+        {
+            "functionName": "PluginSkillExecTool",
+            "arguments": {
+                "functionName": "seedreamLite4Skill",
+                "bundleName": "com.atomicservice.5765880207845681341",
+                "prompt": "一只柯基",
+            },
+        }
+    )
+    assert result.get("success") is False
+    err = result.get("error", "")
+    assert "不支持" in err
+    assert "seedreamBatch5" in err
+
+
+@pytest.mark.asyncio
+async def test_invoke_test_zone_rejects_prod_seedream(monkeypatch):
+    monkeypatch.setenv(
+        "AGENT_RUNTIME_MCP_RUN",
+        "wss://lfhagmirror.hwcloudtest.cn:18449/agent-runtime-service-ws/v1/mcp/run",
+    )
+    tool = InvokeTool()
+    result = await tool.invoke(
+        {
+            "functionName": "PluginSkillExecTool",
+            "arguments": {
+                "functionName": "SeedreamPro_5",
+                "bundleName": _PLUGIN_PLATFORM,
+                "prompt": "一只柯基",
+            },
+        }
+    )
+    assert result.get("success") is False
+    err = result.get("error", "")
+    assert "不支持" in err
+    assert "SeedreamPro4Skill" in err
+
+
+def test_invoke_tool_description_prod_uses_new_names(monkeypatch):
+    monkeypatch.setenv("AGENT_RUNTIME_MCP_RUN", _PROD_MCP)
+    text = invoke_tool_description()
+    assert "seedreamBatch5" in text
+    assert "SeedreamPro_5" in text
+    assert _LITE_BUNDLE in text
+    assert _PLUGIN_PLATFORM in text
+    assert "seedreamLite4Skill" not in text
+    assert "com.atomicservice.5765880207845681341" not in text
+    assert "WIDTHxHEIGHT" in text
+    assert "2k|3k|4k" in text
+
+
+def test_active_catalog_helpers_follow_zone(monkeypatch):
+    monkeypatch.delenv("AGENT_RUNTIME_MCP_RUN", raising=False)
+    assert seedream_lite_function_name() == "seedreamLite4Skill"
+    assert seedream_pro_function_name() == "SeedreamPro4Skill"
+    assert plugin_skill_bundle("seedanceMiniTask") == "com.atomicservice.5765880207845681341"
+    monkeypatch.setenv("AGENT_RUNTIME_MCP_RUN", _PROD_MCP)
+    assert seedream_lite_function_name() == "seedreamBatch5"
+    assert seedream_pro_function_name() == "SeedreamPro_5"
+    assert plugin_skill_bundle("seedanceMiniTask") == _PLUGIN_PLATFORM
+    assert plugin_skill_bundle("seedreamBatch5") == _LITE_BUNDLE
+
+
+def test_design_system_prompt_prod_uses_plugin_platform(monkeypatch):
+    monkeypatch.setenv("AGENT_RUNTIME_MCP_RUN", _PROD_MCP)
+    from jiuwenswarm.agents.harness.design.prompt.design_prompt_builder import (
+        build_design_system_prompt,
+    )
+
+    prompt = build_design_system_prompt()
+    assert _PLUGIN_PLATFORM in prompt
+    assert "seedreamBatch5" in prompt
+    assert "com.atomicservice.5765880207845681341" not in prompt
+    assert "seedreamLite4Skill" not in prompt
 
