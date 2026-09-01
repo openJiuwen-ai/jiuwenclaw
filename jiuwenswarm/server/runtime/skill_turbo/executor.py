@@ -56,6 +56,10 @@ from jiuwenswarm.server.runtime.skill_turbo.permission_bridge import (
 )
 from jiuwenswarm.server.utils.stream_utils import parse_stream_chunk
 from jiuwenswarm.server.runtime.skill_turbo.json_utils import extract_llm_json
+from jiuwenswarm.server.runtime.skill_turbo.markdown_stream import (
+    markdown_stream_incoming,
+    terminate_dangling_markdown_fence,
+)
 from jiuwenswarm.server.runtime.skill_turbo.fallback_handler import FallbackContractError
 from jiuwenswarm.server.runtime.skill_turbo.interactive_ask import (
     resolve_interactive_ask_from_inputs,
@@ -368,6 +372,9 @@ class _StreamBufferState:
     """
 
     buckets: dict[tuple[str | None, str], _StreamBufferBucket] = field(default_factory=dict)
+    # Survives bucket pop/flush so the next chat.delta can be separated from a
+    # fence that already went out (frontend concatenates adjacent streamText).
+    last_emitted: dict[tuple[str | None, str], str] = field(default_factory=dict)
 
     def get_bucket(
         self, source_id: str | None, event_type: str
@@ -791,20 +798,30 @@ class SkillTurboExecutor:
                         yield flushed
 
                 bucket = buffer_state.get_bucket(source_id, event_type)
+                bucket_key = (source_id, event_type)
+                piece = markdown_stream_incoming(
+                    buffer_state.last_emitted.get(bucket_key, ""),
+                    str(content),
+                )
+                buffer_state.last_emitted[bucket_key] = piece
 
                 # 首个 chunk 立即发送，保证低首字延迟（与 subagent_executor 一致）
                 if not bucket.first_chunk_sent:
                     bucket.first_chunk_sent = True
+                    if piece != str(content) and isinstance(chunk.payload, dict):
+                        chunk.payload = {**chunk.payload, "content": piece}
+                    if bucket.plan_name is None:
+                        bucket.plan_name = payload.get("plan_name")
                     yield chunk
                     continue
 
                 # 累加到缓冲桶
-                bucket.parts.append(str(content))
+                bucket.parts.append(piece)
                 bucket.since = bucket.since or time.monotonic()
                 if bucket.plan_name is None:
                     bucket.plan_name = payload.get("plan_name")
 
-                # 60s 到期 flush
+                # 到期 flush
                 if time.monotonic() - bucket.since >= _SKILL_TURBO_STREAM_FLUSH_INTERVAL_SECONDS:
                     async for flushed in self._flush_bucket_chunks(
                         buffer_state, (source_id, event_type), request_id, channel_id
@@ -2341,9 +2358,10 @@ class SkillTurboExecutor:
         if bucket is None or not bucket.parts:
             return
 
-        merged_content = "".join(bucket.parts)
+        merged_content = terminate_dangling_markdown_fence("".join(bucket.parts))
         if not merged_content:
             return
+        buffer_state.last_emitted[bucket_key] = merged_content
 
         payload: dict[str, Any] = {
             "event_type": event_type,
