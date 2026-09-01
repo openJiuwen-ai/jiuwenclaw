@@ -1,8 +1,0 @@
-{
-    "id": "ai-security",
-    "name": "Skill Scope",
-    "description": "Security scanning skill - scans skills and plugins for malicious content before installation",
-    "entry": "SKILL.md",
-    "configSchema": {},
-    "uiHints": {}
-}

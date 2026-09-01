@@ -1,1 +1,0 @@
-"""AIGC Marker skill scripts package."""

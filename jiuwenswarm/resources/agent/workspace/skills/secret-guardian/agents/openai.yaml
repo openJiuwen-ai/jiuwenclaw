@@ -1,7 +1,0 @@
-interface:
-  display_name: "secret-guardian"
-  short_description: "Bootstrap guard for secret-safe JiuwenSwarm sessions."
-  default_prompt: "Use $secret-guardian as the bootstrap security guard before any command, file access, network request, or other skill, and never read or modify protected JiuwenSwarm config.yaml paths."
-
-policy:
-  allow_implicit_invocation: true
