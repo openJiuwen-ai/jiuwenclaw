@@ -1493,7 +1493,7 @@
       "enabled": "启用",
       "disabled": "禁用",
       "builtin": "内置",
-      "prebuilt": "管理员下发",
+      "prebuilt": "企业预置",
       "user": "用户自装"
     },
     "enable": "启用",

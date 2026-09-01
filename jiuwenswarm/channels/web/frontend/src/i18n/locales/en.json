@@ -1492,7 +1492,7 @@
       "enabled": "Enabled",
       "disabled": "Disabled",
       "builtin": "Built-in",
-      "prebuilt": "Admin-distributed",
+      "prebuilt": "Enterprise prebuilt",
       "user": "User-installed"
     },
     "enable": "Enable",
