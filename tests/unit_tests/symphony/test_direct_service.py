@@ -423,6 +423,79 @@ async def test_service_graph_adapts_public_artifact_for_skill_graph_panel(
 
 
 @pytest.mark.asyncio
+async def test_service_graph_disabled_skill_keeps_distinct_unicode_name(
+    monkeypatch,
+    tmp_path,
+):
+    config = _config(tmp_path)
+    artifact = {
+        "capabilities": [
+            {"capability_id": "ppt", "capability_type": "skill", "name": "ppt"},
+            {
+                "capability_id": "ppt-master",
+                "capability_type": "skill",
+                "name": "ppt大师",
+            },
+            {
+                "capability_id": "reviewer",
+                "capability_type": "skill",
+                "name": "Reviewer",
+            },
+        ],
+        "nodes": [
+            {"id": "capability:ppt", "type": "capability", "label": "ppt"},
+            {
+                "id": "capability:ppt-master",
+                "type": "capability",
+                "label": "ppt大师",
+            },
+            {
+                "id": "capability:reviewer",
+                "type": "capability",
+                "label": "Reviewer",
+            },
+        ],
+        "edges": [
+            {
+                "source": "capability:ppt",
+                "target": "capability:ppt-master",
+                "type": "can_feed",
+            },
+            {
+                "source": "capability:ppt-master",
+                "target": "capability:reviewer",
+                "type": "can_feed",
+            },
+        ],
+    }
+    service = SwarmSymphonyService()
+    monkeypatch.setattr(
+        "jiuwenswarm.symphony.service.load_symphony_config",
+        lambda: config,
+    )
+    monkeypatch.setattr(service, "_read_graph_artifact", lambda _graph_dir: artifact)
+    monkeypatch.setattr(
+        "jiuwenswarm.symphony.service.load_execution_disabled_skills",
+        lambda: {"ppt"},
+    )
+
+    result = await service.graph()
+
+    assert [item["id"] for item in result["skills"]] == ["ppt-master", "reviewer"]
+    assert [item["id"] for item in result["graph"]["nodes"]] == [
+        "skill:ppt-master",
+        "skill:reviewer",
+    ]
+    assert result["graph"]["edges"] == [
+        {
+            "source": "skill:ppt-master",
+            "target": "skill:reviewer",
+            "type": "can_feed",
+        }
+    ]
+
+
+@pytest.mark.asyncio
 async def test_service_plans_through_public_runtime_with_minimal_jgf(
     monkeypatch,
     tmp_path,
@@ -1413,6 +1486,7 @@ def test_production_uses_only_stable_openjiuwen_symphony_imports():
         "SkillFolderScanner",
         "SourceSnapshot",
         "SymphonyRuntime",
+        "normalize_name_key",
     }
     allowed_modules = {
         "openjiuwen.symphony.agent",
