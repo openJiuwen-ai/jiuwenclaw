@@ -776,10 +776,16 @@ export function ConversationSidebar({
 
   const switchWorkMode = async (nextMode: 'work' | 'code') => {
     setWorkModeMenuOpen(false);
+    if (enterpriseMode && nextMode !== 'work') return;
     if (nextMode === workMode) return;
     await setWorkMode(nextMode);
     onNew();
   };
+
+  useEffect(() => {
+    if (!enterpriseMode || workMode === 'work') return;
+    void setWorkMode('work');
+  }, [enterpriseMode, workMode, setWorkMode]);
 
   const cronJobs = useCronStore((s) => s.jobs);
   const loadCronJobs = useCronStore((s) => s.loadJobs);
@@ -1203,14 +1209,20 @@ export function ConversationSidebar({
         <button
           type="button"
           className="conversation-sidebar__mode-trigger"
-          onClick={() => setWorkModeMenuOpen((open) => !open)}
-          aria-haspopup="menu"
-          aria-expanded={workModeMenuOpen}
+          onClick={() => {
+            if (enterpriseMode) return;
+            setWorkModeMenuOpen((open) => !open);
+          }}
+          aria-haspopup={enterpriseMode ? undefined : 'menu'}
+          aria-expanded={enterpriseMode ? undefined : workModeMenuOpen}
+          style={enterpriseMode ? { cursor: 'default' } : undefined}
         >
-          <span>{workMode === 'code' ? t('codeMode.code') : t('codeMode.work')}</span>
-          <ChevronDown size={15} className={workModeMenuOpen ? 'is-open' : ''} />
+          <span>{workMode === 'code' && !enterpriseMode ? t('codeMode.code') : t('codeMode.work')}</span>
+          {!enterpriseMode && (
+            <ChevronDown size={15} className={workModeMenuOpen ? 'is-open' : ''} />
+          )}
         </button>
-        {workModeMenuOpen ? (
+        {!enterpriseMode && workModeMenuOpen ? (
           <div className="conversation-sidebar__mode-menu" role="menu">
             <button
               type="button"
