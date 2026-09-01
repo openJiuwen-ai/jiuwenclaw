@@ -10160,6 +10160,117 @@ class JiuWenSwarmDeepAdapter:
 
         return restore
 
+    async def prepare_interrupt_artifacts_for_request(
+        self, request: AgentRequest
+    ) -> None:
+        """兜底：中断后下一轮请求注入 SkillTurbo 节点产物摘要到 supplementary_info。
+
+        dev-stable 没有 enterprise_dev 的 plan_pause / interrupt_resume prepare hook 链
+        （依赖 openjiuwen.harness.tools.todo_resume，dev-stable 分支无此模块），
+        所以这里只做最小子集：读取上一轮 SkillTurbo 中断时保存的节点产物，
+        格式化成摘要，注入 request.params['supplementary_info']，让 LLM 知道
+        「已完成的工作」而非盲目从头重跑。
+
+        无 plan_pause / interrupt_resume 哨兵机制：dev-stable 不存在那两条路径，
+        不会并发注入，故无需去重哨兵。若后续补齐 enterprise_dev 的完整 prepare
+        hook 链，应在此处开头加 is_interrupt_recovery_injected(session) 早返回，
+        避免重复注入。
+        """
+        if self._instance is None:
+            return
+
+        session_id = str(request.session_id or "").strip()
+        if not session_id:
+            return
+
+        params = (
+            request.params
+            if isinstance(getattr(request, "params", None), dict)
+            else None
+        )
+        if params is None:
+            return
+
+        from openjiuwen.core.session.agent import create_agent_session
+
+        # SkillTurbo 节点产物存在独立 __skill_turbo checkpointer key 下，
+        # 需用单独的 session 读写（与 _try_skill_turbo_resume 同一套 id 机制）。
+        skill_turbo_session = create_agent_session(
+            session_id=session_id, card=self._instance.card,
+        )
+        _skill_turbo_set_agent_id(skill_turbo_session, self._instance.card)
+        # pre_run 在 try 内部：失败时直接 return，但仍走 finally 的 post_run，
+        # 避免 checkpointer 状态泄漏（与 load_resume_ctx 的 pre_run 包裹策略一致）。
+        try:
+            await skill_turbo_session.pre_run(inputs=None)
+            summary = await self._read_skill_turbo_node_artifacts_summary(skill_turbo_session)
+            if not summary:
+                return
+
+            # 构建中断恢复提示词（内联，避免依赖 plan_pause_helpers）。
+            language = self._resolve_runtime_language()
+            template = (
+                "[Interrupt recovery hint]\n"
+                "The previous task was interrupted and cancelled. "
+                "Here is a summary of completed work artifacts before the interruption:\n\n"
+                "{summary}\n\n"
+                "Based on this, judge the current task state:\n"
+                "- If artifacts show the target file already exists with substantial content, "
+                "read_file first before deciding to supplement or rebuild from scratch\n"
+                "- If artifacts show the target file was not created or has minimal content, "
+                "you may create it anew\n"
+                "- Do not blindly write_file to rebuild a file that already exists and is complete"
+            ) if language in ("en", "english") else (
+                "【中断恢复提示】之前的任务被中断取消。"
+                "以下是中断前已完成的工作产物摘要：\n\n"
+                "{summary}\n\n"
+                "请据此判断当前任务状态：\n"
+                "- 如果产物显示目标文件已存在且内容较完整，请先 read_file 查看当前状态，"
+                "再决定是补充完善还是从头重建\n"
+                "- 如果产物显示目标文件尚未创建或内容很少，可以重新创建\n"
+                "- 不要盲目从头 write_file 重建一个已存在的完整文件"
+            )
+            prompt = template.format(summary=summary.strip() or "(empty)")
+
+            # 注入到 supplementary_info（与 enterprise_dev merge_supplementary_into_request_params
+            # 行为一致：已存在则追加，不存在则设置）。
+            supplementary = prompt.strip()
+            if not supplementary:
+                return
+            existing = params.get("supplementary_info")
+            if isinstance(existing, str) and existing.strip():
+                params["supplementary_info"] = f"{existing.strip()}\n\n{supplementary}"
+            else:
+                params["supplementary_info"] = supplementary
+
+            # 一次性使用：注入后清除 SkillTurbo 节点产物记录，避免下一轮再次注入。
+            from jiuwenswarm.server.runtime.skill_turbo.node_artifact_store import (
+                clear_node_artifacts,
+            )
+            await clear_node_artifacts(skill_turbo_session)
+
+            logger.info(
+                "[JiuWenSwarmDeepAdapter] SkillTurbo interrupt artifacts summary "
+                "injected session=%s",
+                session_id,
+            )
+        except Exception as exc:
+            logger.warning(
+                "[JiuWenSwarmDeepAdapter] prepare_interrupt_artifacts_for_request failed "
+                "session_id=%s: %s",
+                session_id,
+                exc,
+                exc_info=True,
+            )
+        finally:
+            try:
+                await skill_turbo_session.post_run()
+            except Exception:
+                logger.debug(
+                    "[JiuWenSwarmDeepAdapter] prepare_interrupt_artifacts post_run failed",
+                    exc_info=True,
+                )
+
     @staticmethod
     async def _read_skill_turbo_node_artifacts_summary(session: Any) -> str | None:
         """读取 SkillTurbo 节点产物记录，格式化为可读摘要文本。"""
@@ -10642,36 +10753,8 @@ class JiuWenSwarmDeepAdapter:
                             yield summary_chunk
                         continue
                     yield chunk
-                # resume 成功跑完：把 harness 侧残留的 HITL 中断态（TIE）
-                # 落盘覆盖掉，避免 checkpoint 仍停在中断点、下一轮
-                # query 把 skill_acceleration_exec 当未完成重新发起。
-                await self._finalize_skill_turbo_resume_completion(
-                    request=request,
-                    resume_ctx=resume_ctx,
-                )
                 await _clear_resume_ctx()
                 finish_text = _finish_text(True)
-            except asyncio.CancelledError:
-                # 用户手动终止 resume：必须落盘覆盖 TIE，否则下一轮 query
-                # restore 出来仍是中断态，会把 skill_acceleration_exec 当未
-                # 完成重新发起（见 officeclaw_c663d992 手动终止+"你好"复发案例）。
-                # 不发 chat.final：cancel 常意味着消费端已在拆除，帧可能到不
-                # 了前端；用户 Stop 已通过 interrupt_result 关闭 UI。
-                try:
-                    await self._finalize_skill_turbo_resume_completion(
-                        request=request,
-                        resume_ctx=resume_ctx,
-                        result_content="任务已取消",
-                    )
-                except Exception:  # noqa: BLE001
-                    logger.warning(
-                        "[JiuWenSwarmDeepAdapter] skill_turbo resume finalize "
-                        "on cancel failed session=%s request_id=%s",
-                        request.session_id,
-                        request.request_id,
-                        exc_info=True,
-                    )
-                raise
             except _SkillTurboAbortError as e:
                 async for summary_chunk in _emit_usage_summary():
                     yield summary_chunk
@@ -10710,113 +10793,6 @@ class JiuWenSwarmDeepAdapter:
             )
 
         return _resume_impl()
-
-    async def _finalize_skill_turbo_resume_completion(
-        self,
-        *,
-        request: AgentRequest,
-        resume_ctx: dict[str, Any],
-        result_content: str = "任务已完成",
-    ) -> None:
-        """resume 跑完后的收尾：覆盖 harness 侧 HITL 中断态并补 commit。
-
-        SkillTurbo resume 路径在 ``process_message_stream_impl`` 入口直接 return，
-        绕过了主路径 ``finally`` 里的 ``_persist_session_checkpoint``；而中断时
-        的 TIE（Tool Interrupt Event）已经落盘到 checkpoint。若不在此处补
-        commit，下一轮 query restore 出来的仍是中断态，main agent 会把
-        skill_acceleration_exec 当未完成重新发起 → 所有后续 query 都重跑
-        第一个任务。
-
-        处理：清掉 ``_loop_session`` 的 ``INTERRUPTION_KEY``、把 context 里
-        TIE 工具结果换成 ``result_content``、再走一次 ``_persist_session_checkpoint``。
-        ``result_content`` 区分正常完成（"任务已完成"）与用户取消（"任务已取消"），
-        前者走正常收尾、后者走 cancel 收尾，但两者都要落盘覆盖 TIE，否则下一轮
-        query 会因 checkpoint 仍是中断态而重跑首个任务（见 bug1999 同类复发）。
-        """
-        try:
-            instance = getattr(self, "_instance", None)
-            if instance is None:
-                return
-            session_id = request.session_id or "default"
-            # 任一前置清理失败即跳过 checkpoint commit：避免把仍带中断态 /
-            # TIE 的状态落盘覆盖，反而固化本 PR 要修的 bug。
-            state_cleared = True
-            # 1) 清中断态：resume 跑通即视为工具成功，不再需要 HITL 续跑。
-            loop_session = getattr(instance, "_loop_session", None)
-            if loop_session is not None:
-                try:
-                    loop_session.update_state({INTERRUPTION_KEY: None})
-                except Exception:  # noqa: BLE001
-                    state_cleared = False
-                    logger.warning(
-                        "[JiuWenSwarmDeepAdapter] skill_turbo resume finalize: "
-                        "clear INTERRUPTION_KEY failed session=%s; "
-                        "skip checkpoint commit to avoid persisting interrupt state",
-                        session_id,
-                        exc_info=True,
-                    )
-            # 2) 把 context 里残留的 TIE 工具结果替换成成功结果，避免下一轮
-            # LLM 看到"工具被中断未完成"而重新发起同一调用。
-            react_agent = getattr(instance, "react_agent", None)
-            context_engine = getattr(react_agent, "context_engine", None)
-            if context_engine is not None and loop_session is not None:
-                target_sid = self._resolve_interrupt_session_id(session_id)
-                try:
-                    context = context_engine.get_context(session_id=target_sid)
-                    pending_tcid = resume_ctx.get("pending_tool_call_id")
-                    messages = list(context.get_messages() or []) if context is not None else []
-                    if context is not None and messages:
-                        from openjiuwen.core.foundation.llm.schema.message import (
-                            ToolMessage,
-                        )
-
-                        replaced = False
-                        for idx in range(len(messages) - 1, -1, -1):
-                            msg = messages[idx]
-                            if (
-                                getattr(msg, "tool_call_id", None) == pending_tcid
-                                and isinstance(msg, ToolMessage)
-                            ):
-                                messages[idx] = ToolMessage(
-                                    tool_call_id=pending_tcid or "",
-                                    content=result_content,
-                                )
-                                replaced = True
-                                break
-                        if replaced:
-                            context.set_messages(messages, with_history=True)
-                            await context_engine.save_contexts(loop_session)
-                except Exception:  # noqa: BLE001
-                    state_cleared = False
-                    logger.warning(
-                        "[JiuWenSwarmDeepAdapter] skill_turbo resume finalize: "
-                        "replace TIE tool_result failed session=%s; "
-                        "skip checkpoint commit to avoid persisting TIE state",
-                        session_id,
-                        exc_info=True,
-                    )
-            # 3) 补一次 checkpoint commit，把清理后的状态落盘，覆盖中断时的 TIE。
-            # 前置清理失败时跳过：落盘反而固化中断态 / TIE，正是本 PR 要修的 bug。
-            if not state_cleared:
-                return
-            try:
-                await self._persist_session_checkpoint(session_id, request.request_id or "")
-            except Exception:  # noqa: BLE001
-                logger.warning(
-                    "[JiuWenSwarmDeepAdapter] skill_turbo resume finalize: "
-                    "checkpoint commit failed session=%s request_id=%s",
-                    session_id,
-                    request.request_id,
-                    exc_info=True,
-                )
-        except Exception:  # noqa: BLE001
-            logger.warning(
-                "[JiuWenSwarmDeepAdapter] skill_turbo resume finalize failed "
-                "session=%s request_id=%s",
-                request.session_id,
-                request.request_id,
-                exc_info=True,
-            )
 
     @staticmethod
     def _skill_turbo_answers_to_confirm_payload(
