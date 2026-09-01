@@ -3814,9 +3814,9 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                         min={1}
                         value={inputValue}
                         placeholder={isUnlimited ? '' : t('swarmflow.budgetPlaceholder')}
-                        readOnly={swarmflowToggleDisabled || isUnlimited}
+                        readOnly={swarmflowToggleDisabled}
                         onChange={(v) => {
-                          if (swarmflowToggleDisabled || isUnlimited) return;
+                          if (swarmflowToggleDisabled) return;
                           const unit = inputUnit;
                           const actual = computeBudget(v, unit);
                           // 输入有效数字→设置上限（自动取消"无限制"）；
@@ -3828,14 +3828,14 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                       />
                       <Select
                         value={inputUnit}
-                        disabled={swarmflowToggleDisabled || isUnlimited}
+                        disabled={swarmflowToggleDisabled}
                         options={[
                           { value: 'token', label: 'token' },
                           { value: 'K', label: 'K (×1,000)' },
                           { value: 'M', label: 'M (×1,000,000)' },
                         ]}
                         onChange={(val) => {
-                          if (swarmflowToggleDisabled || isUnlimited) return;
+                          if (swarmflowToggleDisabled) return;
                           const unit = val as 'token' | 'K' | 'M';
                           const actual = computeBudget(inputValue || '500', unit);
                           useSessionStore.getState().setSwarmflowActive(

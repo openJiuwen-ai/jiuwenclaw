@@ -3072,15 +3072,13 @@ overflow: hidden;
   box-sizing: border-box;
 }
 
-.chat-swarmflow-config-panel__budget-row .ui-input {
-  flex: 1 1 0;
+.chat-swarmflow-config-panel__budget-row .ui-input-wrap {
+  flex: 1 1 auto;
   min-width: 0;
-  width: 0;
 }
 
 .chat-swarmflow-config-panel__budget-row .ui-select {
   flex: 0 0 auto;
-  width: auto;
   min-width: 0;
 }
 
