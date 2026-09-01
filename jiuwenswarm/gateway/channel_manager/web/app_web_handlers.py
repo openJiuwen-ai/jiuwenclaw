@@ -17,6 +17,7 @@ import base64
 import threading
 import uuid
 from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import Any
 
 try:
@@ -62,6 +63,11 @@ from jiuwenswarm.common.config import (
     update_updater_in_config,
     update_proactive_recommendation_in_config,
 )
+from jiuwenswarm.common.local_env_config import is_enterprise
+from jiuwenswarm.common.request_identity import (
+    apply_routing_metadata,
+    normalize_routing_identity,
+)
 from jiuwenswarm.gateway.config.a2ui.access import update_a2ui_in_config
 from jiuwenswarm.gateway.config.browser.access import (
     get_browser_body_in_config,
@@ -99,6 +105,10 @@ from jiuwenswarm.server.runtime.a2ui.integration import (
     get_default_a2ui_config_payload,
     validate_a2ui_config_update,
 )
+from jiuwenswarm.server.runtime.enterprise_config.loader import (
+    load_effective_enterprise_config,
+)
+from jiuwenswarm.server.runtime.enterprise_config.schemas import TemplateRefSlot
 from jiuwenswarm.common.reasoning_injector import build_reasoning_model_request_kwargs
 from jiuwenswarm.common.updater import DEFAULT_SOURCE_CONFIG, UpdaterService
 from jiuwenswarm.common.utils import (
@@ -1412,6 +1422,67 @@ def _normalize_single_xiaoyi_to_app(raw: dict) -> dict:
     }
 
 
+async def _enterprise_models_list_payload(
+    params: dict[str, Any],
+) -> dict[str, Any]:
+    """Resolve the enterprise chat model list without exposing credentials."""
+    identity = normalize_routing_identity(params)
+    request = SimpleNamespace(
+        metadata=apply_routing_metadata({}, identity),
+    )
+    enterprise = await load_effective_enterprise_config(
+        request,
+        {TemplateRefSlot.DEFAULT_MODEL},
+    )
+    entities = (
+        enterprise.models.get(TemplateRefSlot.DEFAULT_MODEL.value, [])
+        if enterprise is not None
+        else []
+    )
+    result: list[dict[str, Any]] = []
+    for idx, entity in enumerate(entities):
+        if not isinstance(entity, dict):
+            continue
+        model_name = str(entity.get("model_id") or "").strip()
+        if not model_name:
+            continue
+        parameters = entity.get("parameters")
+        if not isinstance(parameters, dict):
+            parameters = {}
+        context_window_tokens = 0
+        try:
+            from openjiuwen.core.context_engine.context.context_utils import ContextUtils
+
+            context_window_tokens = ContextUtils.resolve_context_max(
+                model_name=model_name,
+            )
+        except Exception:
+            logger.debug(
+                "Failed to resolve context_window_tokens for model %s",
+                model_name,
+                exc_info=True,
+            )
+        reasoning_level = parameters.get("reasoning_level", "")
+        result.append({
+            "model_name": model_name,
+            "api_base": str(entity.get("api_base") or "").strip(),
+            # Enterprise credentials remain server-side and must never reach browsers.
+            "api_key": "",
+            "model_provider": str(entity.get("model_provider") or "").strip(),
+            "timeout": entity.get("timeout", 60),
+            "temperature": parameters.get("temperature", 0.95),
+            "reasoning_level": "off" if reasoning_level is False else reasoning_level,
+            "is_default": idx == 0,
+            "alias": "",
+            "context_window_tokens": context_window_tokens,
+        })
+    return {
+        "models": result,
+        "active_model": result[0]["model_name"] if result else "",
+        "model_source": "enterprise",
+    }
+
+
 @dataclass
 class WebHandlersBindParams:
     """Named bundle for :func:`_register_web_handlers` (avoids long positional / keyword lists)."""
@@ -2516,12 +2587,22 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
     # ── models.* handlers ────────────────────────────────────────
 
     async def _models_list(ws, req_id, params, session_id):
-        """返回已配置的所有默认模型列表（与 config.get 一致，返回解密后的完整值）。
+        """返回当前上下文可用的默认模型列表。
 
-        每条带 ``origin_index`` 指向 ``models.defaults`` 中的位置，配合 replace_all
-        在保存时识别"未编辑字段"并保留原 YAML 占位符（如 ``${API_KEY}``）。
+        企业版按请求 ``bot_id`` 从 Gateway 企业配置库解析模型，且不返回模型凭据；
+        个人版保持从 ``models.defaults`` 读取的原有行为。
         """
         try:
+            if is_enterprise():
+                payload = await _enterprise_models_list_payload(params)
+                await channel.send_response(
+                    ws,
+                    req_id,
+                    ok=True,
+                    payload=payload,
+                )
+                return
+
             config = get_config()
             models = get_default_models(config)
             result = []
