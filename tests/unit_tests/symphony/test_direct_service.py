@@ -1683,11 +1683,6 @@ async def test_start_refresh_graph_runs_in_background_and_reuses_active_task(
     assert service._active_build_task is None
 
 
-# The status snapshot races the background build task: graph_status reads the
-# build log from a worker thread while the event loop is free to run the build
-# task, which synchronously records the model probe stages. Under load the log
-# has already advanced past "update.start" when the snapshot is taken.
-@pytest.mark.skip(reason="flaky: status snapshot races the background build task")
 @pytest.mark.asyncio
 async def test_start_refresh_graph_status_is_running_before_background_task_enters(
     monkeypatch,
@@ -1699,8 +1694,14 @@ async def test_start_refresh_graph_status_is_running_before_background_task_ente
         success=True,
         version="old",
     )
+    probe_entered = asyncio.Event()
+    release_probe = asyncio.Event()
     build_entered = asyncio.Event()
     release_build = asyncio.Event()
+
+    async def blocking_probe(_config):
+        probe_entered.set()
+        await release_probe.wait()
 
     async def fake_build_graph(*args, **kwargs):
         del args, kwargs
@@ -1717,6 +1718,10 @@ async def test_start_refresh_graph_status_is_running_before_background_task_ente
         lambda: object(),
     )
     monkeypatch.setattr(
+        "jiuwenswarm.symphony.service.probe_model_connection",
+        blocking_probe,
+    )
+    monkeypatch.setattr(
         "jiuwenswarm.symphony.service.service_build_graph",
         fake_build_graph,
     )
@@ -1727,18 +1732,31 @@ async def test_start_refresh_graph_status_is_running_before_background_task_ente
     service = SwarmSymphonyService()
 
     started = await service.start_refresh_graph(force=True)
-    status = await service.graph_status()
+    build_task = service._active_build_task
 
-    assert started["build_progress"] == status["build_progress"]
-    assert status["build_progress"]["status"] == "running"
-    assert status["build_progress"]["stage"] == "update.start"
-    assert status["build_progress"]["percent"] == 3
-    assert [entry["stage"] for entry in status["build_log"]] == ["update.start"]
+    assert started["build_progress"]["status"] == "running"
+    assert started["build_progress"]["stage"] == "update.start"
+    assert build_task is not None
 
-    await build_entered.wait()
-    release_build.set()
-    result = await asyncio.wait_for(service._active_build_task, timeout=0.5)
+    await probe_entered.wait()
+    try:
+        status = await service.graph_status()
 
+        assert status["build_progress"]["status"] == "running"
+        assert status["build_progress"]["stage"] == "model.probe.start"
+        assert status["build_progress"]["percent"] == 5
+        assert [entry["stage"] for entry in status["build_log"]] == [
+            "update.start",
+            "model.probe.start",
+        ]
+        assert build_entered.is_set() is False
+    finally:
+        release_probe.set()
+        release_build.set()
+
+    result = await asyncio.wait_for(build_task, timeout=0.5)
+
+    assert build_entered.is_set()
     assert result["success"] is True
 
 
