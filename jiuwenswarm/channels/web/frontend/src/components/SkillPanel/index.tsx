@@ -153,6 +153,7 @@ interface SkillPanelProps {
 
 function getSourceLabel(source: string, t: (key: string) => string, isBuiltinSource?: boolean, sourceType?: string): string {
   if (sourceType === 'prebuilt') return t('skills.enterprisePrebuilt');
+  if (sourceType === 'builtin') return t('skills.source.builtin');
   if (isBuiltinSource) return t('skills.source.builtin');
   if (source === "local") return t('skills.source.local');
   if (source === "project") return t('skills.source.project');
@@ -164,7 +165,9 @@ function getSourceLabel(source: string, t: (key: string) => string, isBuiltinSou
 }
 
 function isAdministratorManagedSkill(skill: SkillItem): boolean {
-  return skill.source_type === 'prebuilt';
+  // 企业 DTO：removable 是后端给的权威字段（user=true 可卸载/启停，builtin/prebuilt=false）。
+  if (typeof skill.removable === 'boolean') return !skill.removable;
+  return skill.source_type === 'prebuilt' || skill.source_type === 'builtin';
 }
 
 /** 与后端一致：tags/allowed_tools 可能是逗号分隔字符串，统一为 string[] */
@@ -603,7 +606,7 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
   const { t, i18n } = useTranslation();
   const readOnly = isEnterprise();
   const [activeTab, setActiveTab] = useState<"my" | "marketplace" | "index" | "graph">("my");
-  const [mySkillsSubTab, setMySkillsSubTab] = useState<"all" | "enabled" | "disabled">("all");
+  const [mySkillsSubTab, setMySkillsSubTab] = useState<"all" | "enabled" | "disabled" | "builtin" | "prebuilt" | "user">(readOnly ? "builtin" : "all");
   const [mySkillsPage, setMySkillsPage] = useState(1);
   const [marketplaceSubTab, setMarketplaceSubTab] = useState<"builtin" | "swarmskills" | "online">("builtin");
   const [searchTrigger, setSearchTrigger] = useState(0);
@@ -1421,9 +1424,9 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
     if (installedSkillMap.has(skill.name)) return t('skills.status.installed');
     if (skill.source === "local") return t('skills.status.installed');
     if (skill.is_builtin) {
-      return t('skills.status.notInstalled');
+      return "";
     }
-    if (skill.source !== "project") return t('skills.status.notInstalled');
+    if (skill.source !== "project") return "";
     return t('skills.status.builtIn');
   };
 
@@ -1439,6 +1442,15 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
         break;
       case "disabled":
         filtered = visibleSkills.filter(s => s.enabled === false);
+        break;
+      case "builtin":
+        filtered = visibleSkills.filter(s => s.source_type === "builtin");
+        break;
+      case "prebuilt":
+        filtered = visibleSkills.filter(s => s.source_type === "prebuilt");
+        break;
+      case "user":
+        filtered = visibleSkills.filter(s => s.source_type === "user");
         break;
       default:
         break;
@@ -2271,6 +2283,7 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
                             checked={selectedSkill.enabled !== false}
                             onChange={() => toggleSkillDisabled(selectedSkill.name, selectedSkill.origin)}
                             disabled={
+                              readOnly ||
                               actionTarget === `toggle:${selectedSkill.origin || selectedSkill.name}` ||
                               isAdministratorManagedSkill(selectedSkill)
                             }
@@ -2316,36 +2329,73 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
               <div className="mt-4 flex flex-col flex-1 min-h-0">
                 <div className="flex items-center gap-3 flex-shrink-0">
                   <div className="flex items-center gap-2">
-                    <button
-                      onClick={() => setMySkillsSubTab("all")}
-                      className={`px-4 text-sm font-medium  ${
-                        mySkillsSubTab === "all"
-                          ? "rounded-[8px] bg-secondary h-8 text-text"
-                          : "text-text-muted hover:text-text"
-                      }`}
-                    >
-                      {t('skills.mySkillsTabs.all')}
-                    </button>
-                    <button
-                      onClick={() => setMySkillsSubTab("enabled")}
-                      className={`px-4 text-sm font-medium  ${
-                        mySkillsSubTab === "enabled"
-                          ? "rounded-[8px] bg-secondary h-8 text-text"
-                          : "text-text-muted hover:text-text"
-                      }`}
-                    >
-                      {t('skills.mySkillsTabs.enabled')}
-                    </button>
-                    <button
-                      onClick={() => setMySkillsSubTab("disabled")}
-                      className={`px-4 text-sm font-medium  ${
-                        mySkillsSubTab === "disabled"
-                          ? "rounded-[8px] bg-secondary h-8 text-text"
-                          : "text-text-muted hover:text-text"
-                      }`}
-                    >
-                      {t('skills.mySkillsTabs.disabled')}
-                    </button>
+                    {readOnly ? (
+                      <>
+                        <button
+                          onClick={() => setMySkillsSubTab("builtin")}
+                          className={`px-4 text-sm font-medium  ${
+                            mySkillsSubTab === "builtin"
+                              ? "rounded-[8px] bg-secondary h-8 text-text"
+                              : "text-text-muted hover:text-text"
+                          }`}
+                        >
+                          {t('skills.mySkillsTabs.builtin')}
+                        </button>
+                        <button
+                          onClick={() => setMySkillsSubTab("prebuilt")}
+                          className={`px-4 text-sm font-medium  ${
+                            mySkillsSubTab === "prebuilt"
+                              ? "rounded-[8px] bg-secondary h-8 text-text"
+                              : "text-text-muted hover:text-text"
+                          }`}
+                        >
+                          {t('skills.mySkillsTabs.prebuilt')}
+                        </button>
+                        <button
+                          onClick={() => setMySkillsSubTab("user")}
+                          className={`px-4 text-sm font-medium  ${
+                            mySkillsSubTab === "user"
+                              ? "rounded-[8px] bg-secondary h-8 text-text"
+                              : "text-text-muted hover:text-text"
+                          }`}
+                        >
+                          {t('skills.mySkillsTabs.user')}
+                        </button>
+                      </>
+                    ) : (
+                      <>
+                        <button
+                          onClick={() => setMySkillsSubTab("all")}
+                          className={`px-4 text-sm font-medium  ${
+                            mySkillsSubTab === "all"
+                              ? "rounded-[8px] bg-secondary h-8 text-text"
+                              : "text-text-muted hover:text-text"
+                          }`}
+                        >
+                          {t('skills.mySkillsTabs.all')}
+                        </button>
+                        <button
+                          onClick={() => setMySkillsSubTab("enabled")}
+                          className={`px-4 text-sm font-medium  ${
+                            mySkillsSubTab === "enabled"
+                              ? "rounded-[8px] bg-secondary h-8 text-text"
+                              : "text-text-muted hover:text-text"
+                          }`}
+                        >
+                          {t('skills.mySkillsTabs.enabled')}
+                        </button>
+                        <button
+                          onClick={() => setMySkillsSubTab("disabled")}
+                          className={`px-4 text-sm font-medium  ${
+                            mySkillsSubTab === "disabled"
+                              ? "rounded-[8px] bg-secondary h-8 text-text"
+                              : "text-text-muted hover:text-text"
+                          }`}
+                        >
+                          {t('skills.mySkillsTabs.disabled')}
+                        </button>
+                      </>
+                    )}
                   </div>
                   <div className="flex-1 min-w-0">
                     <input
@@ -2406,9 +2456,11 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
                                     <span className="px-2 py-1 rounded-full bg-secondary border border-border">
                                       {t('skills.sourceLabel')}: {getSourceLabel(skill.source, t, skill.is_builtin_source, skill.source_type)}
                                     </span>
-                                    <span className="px-2 py-1 rounded-full bg-secondary border border-border">
-                                      {t('skills.statusLabel')}: {renderStatus(skill)}
-                                    </span>
+                                    {renderStatus(skill) && (
+                                      <span className="px-2 py-1 rounded-full bg-secondary border border-border">
+                                        {t('skills.statusLabel')}: {renderStatus(skill)}
+                                      </span>
+                                    )}
                                   </div>
                                 </div>
                               </div>
@@ -2418,7 +2470,7 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
                                   <Switch
                                     checked={!isDisabled}
                                     onChange={() => toggleSkillDisabled(skill.name, skill.origin)}
-                                    disabled={isToggling || isAdministratorManagedSkill(skill)}
+                                    disabled={readOnly || isToggling || isAdministratorManagedSkill(skill)}
                                   />
                                 </div>
                               </div>
@@ -2442,9 +2494,11 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
                                 <span className="px-2 py-0.5 rounded-full bg-secondary border border-border truncate">
                                   {t('skills.sourceLabel')}: {getSourceLabel(skill.source, t, skill.is_builtin_source, skill.source_type)}
                                 </span>
-                                <span className="px-2 py-0.5 rounded-full bg-secondary border border-border truncate">
-                                  {t('skills.statusLabel')}: {renderStatus(skill)}
-                                </span>
+                                {renderStatus(skill) && (
+                                  <span className="px-2 py-0.5 rounded-full bg-secondary border border-border truncate">
+                                    {t('skills.statusLabel')}: {renderStatus(skill)}
+                                  </span>
+                                )}
                               </div>
                               <div className="flex items-center mt-auto pt-2 gap-2 flex-shrink-0" style={{ width: "100%" }}>
                                 <div className="flex gap-1.5 flex-1">
@@ -2454,7 +2508,7 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
                                   <Switch
                                     checked={!isDisabled}
                                     onChange={() => toggleSkillDisabled(skill.name, skill.origin)}
-                                    disabled={isToggling || isAdministratorManagedSkill(skill)}
+                                    disabled={readOnly || isToggling || isAdministratorManagedSkill(skill)}
                                   />
                                 </div>
                               </div>

@@ -6466,11 +6466,7 @@ class JiuWenSwarmDeepAdapter:
             )
 
     async def refresh_enabled_skills_from_db(self) -> None:
-        """账本变更后直读 DB 刷新 ``_enabled_skills`` 并热替换 ``SkillUseRail``（D11 轻量路径）。
-
-        不全量 ``create_instance``：不重建模型/工具卡，仅更新启用集与技能 Rail。
-        刷新前先做盘→库对账，避免「盘有库无」导致永久 Skill not found。
-        """
+        """Refresh enabled skills from the current tenant workspace state."""
         if not is_skill_whitelist_tenant(self._agent_id, self._service_id):
             return
         if self._instance is None:
@@ -6480,32 +6476,15 @@ class JiuWenSwarmDeepAdapter:
             return
 
         try:
-            recon = await SkillWhitelistSynchronizer(
-                self._workspace_dir,
-                service_id=str(self._service_id or ""),
-                agent_id=str(self._agent_id or ""),
-            ).reconcile_disk_into_ledger()
-            if recon.errors:
-                logger.warning(
-                    "[JiuWenSwarmDeepAdapter] disk→ledger reconcile warnings: %s",
-                    recon.errors,
-                )
-        except Exception as exc:  # noqa: BLE001
-            logger.warning(
-                "[JiuWenSwarmDeepAdapter] disk→ledger reconcile failed: %s",
-                exc,
-            )
-
-        from jiuwenswarm.agents.harness.common.installed_skill import list_enabled_skill_names
-
-        try:
-            names = await list_enabled_skill_names(
+            manager = self._skill_manager or SkillManager(
+                workspace_dir=self._workspace_dir,
                 service_id=str(self._service_id or ""),
                 agent_id=str(self._agent_id or ""),
             )
+            names = manager.list_enabled_skill_names()
         except Exception as exc:  # noqa: BLE001
             logger.warning(
-                "[JiuWenSwarmDeepAdapter] list_enabled_skill_names failed: %s",
+                "[JiuWenSwarmDeepAdapter] list workspace enabled skills failed: %s",
                 exc,
             )
             return
@@ -8139,10 +8118,13 @@ class JiuWenSwarmDeepAdapter:
                 "agent_name", config.get("agent_name", "main_agent")
             )
 
-            if is_skill_whitelist_tenant(self._agent_id, self._service_id):
-                enterprise_skills: list[dict[str, Any]] = []
-                if self._enterprise_config is not None:
-                    enterprise_skills = getattr(self._enterprise_config, "skill_whitelist", None) or []
+            if (
+                is_skill_whitelist_tenant(self._agent_id, self._service_id)
+                and self._enterprise_config is not None
+            ):
+                enterprise_skills: list[dict[str, Any]] = (
+                    getattr(self._enterprise_config, "skill_whitelist", None) or []
+                )
                 skill_config = parse_agent_skill_whitelist(
                     self._agent_id, self._service_id, enterprise_skills
                 )
@@ -8150,6 +8132,7 @@ class JiuWenSwarmDeepAdapter:
                     self._workspace_dir,
                     self._service_id,
                     self._agent_id,
+                    skill_manager=self._skill_manager,
                 ).sync(skill_config)
                 if sync_result.errors:
                     logger.warning(

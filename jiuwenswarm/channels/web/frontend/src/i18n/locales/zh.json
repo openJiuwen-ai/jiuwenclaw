@@ -1491,7 +1491,10 @@
     "mySkillsTabs": {
       "all": "全部",
       "enabled": "启用",
-      "disabled": "禁用"
+      "disabled": "禁用",
+      "builtin": "内置",
+      "prebuilt": "管理员下发",
+      "user": "用户自装"
     },
     "enable": "启用",
     "noDisabledSkills": "暂无禁用的技能",

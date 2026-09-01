@@ -150,6 +150,8 @@ class AgentManager:
         self._env_service_id: str = env_service_id or service_id or "default"
         self._workspace_key: str = (workspace_key or "").strip() or "default"
         self._user_workspace_dir = user_workspace_dir
+        self._skill_manager = None
+        self._skill_manager_lock = asyncio.Lock()
         if env_overrides is not None and isinstance(env_overrides, dict):
             omission_removals = infer_multimodal_env_removals(
                 None,
@@ -231,6 +233,49 @@ class AgentManager:
             create_lock = asyncio.Lock()
             self._agent_create_locks[lock_key] = create_lock
         return create_lock
+
+    async def _get_or_create_skill_manager(self):
+        """Return the one SkillManager owned by this tenant workspace."""
+        if self._skill_manager is not None:
+            return self._skill_manager
+        async with self._skill_manager_lock:
+            if self._skill_manager is not None:
+                return self._skill_manager
+            from pathlib import Path
+
+            from jiuwenswarm.common.utils import (
+                collapse_nested_agent_workspace_dir,
+                get_agent_workspace_dir,
+                get_agent_workspace_relative_dir,
+            )
+            from jiuwenswarm.server.runtime.skill.skill_manager import SkillManager
+            from jiuwenswarm.server.runtime.skill.workspace_provider import (
+                SkillWorkspaceProvider,
+                SkillWorkspaceUnavailable,
+            )
+
+            if self._user_workspace_dir is not None:
+                workspace_dir = collapse_nested_agent_workspace_dir(
+                    Path(self._user_workspace_dir) / get_agent_workspace_relative_dir()
+                )
+            elif is_enterprise():
+                raise SkillWorkspaceUnavailable(
+                    "enterprise tenant workspace was not resolved"
+                )
+            else:
+                workspace_dir = collapse_nested_agent_workspace_dir(
+                    get_agent_workspace_dir()
+                )
+            self._skill_manager, _created = SkillWorkspaceProvider().get_or_create_manager(
+                workspace_dir,
+                require_valid_state=is_enterprise(),
+                factory=lambda ready: SkillManager(
+                    workspace_dir=str(ready.workspace_dir),
+                    service_id=self.service_id,
+                    agent_id=self.agent_id,
+                ),
+            )
+            return self._skill_manager
 
     def _borrow_agent(self, agent: "JiuWenSwarm") -> "JiuWenSwarm":
         try:
@@ -526,6 +571,7 @@ class AgentManager:
                 else None,
                 agent_id=self.agent_id,
                 service_id=self.service_id,
+                skill_manager=await self._get_or_create_skill_manager(),
             )
             setattr(agent, "_env_agent_id", self._env_agent_id)
             setattr(agent, "_env_service_id", self._env_service_id)
@@ -1441,6 +1487,7 @@ class AgentManager:
                 else None,
                 agent_id=self.agent_id,
                 service_id=self.service_id,
+                skill_manager=await self._get_or_create_skill_manager(),
             )
             setattr(agent, "_env_agent_id", self._env_agent_id)
             setattr(agent, "_env_service_id", self._env_service_id)

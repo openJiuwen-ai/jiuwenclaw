@@ -43,6 +43,7 @@ from jiuwenswarm.server.runtime.session.permission_response_ledger import (
     PermissionResponseLedger,
 )
 from jiuwenswarm.server.runtime.skill.skill_manager import SkillManager
+from jiuwenswarm.server.runtime.skill.workspace_provider import SkillWorkspaceProvider
 from jiuwenswarm.server.utils.utils import is_team_params
 from jiuwenswarm.common.config import get_config, get_permissions_file_guard_workspace_access
 from jiuwenswarm.extensions.registry import ExtensionRegistry
@@ -600,6 +601,7 @@ _SKILL_ROUTES: dict[ReqMethod, str] = {
     ReqMethod.SKILLS_EVOLUTION_STATUS: "handle_skills_evolution_status",
     ReqMethod.SKILLS_EVOLUTION_GET: "handle_skills_evolution_get",
     ReqMethod.SKILLS_EVOLUTION_SAVE: "handle_skills_evolution_save",
+    ReqMethod.SKILLS_ENTERPRISE_LIST: "handle_skills_enterprise_list",
     ReqMethod.SKILLS_ENTERPRISE_INSTALL: "handle_skills_web_install",
     ReqMethod.SKILLS_ENTERPRISE_UNINSTALL: "handle_skills_web_uninstall",
 }
@@ -1018,14 +1020,23 @@ class JiuWenSwarm:
         user_workspace_dir: str | None = None,
         agent_id: str | None = None,
         service_id: str | None = None,
+        skill_manager: SkillManager | None = None,
     ) -> None:
         self._adapter: AgentAdapter | None = None
         self._sdk_name: str | None = None
-        # 多租户：user_workspace_dir 为租户根（service_{sid}/agent_{aid}），再拼相对 workspace/sessions
+        # 多租户：user_workspace_dir 为 workspace_key 对应的用户根，再拼相对 workspace/sessions。
         enterprise = is_enterprise()
         self._agent_id = agent_id if enterprise else None
         self._service_id = service_id if enterprise else None
         tenant_root = user_workspace_dir or (workspace_dir if enterprise else None)
+        if enterprise and not tenant_root:
+            from jiuwenswarm.server.runtime.skill.workspace_provider import (
+                SkillWorkspaceUnavailable,
+            )
+
+            raise SkillWorkspaceUnavailable(
+                "enterprise tenant workspace could not be resolved"
+            )
         if tenant_root:
             user_ws = Path(tenant_root)
             self._workspace_dir = str(
@@ -1039,7 +1050,24 @@ class JiuWenSwarm:
                 collapse_nested_agent_workspace_dir(get_agent_workspace_dir())
             )
             self._sessions_dir = None
-        self._skill_manager = SkillManager(workspace_dir=self._workspace_dir)
+        workspace_provider = SkillWorkspaceProvider()
+        ready_workspace = workspace_provider.ensure(
+            self._workspace_dir,
+            require_valid_state=enterprise,
+        )
+        self._workspace_dir = str(ready_workspace.workspace_dir)
+        if skill_manager is not None:
+            self._skill_manager = skill_manager
+        else:
+            self._skill_manager, _created = workspace_provider.get_or_create_manager(
+                self._workspace_dir,
+                require_valid_state=enterprise,
+                factory=lambda ready: SkillManager(
+                    workspace_dir=str(ready.workspace_dir),
+                    service_id=self._service_id,
+                    agent_id=self._agent_id,
+                ),
+            )
         self._session_manager = SessionManager()
         self._permission_response_ledger = PermissionResponseLedger()
         # SkillDev 模式：懒初始化，首次 skilldev.* 请求时构造
