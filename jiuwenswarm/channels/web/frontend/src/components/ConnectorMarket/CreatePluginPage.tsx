@@ -225,7 +225,7 @@ export function CreatePluginPage({ onBack, onCreated }: CreatePluginPageProps) {
       <Section title={t('connectorMarket.create.basicInfo')}>
         {AVATAR_UPLOAD_ENABLED && (
           <div className="mb-4 flex items-center gap-3">
-            <label className="flex h-14 w-14 shrink-0 cursor-pointer items-center justify-center overflow-hidden rounded-2xl bg-bg-muted text-text-muted hover:bg-bg">
+            <label className="flex h-14 w-14 shrink-0 cursor-pointer items-center justify-center overflow-hidden rounded-2xl bg-bg-muted text-text-muted hover:bg-bg" data-testid="connector-market-create-plugin-avatar">
               {avatarPreviewUrl ? (
                 <img src={avatarPreviewUrl} alt="" className="h-full w-full object-cover" />
               ) : (
@@ -269,9 +269,10 @@ export function CreatePluginPage({ onBack, onCreated }: CreatePluginPageProps) {
             className={`h-9 w-full rounded-lg border bg-card px-3 text-[13px] text-text outline-none focus:border-border-hover ${
               fieldErrors.name ? 'border-danger' : 'border-border'
             }`}
+            data-testid="connector-market-create-plugin-name"
           />
           {fieldErrors.name && (
-            <p className="mt-1 text-[11px] leading-4 text-danger">{t('connectorMarket.create.fieldRequired')}</p>
+            <p className="mt-1 text-[11px] leading-4 text-danger" data-testid="connector-market-create-plugin-field-error" data-variant="name">{t('connectorMarket.create.fieldRequired')}</p>
           )}
         </div>
 
@@ -291,10 +292,11 @@ export function CreatePluginPage({ onBack, onCreated }: CreatePluginPageProps) {
             className={`mb-1.5 h-9 w-full rounded-lg border bg-card px-3 text-[13px] text-text outline-none focus:border-border-hover ${
               fieldErrors.id ? 'border-danger' : 'border-border'
             }`}
+            data-testid="connector-market-create-plugin-id"
           />
           <p className="text-[11px] leading-4 text-[color:var(--color-text-placeholder)]">{t('connectorMarket.create.idHint')}</p>
           {fieldErrors.id && (
-            <p className="mt-1 text-[11px] leading-4 text-danger">{t('connectorMarket.create.fieldRequired')}</p>
+            <p className="mt-1 text-[11px] leading-4 text-danger" data-testid="connector-market-create-plugin-field-error" data-variant="id">{t('connectorMarket.create.fieldRequired')}</p>
           )}
         </div>
 
@@ -315,13 +317,14 @@ export function CreatePluginPage({ onBack, onCreated }: CreatePluginPageProps) {
               className={`w-full resize-none rounded-lg border bg-card px-3 py-2 text-[13px] leading-5 text-text outline-none focus:border-border-hover ${
                 fieldErrors.description ? 'border-danger' : 'border-border'
               }`}
+              data-testid="connector-market-create-plugin-description"
             />
             <span className="absolute bottom-2 right-3 text-[11px] text-text-muted">
               {description.length}/{DESCRIPTION_MAX}
             </span>
           </div>
           {fieldErrors.description && (
-            <p className="mt-1 text-[11px] leading-4 text-danger">{t('connectorMarket.create.fieldRequired')}</p>
+            <p className="mt-1 text-[11px] leading-4 text-danger" data-testid="connector-market-create-plugin-field-error" data-variant="description">{t('connectorMarket.create.fieldRequired')}</p>
           )}
         </div>
       </Section>
@@ -413,7 +416,7 @@ export function CreatePluginPage({ onBack, onCreated }: CreatePluginPageProps) {
         <button type="button" onClick={onBack} className="rounded-lg border border-border px-4 py-1.5 text-[13px] text-text hover:border-border-hover" data-testid="connector-market-create-plugin-cancel">
           {t('connectorMarket.common.cancel')}
         </button>
-        <button type="button" onClick={handleSubmit} disabled={submitting} className="rounded-lg bg-text px-4 py-1.5 text-[13px] text-text-inverse disabled:opacity-60">
+        <button type="button" onClick={handleSubmit} disabled={submitting} className="rounded-lg bg-text px-4 py-1.5 text-[13px] text-text-inverse disabled:opacity-60" data-testid="connector-market-create-plugin-confirm">
           {t('connectorMarket.common.confirm')}
         </button>
       </div>

@@ -282,6 +282,7 @@ export function RegisterMcpPage({ onBack, onRegistered, editName }: RegisterMcpP
             readOnly={!!editName}
             disabled={!!editName}
             className="h-9 w-full rounded-lg border border-border bg-card px-3 text-[13px] text-text outline-none placeholder:text-[color:var(--color-text-placeholder)] focus:border-border-hover disabled:cursor-not-allowed disabled:bg-bg-muted disabled:text-text-muted"
+            data-testid="connector-market-register-mcp-name"
           />
         </Field>
 
@@ -323,6 +324,7 @@ export function RegisterMcpPage({ onBack, onRegistered, editName }: RegisterMcpP
                 className={`h-9 w-full rounded-lg border bg-card px-3 text-[13px] text-text outline-none placeholder:text-[color:var(--color-text-placeholder)] focus:border-border-hover ${
                   fieldErrors.command ? 'border-danger' : 'border-border'
                 }`}
+                data-testid="connector-market-register-mcp-command"
               />
             </Field>
             <KeyValueField label={t('connectorMarket.registerMcp.args')} single rows={args} onChange={setArgs} placeholderKey={t('connectorMarket.registerMcp.pleaseInput')} />
@@ -352,6 +354,7 @@ export function RegisterMcpPage({ onBack, onRegistered, editName }: RegisterMcpP
                 className={`h-9 w-full rounded-lg border bg-card px-3 text-[13px] text-text outline-none placeholder:text-[color:var(--color-text-placeholder)] focus:border-border-hover ${
                   fieldErrors.url ? 'border-danger' : 'border-border'
                 }`}
+                data-testid="connector-market-register-mcp-url"
               />
             </Field>
             <Field label={t('connectorMarket.registerMcp.bearerTokenEnvKey')}>
