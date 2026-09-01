@@ -287,18 +287,6 @@ def _with_heartbeat_history_metadata(
 _HISTORY_SCOPE_CURRENT_TURN = "current_turn"
 
 
-def _unwrap_scoped(value: Any) -> Any:
-    """Return the inner ``items`` when *value* is a ``{"items": …, "scope": …}``
-    dict, otherwise return *value* unchanged.
-
-    This allows code that reads history extras to transparently handle both the
-    new scoped format and legacy flat lists/dicts.
-    """
-    if isinstance(value, dict) and "items" in value and "scope" in value:
-        return value["items"]
-    return value
-
-
 def _history_user_extra(params: Any) -> dict[str, Any] | None:
     """Extract media/files/skills from ``params`` for the history extra.
 
