@@ -1,6 +1,9 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026-2026. All rights reserved
 
-"""通用 ``DBHandler`` 生命周期（由 ``Settings`` / 环境变量驱动）。"""
+"""通用 ``Database``：按 ``Settings`` / 环境变量创建并连接 foundation ``DBHandler``。
+
+无进程级单例；共享实例与 ``ensure_*_handler`` 见 ``core.enterprise_config.gateway_db``。
+"""
 
 from __future__ import annotations
 
@@ -176,32 +179,3 @@ class Database:
         finally:
             self._handler = None
             self.tables_registered = False
-
-
-async def ensure_db_handler(*, log_prefix: str = "manager_config_receiver") -> DBHandler:
-    """获取 DB CRUD 入口（遗留调用方，如 Agent ``installed_skill``）。
-
-    - 已 ``wire_manager_ws_table_store``：返回 ``PersistentStore`` 适配器。
-    - 未注入：回退 ``GatewayDb`` 直连（Agent 进程等无装配 PersistentStore 的场景）。
-
-    **Gateway Manager Config Receiver 写路径走** ``require_*_repository`` /
-    ``ensure_table_store``，勿依赖本函数的 GatewayDb 回退。
-    """
-    from .table_store_access import get_table_store_handler_if_wired
-
-    wired = await get_table_store_handler_if_wired()
-    if wired is not None:
-        return wired  # type: ignore[return-value]
-    logger.warning(
-        "[%s] PersistentStore not wired; falling back to GatewayDb "
-        "(legacy / Agent path; Manager routers must use ensure_table_store)",
-        log_prefix,
-    )
-    return await get_shared_gateway_database().ensure_ready(log_prefix=log_prefix)
-
-
-def get_shared_gateway_database() -> Database:
-    """进程内唯一的 Gateway 本地库（``GatewayDb`` 单例）。"""
-    from ..core.enterprise_config.gateway_db import GatewayDb
-
-    return GatewayDb.current()
