@@ -39,15 +39,16 @@ from jiuwenswarm.common.config import (
     update_skill_evolution_enabled_in_config,
     update_config,
 )
+from jiuwenswarm.common.reasoning_config import (
+    resolve_endpoint_profile_override,
+    validate_reasoning_level_for_model,
+)
 from jiuwenswarm.common.reasoning_injector import build_reasoning_model_request_kwargs
 from jiuwenswarm.common.context_window import resolve_context_window_tokens
 from jiuwenswarm.gateway.routing.route_binding import GatewayRouteBinding
 from jiuwenswarm.common.version import __version__
 from jiuwenswarm.common.utils import get_user_workspace_dir
 from jiuwenswarm.gateway.routing.agent_request_timeout import (
-    AGENT_SERVER_TIMEOUT_CODE,
-    AGENT_SERVER_TIMEOUT_ERROR,
-    AgentRequestTimeoutError,
     resolve_agent_request_timeout_seconds,
     send_agent_request_with_timeout,
 )
@@ -2737,19 +2738,37 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                 client_cfg["timeout"] = 1800
             if "temperature" not in model_config_obj:
                 model_config_obj["temperature"] = 0.95
-            _reasoning_level = str(model_config_obj.get("reasoning_level", "")).strip()
-            if _reasoning_level and _reasoning_level not in {"off", "low", "medium", "high"}:
-                await channel.send_response(
-                    ws,
-                    req_id,
-                    ok=False,
-                    error="reasoning_level must be one of: off, low, medium, high",
-                )
-                return
             # target 作为 model_name 的回退：若未通过 model= 参数指定，则以 target 为准
             if not client_cfg.get("model_name"):
                 client_cfg["model_name"] = target
             effective_name = client_cfg["model_name"]
+
+            # 与 web 端 models.replace_all 一致：按 core 能力表校验具体模型
+            # 支持的思考档位，并落库规范化后的值。
+            try:
+                _normalized_reasoning = validate_reasoning_level_for_model(
+                    raw_level=model_config_obj.get("reasoning_level"),
+                    model_name=resolve_env_vars(str(effective_name)),
+                    model_provider=resolve_env_vars(str(client_cfg.get("client_provider", ""))),
+                    api_base=resolve_env_vars(str(client_cfg.get("api_base", ""))),
+                    endpoint_profile=client_cfg.get("endpoint_profile"),
+                )
+            except ValueError as _reasoning_err:
+                await channel.send_response(ws, req_id, ok=False, error=str(_reasoning_err))
+                return
+            if _normalized_reasoning:
+                # 必须带引号落库：裸 on/off 会被 YAML 1.1 加载器读成布尔。
+                model_config_obj["reasoning_level"] = DoubleQuotedScalarString(_normalized_reasoning)
+            else:
+                model_config_obj.pop("reasoning_level", None)
+            # 与 web 端一致：已知自建网关按 api_base host 推断 endpoint_profile
+            # 并落库（如 vLLM 风格端点需走 core 的 "vllm" 方言才能关思考）。
+            if not client_cfg.get("endpoint_profile"):
+                _inferred_profile = resolve_endpoint_profile_override(
+                    resolve_env_vars(str(client_cfg.get("api_base", "")))
+                )
+                if _inferred_profile:
+                    client_cfg["endpoint_profile"] = _inferred_profile
 
             # alias 为顶层字段，从 client_cfg 提取；提前算最终值，
             # 确保唯一性校验基于实际存储值
@@ -2901,9 +2920,31 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                             continue
                         else:
                             _client_cfg[mapped_k] = v
-                    _reasoning_level = str(_model_cfg_obj.get("reasoning_level", "")).strip()
-                    if _reasoning_level and _reasoning_level not in {"off", "low", "medium", "high"}:
-                        raise _ModelOpError("reasoning_level must be one of: off, low, medium, high")
+                    # 与 web 端 models.replace_all 一致：按 core 能力表校验具体模型
+                    # 支持的思考档位，并落库规范化后的值。
+                    try:
+                        _normalized_reasoning = validate_reasoning_level_for_model(
+                            raw_level=_model_cfg_obj.get("reasoning_level"),
+                            model_name=resolve_env_vars(str(_client_cfg.get("model_name", ""))),
+                            model_provider=resolve_env_vars(str(_client_cfg.get("client_provider", ""))),
+                            api_base=resolve_env_vars(str(_client_cfg.get("api_base", ""))),
+                            endpoint_profile=_client_cfg.get("endpoint_profile"),
+                        )
+                    except ValueError as _reasoning_err:
+                        raise _ModelOpError(str(_reasoning_err)) from _reasoning_err
+                    if _normalized_reasoning:
+                        # 必须带引号落库：裸 on/off 会被 YAML 1.1 加载器读成布尔。
+                        _model_cfg_obj["reasoning_level"] = DoubleQuotedScalarString(_normalized_reasoning)
+                    else:
+                        _model_cfg_obj.pop("reasoning_level", None)
+                    # 与 web 端一致：已知自建网关按 api_base host 推断
+                    # endpoint_profile 并落库。
+                    if not _client_cfg.get("endpoint_profile"):
+                        _inferred_profile = resolve_endpoint_profile_override(
+                            resolve_env_vars(str(_client_cfg.get("api_base", "")))
+                        )
+                        if _inferred_profile:
+                            _client_cfg["endpoint_profile"] = _inferred_profile
                     if "verify_ssl" not in _client_cfg:
                         _client_cfg["verify_ssl"] = False
                     if "timeout" not in _client_cfg:
@@ -3014,13 +3055,20 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
             # 若 await send_request() 阻塞 >30s，会导致 TUI WS 超时且后续请求排队，
             # 故直接以本地数据构建 payload 立即回包。
             payload: dict = {}
-            payload["available_models"] = names
             _raw = get_config_raw()
-            _defs = (_raw.get("models") or {}).get("defaults")
+            _raw_models = _raw.get("models") if isinstance(_raw, dict) else {}
+            _raw_models = _raw_models if isinstance(_raw_models, dict) else {}
+            _raw_defs = _raw_models.get("defaults")
+            _defs = _raw_defs if isinstance(_raw_defs, list) else []
+            _available_models = list(names)
+            _first_default = None
+            for entry in _defs:
+                if isinstance(entry, dict):
+                    _first_default = entry
+                    break
 
             # _model_meta 必须在 if/else 之前定义，两个分支共用；
-            # 否则 else 分支（models.defaults 为空、仅配 agentos 的场景）
-            # 会 UnboundLocalError——恰是本 PR 要修复的场景。
+            # 否则 models.defaults 为空、仅配 agentos 时无法构造模型列表。
             def _model_meta(i: int, e: dict, *, is_agentos: bool = False) -> dict:
                 mcc = e.get("model_client_config") or {}
                 mco = e.get("model_config_obj") or {}
@@ -3041,48 +3089,53 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                     "reasoning_level": resolve_env_vars(str(mco.get("reasoning_level", ""))),
                     # 同名模型冲突时用于区分：仅展示末4位，避免泄露过多 key 信息
                     "api_key_suffix": _api_key[-4:] if _api_key else "",
-                    "is_current": (i == 0 and not is_agentos),
+                    "is_current": (
+                        not is_agentos
+                        and _first_default is e
+                    ),
                     "is_agentos": is_agentos,
                 }
 
-            # agentos 备份模型追加逻辑两个分支都要用，提前读取
-            _agentos_raw = (_raw.get("models") or {}).get("agentos")
-            _agentos_list = _agentos_raw if isinstance(_agentos_raw, list) else []
-
-            if isinstance(_defs, list) and _defs:
-                _first_name = resolve_env_vars(str((_defs[0].get("model_client_config") or {}).get("model_name", "")))
-                _first_alias = resolve_env_vars(str(_defs[0].get("alias", ""))) if _defs[0].get("alias") else ""
+            if _first_default is not None:
+                _first_name = resolve_env_vars(
+                    str((_first_default.get("model_client_config") or {}).get("model_name", ""))
+                )
+                _first_alias = (
+                    resolve_env_vars(str(_first_default.get("alias", "")))
+                    if _first_default.get("alias")
+                    else ""
+                )
                 payload["current"] = _first_alias or _first_name or os.getenv("MODEL_NAME", "unknown")
                 payload["current_model_name"] = _first_name or os.getenv("MODEL_NAME", "unknown")
-
-                _models_list = [
-                    _model_meta(i, e)
-                    for i, e in enumerate(_defs) if isinstance(e, dict)
-                ]
-                # 追加 agentos 备份模型：与 defaults 并列展示、同等可选可切换，
-                # 但 is_current 恒 False、is_agentos True 供前端区分渲染与切换路径
-                for _ai, _ab in enumerate(_agentos_list):
-                    if not isinstance(_ab, dict):
-                        continue
-                    _ab_mcc = _ab.get("model_client_config")
-                    if not (isinstance(_ab_mcc, dict) and _ab_mcc.get("model_name")):
-                        continue
-                    _models_list.append(_model_meta(_ai, _ab, is_agentos=True))
-                payload["models"] = _models_list
             else:
                 # models.defaults 不存在/为空：仍需展示 agentos 备份模型（若有），
                 # 否则 .env 全空且只有 agentos 时列表为空，用户无法切换。
                 payload["current"] = os.getenv("MODEL_NAME", "unknown")
-                _models_list = []
-                for _ai, _ab in enumerate(_agentos_list):
-                    if not isinstance(_ab, dict):
-                        continue
-                    _ab_mcc = _ab.get("model_client_config")
-                    if not (isinstance(_ab_mcc, dict) and _ab_mcc.get("model_name")):
-                        continue
-                    _models_list.append(_model_meta(_ai, _ab, is_agentos=True))
-                if _models_list:
-                    payload["models"] = _models_list
+                payload["current_model_name"] = os.getenv("MODEL_NAME", "unknown")
+            _models_list = []
+            for i, entry in enumerate(_defs):
+                if isinstance(entry, dict):
+                    _models_list.append(_model_meta(i, entry))
+
+            # 追加 agentos 备份模型：与 defaults 并列展示、同等可选可切换，
+            # 但 is_current 恒 False、is_agentos True 供前端区分渲染与切换路径。
+            _agentos_raw = _raw_models.get("agentos")
+            _agentos_list = _agentos_raw if isinstance(_agentos_raw, list) else []
+            for _ai, _ab in enumerate(_agentos_list):
+                if not isinstance(_ab, dict):
+                    continue
+                _ab_mcc = _ab.get("model_client_config")
+                if not (isinstance(_ab_mcc, dict) and _ab_mcc.get("model_name")):
+                    continue
+                _agentos_meta = _model_meta(_ai, _ab, is_agentos=True)
+                _models_list.append(_agentos_meta)
+                if (
+                    _agentos_meta["name"]
+                    and _agentos_meta["name"] not in _available_models
+                ):
+                    _available_models.append(_agentos_meta["name"])
+            payload["available_models"] = _available_models
+            payload["models"] = _models_list
             await channel.send_response(ws, req_id, ok=True, payload=payload)
             return
 

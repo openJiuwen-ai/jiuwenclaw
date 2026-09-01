@@ -1326,6 +1326,33 @@ async def test_models_replace_all_rejects_invalid_vendor_identity(vendor_key, pl
 
 
 @pytest.mark.asyncio
+async def test_models_replace_all_rejects_reasoning_level_not_supported_by_model():
+    channel = FakeWebChannel()
+    _register_web_handlers(WebHandlersBindParams(channel=channel))
+
+    await channel.methods["models.replace_all"](
+        object(),
+        "req-models-invalid-reasoning",
+        {
+            "models": [{
+                "model_name": "kimi-k3",
+                "api_base": "https://api.moonshot.cn/v1",
+                "api_key": "secret",
+                "model_provider": "OpenAI",
+                "reasoning_level": "off",
+                "is_default": True,
+            }],
+        },
+        "sess-1",
+    )
+
+    response = channel.responses[-1]
+    assert response["ok"] is False
+    assert response["code"] == "BAD_REQUEST"
+    assert "reasoning_level must be one of: low, high, max" in response["error"]
+
+
+@pytest.mark.asyncio
 async def test_config_set_routes_team_payload_to_modes_team_helper(monkeypatch):
     channel = FakeWebChannel()
     recorded: list[dict] = []

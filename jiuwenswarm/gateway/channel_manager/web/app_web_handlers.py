@@ -92,6 +92,10 @@ from jiuwenswarm.server.runtime.a2ui.integration import (
     get_default_a2ui_config_payload,
     validate_a2ui_config_update,
 )
+from jiuwenswarm.common.reasoning_config import (
+    effective_endpoint_profile,
+    validate_reasoning_level_for_model,
+)
 from jiuwenswarm.common.reasoning_injector import (
     build_reasoning_model_request_kwargs,
     core_has_context_window_field,
@@ -513,6 +517,20 @@ def _serialize_reasoning_level(value: Any) -> Any:
     return DoubleQuotedScalarString(text)
 
 
+def _reasoning_level_display(value: Any) -> str:
+    """Normalize a stored reasoning_level to its canonical string level.
+
+    Legacy YAML entries hold bare ``on``/``off`` scalars which YAML 1.1
+    loaders parse into booleans; map them back so the frontend and the
+    replace_all change detection never see raw booleans.
+    """
+    if value is True:
+        return "on"
+    if value is False:
+        return "off"
+    return str(value or "").strip()
+
+
 def _merge_models_for_replace_all(
         parsed: list[dict[str, Any]],
         raw_defaults: list[dict[str, Any]],
@@ -561,8 +579,11 @@ def _merge_models_for_replace_all(
                 new_mcc["client_provider"] = item["model_provider"]
             if not _values_match(item["temperature"], resolved_mco.get("temperature")):
                 new_mco["temperature"] = item["temperature"]
-            reasoning_level = item.get("reasoning_level", "")
-            if not _values_match(reasoning_level, resolved_mco.get("reasoning_level")):
+            reasoning_level = str(item.get("reasoning_level") or "").strip()
+            # 不能用 _values_match：legacy YAML 1.1 会把裸 on/off 读成布尔，
+            # 其布尔分支使 bool("")==bool(False) 成立，「清空档位」会被误判为
+            # 未修改而让旧值残留。按规范化后的字符串比较。
+            if reasoning_level != _reasoning_level_display(resolved_mco.get("reasoning_level")):
                 if reasoning_level:
                     new_mco["reasoning_level"] = _serialize_reasoning_level(reasoning_level)
                 else:
@@ -3229,7 +3250,9 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             verify_ssl = bool(item.get("verify_ssl", False))
             is_default = bool(item.get("is_default", False))
             alias = str(item.get("alias") or "").strip()
-            reasoning_level = str(item.get("reasoning_level") or "").strip()
+            # 原样透传给共享校验函数：不要用 `or ""` 压平，否则布尔 False
+            # （legacy YAML 裸 off / 非前端客户端传的 JSON false）会被当成清空。
+            raw_reasoning_level = item.get("reasoning_level")
             vendor_key = str(item.get("vendor_key") or "").strip() or None
             plan = str(item.get("plan") or "").strip() or None
             if plan:
@@ -3243,6 +3266,17 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                     ) from exc
                 if not vendor_key:
                     raise _ConfigBadRequest(f"models[{idx}].vendor_key is required when plan is set")
+
+            try:
+                reasoning_level = validate_reasoning_level_for_model(
+                    raw_level=raw_reasoning_level,
+                    model_name=model_name,
+                    model_provider=model_provider,
+                    api_base=api_base,
+                    endpoint_profile=item.get("endpoint_profile"),
+                )
+            except ValueError as reasoning_err:
+                raise _ConfigBadRequest(f"models[{idx}].{reasoning_err}") from reasoning_err
 
             if alias:
                 if alias in aliases_seen:
@@ -3260,7 +3294,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 "timeout": timeout,
                 "verify_ssl": verify_ssl,
                 "alias": alias,
-                "reasoning_level": reasoning_level,
+                "reasoning_level": reasoning_level or "",
                 "origin_index": origin_index,
                 # vendor_key is an opaque hint
                 # selector; not validated (the selector only ever emits keys
@@ -3273,7 +3307,9 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 "plan": plan,
                 # endpoint_profile: OpenAI 协议端点方言(deepseek/openrouter/dashscope/...);
                 # opaque passthrough, not validated. Anthropic 协议时 core 忽略此字段。
-                "endpoint_profile": str(item.get("endpoint_profile") or "").strip() or None,
+                # 前端未传时按 api_base host 推断已知自建网关方言(如 vllm)并落库,
+                # 否则该类端点的思考开关只会发官方 thinking.type 而被网关忽略。
+                "endpoint_profile": effective_endpoint_profile(api_base, item.get("endpoint_profile")),
             })
 
         # alias 与其他条目的 model_name 冲突校验
@@ -3386,7 +3422,9 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         api_base = api_base.rstrip("/")
 
         verify_ssl = bool(params.get("verify_ssl", False))
-        endpoint_profile = str(params.get("endpoint_profile") or "").strip() or None
+        # 未显式传方言时按 api_base host 推断已知自建网关(如 vllm)，
+        # 保证“测试连接”与保存后的真实运行走同一条 core 路由。
+        endpoint_profile = effective_endpoint_profile(api_base, params.get("endpoint_profile"))
 
         model_config_obj = _resolve_model_config_obj_for_validate(model, params)
 
@@ -3417,6 +3455,29 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             max_retries=0,
             verify_ssl=verify_ssl,
         )
+        # Anthropic-compatible endpoints that send thinking.budget_tokens
+        # require max_tokens > budget. Use the actual budget core would emit
+        # (effort-mapped or explicit), not a stale 1024 default: many wires
+        # (qwen38_anthropic, dashscope_budget) no longer pin 1024, while
+        # anthropic_manual maps high → 16384.
+        try:
+            from openjiuwen.core.foundation.llm.reasoning import resolve_reasoning_plan
+
+            _plan = resolve_reasoning_plan(
+                model_client_config,
+                model_request_config,
+                request_model=model,
+            )
+            _thinking = (_plan.sdk_params or {}).get("thinking")
+            if isinstance(_thinking, dict):
+                _budget = _thinking.get("budget_tokens")
+                if isinstance(_budget, int) and _budget > 0:
+                    supremum_max_tokens = max(supremum_max_tokens, _budget + 16)
+        except Exception:  # noqa: BLE001
+            logger.debug(
+                "[config.validate_model] skip budget floor from reasoning plan",
+                exc_info=True,
+            )
         llm = Model(model_config=model_request_config, model_client_config=model_client_config)
 
         async def test_invoke(max_tokens: int):
@@ -3525,7 +3586,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                     "api_key": mcc.get("api_key", ""),
                     "model_provider": mcc.get("client_provider", ""),
                     "temperature": mco.get("temperature", 0.95),
-                    "reasoning_level": "off" if mco.get("reasoning_level") is False else mco.get("reasoning_level", ""),
+                    "reasoning_level": _reasoning_level_display(mco.get("reasoning_level")),
                     "is_default": is_default,
                     # agentos 备份模型标记：由 get_default_models 经 _source=="agentos"
                     # 注入。前端据此区分 defaults / agentos，置灰只读展示 agentos、
@@ -3560,9 +3621,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                         "api_key": mcc.get("api_key", ""),
                         "model_provider": mcc.get("client_provider", ""),
                         "temperature": mco.get("temperature", 0.95),
-                        "reasoning_level": "off"
-                        if mco.get("reasoning_level") is False
-                        else mco.get("reasoning_level", ""),
+                        "reasoning_level": _reasoning_level_display(mco.get("reasoning_level")),
                         "is_default": entry.get("is_default"),
                         "is_agentos": False,
                         "is_free": True,

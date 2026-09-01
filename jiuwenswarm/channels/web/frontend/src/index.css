@@ -561,16 +561,17 @@ body.workspace-resize-active iframe {
 
   /* Chat Bubbles */
   .chat-bubble {
-    border: 1px solid transparent;
     background: var(--color-chat-bubble-default);
-    border-radius: var(--radius-lg);
-    padding: 10px 14px;
+    border-radius: 24px 0 24px 24px;
+    padding: 16px 20px;
     min-width: 0;
+    /* light.css 中 --color-text-primary 即 #191919 */
+    color: var(--color-text-primary);
   }
 
   .chat-bubble.user {
     border-color: transparent;
-    background: var(--color-chat-bubble-user);
+    background: var(--color-connector-tool-icon-surface);
     width: fit-content;
     max-width: 100%;
     margin-left: auto;
@@ -663,8 +664,8 @@ body.workspace-resize-active iframe {
   .chat-text {
     overflow-wrap: anywhere;
     word-break: break-word;
-    color: var(--color-text-chat);
-    line-height: 1.5;
+    color: var(--color-text-primary);
+    line-height: 22px;
     white-space: pre-wrap;
   }
 
@@ -672,7 +673,7 @@ body.workspace-resize-active iframe {
     @apply prose prose-sm max-w-none;
     max-width: 100%;
     min-width: 0;
-    --tw-prose-body: var(--color-text-chat);
+    --tw-prose-body: var(--color-text-primary);
     --tw-prose-headings: var(--color-text-strong);
     --tw-prose-lead: var(--color-text-secondary);
     --tw-prose-links: var(--color-action-primary);
@@ -992,6 +993,8 @@ body.workspace-resize-active iframe {
 
   .chat-scroll {
     padding: 18px 0 22px;
+    /* 滚动条常驻占位：内容超出时滚动条出现不再挤压内容区（与 ToolPanel/Subagent 等处理一致）。 */
+    scrollbar-gutter: stable;
   }
 
   .chat-content {
@@ -1034,31 +1037,26 @@ body.workspace-resize-active iframe {
     gap: 4px;
   }
 
-  /* ====== Team Timeline Messages ====== */
+  /* ====== Team Timeline Messages（与单 agent assistant-row 同一套布局指标） ====== */
   .team-member-message {
     width: min(100%, 920px);
     margin: 0 auto 12px;
-    display: grid;
-    grid-template-columns: 36px minmax(0, 1fr);
-    gap: 12px;
-    align-items: start;
+    display: flex;
+    gap: 10px;
+    align-items: flex-start;
   }
 
   .team-member-message__header {
     display: flex;
     align-items: center;
-    gap: 12px;
-    min-height: calc(var(--font-size-sm) * 1.75);
+    flex: 0 0 auto;
+    width: 32px;
+    margin-top: 2px;
   }
 
   .team-member-message__body {
     min-width: 0;
-    margin-left: 0;
-  }
-
-  .team-member-message__body.is-continued {
-    grid-column: 2;
-    margin-left: 0;
+    flex: 1 1 auto;
   }
 
   .chat-message-file-list {
@@ -1349,6 +1347,21 @@ body.workspace-resize-active iframe {
     color: var(--color-feedback-warning);
   }
 
+  /* 群聊消息列表内的 @提及 chip：去背景，文字统一链接蓝（light.css --color-text-link: #0067d1） */
+  .team-group-chat-message-list .team-event-group-chip--p2p,
+  .team-group-chat-message-list .team-event-group-chip--broadcast {
+    background: transparent;
+    color: var(--color-text-link);
+    font-size: 16px;
+    font-weight: 400;
+  }
+
+  /* 群聊消息正文：16px / 28px 行高 */
+  .team-group-chat-message-list .team-message-markdown {
+    font-size: 16px;
+    line-height: 28px;
+  }
+
   .chat-timeline {
     display: flex;
     flex-direction: column;
@@ -1501,16 +1514,14 @@ body.workspace-resize-active iframe {
     justify-content: flex-start;
     gap: 6px;
     margin: 0;
-    padding: 0 2px 0 42px;
     font-size: var(--font-size-2xs, 11px);
     color: rgba(var(--color-text-secondary-rgb), 0.72);
   }
 
-  /* team：与 920px 居中栅格的内容列（36 + 12 = 48px）对齐。 */
+  /* 不带头像的独立时间行（成员消息轮次）：team 模式与 920px 居中栅格对齐。 */
   .turn-elapsed--team {
     width: min(100%, 920px);
     margin: 0 auto;
-    padding-left: 48px;
   }
 
   .turn-elapsed__spinner {
@@ -1535,44 +1546,40 @@ body.workspace-resize-active iframe {
     }
   }
 
-  .completed-work-row {
+  .completed-work-col {
     display: flex;
-    gap: 10px;
+    flex-direction: column;
     align-items: flex-start;
+    gap: 12px;
     margin: 2px 0;
   }
 
-  .completed-work-row.completed-work-row--no-avatar {
-    gap: 0;
-  }
-
-  .completed-work-row__avatar {
-    flex: 0 0 32px;
-    width: 32px;
+  .completed-work-col__avatar {
+    display: flex;
+    align-items: center;
+    gap: 12px;
     line-height: 0;
   }
 
-  .completed-work-row--team {
+  .chat-avatar-name {
+    font-size: var(--font-size-sm, 13px);
+    font-weight: 600;
+    line-height: normal;
+    color: var(--color-text-primary);
+  }
+
+  .completed-work-col--team {
     width: min(100%, 920px);
     margin: 2px auto;
-    display: grid;
-    grid-template-columns: 36px minmax(0, 1fr);
-    gap: 12px;
-    align-items: start;
   }
 
-  .completed-work-row--team.completed-work-row--team-no-avatar {
-    grid-template-columns: minmax(0, 1fr);
-    gap: 0;
-  }
-
-  .completed-work-row--nested {
+  .completed-work-col--nested {
     margin-left: 0;
   }
 
-  .completed-work-row--nested .completed-work-chip--streak {
+  .completed-work-col--nested .completed-work-chip--streak {
     font-size: var(--font-size-2xs, 11px);
-    color: rgba(var(--color-text-secondary-rgb), 0.72);
+    color: var(--color-text-meta);
   }
 
   .completed-work-chip {
@@ -1584,7 +1591,7 @@ body.workspace-resize-active iframe {
     padding: 2px 4px 2px 0;
     border: 0;
     background: transparent;
-    color: rgba(var(--color-text-secondary-rgb), 0.88);
+    color: var(--color-text-meta);
     font-size: var(--font-size-sm, 13px);
     line-height: 1.4;
     cursor: pointer;
@@ -1592,24 +1599,12 @@ body.workspace-resize-active iframe {
     transition: color 0.18s ease;
   }
 
-  .completed-work-chip:hover {
-    color: var(--color-text-primary);
-  }
-
   .completed-work-chip__icon {
     display: inline-flex;
     width: 16px;
     height: 16px;
     flex-shrink: 0;
-    color: var(--color-feedback-success);
-  }
-
-  .completed-work-chip__icon.is-partial {
-    color: var(--color-feedback-warning);
-  }
-
-  .completed-work-chip__icon.is-error {
-    color: var(--color-feedback-danger);
+    color: var(--color-text-meta);
   }
 
   .completed-work-chip__icon svg {
@@ -1643,38 +1638,24 @@ body.workspace-resize-active iframe {
     transition: transform 0.22s ease, opacity 0.18s ease;
   }
 
-  .reasoning-row {
+  .reasoning-col {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
     margin: 0;
   }
 
-  .reasoning-row:not(.reasoning-row--team) {
+  .reasoning-col__avatar {
     display: flex;
-    gap: 10px;
-    align-items: flex-start;
-  }
-
-  .reasoning-row:not(.reasoning-row--team).reasoning-row--no-avatar {
-    gap: 0;
-  }
-
-  .reasoning-row:not(.reasoning-row--team) > .reasoning-row__avatar {
-    flex: 0 0 32px;
-    width: 32px;
+    align-items: center;
+    gap: 6px;
+    flex: 0 0 auto;
     line-height: 0;
   }
 
-  .reasoning-row--team {
+  .reasoning-col--team {
     width: min(100%, 920px);
     margin: 0 auto;
-    display: grid;
-    grid-template-columns: 36px minmax(0, 1fr);
-    gap: 12px;
-    align-items: start;
-  }
-
-  .reasoning-row--team.reasoning-row--team-no-avatar {
-    grid-template-columns: minmax(0, 1fr);
-    gap: 0;
   }
 
   .reasoning-panel {
@@ -2126,8 +2107,8 @@ body.workspace-resize-active iframe {
 
   @media (prefers-reduced-motion: reduce) {
     .chat-timeline,
-    .completed-work-row,
-    .reasoning-row,
+    .completed-work-col,
+    .reasoning-col,
     .tool-group-frame,
     .reasoning-panel__collapse,
     .timeline-collapse,

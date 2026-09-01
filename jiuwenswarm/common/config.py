@@ -325,6 +325,28 @@ def get_progressive_tool_enabled(config: dict[str, Any] | None = None) -> bool:
     return bool(value)
 
 
+def get_endpoint_profile_overrides(config: dict[str, Any] | None = None) -> dict[str, str]:
+    """Return the user-configured ``api_base host -> endpoint_profile`` map.
+
+    Read from the top-level ``endpoint_profile_overrides`` key in
+    ``config.yaml``. Used for self-hosted gateways whose thinking-control
+    dialect (e.g. DashScope-style ``enable_thinking``) cannot be inferred
+    from the host name; no host is built into the source code. Hosts are
+    normalized to lowercase; blank entries are dropped.
+    """
+    cfg = config if isinstance(config, dict) else get_config()
+    raw = cfg.get("endpoint_profile_overrides")
+    if not isinstance(raw, dict):
+        return {}
+    overrides: dict[str, str] = {}
+    for host, profile in raw.items():
+        host_key = str(host or "").strip().lower()
+        profile_value = str(profile or "").strip()
+        if host_key and profile_value:
+            overrides[host_key] = profile_value
+    return overrides
+
+
 def get_evolution_review_feedback_min_confidence(config: dict[str, Any] | None) -> float:
     """Return the minimum confidence required for reviewer-driven evolution."""
 
@@ -2360,6 +2382,12 @@ def migrate_config_from_template(
     # Guard against empty merged_data overwriting valid user config
     if merged_data is None or not merged_data:
         return False
+
+    # 写回程序版本号，与合并内容原子落盘；放在 diff 判断之前，
+    # 使旧 config（无版本号或版本号旧）必走写盘分支把版本号写回，
+    # 已写回的最新 config 下次启动被 ensure_config_migrated_from_template 短路。
+    from jiuwenswarm.common._build_config import VERSION
+    merged_data["config_version"] = VERSION
 
     # Only write if there are actual changes
     if merged_data != user_data:

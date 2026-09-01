@@ -149,6 +149,25 @@ test('回归：pending/timeout 工具的 updatedAt 不计入耗时终点（防�
   assert.equal(summary.workEndMs, toolStart, 'pending 的 updatedAt 不得进入 work 终点');
 });
 
+test('任务用时行移动到本轮内容顶部：头像下第一行，并接管顶部头像', () => {
+  const items = [
+    userMessage(U),
+    assistantMessage(U + 2_000, U + 8_000),
+  ];
+  const out = buildRenderItems(items, false, false);
+  const summaryIndex = out.findIndex((item) => item.type === 'turnSummary');
+  const assistantIndex = out.findIndex(
+    (item) => item.type === 'message' && item.message.role === 'assistant',
+  );
+
+  assert.ok(summaryIndex >= 0, '仍应生成任务用时行');
+  assert.ok(summaryIndex < assistantIndex, '时间行应排在本轮 assistant 内容之前（头像下第一行）');
+  const summary = out[summaryIndex];
+  assert.equal(summary.showAvatar, true, '时间行接管本轮顶部头像');
+  const assistant = out[assistantIndex];
+  assert.equal(assistant.showAvatar, false, '首条 assistant 内容不再重复画头像');
+});
+
 test('slash 命令结果自成时间线块，不把上一轮任务用时排到卡片下方', () => {
   const assistantAt = U + 2_000;
   const completedAt = U + 8_000;

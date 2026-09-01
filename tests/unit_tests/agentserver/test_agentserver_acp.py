@@ -1,3 +1,5 @@
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+
 import asyncio
 import json
 import types
@@ -241,6 +243,107 @@ def test_interface_deep_parse_stream_chunk_preserves_tool_update():
         "tool_name": "read_file",
         "status": "in_progress",
     }
+
+
+def _full_context_usage_payload():
+    return {
+        "event_type": "context.usage",
+        "schema_version": "context-usage.v1",
+        "phase": "pre_call",
+        "request_id": "req-context",
+        "session_id": "sess-context",
+        "context_window": {
+            "limit_tokens": 200000,
+            "input_tokens": 25000,
+            "occupancy_rate": 12.5,
+        },
+        "parts": {
+            "system_prompt": {
+                "category": "system_prompt",
+                "tokens": 10000,
+                "percentage_of_window": 5.0,
+                "percentage_of_input": 40.0,
+            },
+            "tools": {
+                "category": "tools",
+                "tokens": 15000,
+                "percentage_of_window": 7.5,
+                "percentage_of_input": 60.0,
+            },
+        },
+        "kv_cache": {
+            "request": {
+                "input_tokens": 25000,
+                "cache_read_tokens": 20000,
+                "cache_miss_tokens": 5000,
+                "hit_rate": 0.8,
+                "status": "observed",
+            },
+            "session": {
+                "calls_total": 1,
+                "calls_observed": 1,
+                "weighted_hit_rate": 0.8,
+            },
+        },
+    }
+
+
+def test_parse_stream_chunk_preserves_full_context_usage_snapshot():
+    parsed = parse_stream_chunk(
+        types.SimpleNamespace(
+            type="context.usage",
+            payload=_full_context_usage_payload(),
+        )
+    )
+
+    assert parsed["event_type"] == "context.usage"
+    assert parsed["context_window"]["limit_tokens"] == 200000
+    assert parsed["parts"]["system_prompt"]["tokens"] == 10000
+    assert parsed["parts"]["system_prompt"]["percentage_of_window"] == 5.0
+    assert parsed["parts"]["tools"]["percentage_of_input"] == 60.0
+    assert parsed["kv_cache"]["request"]["cache_read_tokens"] == 20000
+    assert parsed["kv_cache"]["session"]["weighted_hit_rate"] == 0.8
+    assert parsed["session_kv_cache_hit_rate"] == 0.8
+    assert parsed["rate"] == 12.5
+    assert parsed["context_usage_summary"]["occupancy_rate"] == 0.125
+    assert parsed["context_usage_summary"]["percentage"] == 12.5
+    assert parsed["context_max"] == 200000
+    assert parsed["tokens_used"] == 25000
+
+
+def test_interface_deep_parse_stream_chunk_preserves_full_context_usage_snapshot():
+    parse_chunk = getattr(interface_deep_module.JiuWenSwarmDeepAdapter, "_parse_stream_chunk")
+    parsed = parse_chunk(
+        types.SimpleNamespace(
+            type="context.usage",
+            payload=_full_context_usage_payload(),
+        )
+    )
+
+    assert parsed["parts"]["system_prompt"]["percentage_of_window"] == 5.0
+    assert parsed["parts"]["tools"]["tokens"] == 15000
+    assert parsed["kv_cache"]["request"]["cache_miss_tokens"] == 5000
+    assert parsed["kv_cache"]["session"]["calls_observed"] == 1
+    assert parsed["session_kv_cache_hit_rate"] == 0.8
+    assert parsed["rate"] == 12.5
+    assert parsed["context_usage_summary"]["occupancy_rate"] == 0.125
+    assert parsed["context_usage_summary"]["percentage"] == 12.5
+    assert parsed["context_max"] == 200000
+    assert parsed["tokens_used"] == 25000
+
+
+def test_context_usage_legacy_rate_converts_core_ratio_to_percent():
+    payload = _full_context_usage_payload()
+    payload["context_window"]["occupancy_rate"] = 0.125
+
+    parsed = parse_stream_chunk(
+        types.SimpleNamespace(
+            type="context.usage",
+            payload=payload,
+        )
+    )
+
+    assert parsed["rate"] == 12.5
 
 
 def test_interface_deep_parse_stream_chunk_preserves_tool_result_status():

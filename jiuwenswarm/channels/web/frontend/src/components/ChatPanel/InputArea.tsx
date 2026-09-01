@@ -47,7 +47,11 @@ import {
   type SlashCommand,
   type SlashCommandContext,
 } from './slashCommands/registry';
-import { shouldExecuteRegisteredSlashCommand } from './slashCommands/semantics';
+import {
+  getWebSlashCommandsForMode,
+  shouldExecuteRegisteredSlashCommand,
+  supportsWebSlashCommands,
+} from './slashCommands/semantics';
 import { withUploadDocumentBlock } from '../../utils/documentMessage';
 import { ExtensionPickerPanel } from './ExtensionPickerPanel';
 import { SkillPickerPanel } from './SkillPickerPanel';
@@ -88,6 +92,7 @@ import { TeamMemberAvatar } from '../TeamMemberAvatar';
 import { CodeBranchSelector } from '../../features/code-mode/CodeBranchSelector';
 import { generateUuidV4 } from '../../utils/uuid';
 import { createAgentManagementClient, getAgentAvatarUrl, type AgentCatalogItem } from '../../features/agentManagement';
+import { ContextUsageIndicator } from './ContextUsageIndicator';
 
 /** 输入栏下拉所需的最小技能数据结构（与 SkillPanel 中的 SkillItem 保持一致） */
 type InputAreaSkillItem = {
@@ -791,10 +796,10 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
     () => getComposerSuggestionItems(
       composerSuggestion,
       mentionableMembers,
-      slashCommands,
+      getWebSlashCommandsForMode(slashCommands, mode),
       slashSkills,
     ),
-    [composerSuggestion, mentionableMembers, slashCommands, slashSkills],
+    [composerSuggestion, mentionableMembers, mode, slashCommands, slashSkills],
   );
 
   useEffect(() => {
@@ -1611,13 +1616,14 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
     const richContent = extractRichContent();
     const trimmedBase = (richContent + pendingVoiceText).trim();
 
-    // 斜杠命令拦截：控制命令不走 chat.send / 队列 / 中断逻辑（与 command.goal 同级——
-    // 控制操作不该被排进消息队列，/btw 还要能与主对话并行）。命中注册表即执行并 return；
+    // 单 Agent 下拦截斜杠命令：控制命令不走 chat.send / 队列 / 中断逻辑。
+    // Team 下不拦截，以普通文本发送，不会触发 command.btw / command.compact 等 RPC。
     if (trimmedBase.startsWith('/')) {
       const { name, args } = parseSlashLine(trimmedBase);
       const cmd = findSlashCommand(name);
-      if (cmd && shouldExecuteRegisteredSlashCommand(name, args)) {
-        const slashSid = useChatStore.getState().activeSessionId;
+      const slashSid = useChatStore.getState().activeSessionId;
+      const slashMode = useSessionStore.getState().getRuntime(slashSid)?.mode ?? mode;
+      if (cmd && shouldExecuteRegisteredSlashCommand(name, args, slashMode)) {
         if (isListening) stopListening();
         if (slashSid) useChatStore.getState().setInputValue(slashSid, '');
         setPendingVoiceText('');
@@ -1627,7 +1633,6 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
         setComposerSuggestion(null);
         // requiresSession=false 的命令（如 /plan 纯本地开关）无需真实会话，欢迎页也能用
         if (cmd.requiresSession === false || (slashSid && slashSid !== NEW_CONVERSATION_ID)) {
-          const slashMode = useSessionStore.getState().getRuntime(slashSid)?.mode ?? 'agent';
           void executeSlashCommand(
             cmd,
             {
@@ -1738,6 +1743,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
     onSubmit,
     onInterrupt,
     stopListening,
+    mode,
     isAgentMode,
     isTeamMode,
     queuePaused,
@@ -1864,6 +1870,12 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
         setComposerSuggestion(null);
         return;
       }
+      const slashSid = useChatStore.getState().activeSessionId;
+      const slashMode = useSessionStore.getState().getRuntime(slashSid)?.mode ?? mode;
+      if (!supportsWebSlashCommands(slashMode)) {
+        setComposerSuggestion(null);
+        return;
+      }
       const slashCmd = findSlashCommand(value);
       // 无参命令（/plan、/compact）：选中即执行，不插入文本、不再等回车。
       // `/plan hi` 这类手工输入不走此选中路径，提交时会被当作普通消息。
@@ -1878,13 +1890,11 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
           setRangeStartByTextOffset(range, el, Math.max(0, beforeTextLength - triggerLength));
           range.deleteContents();
         }
-        const slashSid = useChatStore.getState().activeSessionId;
         if (slashSid) useChatStore.getState().setInputValue(slashSid, extractPlainText());
         setComposerSuggestion(null);
         el.focus();
         // requiresSession=false 的命令（如 /plan 纯本地开关）无需真实会话，欢迎页也能用
         if (slashCmd.requiresSession === false || (slashSid && slashSid !== NEW_CONVERSATION_ID)) {
-          const slashMode = useSessionStore.getState().getRuntime(slashSid)?.mode ?? 'agent';
           void executeSlashCommand(
             slashCmd,
             {
@@ -2027,7 +2037,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
     if (sid) useChatStore.getState().setInputValue(sid, extractPlainText());
     setComposerSuggestion(null);
     el.focus();
-  }, [executeSlashCommand, extractPlainText, getCurrentComposerTrigger, onSubmit, setRangeStartByTextOffset]);
+  }, [executeSlashCommand, extractPlainText, getCurrentComposerTrigger, mode, onSubmit, setRangeStartByTextOffset]);
 
   const notifyKVCInputIntent = useCallback(() => {
     if (!activeSessionId || activeSessionId === NEW_CONVERSATION_ID) return;
@@ -3217,7 +3227,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
             {isModeMenuOpen && modeMenuAnchor && createPortal(
               <div
                 ref={modeMenuPortalRef}
-                className="chat-mode-select__menu"
+                className="chat-mode-select__menu chat-mode-select__menu--agent-modes"
                 role="menu"
                 data-testid="chat-panel-mode-select-menu"
                 style={menuDirection === 'up'
@@ -3384,6 +3394,8 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
             </button>
           )} */}
 
+          {isAgentMode && <ContextUsageIndicator />}
+
           <ChatModelSelector
             disabled={isProcessing || isCompactRunning || (!isAgentMode && activeSessionId !== NEW_CONVERSATION_ID)}
           />
@@ -3416,24 +3428,24 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
       </div>
       </div>
 
-      {showSlashSuggestionBelow && composerSuggestion && (
-        <ComposerSuggestionMenu
-          suggestion={composerSuggestion}
-          items={composerSuggestionItems}
-          highlightedIndex={composerSuggestionIndex}
-          navigationMode={composerSuggestionNavigationMode}
-          containerRef={composerSuggestionMenuRef}
-          onPointerHighlight={(index) => {
-            setComposerSuggestionNavigationMode('pointer');
-            setComposerSuggestionIndex(index);
-          }}
-          onPick={insertComposerToken}
-          loading={slashCatalogLoading}
-          placement="below"
-        />
-      )}
-
       {showWorkContextRow ? (
+        <div className="chat-work-context-wrapper" data-testid="chat-panel-work-context-wrapper">
+          {showSlashSuggestionBelow && composerSuggestion && (
+            <ComposerSuggestionMenu
+              suggestion={composerSuggestion}
+              items={composerSuggestionItems}
+              highlightedIndex={composerSuggestionIndex}
+              navigationMode={composerSuggestionNavigationMode}
+              containerRef={composerSuggestionMenuRef}
+              onPointerHighlight={(index) => {
+                setComposerSuggestionNavigationMode('pointer');
+                setComposerSuggestionIndex(index);
+              }}
+              onPick={insertComposerToken}
+              loading={slashCatalogLoading}
+              placement="below"
+            />
+          )}
         <div ref={workMenuRef} className="chat-work-context-row" data-testid="chat-panel-work-context-row">
           <div className={clsx('chat-work-select', workMenuOpen === 'project' && 'chat-work-select--open')} data-testid="chat-panel-work-select">
             <button
@@ -3543,6 +3555,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
               </div>
             </div>
           ) : null}
+        </div>
         </div>
       ) : null}
 
