@@ -56,6 +56,7 @@ class ReqMethod(Enum):
 
     SESSION_LIST = "session.list"
     SESSION_GET_METADATA = "session.get_metadata"
+    SESSION_PLAN_STATUS = "session.plan_status"
     SESSION_PIN = "session.pin"
     SESSION_COLOR_SET = "session.color_set"
     SESSION_PREVIEW = "session.preview"
