@@ -949,7 +949,7 @@ def _validate_outline_markdown_basic(
                 if expected_type == "content":
                     matched = _is_research_required_page(block)
                 else:
-                    matched = actual_type in type_aliases[expected_type]
+                    matched = actual_type in type_aliases.get(expected_type, set())
                 if matched:
                     matched_page_indices.add(page_index)
                     break
