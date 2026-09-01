@@ -385,10 +385,12 @@ agents:
   #   CLAW_XIAOYI_UID             — 握手 x-uid（优先）；否则 AGENT_RUNTIME_UID / 渠道 uid
   #   AGENT_RUNTIME_BASEURL       — agent_as_a_tool（可选）
   #   AGENT_RUNTIME_WS_TIMEOUT    — 插件等待超时秒数（缺省 120）
-  # 云端能力以白名单为准（禁止臆造 bundleName）：
-  #   生图  seedreamLite4Skill|SeedreamPro4Skill + bundleName=com.atomicservice.5765880207845681341
-  #   生视频 seedanceMiniTask|seedanceMiniTaskQuery + 同上；默认轮询到成片
-  #   图像理解 imageUnderStandStream + bundleName=xiaoyi
+  # 云端能力以白名单为准（禁止臆造 bundleName）；随 AGENT_RUNTIME_MCP_RUN 分区域：
+  #   蓝区/绿区 生图 seedreamLite4Skill|SeedreamPro4Skill + bundleName=com.atomicservice.5765880207845681341
+  #             生视频/生音乐 同上原子包；生视频默认轮询到成片
+  #   现网     生图 Lite seedreamBatch5 + com.example.aikitdemo；
+  #             生图 Pro SeedreamPro_5 / 生视频 / 生音乐 + com.huawei.pluginPlatform
+  #   各区     图像理解 imageUnderStandStream + bundleName=xiaoyi
   invoke_tool:
     enabled: true
 

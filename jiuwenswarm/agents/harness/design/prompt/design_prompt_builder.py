@@ -20,6 +20,11 @@ from openjiuwen.harness.prompts import PromptSection, SystemPromptBuilder
 
 from jiuwenswarm.agents.harness.common.prompt import safety_override  # noqa: F401  — patches openjiuwen SAFETY_PROMPT
 from jiuwenswarm.agents.harness.common.prompt import skills_goal_override  # noqa: F401  — patches openjiuwen Skills + Goal sections
+from jiuwenswarm.agents.harness.common.tools.invoke_meta.plugin_skill_catalog import (
+    plugin_skill_bundle,
+    seedream_lite_function_name,
+    seedream_pro_function_name,
+)
 
 
 # ─── Priority ────────────────────────────────────
@@ -127,6 +132,18 @@ def _design_role_prompt() -> PromptSection:
 
 
 def _design_product_fundamentals_prompt() -> PromptSection:
+    lite = seedream_lite_function_name()
+    pro = seedream_pro_function_name()
+    lite_bundle = plugin_skill_bundle(lite)
+    pro_bundle = plugin_skill_bundle(pro)
+    music_bundle = plugin_skill_bundle("musicGeneration")
+    if lite_bundle == pro_bundle:
+        image_bundle_clause = f"plus `bundleName={lite_bundle}` "
+    else:
+        image_bundle_clause = (
+            f"`{lite}` uses `bundleName={lite_bundle}`, "
+            f"`{pro}` uses `bundleName={pro_bundle}`, "
+        )
     content = (
         "## Product Fundamentals\n"
         "\n"
@@ -140,9 +157,9 @@ def _design_product_fundamentals_prompt() -> PromptSection:
         "- **Poster / brand / illustration**: generate visual assets (images) "
         "directly via `invoke` — call `invoke` with "
         "`functionName=PluginSkillExecTool` and `arguments.functionName="
-        "seedreamLite4Skill` (up to 15 images via `max_images`) or "
-        "`SeedreamPro4Skill` (single high-quality image, do NOT pass "
-        "`max_images`), plus `bundleName=com.atomicservice.5765880207845681341` "
+        f"{lite}` (up to 15 images via `max_images`) or "
+        f"`{pro}` (single high-quality image, do NOT pass "
+        f"`max_images`), {image_bundle_clause}"
         "and a `prompt` written as a full sentence. Size is `1K` (1024×1024) "
         "or `2K` (2048×2048). Do not stop after writing only a prompt or "
         "script; the user-facing deliverable is the image file.\n"
@@ -151,7 +168,7 @@ def _design_product_fundamentals_prompt() -> PromptSection:
         "markdown file is **not** a valid final deliverable.\n"
         "- **Song**: generate a finished audio track via `invoke` "
         "(`lyricsGeneration` / `musicGeneration`, "
-        "bundleName=com.atomicservice.5765880207845681341). A lyrics markdown "
+        f"bundleName={music_bundle}). A lyrics markdown "
         "or LRC text file alone is **not** a valid final deliverable.\n"
         "\n"
         "Match the user's requested medium. Do not steer video, poster, or "
@@ -231,6 +248,7 @@ def _design_interaction_principles_prompt() -> PromptSection:
 
 
 def _design_core_capabilities_prompt() -> PromptSection:
+    music_bundle = plugin_skill_bundle("musicGeneration")
     content = (
         "# Core capabilities\n"
         "\n"
@@ -286,7 +304,8 @@ def _design_core_capabilities_prompt() -> PromptSection:
         "a single 10–15s clip or explain the per-clip limit.\n"
         "2. **Generate via invoke**: Call `invoke` with "
         "`functionName=PluginSkillExecTool` and `arguments.functionName="
-        "seedanceMiniTask`, plus `bundleName=com.atomicservice.5765880207845681341` "
+        "seedanceMiniTask`, plus "
+        f"`bundleName={plugin_skill_bundle('seedanceMiniTask')}` "
         "and a `content` array (first item `type=text`). Wait for the finished "
         "clip (`video_url`); if only `task_id` is returned, call "
         "`seedanceMiniTaskQuery` until `status=succeeded`.\n"
@@ -314,7 +333,7 @@ def _design_core_capabilities_prompt() -> PromptSection:
         "3. **Generate via invoke**: Call `invoke` with "
         "`functionName=PluginSkillExecTool` and `arguments.functionName="
         "lyricsGeneration` or `musicGeneration`, plus "
-        "`bundleName=com.atomicservice.5765880207845681341`. Business fields "
+        f"`bundleName={music_bundle}`. Business fields "
         "(`prompt`, `mode`, `lyrics`, `is_instrumental`, `lyrics_optimizer`) "
         "are flat at the top level — do NOT wrap them in a `content` array.\n"
         "   - **Basic instrumental**: `musicGeneration` with "
