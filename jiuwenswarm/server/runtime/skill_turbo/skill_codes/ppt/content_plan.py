@@ -932,22 +932,26 @@ def _validate_outline_markdown_basic(
         type_aliases = {
             "cover": {"cover", "intro"},
             "agenda": {"agenda"},
-            "ending": {"ending", "conclusion", "transition"},
+            "ending": {"ending", "conclusion"},
         }
+        matched_page_indices: set[int] = set()
         for section in normalized_sections:
-            expected_title = section["title"]
+            expected_title = section["title"].strip()
             expected_type = section["page_type"]
             matched = False
-            for _, block in pages:
-                actual_title = _extract_outline_field(block, "标题")
+            for page_index, (_, block) in enumerate(pages):
+                if page_index in matched_page_indices:
+                    continue
+                actual_title = _extract_outline_field(block, "标题").strip()
                 actual_type = _extract_outline_field(block, "类型").strip().lower()
-                if expected_title not in actual_title:
+                if expected_title != actual_title:
                     continue
                 if expected_type == "content":
                     matched = _is_research_required_page(block)
                 else:
                     matched = actual_type in type_aliases[expected_type]
                 if matched:
+                    matched_page_indices.add(page_index)
                     break
             if not matched:
                 raise ContentPlanError(
