@@ -373,22 +373,22 @@ async def test_joyai_channel_tts_collects_pcm_and_returns_wav(monkeypatch) -> No
 
 def test_video_live_mode_is_explicit_and_defaults_to_joyai(monkeypatch) -> None:
     monkeypatch.delenv("VIDEO_LIVE_MODE", raising=False)
-    assert video_live._video_live_mode() == "joyai"
+    assert video_live._video_live_mode() == "joyai"  # pylint: disable=protected-access
 
     monkeypatch.setenv("VIDEO_LIVE_MODE", "JoyAI")
-    assert video_live._video_live_mode() == "joyai"
+    assert video_live._video_live_mode() == "joyai"  # pylint: disable=protected-access
 
     monkeypatch.setenv("VIDEO_LIVE_MODE", "unknown")
-    assert video_live._video_live_mode() == "joyai"
+    assert video_live._video_live_mode() == "joyai"  # pylint: disable=protected-access
 
 
 def test_voice_protocol_selects_native_or_openai_adapter(monkeypatch) -> None:
     monkeypatch.setenv("VIDEO_LIVE_MODE", "joyai")
     monkeypatch.setenv("VOICE_PROTOCOL", "native_ws")
-    assert video_live._uses_joyai_voice_channel()
+    assert video_live._uses_joyai_voice_channel()  # pylint: disable=protected-access
 
     monkeypatch.setenv("VOICE_PROTOCOL", "openai_http")
-    assert not video_live._uses_joyai_voice_channel()
+    assert not video_live._uses_joyai_voice_channel()  # pylint: disable=protected-access
 
 
 def test_unified_voice_config_precedes_legacy_fields(monkeypatch) -> None:
@@ -1241,7 +1241,7 @@ def test_jsonl_appends_are_atomic_across_threads(tmp_path) -> None:
     with ThreadPoolExecutor(max_workers=8) as pool:
         list(
             pool.map(
-                lambda index: video_live._append_jsonl(
+                lambda index: video_live._append_jsonl(  # pylint: disable=protected-access
                     path, {"index": index, "text": "测试"}
                 ),
                 range(100),

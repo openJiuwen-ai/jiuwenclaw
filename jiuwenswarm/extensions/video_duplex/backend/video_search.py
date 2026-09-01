@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import re
 import time
 from typing import Any, Awaitable, Callable
@@ -12,6 +13,8 @@ import uuid
 from jiuwenswarm.extensions.video_duplex.backend.qwen_omni_tools import (
     parse_qwen_omni_tool_call,
 )
+
+logger = logging.getLogger(__name__)
 VIDEO_TOOL_CHANNEL_ID = "video_tool"
 
 
@@ -271,8 +274,8 @@ class VideoSearchManager:
     async def _send_event(self, ws: Any, event: str, payload: dict[str, Any]) -> None:
         try:
             await self._channel.send_event(ws, event, payload)
-        except Exception:
-            pass
+        except Exception:  # noqa: BLE001 - progress delivery is best-effort
+            logger.debug("Failed to send video search event %s", event, exc_info=True)
 
     async def _run_job(
         self,
