@@ -229,7 +229,7 @@ function SplitDiff({ file }: { file: GitDiffFile }) {
 
 function FileDiff({ file, viewMode }: { file: GitDiffFile; viewMode: DiffViewMode }) {
   if (file.is_binary) return <div className="code-review__empty">二进制文件不能显示文本差异。</div>;
-  if (file.is_large_file && file.hunks.length === 0) return <div className="code-review__empty">文件过大，后端未返回差异内容。</div>;
+  if (file.is_large_file && file.hunks.length === 0) return <div className="code-review__empty">该文件差异超过 1MB，已跳过内容预览。</div>;
   if (file.hunks.length === 0) return <div className="code-review__empty">该文件没有可显示的差异内容。</div>;
   return viewMode === 'split' ? <SplitDiff file={file} /> : <UnifiedDiff file={file} />;
 }
@@ -377,7 +377,6 @@ export function CodeReviewPanel({ project, sessionId, target = null, diffWatch, 
       ),
     [diffWatch.detailFiles, diffWatch.files],
   );
-  const workingTreeFilePaths = useMemo(() => Object.keys(diffWatch.files).sort(), [diffWatch.files]);
 
   const reviewDocument = useMemo<CodeReviewDocument | null>(() => {
     if (source === 'last_turn') {
@@ -408,9 +407,7 @@ export function CodeReviewPanel({ project, sessionId, target = null, diffWatch, 
   useEffect(() => {
     const validPaths = new Set(files.map(file => file.file_path));
     setExpandedPaths(previous => {
-      const next = new Set([...previous].filter(path => validPaths.has(path)));
-      if (next.size === 0 && files[0]) next.add(files[0].file_path);
-      return next;
+      return new Set([...previous].filter(path => validPaths.has(path)));
     });
   }, [files]);
 
@@ -422,8 +419,10 @@ export function CodeReviewPanel({ project, sessionId, target = null, diffWatch, 
   }, [project.project_id, sessionId, source, target]);
 
   useEffect(() => {
-    diffWatch.setDetailPaths(source === 'working_tree' ? workingTreeFilePaths : []);
-  }, [diffWatch.setDetailPaths, source, workingTreeFilePaths]);
+    // 详情可能接近 1MB；只保留当前查看文件的内容，切换或关闭时释放旧详情。
+    const selectedFileIsExpanded = selectedPath && expandedPaths.has(selectedPath);
+    diffWatch.setDetailPaths(source === 'working_tree' && selectedFileIsExpanded ? [selectedPath] : []);
+  }, [diffWatch.setDetailPaths, expandedPaths, selectedPath, source]);
 
   const filteredFiles = useMemo(() => {
     const query = search.trim().toLocaleLowerCase();
@@ -444,16 +443,13 @@ export function CodeReviewPanel({ project, sessionId, target = null, diffWatch, 
   const toggleFile = (filePath: string) => {
     setSelectedPath(filePath);
     setExpandedPaths(previous => {
-      const next = new Set(previous);
-      if (next.has(filePath)) next.delete(filePath);
-      else next.add(filePath);
-      return next;
+      return previous.has(filePath) ? new Set() : new Set([filePath]);
     });
   };
 
   const openFileFromSidebar = (filePath: string) => {
     setSelectedPath(filePath);
-    setExpandedPaths(previous => new Set(previous).add(filePath));
+    setExpandedPaths(new Set([filePath]));
     window.requestAnimationFrame(() => fileSectionRefs.current.get(filePath)?.scrollIntoView({ block: 'start' }));
   };
 

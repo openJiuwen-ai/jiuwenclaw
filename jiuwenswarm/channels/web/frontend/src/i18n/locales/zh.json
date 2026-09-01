@@ -1775,7 +1775,7 @@
     },
     "graph": {
       "orchestration": {
-        "description": "开启后，JiuwenSwarm 会为已安装的技能构建技能图谱（消耗Token），并在执行任务时基于图谱自动选择、组合和编排技能，提高任务执行效率；关闭后将不再进行技能编排，已构建的技能图谱不会删除。",
+        "description": "开启后，会为已安装的技能构建技能图谱（消耗Token），并在执行任务时基于图谱自动选择、组合和编排技能，提高任务执行效率；关闭后将不再进行技能编排，已构建的技能图谱不会删除。",
         "graphDefinition": "技能图谱就像一张技能关系地图：每个点代表一个技能，点之间的线表示它们可以配合使用。",
         "saving": "正在保存…",
         "saveFailed": "技能编排开关保存失败，请稍后重试。",
@@ -1809,7 +1809,7 @@
       "tasks": "任务",
       "relatedEdges": "关联技能",
       "noRelatedEdges": "暂无关联技能。",
-      "selectSkillHint": "从技能列表或画布中选择一个技能，查看说明和关联。",
+      "selectSkillHint": "从技能列表或画布中选择一个技能，查看详情",
       "detailDrawerLabel": "技能详情",
       "closeDetail": "关闭详情",
       "zoomIn": "放大",

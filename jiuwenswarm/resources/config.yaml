@@ -1,3 +1,7 @@
+# 配置版本号：与程序版本（jiuwenswarm/common/_build_config.py 的 VERSION）同步。
+# 空串表示未迁移，首次启动迁移后由程序写回实际版本。
+config_version: ""
+
 # 前端显示语言：zh（中文）/ en（英文），与 Web 界面语言切换同步
 preferred_language: zh
 
