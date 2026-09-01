@@ -2031,7 +2031,7 @@ overflow: hidden;
   /* stretch：tab 项占满整行高度，is-active 的 2px 下划线（::after）才能
      精确压在容器底边上（原 flex-start 使 item 高度只到内容高，下划线悬空） */
   align-items: stretch;
-  color: var(--color-text-secondary);
+  color: var(--color-text-primary);
   font-size: 14px;
   /* 固定行不参与 flex 收缩：面板内容超过 max-height 时若被压缩成小数高度，这 1px
      border-bottom 和 is-active 的 2px 下划线会落在非整设备像素上，视觉上变成约 0.667px；
