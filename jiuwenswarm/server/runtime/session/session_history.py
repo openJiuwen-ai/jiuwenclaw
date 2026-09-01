@@ -254,19 +254,21 @@ def _read_history_jsonl(path: Path) -> list[dict[str, Any]]:
 
 
 def _dedup_records_last_wins(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """同 id 的 chat.final 记录保留最后一条（last-wins）。
+    """同 id 的 chat.final 记录去重（内容前缀语义，替代 last-wins）。
 
-    一轮内 chat.final 会多次落盘（段落边界的 pending 草稿 + 逐段/累计快照），
-    id 均为 ``<request_id>:assistant``——不去重的话前端按 id 只能命中首条，
-    其余按内容匹配不上沦为独立消息，一轮内容按前缀逐段重复展示。
-    last-wins = 保留内容最全的最后一条；无 id 记录原样保留。
+    一轮内 chat.final 会多次落盘，id 均为 ``<request_id>:assistant``，但内容
+    分两种形态：
+    - 「累计快照」：中间稿是终稿前缀，前端会重复展示——丢弃；
+    - 「独立正文段」：多次尝试各自的正文（穿插时间线重建依赖）——保留。
+    因此只丢弃「终稿前缀」或「与已保留正文逐字重复（重试同稿）」的中间稿，
+    其余中间稿全部保留；无 id 记录原样保留。
 
     只收敛 event_type=="chat.final"：tool_call/tool_result 等记录合法共享
     回合 rid（同 id 多条是正常形态），不能误收。
 
     多气泡（leader 同轮多次发言）：各泡 chat.final 带 ``bubble_seq``，共享 id
-    但语义上是不同卡片——去重键带上 bubble_seq（同一泡的快照重写仍 last-wins，
-    不同泡互不收敛）。无 bubble_seq 的存量记录行为不变。
+    但语义上是不同卡片——去重键带上 bubble_seq（同一泡的快照重写仍按前缀
+    语义收敛，不同泡互不收敛）。无 bubble_seq 的存量记录行为不变。
     """
     def _dedup_key(record: dict[str, Any]) -> str:
         record_id = str(record.get("id") or "").strip()
@@ -275,22 +277,44 @@ def _dedup_records_last_wins(records: list[dict[str, Any]]) -> list[dict[str, An
             return f"{record_id}#b{bubble_seq}"
         return record_id
 
-    last_index_by_id: dict[str, int] = {}
+    def _record_text(record: dict[str, Any]) -> str:
+        content = record.get("content")
+        return content.strip() if isinstance(content, str) else ""
+
+    # 每 key 最后一条 chat.final 的正文（前缀判断基准）
+    last_index_by_key: dict[str, int] = {}
+    last_text_by_key: dict[str, str] = {}
     for index, record in enumerate(records):
         if str(record.get("event_type") or "") != "chat.final":
             continue
-        record_id = _dedup_key(record)
-        if record_id:
-            last_index_by_id[record_id] = index
-    if not last_index_by_id:
-        return records
-    return [
-        record
-        for index, record in enumerate(records)
-        if str(record.get("event_type") or "") != "chat.final"
-        or not str(record.get("id") or "").strip()
-        or last_index_by_id[_dedup_key(record)] == index
-    ]
+        key = _dedup_key(record)
+        if not key:
+            continue
+        last_index_by_key[key] = index
+        last_text_by_key[key] = _record_text(record)
+
+    kept: list[dict[str, Any]] = []
+    kept_text_by_key: dict[str, str] = {}
+    for index, record in enumerate(records):
+        if str(record.get("event_type") or "") != "chat.final":
+            kept.append(record)
+            continue
+        key = _dedup_key(record)
+        if not key:
+            kept.append(record)
+            continue
+        if index != last_index_by_key.get(key):
+            # 中间稿：终稿前缀（累计快照）或与已保留正文重复（重试同稿）→ 丢弃
+            text = _record_text(record)
+            if not text:
+                continue
+            if last_text_by_key.get(key, "").startswith(text):
+                continue
+            if kept_text_by_key.get(key) == text:
+                continue
+        kept_text_by_key[key] = _record_text(record)
+        kept.append(record)
+    return kept
 
 
 def load_history_records(session_id: str) -> list[dict[str, Any]]:
