@@ -6,7 +6,6 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
@@ -14,6 +13,7 @@ from jiuwenswarm.agents.harness.team.expert_org.catalog import (
     JiuwenExpertGroupCatalog,
     descriptor_from_agent_group_dir,
 )
+from jiuwenswarm.agents.swarm.agent_group import load_agent_group_package_bundle
 
 
 def _write_json(path: Path, payload: dict) -> None:
@@ -87,30 +87,6 @@ def test_catalog_list_maps_validated_packages(
         lambda name: frontend if name == "frontend-group" else backend,
     )
 
-    def _fake_load(path: Path):
-        assert path.name in {"frontend-group", "backend-group"}
-        if path.name == "frontend-group":
-            return {
-                "leader": SimpleNamespace(
-                    agent_card=SimpleNamespace(
-                        name="Frontend Lead", description="lead desc"
-                    )
-                ),
-                "member1": SimpleNamespace(
-                    agent_card=SimpleNamespace(name="member1", description="")
-                ),
-            }
-        return {
-            "leader": SimpleNamespace(
-                agent_card=SimpleNamespace(name="Backend Lead", description="api")
-            )
-        }
-
-    monkeypatch.setattr(
-        "jiuwenswarm.agents.harness.team.expert_org.catalog._load_agent_group_package",
-        _fake_load,
-    )
-
     catalog = JiuwenExpertGroupCatalog()
     all_groups = catalog.list()
     assert [item.agent_group_name for item in all_groups] == [
@@ -140,14 +116,10 @@ def test_catalog_list_skips_packages_that_fail_load(
     def _fake_load(path: Path):
         if path.name == "broken-group":
             raise ValueError("invalid roster")
-        return {
-            "leader": SimpleNamespace(
-                agent_card=SimpleNamespace(name="Good", description="")
-            )
-        }
+        return load_agent_group_package_bundle(path)
 
     monkeypatch.setattr(
-        "jiuwenswarm.agents.harness.team.expert_org.catalog._load_agent_group_package",
+        "jiuwenswarm.agents.harness.team.expert_org.catalog._load_agent_group_package_bundle",
         _fake_load,
     )
 
@@ -164,17 +136,48 @@ def test_descriptor_from_dir_uses_load_result(
         "sample",
         capabilities=["analysis"],
         instruction="do analysis",
-    )
-    monkeypatch.setattr(
-        "jiuwenswarm.agents.harness.team.expert_org.catalog._load_agent_group_package",
-        lambda _path: {
-            "leader": SimpleNamespace(
-                agent_card=SimpleNamespace(name="专家团负责人", description="fallback")
-            )
-        },
+        display_name="专家团负责人",
     )
     descriptor = descriptor_from_agent_group_dir("sample", package)
     assert descriptor.agent_group_name == "sample"
     assert descriptor.display_name == "专家团负责人"
     assert descriptor.description == "do analysis"
     assert descriptor.capabilities == ("analysis",)
+
+
+def test_load_bundle_missing_manifest_raises_value_error(tmp_path: Path) -> None:
+    package = tmp_path / "missing-manifest"
+    package.mkdir()
+    with pytest.raises(ValueError, match="manifest.*missing"):
+        load_agent_group_package_bundle(package)
+
+
+def test_load_bundle_invalid_json_raises_value_error(tmp_path: Path) -> None:
+    package = tmp_path / "bad-json"
+    package.mkdir()
+    (package / "manifest.json").write_text("{not-json", encoding="utf-8")
+    with pytest.raises(ValueError, match="not valid JSON"):
+        load_agent_group_package_bundle(package)
+
+
+def test_load_bundle_non_object_raises_value_error(tmp_path: Path) -> None:
+    package = tmp_path / "list-manifest"
+    package.mkdir()
+    (package / "manifest.json").write_text("[]", encoding="utf-8")
+    with pytest.raises(ValueError, match="must contain a JSON object"):
+        load_agent_group_package_bundle(package)
+
+
+def test_catalog_get_raises_value_error_when_manifest_unreadable(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    package = tmp_path / "broken-get"
+    package.mkdir()
+    (package / "manifest.json").write_text("{broken", encoding="utf-8")
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.harness.team.expert_org.catalog._resolve_agent_group_dir",
+        lambda _name: package,
+    )
+    catalog = JiuwenExpertGroupCatalog()
+    with pytest.raises(ValueError, match="not valid JSON"):
+        catalog.get("broken-get")

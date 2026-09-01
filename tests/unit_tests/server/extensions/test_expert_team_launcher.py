@@ -4,8 +4,6 @@
 
 from __future__ import annotations
 
-import json
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -13,7 +11,6 @@ import pytest
 from jiuwenswarm.agents.harness.team.expert_org.launcher import (
     JiuwenExpertTeamLauncher,
     _align_spec_storage,
-    _read_agent_group_capabilities,
 )
 
 
@@ -116,6 +113,43 @@ class _FakeRuntime:
         return True
 
 
+@pytest.fixture(autouse=True)
+def agent_group_loader(monkeypatch: pytest.MonkeyPatch, tmp_path):
+    package_dir = tmp_path / "sample-expert-group"
+    package_dir.mkdir()
+    package = SimpleNamespace(
+        package_dir=package_dir,
+        manifest={
+            "name": "sample-expert-group",
+            "instruction": "expert group instruction",
+            "capabilities": ["frontend"],
+        },
+        templates={},
+        instruction="expert group instruction",
+        capabilities=("frontend",),
+    )
+    calls = {"resolve": 0, "load": 0}
+
+    def _resolve(_name):
+        calls["resolve"] += 1
+        return package_dir
+
+    def _load(path):
+        calls["load"] += 1
+        assert path == package_dir
+        return package
+
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.extension_package_manager.resolve_agent_group_dir",
+        _resolve,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.swarm.agent_group.load_agent_group_package_bundle",
+        _load,
+    )
+    return calls
+
+
 def test_align_spec_storage_uses_donor_connection_string(monkeypatch: pytest.MonkeyPatch) -> None:
     captured: dict[str, object] = {}
 
@@ -141,11 +175,12 @@ def test_align_spec_storage_uses_donor_connection_string(monkeypatch: pytest.Mon
 
 
 @pytest.mark.asyncio
-async def test_launch_creates_resolvable_team(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_launch_creates_resolvable_team(
+    monkeypatch: pytest.MonkeyPatch, agent_group_loader
+) -> None:
     shared_db = _FakeDb()
     runtime = _FakeRuntime(shared_db)
-    launcher = JiuwenExpertTeamLauncher(runtime_manager=runtime, sequence_start=1)
-    monkeypatch.setattr(launcher, "_validate_agent_group", lambda _name: None)
+    launcher = JiuwenExpertTeamLauncher(runtime_manager=runtime)
 
     async def _fake_build(**kwargs):
         return _FakeSpec(kwargs["team_id"])
@@ -159,9 +194,10 @@ async def test_launch_creates_resolvable_team(monkeypatch: pytest.MonkeyPatch) -
         display_name="Sample",
     )
 
-    assert launched.team_id == "org-org-1-sample-expert-group-1"
+    assert launched.team_id.startswith("org-expert-")
+    assert len(launched.team_id.removeprefix("org-expert-")) == 12
     assert launched.agent_group_name == "sample-expert-group"
-    assert launched.leader_id == "leader-org-org-1-sample-expert-group-1"
+    assert launched.leader_id == f"leader-{launched.team_id}"
     assert launched.capabilities == ("frontend",)
     assert launched.to_dict()["team_id"] == launched.team_id
 
@@ -171,6 +207,7 @@ async def test_launch_creates_resolvable_team(monkeypatch: pytest.MonkeyPatch) -
     pooled = await runtime.pool.get(launched.team_id)
     assert pooled is not None
     assert pooled.agent.team_backend.team_name == launched.team_id
+    assert agent_group_loader == {"resolve": 1, "load": 1}
 
 
 @pytest.mark.asyncio
@@ -182,12 +219,7 @@ async def test_launch_with_owner_uses_shared_db_for_task_and_message_managers(
     owner_agent = _FakeAgent("owner-team", shared_db)
     runtime.entries["owner-team"] = owner_agent
 
-    launcher = JiuwenExpertTeamLauncher(runtime_manager=runtime, sequence_start=1)
-    monkeypatch.setattr(launcher, "_validate_agent_group", lambda _name: None)
-    monkeypatch.setattr(
-        "jiuwenswarm.agents.harness.team.expert_org.launcher._read_agent_group_instruction",
-        lambda _name: "expert group instruction",
-    )
+    launcher = JiuwenExpertTeamLauncher(runtime_manager=runtime)
 
     async def _fake_build(**kwargs):
         return _FakeSpec(kwargs["team_id"])
@@ -221,8 +253,7 @@ async def test_launch_with_owner_uses_shared_db_for_task_and_message_managers(
 async def test_launch_allocates_unique_team_ids(monkeypatch: pytest.MonkeyPatch) -> None:
     shared_db = _FakeDb()
     runtime = _FakeRuntime(shared_db)
-    launcher = JiuwenExpertTeamLauncher(runtime_manager=runtime, sequence_start=7)
-    monkeypatch.setattr(launcher, "_validate_agent_group", lambda _name: None)
+    launcher = JiuwenExpertTeamLauncher(runtime_manager=runtime)
 
     async def _fake_build(**kwargs):
         return _FakeSpec(kwargs["team_id"])
@@ -239,9 +270,34 @@ async def test_launch_allocates_unique_team_ids(monkeypatch: pytest.MonkeyPatch)
         agent_group_name="frontend-group",
         session_id="s",
     )
-    assert first.team_id == "org-org-frontend-group-7"
-    assert second.team_id == "org-org-frontend-group-8"
+    assert first.team_id.startswith("org-expert-")
+    assert second.team_id.startswith("org-expert-")
     assert first.team_id != second.team_id
+    assert len(first.team_id.removeprefix("org-expert-")) == 12
+    assert len(second.team_id.removeprefix("org-expert-")) == 12
+
+
+@pytest.mark.asyncio
+async def test_launch_does_not_stop_when_spec_build_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = _FakeRuntime(_FakeDb())
+    launcher = JiuwenExpertTeamLauncher(runtime_manager=runtime)
+
+    async def _fail_build(**_kwargs):
+        raise RuntimeError("spec build failed")
+
+    monkeypatch.setattr(launcher, "_build_enriched_spec", _fail_build)
+
+    with pytest.raises(RuntimeError, match="spec build failed"):
+        await launcher.launch(
+            organization_id="org-1",
+            agent_group_name="sample-expert-group",
+            session_id="sess-1",
+        )
+
+    assert runtime.activate_calls == []
+    assert runtime.stop_calls == []
 
 
 @pytest.mark.asyncio
@@ -252,7 +308,6 @@ async def test_launch_rolls_back_when_activate_fails(
     runtime = _FakeRuntime(shared_db)
     runtime.fail_activate = True
     launcher = JiuwenExpertTeamLauncher(runtime_manager=runtime)
-    monkeypatch.setattr(launcher, "_validate_agent_group", lambda _name: None)
 
     async def _fake_build(**kwargs):
         return _FakeSpec(kwargs["team_id"])
@@ -266,8 +321,11 @@ async def test_launch_rolls_back_when_activate_fails(
             session_id="sess-1",
         )
 
-    assert runtime.stop_calls == [("org-org-1-sample-expert-group-1", "sess-1")]
-    assert await runtime.pool.get("org-org-1-sample-expert-group-1") is None
+    assert len(runtime.stop_calls) == 1
+    stopped_team_id, stopped_session_id = runtime.stop_calls[0]
+    assert stopped_team_id.startswith("org-expert-")
+    assert stopped_session_id == "sess-1"
+    assert await runtime.pool.get(stopped_team_id) is None
 
 
 @pytest.mark.asyncio
@@ -275,7 +333,6 @@ async def test_stop_removes_team(monkeypatch: pytest.MonkeyPatch) -> None:
     shared_db = _FakeDb()
     runtime = _FakeRuntime(shared_db)
     launcher = JiuwenExpertTeamLauncher(runtime_manager=runtime)
-    monkeypatch.setattr(launcher, "_validate_agent_group", lambda _name: None)
 
     async def _fake_build(**kwargs):
         return _FakeSpec(kwargs["team_id"])
@@ -314,59 +371,13 @@ def test_verify_shared_database_rejects_mismatched_task_manager_db() -> None:
         launcher._verify_shared_database(expert_agent, donor_backend)
 
 
-def test_read_agent_group_capabilities_from_manifest(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    group_dir = tmp_path / "finance-group"
-    group_dir.mkdir()
-    (group_dir / "manifest.json").write_text(
-        json.dumps(
-            {
-                "name": "finance-group",
-                "package_type": "agent_group",
-                "agents": ["leader"],
-                "capabilities": ["finance", "risk"],
-            }
-        ),
-        encoding="utf-8",
-    )
-    monkeypatch.setattr(
-        "jiuwenswarm.server.runtime.extension_package_manager.resolve_agent_group_dir",
-        lambda _name: group_dir,
-    )
-    assert _read_agent_group_capabilities("finance-group") == ("finance", "risk")
-
-
-def test_read_agent_group_capabilities_without_manifest_field(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    group_dir = tmp_path / "sample-expert-group"
-    group_dir.mkdir()
-    (group_dir / "manifest.json").write_text(
-        json.dumps(
-            {
-                "name": "sample-expert-group",
-                "package_type": "agent_group",
-                "agents": ["leader"],
-            }
-        ),
-        encoding="utf-8",
-    )
-    monkeypatch.setattr(
-        "jiuwenswarm.server.runtime.extension_package_manager.resolve_agent_group_dir",
-        lambda _name: group_dir,
-    )
-    assert _read_agent_group_capabilities("sample-expert-group") == ()
-
-
 @pytest.mark.asyncio
 async def test_launch_reflects_metadata_capabilities_from_build(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     shared_db = _FakeDb()
     runtime = _FakeRuntime(shared_db)
-    launcher = JiuwenExpertTeamLauncher(runtime_manager=runtime, sequence_start=1)
-    monkeypatch.setattr(launcher, "_validate_agent_group", lambda _name: None)
+    launcher = JiuwenExpertTeamLauncher(runtime_manager=runtime)
 
     async def _fake_build(**kwargs):
         return _FakeSpec(

@@ -4,7 +4,6 @@
 
 from __future__ import annotations
 
-import json
 import logging
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -56,56 +55,31 @@ def _resolve_agent_group_dir(name: str) -> Path:
     return resolve_agent_group_dir(name)
 
 
-def _load_agent_group_package(path: Path) -> dict[str, Any]:
+def _load_agent_group_package_bundle(path: Path) -> Any:
     """Lazy import so unit tests can monkeypatch without loading swarm assembly."""
-    from jiuwenswarm.agents.swarm.agent_group import load_agent_group_package
+    from jiuwenswarm.agents.swarm.agent_group import (
+        load_agent_group_package_bundle,
+    )
 
-    return load_agent_group_package(path)
-
-
-def _read_group_manifest(package_dir: Path) -> dict[str, Any]:
-    manifest_path = package_dir / "manifest.json"
-    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
-    if not isinstance(payload, dict):
-        raise ValueError(f"agent_group manifest must be an object: {manifest_path}")
-    return payload
-
-
-def _capabilities_from_manifest(manifest: dict[str, Any]) -> tuple[str, ...]:
-    raw = manifest.get("capabilities", [])
-    if not isinstance(raw, list):
-        return ()
-    names: list[str] = []
-    seen: set[str] = set()
-    for item in raw:
-        name = str(item or "").strip()
-        if not name or name in seen:
-            continue
-        seen.add(name)
-        names.append(name)
-    return tuple(names)
+    return load_agent_group_package_bundle(path)
 
 
 def descriptor_from_agent_group_dir(
     agent_group_name: str, package_dir: Path
 ) -> ExpertGroupDescriptor:
-    """Validate one package with load_agent_group_package and map to a descriptor."""
-    templates = _load_agent_group_package(package_dir)
-    manifest = _read_group_manifest(package_dir)
-    leader = templates.get("leader")
+    """Validate one package and map its single load result to a descriptor."""
+    package = _load_agent_group_package_bundle(package_dir)
+    leader = package.templates.get("leader")
     leader_card = getattr(leader, "agent_card", None) if leader is not None else None
     display_name = str(getattr(leader_card, "name", "") or "").strip() or agent_group_name
-    instruction = manifest.get("instruction", "")
-    if not isinstance(instruction, str):
-        instruction = ""
-    description = instruction.strip() or str(
+    description = package.instruction or str(
         getattr(leader_card, "description", "") or ""
     ).strip()
     return ExpertGroupDescriptor(
         agent_group_name=agent_group_name,
         display_name=display_name,
         description=description,
-        capabilities=_capabilities_from_manifest(manifest),
+        capabilities=package.capabilities,
     )
 
 
@@ -120,7 +94,7 @@ class JiuwenExpertGroupCatalog:
         for name, package_dir in _iter_agent_group_dirs():
             try:
                 descriptor = descriptor_from_agent_group_dir(name, package_dir)
-            except (ValueError, OSError, json.JSONDecodeError) as exc:
+            except (ValueError, OSError) as exc:
                 logger.warning(
                     "[ExpertGroupCatalog] skip invalid agent_group %s: %s",
                     name,

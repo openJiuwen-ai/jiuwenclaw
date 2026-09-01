@@ -31,4 +31,4 @@ def __getattr__(name: str):
         )
 
         return register_expert_adapter_installer
-    raise AttributeError(name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

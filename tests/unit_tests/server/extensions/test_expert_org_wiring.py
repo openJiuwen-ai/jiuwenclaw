@@ -135,11 +135,19 @@ async def test_launcher_shares_db_from_owner(monkeypatch: pytest.MonkeyPatch) ->
             return True
 
     runtime = _Runtime()
-    launcher = JiuwenExpertTeamLauncher(runtime_manager=runtime, sequence_start=1)
-    monkeypatch.setattr(launcher, "_validate_agent_group", lambda _name: None)
+    launcher = JiuwenExpertTeamLauncher(runtime_manager=runtime)
+    package_dir = object()
     monkeypatch.setattr(
-        "jiuwenswarm.agents.harness.team.expert_org.launcher._read_agent_group_instruction",
-        lambda _name: "group instruction",
+        "jiuwenswarm.server.runtime.extension_package_manager.resolve_agent_group_dir",
+        lambda _name: package_dir,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.swarm.agent_group.load_agent_group_package_bundle",
+        lambda _path: SimpleNamespace(
+            instruction="group instruction",
+            capabilities=("frontend",),
+            templates={},
+        ),
     )
 
     async def _fake_build(**kwargs):
@@ -156,7 +164,8 @@ async def test_launcher_shares_db_from_owner(monkeypatch: pytest.MonkeyPatch) ->
         session_id="sess-1",
         share_db_from_team_id="owner-team",
     )
-    assert launched.team_id == "org-org-1-sample-expert-group-1"
+    assert launched.team_id.startswith("org-expert-")
+    assert len(launched.team_id.removeprefix("org-expert-")) == 12
     assert expert_backend.db is shared_db
     assert expert_backend.task_manager.db is shared_db
     assert expert_backend.message_manager.db is shared_db

@@ -4,9 +4,8 @@
 
 from __future__ import annotations
 
-import asyncio
-import json
 import logging
+import uuid
 from dataclasses import asdict, dataclass
 from typing import Any
 
@@ -78,45 +77,16 @@ def _align_spec_storage(spec: Any, donor_db: Any) -> None:
     spec.storage = StorageSpec(type=db_type, params=params)
 
 
-def _read_agent_group_instruction(agent_group_name: str) -> str:
-    from jiuwenswarm.server.runtime.extension_package_manager import (
-        resolve_agent_group_dir,
-    )
-
-    package_dir = resolve_agent_group_dir(agent_group_name)
-    manifest_path = package_dir / "manifest.json"
-    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
-    if not isinstance(payload, dict):
-        return ""
-    instruction = payload.get("instruction", "")
-    return instruction.strip() if isinstance(instruction, str) else ""
-
-
-def _read_agent_group_capabilities(agent_group_name: str) -> tuple[str, ...]:
-    from jiuwenswarm.agents.harness.team.expert_org.catalog import (
-        _capabilities_from_manifest,
-    )
-    from jiuwenswarm.server.runtime.extension_package_manager import (
-        resolve_agent_group_dir,
-    )
-
-    package_dir = resolve_agent_group_dir(agent_group_name)
-    manifest_path = package_dir / "manifest.json"
-    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
-    if not isinstance(payload, dict):
-        return ()
-    return _capabilities_from_manifest(payload)
-
-
 def _team_build_labels(
     *,
     team_id: str,
     agent_group_name: str,
+    instruction: str,
     display_name: str | None,
     spec: Any,
 ) -> tuple[str, str, str, str]:
     team_display = str(display_name or "").strip() or agent_group_name or team_id
-    team_desc = _read_agent_group_instruction(agent_group_name) or team_display
+    team_desc = instruction or team_display
     leader = getattr(spec, "leader", None)
     leader_display = str(getattr(leader, "display_name", "") or "").strip() or "leader"
     leader_desc = str(getattr(leader, "desc", "") or "").strip()
@@ -133,15 +103,8 @@ class JiuwenExpertTeamLauncher:
     On failure after a team_id is allocated, ``stop`` is called for rollback.
     """
 
-    def __init__(
-        self,
-        *,
-        runtime_manager: Any | None = None,
-        sequence_start: int = 1,
-    ) -> None:
+    def __init__(self, *, runtime_manager: Any | None = None) -> None:
         self._runtime_manager = runtime_manager
-        self._seq = max(1, int(sequence_start))
-        self._seq_lock = asyncio.Lock()
 
     def _get_runtime(self) -> Any:
         if self._runtime_manager is not None:
@@ -153,23 +116,8 @@ class JiuwenExpertTeamLauncher:
 
         return _runner_team_runtime_manager(GLOBAL_RUNNER)
 
-    @staticmethod
-    def _validate_agent_group(agent_group_name: str) -> None:
-        from jiuwenswarm.server.runtime.extension_package_manager import (
-            resolve_agent_group_dir,
-        )
-
-        resolve_agent_group_dir(agent_group_name)
-
-    async def _allocate_team_id(
-        self, *, organization_id: str, agent_group_name: str
-    ) -> str:
-        async with self._seq_lock:
-            seq = self._seq
-            self._seq += 1
-        org = str(organization_id or "").strip() or "org"
-        group = str(agent_group_name or "").strip() or "group"
-        return f"org-{org}-{group}-{seq}"
+    async def _allocate_team_id(self) -> str:
+        return f"org-expert-{uuid.uuid4().hex[:12]}"
 
     async def _resolve_donor_backend(
         self,
@@ -203,6 +151,7 @@ class JiuwenExpertTeamLauncher:
         team_id: str,
         session_id: str,
         agent_group_name: str,
+        agent_group_package: Any,
         display_name: str | None,
         channel_id: str | None = None,
         shared_db: Any | None = None,
@@ -216,7 +165,7 @@ class JiuwenExpertTeamLauncher:
         metadata = dict(getattr(spec, "metadata", None) or {})
         metadata["agent_group_name"] = agent_group_name
         metadata["expert_team"] = True
-        metadata["capabilities"] = list(_read_agent_group_capabilities(agent_group_name))
+        metadata["capabilities"] = list(agent_group_package.capabilities)
         if display_name:
             metadata["display_name"] = display_name
         updates["metadata"] = metadata
@@ -229,6 +178,7 @@ class JiuwenExpertTeamLauncher:
             channel_id=channel_id,
             request_metadata={"mode": "team", "agent_group_name": agent_group_name},
             agent_group_name=agent_group_name,
+            agent_group_package=agent_group_package,
         )
         if shared_db is not None:
             _align_spec_storage(spec, shared_db)
@@ -240,6 +190,7 @@ class JiuwenExpertTeamLauncher:
         *,
         team_id: str,
         agent_group_name: str,
+        instruction: str,
         display_name: str | None,
         spec: Any,
     ) -> None:
@@ -254,6 +205,7 @@ class JiuwenExpertTeamLauncher:
         team_display, team_desc, leader_display, leader_desc = _team_build_labels(
             team_id=team_id,
             agent_group_name=agent_group_name,
+            instruction=instruction,
             display_name=display_name,
             spec=spec,
         )
@@ -309,11 +261,17 @@ class JiuwenExpertTeamLauncher:
         if not str(session_id or "").strip():
             raise ValueError("session_id is required")
 
-        self._validate_agent_group(group_name)
-        team_id = await self._allocate_team_id(
-            organization_id=organization_id,
-            agent_group_name=group_name,
+        from jiuwenswarm.agents.swarm.agent_group import (
+            load_agent_group_package_bundle,
         )
+        from jiuwenswarm.server.runtime.extension_package_manager import (
+            resolve_agent_group_dir,
+        )
+
+        agent_group_package = load_agent_group_package_bundle(
+            resolve_agent_group_dir(group_name)
+        )
+        team_id = await self._allocate_team_id()
         runtime = self._get_runtime()
         donor_backend = await self._resolve_donor_backend(
             session_id=session_id,
@@ -322,18 +280,19 @@ class JiuwenExpertTeamLauncher:
         )
         shared_db = getattr(donor_backend, "db", None) if donor_backend is not None else None
 
-        activated = False
+        activation_attempted = False
         try:
             spec = await self._build_enriched_spec(
                 team_id=team_id,
                 session_id=session_id,
                 agent_group_name=group_name,
+                agent_group_package=agent_group_package,
                 display_name=display_name,
                 channel_id=channel_id,
                 shared_db=shared_db,
             )
+            activation_attempted = True
             activation = await runtime.activate(spec, session_id)
-            activated = True
             agent = getattr(activation, "agent", None)
             if agent is None:
                 raise ValueError(f"activate returned no agent for team: {team_id}")
@@ -343,6 +302,7 @@ class JiuwenExpertTeamLauncher:
                     agent,
                     team_id=team_id,
                     agent_group_name=group_name,
+                    instruction=agent_group_package.instruction,
                     display_name=display_name,
                     spec=spec,
                 )
@@ -367,7 +327,7 @@ class JiuwenExpertTeamLauncher:
                 agent_group_name=group_name,
             )
         except Exception:
-            if activated or team_id:
+            if activation_attempted:
                 await self.stop(team_id=team_id, session_id=session_id)
             raise
 
