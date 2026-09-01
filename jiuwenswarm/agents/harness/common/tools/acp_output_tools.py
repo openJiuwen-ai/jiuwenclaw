@@ -227,8 +227,7 @@ class AcpOutputManager:
             ):
                 raise RuntimeError("ACP output request was not delivered")
         except asyncio.CancelledError:
-            self._pending.pop(jsonrpc_id, None)
-            await self._notify_cancellation(
+            await self._handle_cancellation(
                 cancel_method=cancel_method,
                 jsonrpc_id=jsonrpc_id,
                 channel_id=channel_id,
@@ -240,6 +239,25 @@ class AcpOutputManager:
             self._pending.pop(jsonrpc_id, None)
             raise RuntimeError(f"Failed to send ACP output request: {exc}") from exc
 
+        # asyncio.wait_for() can race a cancellation against the completion
+        # of the awaited callback: if the callback finished just as this
+        # task was cancelled, wait_for() silently returns the callback's
+        # result instead of propagating CancelledError (see cpython
+        # gh-90833/bpo-42130). When that happens the task's cancellation
+        # request is still outstanding, so falling through here would wait
+        # on the full response timeout below instead of honoring the
+        # cancellation. Detect that swallowed cancellation explicitly.
+        current_task = asyncio.current_task()
+        if current_task is not None and current_task.cancelling():
+            await self._handle_cancellation(
+                cancel_method=cancel_method,
+                jsonrpc_id=jsonrpc_id,
+                channel_id=channel_id,
+                session_id=session_id,
+                method=method,
+            )
+            raise asyncio.CancelledError()
+
         logger.info(
             "[AcpOutput] sent E2A request: jsonrpc_id=%s method=%s request_id=%s",
             jsonrpc_id,
@@ -249,14 +267,14 @@ class AcpOutputManager:
 
         try:
             if future.done():
-                return future.result()
-            return await asyncio.wait_for(
-                future,
-                timeout=max(0.0, deadline - loop.time()),
-            )
+                result = future.result()
+            else:
+                result = await asyncio.wait_for(
+                    future,
+                    timeout=max(0.0, deadline - loop.time()),
+                )
         except asyncio.CancelledError:
-            self._pending.pop(jsonrpc_id, None)
-            await self._notify_cancellation(
+            await self._handle_cancellation(
                 cancel_method=cancel_method,
                 jsonrpc_id=jsonrpc_id,
                 channel_id=channel_id,
@@ -273,6 +291,36 @@ class AcpOutputManager:
                 timeout,
             )
             raise
+
+        if current_task is not None and current_task.cancelling():
+            await self._handle_cancellation(
+                cancel_method=cancel_method,
+                jsonrpc_id=jsonrpc_id,
+                channel_id=channel_id,
+                session_id=session_id,
+                method=method,
+            )
+            raise asyncio.CancelledError()
+
+        return result
+
+    async def _handle_cancellation(
+        self,
+        *,
+        cancel_method: str | None,
+        jsonrpc_id: str,
+        channel_id: str,
+        session_id: str | None,
+        method: str,
+    ) -> None:
+        self._pending.pop(jsonrpc_id, None)
+        await self._notify_cancellation(
+            cancel_method=cancel_method,
+            jsonrpc_id=jsonrpc_id,
+            channel_id=channel_id,
+            session_id=session_id,
+            method=method,
+        )
 
     async def _notify_cancellation(
         self,

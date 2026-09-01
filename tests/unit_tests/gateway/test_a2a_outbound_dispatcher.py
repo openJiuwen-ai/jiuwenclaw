@@ -981,6 +981,62 @@ async def test_reverse_rpc_emits_cancel_notification_when_tool_is_canceled(
 
 
 @pytest.mark.asyncio
+async def test_reverse_rpc_cancel_racing_callback_completion_still_cancels(
+    monkeypatch,
+) -> None:
+    """Cancellation must be honored even if it races the push callback.
+
+    Regression test for a Python 3.11 ``asyncio.wait_for`` behavior: if the
+    task is cancelled at (almost) the exact moment the awaited callback
+    future completes, ``wait_for`` can silently return the callback's
+    result instead of propagating ``CancelledError`` (a known asyncio
+    "swallowed cancellation" race, fixed on 3.12+). When that happens,
+    ``send_jsonrpc_request`` must still detect the outstanding cancellation
+    request instead of falling through to the full response timeout.
+
+    The cancel() call is issued from *inside* the mocked push callback
+    itself so the race is deterministic regardless of Python version or
+    event loop scheduling.
+    """
+    manager = get_acp_output_manager()
+    manager.reset_state()
+    pushes = []
+    holder: dict[str, asyncio.Task] = {}
+
+    async def send_push(wire):
+        pushes.append(wire)
+        if wire["body"]["method"] == A2A_TOOL_DISPATCH_TASK:
+            holder["task"].cancel()
+        elif wire["body"]["method"] == A2A_TOOL_CANCEL_CALL:
+            rpc_id = wire["body"]["id"]
+            manager.complete_jsonrpc_response(
+                rpc_id, {"jsonrpc": "2.0", "id": rpc_id, "result": {"canceled": True}}
+            )
+
+    monkeypatch.setattr(manager, "_send_push_callback", send_push)
+    try:
+        pending = asyncio.create_task(
+            manager.send_jsonrpc_request(
+                A2A_TOOL_DISPATCH_TASK,
+                {"task": "secret"},
+                session_id="s1",
+                log_params=False,
+                cancel_method=A2A_TOOL_CANCEL_CALL,
+            )
+        )
+        holder["task"] = pending
+
+        with pytest.raises(asyncio.CancelledError):
+            await pending
+        assert [item["body"]["method"] for item in pushes] == [
+            A2A_TOOL_DISPATCH_TASK,
+            A2A_TOOL_CANCEL_CALL,
+        ]
+    finally:
+        manager.reset_state()
+
+
+@pytest.mark.asyncio
 async def test_reverse_rpc_delivery_failure_fails_immediately(monkeypatch) -> None:
     manager = get_acp_output_manager()
     manager.reset_state()
