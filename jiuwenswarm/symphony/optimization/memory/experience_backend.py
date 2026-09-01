@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import threading
 import time
 from pathlib import Path
@@ -118,7 +119,8 @@ class ExperienceBankPromptMemory(PromptMemory):
 
     def _rewrite_sidecar(self) -> None:
         self._dir.mkdir(parents=True, exist_ok=True)
-        with self._sidecar.open("w", encoding="utf-8") as handle:
+        tmp_path = self._sidecar.with_suffix(self._sidecar.suffix + ".tmp")
+        with tmp_path.open("w", encoding="utf-8") as handle:
             for item_id, record in self._records.items():
                 handle.write(
                     json.dumps(
@@ -127,6 +129,9 @@ class ExperienceBankPromptMemory(PromptMemory):
                     )
                     + "\n"
                 )
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_path, self._sidecar)
 
 
 __all__ = ["ExperienceBankPromptMemory"]

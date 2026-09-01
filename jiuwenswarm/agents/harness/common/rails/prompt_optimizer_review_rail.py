@@ -14,6 +14,7 @@ directly in the leader's own context, the same way
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any, Callable
 
@@ -105,7 +106,7 @@ class PromptOptimizerReviewRail(DeepAgentRail):
             return
 
         language = getattr(self.system_prompt_builder, "language", "cn") or "cn"
-        content = _render_pending_section(self._resolve_config_base())
+        content = await asyncio.to_thread(_render_pending_section, self._resolve_config_base())
         if not content.strip():
             self.system_prompt_builder.remove_section(self.SECTION_NAME)
             return

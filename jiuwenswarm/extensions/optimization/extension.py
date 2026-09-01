@@ -12,15 +12,17 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 from dataclasses import replace
 from typing import Any
 
+from openjiuwen.dev_tools.tune.optimizer.prompt_search.memory import PromptMemory
 from openjiuwen.dev_tools.tune.optimizer.prompt_search.run_log import read_run_log
 
 from jiuwenswarm.extensions.sdk import BaseExtension
-from jiuwenswarm.symphony.optimization.config import load_optimization_config
+from jiuwenswarm.symphony.optimization.config import OptimizationConfig, load_optimization_config
 from jiuwenswarm.symphony.optimization.factory import OptimizerRuntimeFactory
-from jiuwenswarm.symphony.optimization.models import TaskSpec
+from jiuwenswarm.symphony.optimization.models import TaskSpec, to_prompt_task_spec
 from jiuwenswarm.symphony.optimization.service import (
     default_run_log_path,
     optimize_prompt,
@@ -46,6 +48,8 @@ class PromptOptimizerExtension(BaseExtension):
         self._registry = None
         self._run_guard = asyncio.Lock()
         self._active_task: asyncio.Task | None = None
+        self._memory_lock = threading.Lock()
+        self._memory_cache: dict[str, PromptMemory] = {}
 
     async def initialize(self, config) -> None:
         return None
@@ -62,6 +66,22 @@ class PromptOptimizerExtension(BaseExtension):
             OPTIMIZER_PENDING_IMPROVEMENTS, self.pending_improvements
         )
         registry.register_rpc_handler(OPTIMIZER_MARK_APPLIED, self.mark_applied)
+
+    def _get_memory(self, config: OptimizationConfig) -> PromptMemory:
+        """Return the process-shared memory instance for ``config``'s directory.
+
+        Every RPC handler mutates/reads the same in-process object (rather than
+        each building its own fresh instance from disk) so the object's own
+        lock actually serializes concurrent ``mark_applied``/``add`` calls
+        instead of racing two independent snapshots of the sidecar file.
+        """
+        key = str(config.resolved_memory_dir)
+        with self._memory_lock:
+            memory = self._memory_cache.get(key)
+            if memory is None:
+                memory = OptimizerRuntimeFactory(config).memory()
+                self._memory_cache[key] = memory
+            return memory
 
     async def optimize(
         self,
@@ -92,7 +112,10 @@ class PromptOptimizerExtension(BaseExtension):
             self._active_task = current_task
 
         try:
-            result = await optimize_prompt(task, config=config, run_log_path=run_log)
+            memory = await asyncio.to_thread(self._get_memory, config)
+            result = await optimize_prompt(
+                task, config=config, run_log_path=run_log, memory=memory
+            )
         except Exception as exc:  # noqa: BLE001
             logger.exception("optimizer.optimize failed")
             return {"success": False, "detail": f"optimization failed: {exc}"}
@@ -120,7 +143,7 @@ class PromptOptimizerExtension(BaseExtension):
                 "memory_enabled": config.memory_enabled,
                 "memory_dir": str(config.resolved_memory_dir),
                 "run_log": read_run_log(default_run_log_path(config)),
-                "running": self._active_task is not None and not self._active_task.done(),
+                "running": (task := self._active_task) is not None and not task.done(),
             }
 
         return await asyncio.to_thread(load)
@@ -140,8 +163,10 @@ class PromptOptimizerExtension(BaseExtension):
             return {"success": False, "detail": "objective is required"}
 
         def search() -> dict[str, Any]:
-            memory = OptimizerRuntimeFactory(config).memory()
-            records = memory.search_similar(task, top_k=int(params.get("top_k") or 1))
+            memory = self._get_memory(config)
+            records = memory.search_similar(
+                to_prompt_task_spec(task), top_k=int(params.get("top_k") or 1)
+            )
             if not records:
                 return {"success": True, "found": False, "objective": task.objective}
             best = max(records, key=lambda r: r.reward)
@@ -175,7 +200,7 @@ class PromptOptimizerExtension(BaseExtension):
             threshold = config.convergence_threshold
 
         def load() -> dict[str, Any]:
-            memory = OptimizerRuntimeFactory(config).memory()
+            memory = self._get_memory(config)
             records = memory.pending(threshold)
             return {
                 "success": True,
@@ -200,7 +225,7 @@ class PromptOptimizerExtension(BaseExtension):
             return {"success": False, "detail": "record_id is required"}
 
         def apply() -> dict[str, Any]:
-            memory = OptimizerRuntimeFactory(config).memory()
+            memory = self._get_memory(config)
             found = memory.mark_applied(record_id)
             if not found:
                 return {
