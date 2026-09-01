@@ -687,24 +687,28 @@ class CronSchedulerService:
 
     def _schedule_event(self, at_dt: datetime, kind: str, job_id: str, run_id: str) -> None:
         at_ts = float(at_dt.timestamp())
-        # 幂等去重（仅 wake）：若堆里已有该 job 的未来 wake event，不重复排入。
+        # 幂等去重（仅 wake，同 run_id 维度）：若堆里已有相同 run_id + wake 的 event，
+        # 不重复排入。
         # 背景：proactive.tick 每次 completed 后（854行）都调 _compute_next_run 算下一次
         # wake 并 _schedule_event。相邻几次 tick（cron 到点 + 用户多次 run_now）算出的
         # next_run_id 相同（下一个 cron 到点不变），重复排入会让堆里累积多个同 run_id
         # wake，到点时被主循环逐个消费 → 同一 run_id triggering 多次 → 连推多张卡片
         # （2026-08-31 实测 9 次同 run_id 推 6 张；2026-09-01 插桩确证堆里累积 6 个同
-        # run_id wake）。普通定时任务也有同样代码路径，只是没有"短时间多次触发"场景
-        # 而不累积；此 job 维度去重对所有任务兜底。
-        # 只对 wake 去重：push/push_update 是补发场景，可能需要重复（如 push_update
-        # 补最终结果），不去重。
+        # run_id wake）。
+        #
+        # 用 run_id 维度而非 job 维度：trigger_run_now（597行）每次的 run_id = 触发时刻
+        # （每次不同），不会被去重 → 用户点"立即执行"正常执行，不误杀。只有 completed
+        # 重排的 next_run_id（短时间内多次 tick 都相同，= 下一个 cron 到点）才会命中
+        # 去重 → 堵住累积。无需时间魔法数字，靠 run_id 语义自然区分。
+        # 只对 wake 去重：push/push_update 是补发场景，可能需重复（如 push_update 补
+        # 最终结果），不去重。
         if kind == "wake":
-            now_ts = self._now_fn()
             for _, _, e in self._events:
-                if e.kind == "wake" and e.job_id == job_id and e.at_ts > now_ts:
+                if e.kind == "wake" and e.run_id == run_id:
                     logger.info(
-                        "[Cron] _schedule_event skip duplicate wake: job=%s new_run_id=%s "
-                        "existing_run_id=%s existing_at=%.3f (future wake already scheduled)",
-                        job_id, run_id, e.run_id, e.at_ts,
+                        "[Cron] _schedule_event skip duplicate wake: job=%s run_id=%s "
+                        "already in heap (at=%.3f)",
+                        job_id, run_id, e.at_ts,
                     )
                     return
         self._seq += 1
