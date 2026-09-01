@@ -56,11 +56,15 @@ from jiuwenswarm.agents.harness.common.rails.interrupt.interrupt_helpers import 
     apply_permission_trusted_dirs,
     build_permission_rail,
 )
+from jiuwenswarm.agents.harness.common.tools.invoke_meta.invoke_tool import InvokeTool
 from jiuwenswarm.agents.harness.common.browser_defaults import (
     DEFAULT_BROWSER_AGENT_MAX_ITERATIONS,
 )
 from jiuwenswarm.agents.harness.code.prompt.code_prompt_builder import (
     build_code_system_prompt,
+)
+from jiuwenswarm.agents.harness.design.prompt.design_prompt_builder import (
+    build_design_system_prompt,
 )
 from jiuwenswarm.agents.harness.code.rails import (
     CodeTaskPlanningRail,
@@ -382,6 +386,15 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
         # True (code-agent → project_dir). 见
         # ``sysop_builder.build_filesystem_policy`` 中 line 545 附近的分支。
         self._is_code_agent: bool = True
+        # Code/design profile language policy: ``_runtime_language_override``
+        # stays ``None`` in the main ``create_instance`` path so
+        # ``_resolve_runtime_language`` returns ``"en"`` — driven into
+        # ``system_prompt_builder.language`` by ``_update_prompt_for_mode``,
+        # keeping SAFETY / skills / memory / subagent rails' en/cn branches
+        # on English. Only ``configure_team_member_agent`` overrides per
+        # member. User-visible rails/tools (StructuredAskUserRail /
+        # WebPaidSearchTool, etc.) read ``_resolve_output_language`` directly
+        # so their content follows ``preferred_language``.
         self._runtime_language_override: str | None = None
         self._force_english_runtime_prompt: bool = True
 
@@ -393,7 +406,20 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
         return "en"
 
     def _resolve_runtime_language(self) -> str:
-        """Resolve runtime prompt language for code profile rails."""
+        """Resolve runtime language for code/design profile rails and tools.
+
+        Returns ``_runtime_language_override`` when set
+        (``configure_team_member_agent`` populates it per team member),
+        otherwise English. Driven into ``system_prompt_builder.language``
+        via ``_update_prompt_for_mode``, so keeping the default ``None``
+        here is what holds SAFETY / skills / memory / subagent rails on
+        their English branch.
+
+        User-visible rails/tools that produce directly user-facing UI
+        (button labels, error messages, plan-mode notes) read
+        ``_resolve_output_language`` directly so they follow
+        ``preferred_language`` while scaffolding stays English.
+        """
         return self._runtime_language_override or "en"
 
     def _resolve_output_language(self) -> str:
@@ -415,11 +441,15 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
 
     async def create_instance(self, config: dict[str, Any] | None = None, *,
                               mode: str = "code", sub_mode: str = None) -> None:
-        """初始化 DeepAgent 实例（code 模式）.
+        """初始化 DeepAgent 实例（code / design 模式）.
 
         统一使用 create_deep_agent()，不传 vision_model_config /
         audio_model_config。
         completion_timeout 从配置读取，可在 react / modes.code 中自定义。
+
+        ``mode="design"`` 时改用 ``build_design_system_prompt()``（对齐 WorkBuddy
+        设计模式），并按 design 标记 ``_jiuwenswarm_adapter_mode``；其余行为与
+        code 一致（design 派生自 code，复用 rails/tools 装配）。
         """
         # Propagate create params to per-session child adapters (see
         # JiuWenSwarmDeepAdapter._get_or_create_session_adapter).  The parent
@@ -493,7 +523,11 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
             model=model,
             card=agent_card,
             tool_owner_id=self._tool_owner_id(),
-            system_prompt=build_code_system_prompt(),
+            system_prompt=(
+                build_design_system_prompt()
+                if mode == "design"
+                else build_code_system_prompt()
+            ),
             tools=tool_cards if tool_cards else [],
             subagents=configured_subagents,
             rails=rails_list if rails_list else [],
@@ -546,7 +580,7 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
         self._ensure_project_gitignore_agent_history(initial_workspace)
         self._seed_runtime_cwd(initial_workspace, workspace=initial_workspace)
 
-        setattr(self._instance, "_jiuwenswarm_adapter_mode", "code")
+        setattr(self._instance, "_jiuwenswarm_adapter_mode", mode if mode in ("code", "design") else "code")
         setattr(
             self._instance,
             "_jiuwenswarm_code_project_dir",
@@ -714,7 +748,7 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
     def _build_structured_ask_user_rail(self) -> StructuredAskUserRail | None:
         """构建 StructuredAskUserRail."""
         try:
-            return StructuredAskUserRail(language=self._resolve_runtime_language())
+            return StructuredAskUserRail(language=self._resolve_output_language())
         except Exception as exc:
             logger.warning("[JiuwenSwarmCodeAdapter] StructuredAskUserRail create failed: %s", exc)
             return None
@@ -1221,6 +1255,31 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
                 tool_name,
             )
 
+        # design 模式：注册统一元工具 invoke（PluginSkillExecTool / agent_as_a_tool）。
+        # design 提示词大量依赖 invoke 路由图像（seedreamLite4Skill）/ 视频
+        # （seedanceMiniTask）能力，CodeAdapter 默认不挂载它，此处按 design 信号
+        # 主动补齐，对齐 DeepAdapter 的注册行为（见 interface_deep.py:5385-5394）。
+        # 受 `agents.invoke_tool.enabled` 控制（默认 true）。
+        if getattr(self, "_session_instance_mode", None) == "design":
+            invoke_cfg = (config_base.get("agents") or {}).get("invoke_tool") or {}
+            if bool(invoke_cfg.get("enabled", True)) and not getattr(
+                self, "_invoke_tool_registered", False
+            ):
+                try:
+                    invoke_tool = InvokeTool()
+                    owner_id = self._tool_owner_id()
+                    self._register_agent_owned_tool(invoke_tool, owner_id)
+                    tool_cards.append(invoke_tool.card)
+                    self._invoke_tool_registered = True
+                    logger.info(
+                        "[JiuwenSwarmCodeAdapter] invoke meta-tool registered (design mode)"
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "[JiuwenSwarmCodeAdapter] invoke meta-tool registration failed: %s",
+                        exc,
+                    )
+
         return tool_cards
 
     def _get_tool_build_func(self, tool_name: str, agent_id: str) -> Any | None:
@@ -1240,13 +1299,13 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
     def _build_web_free_search_tool(self, agent_id: str) -> Any:
         """构建 web_free_search 工具."""
         return WebFreeSearchTool(
-            language=self._resolve_runtime_language(), agent_id=agent_id
+            language=self._resolve_output_language(), agent_id=agent_id
         )
 
     def _build_web_fetch_webpage_tool(self, agent_id: str) -> Any:
         """构建 web_fetch_webpage 工具."""
         return WebFetchWebpageTool(
-            language=self._resolve_runtime_language(), agent_id=agent_id
+            language=self._resolve_output_language(), agent_id=agent_id
         )
 
     def _build_paid_search_tool(self, agent_id: str) -> WebPaidSearchTool | None:
@@ -1258,7 +1317,7 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
             logger.info("[JiuwenSwarmCodeAdapter] web_paid_search skipped: no paid search API key")
             return None
         tool = WebPaidSearchTool(
-            language=self._resolve_runtime_language(), agent_id=agent_id
+            language=self._resolve_output_language(), agent_id=agent_id
         )
         self._paid_search_tool = tool
         self._paid_search_registered = True

@@ -631,7 +631,11 @@ def _install_default_builtin_skills(
     """
     # 定义默认安装的技能列表
     default_skills = [
-        "xiaoyi-web-search"
+        "xiaoyi-web-search",
+        "find-skills",
+        "xiaoyi-doc-convert",
+        "xiaoyi-pdf",
+        "xiaoyi-ppt",
     ]
 
     if not builtin_dir.exists() or not builtin_dir.is_dir():
@@ -686,7 +690,11 @@ def ensure_builtin_skills_installed() -> None:
     """
     # 默认预装的技能列表
     default_skills = [
-        "xiaoyi-web-search"
+        "xiaoyi-web-search",
+        "find-skills",
+        "xiaoyi-doc-convert",
+        "xiaoyi-pdf",
+        "xiaoyi-ppt",
     ]
 
     builtin_dir = get_builtin_skills_dir()

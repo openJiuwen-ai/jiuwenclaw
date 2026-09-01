@@ -128,7 +128,10 @@ def create_adapter(sdk: str | None = None, *, mode: str = "agent") -> AgentAdapt
 
     Args:
         sdk: SDK name, if None will resolve from environment.
-        mode: Instance mode, "agent" (default) or "code".
+        mode: Instance mode, "agent" (default), "code", or "design".
+            ``design`` 派生自 ``code``（复用 CodeAdapter 的实例化路径与 rails/tools
+            装配），仅 system prompt 与 invoke 工具注册按 design 切换，因此这里
+            返回 CodeAdapter；下游 ``create_instance`` 按 ``mode`` 值区分二者。
 
     Returns:
         AgentAdapter instance for the specified SDK and mode.
@@ -140,7 +143,7 @@ def create_adapter(sdk: str | None = None, *, mode: str = "agent") -> AgentAdapt
     sdk_name = sdk or resolve_sdk_choice()
 
     if sdk_name == "harness":
-        if mode == "code":
+        if mode in ("code", "design"):
             from jiuwenswarm.server.runtime.agent_adapter.interface_code import JiuwenSwarmCodeAdapter
             return JiuwenSwarmCodeAdapter()
         from jiuwenswarm.server.runtime.agent_adapter.interface_deep import JiuWenSwarmDeepAdapter
