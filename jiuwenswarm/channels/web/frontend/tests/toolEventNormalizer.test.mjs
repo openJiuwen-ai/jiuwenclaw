@@ -28,26 +28,13 @@ const plannedGraphInit = `%%{init: ${JSON.stringify({
   themeVariables: { fontSize: '11px', radius: 8 },
 })}}%%`;
 
-test('preserves Mermaid-safe capability IDs as node IDs and labels', () => {
-  assert.equal(
-    plannedGraphToMermaid(payload(['123_start', 'middle_step', 'final-step'])),
-    [
-      plannedGraphInit,
-      'flowchart LR',
-      '123_start("123_start")',
-      'final-step("final-step")',
-      'middle_step("middle_step")',
-    ].join('\n'),
-  );
-});
-
-test('sorts nodes and edges deterministically for chains and branches', () => {
+test('sorts Mermaid-safe nodes and edges deterministically for chains and branches', () => {
   const graph = payload(
-    ['final_step', 'middle-step', 'first_step'],
+    ['final_step', 'middle-step', '123_first_step'],
     [
       { source: 'middle-step', target: 'final_step', relation: 'can_feed' },
-      { source: 'first_step', target: 'middle-step', relation: 'can_feed' },
-      { source: 'first_step', target: 'final_step', relation: 'can_feed' },
+      { source: '123_first_step', target: 'middle-step', relation: 'can_feed' },
+      { source: '123_first_step', target: 'final_step', relation: 'can_feed' },
     ],
   );
 
@@ -56,36 +43,37 @@ test('sorts nodes and edges deterministically for chains and branches', () => {
     [
       plannedGraphInit,
       'flowchart LR',
+      '123_first_step("123_first_step")',
       'final_step("final_step")',
-      'first_step("first_step")',
       'middle-step("middle-step")',
-      'first_step --> final_step',
-      'first_step --> middle-step',
+      '123_first_step --> final_step',
+      '123_first_step --> middle-step',
       'middle-step --> final_step',
     ].join('\n'),
   );
 });
 
 test('aliases Unicode and Mermaid-conflicting IDs without losing labels or edges', () => {
+  const graph = payload(
+    ['capability_0', 'class-foo', 'foo--bar', 'ppt大师', '交付总监'],
+    [
+      { source: 'class-foo', target: 'foo--bar', relation: 'can_feed' },
+      { source: 'foo--bar', target: 'ppt大师', relation: 'can_feed' },
+      { source: 'ppt大师', target: '交付总监', relation: 'can_feed' },
+      { source: '交付总监', target: 'capability_0', relation: 'can_feed' },
+    ],
+  );
+  graph.planned_graph.graph.nodes['ppt大师'].label = 'PPT大师';
+
   assert.equal(
-    plannedGraphToMermaid(
-      payload(
-        ['capability_0', 'class-foo', 'foo--bar', 'ppt大师', '交付总监'],
-        [
-          { source: 'class-foo', target: 'foo--bar', relation: 'can_feed' },
-          { source: 'foo--bar', target: 'ppt大师', relation: 'can_feed' },
-          { source: 'ppt大师', target: '交付总监', relation: 'can_feed' },
-          { source: '交付总监', target: 'capability_0', relation: 'can_feed' },
-        ],
-      ),
-    ),
+    plannedGraphToMermaid(graph),
     [
       plannedGraphInit,
       'flowchart LR',
       'capability_0("capability_0")',
       'capability_1("class-foo")',
       'capability_2("foo--bar")',
-      'capability_3("ppt大师")',
+      'capability_3("PPT大师")',
       'capability_4("交付总监")',
       'capability_1 --> capability_2',
       'capability_2 --> capability_3',

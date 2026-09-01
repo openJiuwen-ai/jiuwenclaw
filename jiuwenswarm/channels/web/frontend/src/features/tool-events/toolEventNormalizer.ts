@@ -205,7 +205,9 @@ export function plannedGraphToMermaid(rawOutput: unknown): string | undefined {
       },
     })}}%%`,
     'flowchart LR',
-    ...nodeIds.map((nodeId) => `${renderedNodeIds.get(nodeId)}("${nodeId}")`),
+    ...nodeIds.map((nodeId) =>
+      `${renderedNodeIds.get(nodeId)}(${JSON.stringify(String(asRecord(nodes[nodeId])?.label || nodeId))})`
+    ),
     ...normalizedEdges.map(
       ({ source, target }) => `${renderedNodeIds.get(source)} --> ${renderedNodeIds.get(target)}`,
     ),
