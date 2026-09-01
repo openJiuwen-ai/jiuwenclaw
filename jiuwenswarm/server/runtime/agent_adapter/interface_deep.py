@@ -6458,17 +6458,17 @@ class JiuWenSwarmDeepAdapter:
                 evolution_triggers["signal_trigger"],
             )
 
-    async def refresh_enabled_skills_from_db(self) -> None:
-        """账本变更后直读 DB 刷新 ``_enabled_skills`` 并热替换 ``SkillUseRail``（D11 轻量路径）。
+    async def refresh_enabled_skills_from_disk(self) -> None:
+        """刷新 ``_enabled_skills`` 并热替换 ``SkillUseRail``（D11 轻量路径）。
 
         不全量 ``create_instance``：不重建模型/工具卡，仅更新启用集与技能 Rail。
-        刷新前先做盘→库对账，避免「盘有库无」导致永久 Skill not found。
+        启用集以磁盘就绪技能为准（暂不依赖 installed_skill 表）。
         """
         if not is_skill_whitelist_tenant(self._agent_id, self._service_id):
             return
         if self._instance is None:
             logger.debug(
-                "[JiuWenSwarmDeepAdapter] refresh_enabled_skills_from_db skipped: instance not ready"
+                "[JiuWenSwarmDeepAdapter] refresh_enabled_skills_from_disk skipped: instance not ready"
             )
             return
 
@@ -6480,30 +6480,18 @@ class JiuWenSwarmDeepAdapter:
             ).reconcile_disk_into_ledger()
             if recon.errors:
                 logger.warning(
-                    "[JiuWenSwarmDeepAdapter] disk→ledger reconcile warnings: %s",
+                    "[JiuWenSwarmDeepAdapter] disk skill scan warnings: %s",
                     recon.errors,
                 )
+            self._enabled_skills = [
+                str(name) for name in (recon.enabled_skill_dirs or []) if str(name).strip()
+            ]
         except Exception as exc:  # noqa: BLE001
             logger.warning(
-                "[JiuWenSwarmDeepAdapter] disk→ledger reconcile failed: %s",
-                exc,
-            )
-
-        from jiuwenswarm.agents.harness.common.installed_skill import list_enabled_skill_names
-
-        try:
-            names = await list_enabled_skill_names(
-                service_id=str(self._service_id or ""),
-                agent_id=str(self._agent_id or ""),
-            )
-        except Exception as exc:  # noqa: BLE001
-            logger.warning(
-                "[JiuWenSwarmDeepAdapter] list_enabled_skill_names failed: %s",
+                "[JiuWenSwarmDeepAdapter] disk skill scan failed: %s",
                 exc,
             )
             return
-
-        self._enabled_skills = [str(name) for name in names if str(name).strip()]
 
         extra_skill_dir: str | None = None
         try:
@@ -6531,7 +6519,7 @@ class JiuWenSwarmDeepAdapter:
         )
         if new_rail is None:
             logger.warning(
-                "[JiuWenSwarmDeepAdapter] refresh_enabled_skills_from_db: SkillUseRail rebuild failed"
+                "[JiuWenSwarmDeepAdapter] refresh_enabled_skills_from_disk: SkillUseRail rebuild failed"
             )
             return
 
@@ -7939,7 +7927,7 @@ class JiuWenSwarmDeepAdapter:
                 manager=self._skill_manager,
                 service_id=self._service_id,
                 agent_id=self._agent_id,
-                on_installed_skills_changed=self.refresh_enabled_skills_from_db,
+                on_installed_skills_changed=self.refresh_enabled_skills_from_disk,
             )
             skill_tool_names: list[str] = []
             for tool in skill_toolkit.get_tools():
