@@ -1132,6 +1132,7 @@ class JiuWenSwarm:
             bind_memory_workspace_dir,
         )
         from jiuwenswarm.common.local_env_config import bind_agent_env_ns
+        from jiuwenswarm.server.runtime.tenant_context import bind_workspace_key
 
         ws = Path(self._resolve_workspace_dir())
         agent_root = ws.parent
@@ -1152,13 +1153,18 @@ class JiuWenSwarm:
             or getattr(self, "_service_id", None)
             or "default"
         )
+        mem_wk = getattr(self, "_workspace_key", None) or "default"
         mem_aid_token = bind_memory_agent_id(str(mem_aid))
         env_ns_token = bind_agent_env_ns(str(mem_sid), str(mem_aid))
-        return tenant_tokens, (mem_ws_token, mem_aid_token, env_ns_token)
+        wk_token = bind_workspace_key(str(mem_wk))
+        return tenant_tokens, (mem_ws_token, mem_aid_token, env_ns_token, wk_token)
 
     @staticmethod
     def _reset_tenant_request_context(tenant_tokens: Any, mem_token: Any) -> None:
-        from jiuwenswarm.server.runtime.tenant_context import reset_tenant_workspace_dirs
+        from jiuwenswarm.server.runtime.tenant_context import (
+            reset_tenant_workspace_dirs,
+            reset_workspace_key,
+        )
         from jiuwenswarm.agents.harness.common.tools.memory_tools import (
             reset_memory_agent_id,
             reset_memory_workspace_dir,
@@ -1166,7 +1172,11 @@ class JiuWenSwarm:
         from jiuwenswarm.common.local_env_config import reset_agent_env_ns
 
         if isinstance(mem_token, tuple):
-            if len(mem_token) == 3:
+            if len(mem_token) == 4:
+                mem_ws_token, mem_aid_token, env_ns_token, wk_token = mem_token
+                reset_workspace_key(wk_token)
+                reset_agent_env_ns(env_ns_token)
+            elif len(mem_token) == 3:
                 mem_ws_token, mem_aid_token, env_ns_token = mem_token
                 reset_agent_env_ns(env_ns_token)
             else:
@@ -1207,6 +1217,7 @@ class JiuWenSwarm:
         adapter = self._ensure_adapter(mode=mode)
         setattr(adapter, "_env_service_id", getattr(self, "_env_service_id", "default"))
         setattr(adapter, "_env_agent_id", getattr(self, "_env_agent_id", "default"))
+        setattr(adapter, "_workspace_key", getattr(self, "_workspace_key", "default"))
         create_kwargs: dict[str, Any] = {"mode": mode, "sub_mode": sub_mode}
         if config_base is not None:
             create_kwargs["config_base"] = config_base

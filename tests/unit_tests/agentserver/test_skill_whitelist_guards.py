@@ -39,11 +39,13 @@ def test_is_skill_whitelist_tenant_requires_agent_runtime(monkeypatch: pytest.Mo
     assert is_skill_whitelist_tenant("real-agent", "real-svc") is False
 
 
-def test_tenant_workspace_requires_ids() -> None:
-    with pytest.raises(TypeError, match="tenant scope is required"):
-        get_tenant_agent_jiuwenclaw_workspace_dir()
-    with pytest.raises(TypeError, match="tenant scope requires both"):
-        get_tenant_agent_skills_dirs(service_id="default", agent_id=None)
+def test_tenant_workspace_defaults_without_key() -> None:
+    from jiuwenswarm.server.runtime.tenant_context import clear_tenant_bindings
+
+    clear_tenant_bindings()
+    path = get_tenant_agent_jiuwenclaw_workspace_dir()
+    assert path.name == "workspace"
+    assert "workspace_default" in str(path)
 
 
 def test_multi_tenant_skill_dirs_single_tenant_fallback() -> None:
@@ -401,9 +403,11 @@ def test_reconcile_disk_into_ledger_only(
 
 
 def test_multi_tenant_skill_dirs_requires_ids_for_tenant_path() -> None:
-    with pytest.raises(TypeError, match="tenant scope is required"):
-        get_tenant_agent_skills_dirs()
-    # 无 tenant ids → 单租户回退
+    # 无 workspace_key → 单租户回退
     dirs = get_multi_tenant_skill_dirs()
     assert len(dirs) == 1
     assert dirs[0] == get_agent_skills_dir()
+    # 显式 key → 多租户树
+    tenant_dirs = get_tenant_agent_skills_dirs("office")
+    assert len(tenant_dirs) == 1
+    assert "workspace_office" in str(tenant_dirs[0])

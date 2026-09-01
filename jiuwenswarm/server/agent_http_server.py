@@ -256,6 +256,7 @@ def build_envelope_json(
     user_id: str | None,
     is_stream: bool,
     routing: dict[str, str] | None = None,
+    tenant_ids: dict[str, str] | None = None,
 ) -> str:
     """组装与 WS 客户端等价的 E2A 信封 JSON。
 
@@ -274,6 +275,9 @@ def build_envelope_json(
         is_stream=is_stream,
         user_id=user_id,
         channel_context=apply_routing_metadata({}, routing),
+        service_id=(tenant_ids or {}).get("service_id"),
+        agent_id=(tenant_ids or {}).get("agent_id"),
+        workspace_key=(tenant_ids or {}).get("workspace_key"),
     )
     return json.dumps(env.to_dict(), ensure_ascii=False)
 
@@ -288,16 +292,21 @@ def build_agent_request(
     user_id: str | None,
     is_stream: bool,
     routing: dict[str, str] | None = None,
+    tenant_ids: dict[str, str] | None = None,
 ) -> Any:
     """构造``AgentRequest``。
 
     ``routing`` 来自 Gateway REST 身份头（``X-User-Id`` / ``X-Bot-Id`` 等），
     经 :func:`apply_routing_metadata` 写入顶层 ``user_id`` 与
     ``channel_context.routing``（group/bot/gateway）。
+
+    ``tenant_ids`` 来自 ``X-Service-Id`` / ``X-Agent-Id`` / ``X-Workspace-Key``，
+    写入信封顶层后由 :func:`e2a_to_agent_request` 落到 ``AgentRequest``。
     """
     from jiuwenswarm.common.e2a.agent_compat import e2a_to_agent_request
     from jiuwenswarm.common.request_identity import apply_routing_metadata
 
+    tenant = tenant_ids or {}
     env = E2AEnvelope(
         request_id=request_id,
         session_id=session_id,
@@ -307,6 +316,9 @@ def build_agent_request(
         is_stream=is_stream,
         user_id=user_id,
         channel_context=apply_routing_metadata({}, routing),
+        service_id=tenant.get("service_id"),
+        agent_id=tenant.get("agent_id"),
+        workspace_key=tenant.get("workspace_key"),
     )
     return e2a_to_agent_request(env)
 
@@ -449,6 +461,7 @@ class AgentHTTPServer:
         channel_id: str = "web",
         user_id: str | None = None,
         routing: dict[str, str] | None = None,
+        tenant_ids: dict[str, str] | None = None,
     ) -> tuple[dict[str, Any], int]:
         """非流式调用，返回 (响应体, 状态码)。"""
         agent_request = build_agent_request(
@@ -460,6 +473,7 @@ class AgentHTTPServer:
             user_id=user_id,
             is_stream=False,
             routing=routing,
+            tenant_ids=tenant_ids,
         )
         sink = UnaryHTTPSink()
         try:
@@ -490,6 +504,7 @@ class AgentHTTPServer:
         channel_id: str = "web",
         user_id: str | None = None,
         routing: dict[str, str] | None = None,
+        tenant_ids: dict[str, str] | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
         """流式调用（结构化入口），产出 sse_starlette 所需的事件 dict。"""
         agent_request = build_agent_request(
@@ -501,6 +516,7 @@ class AgentHTTPServer:
             user_id=user_id,
             is_stream=True,
             routing=routing,
+            tenant_ids=tenant_ids,
         )
         sink = SSESink()
         async for event in self._pump_sse(

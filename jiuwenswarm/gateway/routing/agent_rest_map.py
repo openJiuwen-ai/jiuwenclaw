@@ -242,6 +242,10 @@ def identity_headers(envelope: E2AEnvelope, *, accept: str) -> dict[str, str]:
     ``channel_context.routing``（``group_id`` / ``bot_id`` / ``gateway_id``）
     必须经 ``X-*`` 头传到 Agent，由 Agent HTTP 入口重建。
 
+    企业租户顶层字段同理：``service_id`` / ``agent_id`` / ``workspace_key``
+    （Gateway ``apply_invoke_ids_to_envelope`` 写入）经
+    ``X-Service-Id`` / ``X-Agent-Id`` / ``X-Workspace-Key`` 透传。
+
     ``gateway_id`` 仅透传保留；Agent 业务（如企业配置 ``RoutingContext``）当前不消费。
     """
     from jiuwenswarm.common.request_identity import web_routing_identity
@@ -268,6 +272,15 @@ def identity_headers(envelope: E2AEnvelope, *, accept: str) -> dict[str, str]:
         value = identity.get(field)
         if value:
             headers[header_name] = value
+    for attr, header_name in (
+        ("service_id", "X-Service-Id"),
+        ("agent_id", "X-Agent-Id"),
+        ("workspace_key", "X-Workspace-Key"),
+    ):
+        value = getattr(envelope, attr, None)
+        text = str(value).strip() if value is not None else ""
+        if text:
+            headers[header_name] = text
     return headers
 
 

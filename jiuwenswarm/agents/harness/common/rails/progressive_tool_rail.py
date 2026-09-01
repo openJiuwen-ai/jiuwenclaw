@@ -150,13 +150,20 @@ class ProgressiveToolRail(DeepAgentRail):
             reset_agent_env_ns,
             reset_task_env_overlay,
         )
+        from jiuwenswarm.server.runtime.tenant_context import (
+            bind_workspace_key,
+            reset_workspace_key,
+        )
 
         route = provider()
         service_id = str(route.get("service_id") or "default")
         agent_id = str(route.get("agent_id") or "default")
+        workspace_key = str(route.get("workspace_key") or "default")
         with ExitStack() as cleanup:
             ns_token = bind_agent_env_ns(service_id, agent_id)
             cleanup.callback(reset_agent_env_ns, ns_token)
+            wk_token = bind_workspace_key(workspace_key)
+            cleanup.callback(reset_workspace_key, wk_token)
             overlay_token = bind_task_env_overlay(
                 build_effective_env_overlay(
                     service_id=service_id,
@@ -170,6 +177,7 @@ class ProgressiveToolRail(DeepAgentRail):
                 session_id=str(route.get("session_id") or ""),
                 service_id=service_id,
                 agent_id=agent_id,
+                workspace_key=workspace_key,
                 output_dir=str(route.get("output_dir") or ""),
             )
             cleanup.callback(reset_deepresearch_route, route_token)
