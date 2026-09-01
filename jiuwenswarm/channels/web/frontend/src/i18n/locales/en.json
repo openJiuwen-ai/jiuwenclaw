@@ -3185,7 +3185,7 @@
     "budgetPanelTitle": "SwarmFlow Budget",
     "budgetPanelHint": "Set the Token limit for this session.",
     "budgetPlaceholder": "Enter number",
-    "budgetActualHint": "Actual limit: {{count}} tokens",
+    "budgetActualHint": "Configured limit: {{count}} tokens",
     "workflowList": "Workflow List"
   }
 }

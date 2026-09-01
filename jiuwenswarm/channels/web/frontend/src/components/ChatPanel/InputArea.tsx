@@ -3796,10 +3796,12 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                     inputUnit = 'token';
                   }
                 }
-                const computeBudget = (val: string, unit: 'token' | 'K' | 'M', unlimited: boolean) => {
-                  if (unlimited || !val.trim()) return null;
+                const computeBudget = (val: string, unit: 'token' | 'K' | 'M') => {
+                  if (!val.trim()) return null;
                   const n = Number(val.trim());
-                  if (!Number.isFinite(n) || n <= 0) return null;
+                  // token 是最小计费单位,后端 int() 截断浮点会丢精度,
+                  // 故前端只接受正整数;浮点 / 非数字 / ≤0 一律视作无效。
+                  if (!Number.isInteger(n) || n <= 0) return null;
                   const multiplier = unit === 'M' ? 1_000_000 : unit === 'K' ? 1000 : 1;
                   return n * multiplier;
                 };
@@ -3808,14 +3810,17 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                     <div className="chat-swarmflow-config-panel__budget-row">
                       <Input
                         type="number"
+                        step={1}
+                        min={1}
                         value={inputValue}
                         placeholder={isUnlimited ? '' : t('swarmflow.budgetPlaceholder')}
-                        readOnly={swarmflowToggleDisabled}
+                        readOnly={swarmflowToggleDisabled || isUnlimited}
                         onChange={(v) => {
-                          if (swarmflowToggleDisabled) return;
+                          if (swarmflowToggleDisabled || isUnlimited) return;
                           const unit = inputUnit;
-                          const actual = computeBudget(v, unit, false);
-                          // 输入数字时自动取消"无限制"
+                          const actual = computeBudget(v, unit);
+                          // 输入有效数字→设置上限（自动取消"无限制"）；
+                          // 输入空/非数字→回退无限制。
                           useSessionStore.getState().setSwarmflowActive(
                             activeSessionId, true, actual,
                           );
@@ -3823,16 +3828,16 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                       />
                       <Select
                         value={inputUnit}
-                        disabled={swarmflowToggleDisabled}
+                        disabled={swarmflowToggleDisabled || isUnlimited}
                         options={[
                           { value: 'token', label: 'token' },
                           { value: 'K', label: 'K (×1,000)' },
                           { value: 'M', label: 'M (×1,000,000)' },
                         ]}
                         onChange={(val) => {
-                          if (swarmflowToggleDisabled) return;
+                          if (swarmflowToggleDisabled || isUnlimited) return;
                           const unit = val as 'token' | 'K' | 'M';
-                          const actual = computeBudget(inputValue || '500', unit, false);
+                          const actual = computeBudget(inputValue || '500', unit);
                           useSessionStore.getState().setSwarmflowActive(
                             activeSessionId, true, actual,
                           );
@@ -3847,12 +3852,12 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                         onChange={(e) => {
                           if (swarmflowToggleDisabled) return;
                           if (e.target.checked) {
-                            // 勾选"无限制"→ budget=null
+                            // 勾选"无限制"→ budget=null，数字自动清空（反推时 inputValue=''）
                             useSessionStore.getState().setSwarmflowActive(
                               activeSessionId, true, null,
                             );
                           } else {
-                            // 取消勾选→给一个默认值（500K）
+                            // 取消勾选→给默认值 500K
                             useSessionStore.getState().setSwarmflowActive(
                               activeSessionId, true, 500000,
                             );
@@ -3862,7 +3867,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                       <span className="text-xs text-text-muted">{t('swarmflow.budgetUnlimited')}</span>
                     </label>
                     {!isUnlimited && (() => {
-                      const actual = computeBudget(inputValue, inputUnit, false);
+                      const actual = computeBudget(inputValue, inputUnit);
                       return actual != null ? (
                         <div className="chat-swarmflow-config-panel__actual-hint">
                           {t('swarmflow.budgetActualHint', { count: actual.toLocaleString() })}

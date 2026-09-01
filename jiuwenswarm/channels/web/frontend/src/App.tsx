@@ -1776,17 +1776,6 @@ function AppContent({
             has_more?: boolean;
           }>('command.workflows', { session_id: sid, action: 'list' });
           const list = Array.isArray(payload?.workflows) ? payload.workflows : [];
-          const ids = list.map((w) => {
-            if (w && typeof w === 'object') {
-              const item = w as { id?: string; name?: string; status?: string };
-              return { id: item.id, name: item.name, status: item.status };
-            }
-            return undefined;
-          });
-          console.log(
-            '[history.restore] workflow snapshot sid=%s total=%s has_more=%s listLen=%d items=%o',
-            sid, payload?.total, payload?.has_more, list.length, ids,
-          );
           if (list.length === 0) return;
           const store = useSessionStore.getState();
           for (const item of list) {
@@ -1817,11 +1806,6 @@ function AppContent({
               // 单个工作流详情失败不阻断整体恢复。
             }
           }
-          const after = useSessionStore.getState().runtimes[sid];
-          console.log(
-            '[history.restore] workflow snapshot applied sid=%s swarmflowActive=%s workflowRunsLen=%d',
-            sid, after?.swarmflowActive, after?.workflowRuns?.length,
-          );
         } catch (error) {
           console.warn('[history.restore] workflow snapshot failed', error);
         }

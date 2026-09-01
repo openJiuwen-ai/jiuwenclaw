@@ -3066,19 +3066,22 @@ overflow: hidden;
 
 .chat-swarmflow-config-panel__budget-row {
   display: flex;
-  gap: 8px;
+  gap: 6px;
   align-items: center;
+  width: 100%;
+  box-sizing: border-box;
 }
 
 .chat-swarmflow-config-panel__budget-row .ui-input {
-  flex: 1;
-  min-width: 120px;
+  flex: 1 1 0;
+  min-width: 0;
+  width: 0;
 }
 
 .chat-swarmflow-config-panel__budget-row .ui-select {
+  flex: 0 0 auto;
   width: auto;
-  flex-shrink: 0;
-  min-width: 80px;
+  min-width: 0;
 }
 
 .chat-swarmflow-config-panel__unlimited-row {

@@ -561,8 +561,7 @@ interface SessionState {
   /** 增量合并一条 workflow 更新到 workflowRuns */
   applyWorkflowUpdate: (sessionId: string, workflow: WorkflowRun) => void;
   /** 设置/关闭用户配置 enableSwarmflow 与预算 swarmflowBudget（配置态，非视图态） */
-  setSwarmflowActive: (sessionId: string, active: boolean, budget?: number | null) => void;
-  /** 置位 swarmflowActive 粘性视图标志（置真后不再回 false）；后端 swarmflow.activated 事件专用 */
+  setSwarmflowActive: (sessionId: string, active: boolean, budget?: number | null) => void;  /** 置位 swarmflowActive 粘性视图标志（置真后不再回 false）；后端 swarmflow.activated 事件专用 */
   setSwarmflowViewActive: (sessionId: string) => void;
   /** 懒加载 phase 完整 agents（command.workflows get_phase） */
   loadPhaseAgents: (
@@ -1563,13 +1562,21 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     set((state) => {
       const rt = state.runtimes[sessionId];
       if (!rt) return state;
+      // budget === undefined → caller 不关心,保留旧值(仅切开关);
+      // budget === null   → 显式设为无限制(覆盖旧值);
+      // budget 为正整数   → 设置具体上限。
+      const nextBudget = !active
+        ? null
+        : budget !== undefined
+          ? budget
+          : (rt.swarmflowBudget ?? null);
       return {
         runtimes: {
           ...state.runtimes,
           [sessionId]: {
             ...rt,
             enableSwarmflow: active,
-            swarmflowBudget: active ? (budget ?? rt.swarmflowBudget ?? null) : null,
+            swarmflowBudget: nextBudget,
           },
         },
       };
