@@ -3525,10 +3525,10 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
             </button>
           )} */}
 
-          {isAgentMode && <ContextUsageIndicator />}
+{isAgentMode && <ContextUsageIndicator />}
 
           <ChatModelSelector
-            disabled={isProcessing || composerDisabled || (!isAgentMode && activeSessionId !== NEW_CONVERSATION_ID)}
+            disabled={composerDisabled || (!isAgentMode && activeSessionId !== NEW_CONVERSATION_ID)}
           />
 
           <button
