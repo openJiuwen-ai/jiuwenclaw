@@ -20,6 +20,7 @@ logger = logging.getLogger(__name__)
 # AgentServer's E2A normalization. Local handlers only receive ``params``, so
 # merge ``metadata.routing`` into the handler params copy (not Message.params).
 _LOCAL_ROUTING_IDENTITY_PREFIXES = ("cron.", "skills.enterprise.")
+_LOCAL_ROUTING_IDENTITY_METHODS = frozenset({"models.list"})
 
 _ENTERPRISE_BLOCKED_EXACT = frozenset({
     "config.set", "config.save_all", "models.replace_all", "models.save",
@@ -86,7 +87,10 @@ async def dispatch_web_request(
             routing,
         )
     handler_params = params
-    if method.startswith(_LOCAL_ROUTING_IDENTITY_PREFIXES):
+    if (
+        method in _LOCAL_ROUTING_IDENTITY_METHODS
+        or method.startswith(_LOCAL_ROUTING_IDENTITY_PREFIXES)
+    ):
         # Gateway 本地 handler 只有 params：把 routing 合并进调用副本。
         handler_params = merge_routing_into_params(
             params,
