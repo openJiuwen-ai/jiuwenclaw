@@ -141,6 +141,59 @@ def test_has_persistable_assistant_payload_subagent_activity():
     ) is True
 
 
+def test_has_persistable_assistant_payload_usage_summary():
+    assert session_history._has_persistable_assistant_payload(
+        content_text="",
+        event_type="chat.usage_summary",
+        extra={
+            "usage": {
+                "input_tokens": 100,
+                "output_tokens": 20,
+                "total_tokens": 120,
+            },
+            "model": "test-model",
+        },
+    ) is True
+
+
+def test_append_history_persists_usage_summary(tmp_path, monkeypatch):
+    monkeypatch.setattr(session_history, "get_agent_sessions_dir", lambda: tmp_path)
+
+    session_history.append_history_record(
+        session_id="s-usage-summary",
+        request_id="r1",
+        channel_id="web",
+        role="assistant",
+        event_type="chat.usage_summary",
+        content="",
+        timestamp=1.0,
+        extra={
+            "usage": {
+                "input_tokens": 100,
+                "output_tokens": 20,
+                "total_tokens": 120,
+                "input_cost": 0.01,
+                "output_cost": 0.02,
+                "total_cost": 0.03,
+            },
+            "model": "test-model",
+        },
+    )
+
+    data = _wait_history("s-usage-summary", min_count=1)
+    assert len(data) == 1
+    assert data[0]["event_type"] == "chat.usage_summary"
+    assert data[0]["usage"] == {
+        "input_tokens": 100,
+        "output_tokens": 20,
+        "total_tokens": 120,
+        "input_cost": 0.01,
+        "output_cost": 0.02,
+        "total_cost": 0.03,
+    }
+    assert data[0]["model"] == "test-model"
+
+
 def test_has_persistable_assistant_payload_processing_status_still_rejected():
     assert session_history._has_persistable_assistant_payload(
         content_text="",

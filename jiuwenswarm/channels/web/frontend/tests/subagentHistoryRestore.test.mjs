@@ -3,6 +3,7 @@ import test from 'node:test';
 
 import {
   mergeHistoryToolReplayItems,
+  parseHistoryJsonFileToTimelinePreview,
   parseSubagentHistoryReplay,
   recoverSubagentToolHistory,
   shouldProcessHistoryPayload,
@@ -104,6 +105,49 @@ test('subagent history replays persisted activity without treating it as final t
       tool_name: 'web_search',
       tool_call_id: 'call-4',
     },
+  });
+});
+
+test('session history restores persisted usage summary onto the preceding assistant message', () => {
+  const preview = parseHistoryJsonFileToTimelinePreview([
+    {
+      id: 'r1:user',
+      role: 'user',
+      timestamp: 1787019579,
+      content: 'hello',
+    },
+    {
+      id: 'r1:assistant',
+      role: 'assistant',
+      event_type: 'chat.final',
+      timestamp: 1787019580,
+      content: 'world',
+    },
+    {
+      id: 'r1:assistant',
+      role: 'assistant',
+      event_type: 'chat.usage_summary',
+      timestamp: 1787019581,
+      content: '',
+      usage: {
+        input_tokens: 100,
+        output_tokens: 20,
+        total_tokens: 120,
+        input_cost: 0.01,
+        output_cost: 0.02,
+        total_cost: 0.03,
+      },
+    },
+  ], sessionId);
+
+  assert.equal(preview.messages.length, 2);
+  assert.deepEqual(preview.messages[1].usageSummary, {
+    input_tokens: 100,
+    output_tokens: 20,
+    total_tokens: 120,
+    input_cost: 0.01,
+    output_cost: 0.02,
+    total_cost: 0.03,
   });
 });
 

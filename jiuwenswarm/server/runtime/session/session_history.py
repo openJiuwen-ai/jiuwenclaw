@@ -125,6 +125,8 @@ def _has_persistable_assistant_payload(
         return True
     if str(payload.get("reasoning_content") or "").strip():
         return True
+    if et == "chat.usage_summary" and isinstance(payload.get("usage"), dict):
+        return bool(payload["usage"])
     if et == "chat.file" and payload.get("files"):
         return True
     if et == "chat.tool_call" and (payload.get("tool_call") or payload.get("tool_calls")):
