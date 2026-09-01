@@ -187,8 +187,8 @@ export function ProgressSection({
               const runTasks = tasks.filter((t) => t.workflow_run_id === run.id);
               if (runTasks.length === 0) return null;
               const maxPerRun = 4;
-              const visible = runTasks.slice(0, maxPerRun);
-              const remaining = runTasks.length - visible.length;
+              const visible = expanded ? runTasks : runTasks.slice(0, maxPerRun);
+              const remaining = expanded ? 0 : runTasks.length - visible.length;
               return (
                 <div key={run.id} className="border-b border-border last:border-b-0">
                   <div className="px-2 py-1.5 text-xs text-text-muted font-medium">
