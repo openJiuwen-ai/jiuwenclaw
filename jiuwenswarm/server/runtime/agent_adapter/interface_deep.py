@@ -1215,6 +1215,7 @@ class JiuWenSwarmDeepAdapter(ExpertCapabilityMixin):
         self._dreaming_mode: str = "agent"
         self._send_file_toolkit: SendFileToolkit | None = None
         self._runtime_state_write_task: asyncio.Task[None] | None = None
+        self._housekeeping_tasks: set[asyncio.Task[None]] = set()
         self._send_html_card_toolkit: SendHtmlCardToolkit | None = None
 
     def _schedule_runtime_state_write(
@@ -5664,10 +5665,10 @@ class JiuWenSwarmDeepAdapter(ExpertCapabilityMixin):
         initial_runtime_workspace = self._project_dir or str(
             get_default_project_session_workspace_dir()
         )
-        await asyncio.to_thread(
-            self._ensure_project_gitignore_agent_history,
-            initial_runtime_workspace,
-        )
+        # .gitignore housekeeping 挪后台：历史上这里同步 await 的 git 子进程
+        # 曾在 Windows 上悬挂，把 create_instance（乃至 warm pool 全局
+        # _initialization_lock）整体卡死；纯 housekeeping 不该阻塞会话创建。
+        self._schedule_project_gitignore_agent_history(initial_runtime_workspace)
         self._seed_runtime_cwd(initial_runtime_workspace, workspace=initial_runtime_workspace)
         setattr(self._instance, "_jiuwenswarm_project_dir", initial_runtime_workspace)
 
@@ -5694,26 +5695,65 @@ class JiuWenSwarmDeepAdapter(ExpertCapabilityMixin):
         # 动态加载用户自定义的 Rail 扩展
         await self.load_user_rails()
 
+    def _schedule_project_gitignore_agent_history(self, project_dir: str | None) -> None:
+        """后台执行 .gitignore housekeeping，绝不阻塞实例创建.
+
+        历史教训：该步骤曾在 create_instance 关键路径上 await 一个
+        ``git rev-parse`` 子进程；Windows 上 subprocess.run 超时 kill 后
+        会无超时 communicate 等管道 EOF，管道写端一旦被其他存活进程继承
+        便永久悬挂（stall-watchdog 多次抓到同一点位）。即使现已改为纯
+        文件系统实现，该逻辑仍是纯 housekeeping，不值得阻塞会话创建。
+        """
+        if not project_dir:
+            return
+
+        async def _run() -> None:
+            try:
+                await asyncio.to_thread(
+                    self._ensure_project_gitignore_agent_history, project_dir
+                )
+            except Exception as exc:  # housekeeping 失败绝不外抛
+                logger.warning(
+                    "[JiuWenSwarmDeepAdapter] background gitignore housekeeping failed: %s",
+                    exc,
+                )
+
+        task = asyncio.create_task(
+            _run(),
+            name=f"gitignore-agent-history-{str(project_dir)[-24:]}",
+        )
+        tasks = getattr(self, "_housekeeping_tasks", None)
+        if tasks is None:
+            tasks = self._housekeeping_tasks = set()
+        tasks.add(task)
+        task.add_done_callback(tasks.discard)
+
+    @staticmethod
+    def _find_git_worktree_root(project_dir: str) -> str | None:
+        """逐级向上找 .git，返回工作区根；找不到返回 None.
+
+        普通仓库 .git 是目录，worktree/submodule 里是文件，统一用 exists
+        判定。等价于 ``git rev-parse --show-toplevel`` 的桌面场景子集，
+        但不 spawn 任何子进程（根除管道悬挂类卡死）。
+        """
+        try:
+            start = Path(project_dir)
+        except (OSError, ValueError):
+            return None
+        for candidate in (start, *start.parents):
+            try:
+                if (candidate / ".git").exists():
+                    return str(candidate)
+            except OSError:
+                return None
+        return None
+
     @staticmethod
     def _ensure_project_gitignore_agent_history(project_dir: str | None) -> None:
         """Ensure JiuwenSwarm's file operation logs stay out of project git diffs."""
         if not project_dir:
             return
-        try:
-            repo_probe = subprocess.run(
-                ["git", "rev-parse", "--show-toplevel"],
-                cwd=project_dir,
-                capture_output=True,
-                text=True,
-                timeout=5,
-                check=False,
-            )
-        except (OSError, subprocess.SubprocessError):
-            return
-        if repo_probe.returncode != 0:
-            return
-
-        repo_root_text = repo_probe.stdout.strip()
+        repo_root_text = JiuWenSwarmDeepAdapter._find_git_worktree_root(project_dir)
         if not repo_root_text:
             return
         gitignore_path = Path(repo_root_text) / ".gitignore"
