@@ -1,0 +1,130 @@
+"""RsiEventConsumer：引擎事件单协程消费者（内部 v3 §4.3）。
+
+分发：
+- ``progress.metric`` → 节流合并 → 投影 metric 快照 → P2（推送由调用方注入回调）
+- ``progress.usage`` → ``RsiUsageRecorder.record``
+- ``node.created`` → 采纳时快照 + 投影 → P3
+- ``node.stage`` → 投影描述更新 → P3
+
+推送回调由 AgentServer 注入（``push_callbacks``），本层不直接依赖 WebSocket；
+无回调时静默跳过推送（纯拉取模式仍可用）。
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+from collections.abc import Awaitable, Callable
+from typing import Any
+
+from jiuwenswarm.agents.harness.common.rsi.events import EngineEvent
+
+logger = logging.getLogger(__name__)
+
+PushCallback = Callable[[str, dict[str, Any]], Awaitable[None]]
+
+
+class RsiEventConsumer:
+    """单协程消费引擎事件；绑定任务上下文（task_id / push 回调）。"""
+
+    def __init__(
+        self,
+        task_id: str,
+        usage_recorder: Any,
+        projector: Any,
+        artifact_service: Any,
+    ) -> None:
+        self.task_id = task_id
+        self.usage_recorder = usage_recorder
+        self.projector = projector
+        self.artifact_service = artifact_service
+        self._on_progress: PushCallback | None = None
+        self._on_tree_delta: PushCallback | None = None
+        # 节流记录：P2 只推最新值（内部 v3 §4.3）
+        self._last_pushed_node_ids: set[str] = set()
+
+    def bind_push(self, *, on_progress: PushCallback | None = None, on_tree_delta: PushCallback | None = None) -> None:
+        self._on_progress = on_progress
+        self._on_tree_delta = on_tree_delta
+
+    async def on_engine_event(self, event: EngineEvent) -> None:
+        """事件入口（单消费者循环调用）。"""
+        if event.is_progress_metric:
+            self.projector.on_progress_metric(self.task_id, event.payload)
+            progress = self.projector.derive_progress(self.task_id)
+            usage = self.usage_recorder.usage_summary(self.task_id)
+            if usage is not None:
+                progress["usage"] = usage
+            if self._on_progress is not None:
+                await self._on_progress(self.task_id, progress)
+            return
+        if event.is_progress_usage:
+            self.usage_recorder.record_engine_event(self.task_id, event.payload)
+            return
+        if event.is_node_created:
+            payload = event.payload
+            node_meta = payload.get("node") if isinstance(payload.get("node"), dict) else payload
+            node_ref = str(node_meta.get("ref") or "") if isinstance(node_meta, dict) else ""
+            adopted = bool(node_meta.get("accepted", False)) if isinstance(node_meta, dict) else False
+            if adopted:
+                artifacts_raw = payload.get("artifacts") or []
+                artifacts = [
+                    self._to_artifact_path(item)
+                    for item in artifacts_raw
+                    if isinstance(item, dict)
+                ]
+                node = self.projector.on_node_created(self.task_id, payload)
+                if node is not None and artifacts:
+                    artifact_id = self.artifact_service.make_snapshot(
+                        self.task_id, node_ref, node.node_id, artifacts
+                    )
+                    if artifact_id:
+                        node.snapshot_artifact_id = artifact_id
+                        self.projector.persist_node_update(self.task_id, node)
+            else:
+                self.projector.on_node_created(self.task_id, payload)
+            delta = self.projector.derive_tree_delta(self.task_id, self._last_pushed_node_ids)
+            new_ids = {n.get("node_id") for n in delta.get("nodes", []) if n.get("node_id")}
+            self._last_pushed_node_ids.update(new_ids)
+            if self._on_tree_delta is not None and delta.get("nodes"):
+                await self._on_tree_delta(self.task_id, delta)
+            return
+        if event.is_node_stage:
+            node = self.projector.on_node_stage(self.task_id, event.payload)
+            if node is not None and self._on_tree_delta is not None:
+                await self._on_tree_delta(
+                    self.task_id,
+                    {"nodes": [node.to_dict()]},
+                )
+            return
+        logger.debug("[RSI] 未识别事件: %s/%s", event.family, event.kind)
+
+    @staticmethod
+    def _to_artifact_path(item: dict[str, Any]) -> Any:
+        from jiuwenswarm.agents.harness.common.rsi.models import RsiArtifactPath
+
+        return RsiArtifactPath(
+            role=str(item.get("role") or ""),
+            path=str(item.get("path") or ""),
+            format=str(item.get("format") or ""),
+        )
+
+
+async def consume_queue(
+    queue: asyncio.Queue[EngineEvent | None],
+    consumer: RsiEventConsumer,
+) -> None:
+    """单协程消费有界队列（内部 v3 §4.2 事件链路）。
+
+    ``None`` 哨兵 = 结束信号（终态后 ``await q.join()`` 排空再关）。
+    """
+    while True:
+        event = await queue.get()
+        try:
+            if event is None:
+                return
+            await consumer.on_engine_event(event)
+        except Exception:  # noqa: BLE001 - 单事件失败不终止消费者
+            logger.exception("[RSI] 事件消费失败: %s/%s", event.family, event.kind)
+        finally:
+            queue.task_done()
