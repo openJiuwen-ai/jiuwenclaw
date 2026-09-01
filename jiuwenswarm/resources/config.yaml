@@ -15,6 +15,7 @@ progressive_tool_always_visible_tools:
   - todo_list
   - todo_get
   - todo_modify
+  - send_file_to_user
 progressive_tool_default_visible_tools:
   - read_file
   - write_file
@@ -743,6 +744,8 @@ cspl:
   scan_tool_output: true
 
 channels:
+  desktop:
+    send_file_allowed: true
   web:
     send_file_allowed: true
   feishu:
