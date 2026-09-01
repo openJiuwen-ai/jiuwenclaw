@@ -199,7 +199,7 @@ function SubagentDetail({ sessionId, subagentId, onBack }: { sessionId: string; 
   }));
 
   return (
-    <div className="subagent-detail">
+    <div className="subagent-detail" data-testid="subagent-detail">
       <div className="flex shrink-0 items-center gap-2 bg-card pl-4 pr-6 pt-6" data-testid="subagent-member-detail-section">
         {onBack ? (
           <button
@@ -212,9 +212,9 @@ function SubagentDetail({ sessionId, subagentId, onBack }: { sessionId: string; 
           </button>
         ) : null}
         <div className="flex min-w-0 items-center gap-2">
-          <h2 className="truncate text-sm font-semibold text-text">{subagent.display_name}</h2>
-          {subagent.role ? <span className="truncate text-sm text-text-muted"> | {subagent.role}</span> : null}
-          {subagent.status === 'closed' ? <span className="subagent-closed-badge">{t('subagent.closed')}</span> : null}
+          <h2 className="truncate text-sm font-semibold text-text" data-testid="subagent-detail-name">{subagent.display_name}</h2>
+          {subagent.role ? <span className="truncate text-sm text-text-muted" data-testid="subagent-detail-role"> | {subagent.role}</span> : null}
+          {subagent.status === 'closed' ? <span className="subagent-closed-badge" data-testid="subagent-detail-closed-badge">{t('subagent.closed')}</span> : null}
         </div>
         {subagent.status !== 'closed' || hasFailed || subagent.closed_reason === 'evicted' ? (
           <div className="ml-auto shrink-0">
@@ -431,14 +431,14 @@ export function SubagentExpandedPanel({
   };
 
   if (!runtime) {
-    return <div className="subagent-detail__state" role="status">{t('subagent.empty')}</div>;
+    return <div className="subagent-detail__state" role="status" data-testid="subagent-expanded-empty">{t('subagent.empty')}</div>;
   }
 
   return (
-    <div className="subagent-expanded-panel">
-      <aside className="subagent-expanded-panel__list" aria-label={t('subagent.title')}>
+    <div className="subagent-expanded-panel" data-testid="subagent-expanded-panel">
+      <aside className="subagent-expanded-panel__list" aria-label={t('subagent.title')} data-testid="subagent-expanded-list">
         <div className="subagent-expanded-panel__list-heading px-[24px] pt-[24px]">
-          <span className="text-sm text-text">{t('subagent.activeListTitle', { count: activeCount })}</span>
+          <span className="text-sm text-text" data-testid="subagent-expanded-list-heading">{t('subagent.activeListTitle', { count: activeCount })}</span>
         </div>
         <div className="space-y-3 px-[24px] py-4">
           {subagents.map(subagent => {
@@ -456,7 +456,7 @@ export function SubagentExpandedPanel({
               >
                 <TeamMemberAvatar member={subagent.subagent_id} alt={subagent.display_name} className="h-8 w-8 rounded-xl" imageClassName="rounded-xl" />
                 <span className="min-w-0 flex-1 text-left">
-                  <span className="block truncate text-sm font-semibold text-text">{subagent.display_name}</span>
+                  <span className="block truncate text-sm font-semibold text-text" data-testid="subagent-expanded-row-name">{subagent.display_name}</span>
                   {(subagent.role || subagent.task_description) ? (
                     <span className="block truncate text-xs text-text-muted" data-testid="subagent-expanded-row-role">{subagent.role || subagent.task_description}</span>
                   ) : null}
@@ -468,7 +468,7 @@ export function SubagentExpandedPanel({
         </div>
       </aside>
       {detailSubagent ? (
-        <section className="min-w-0 flex-1 overflow-hidden">
+        <section className="min-w-0 flex-1 overflow-hidden" data-testid="subagent-expanded-detail">
           <SubagentDetail key={detailSubagent.subagent_id} sessionId={sessionId} subagentId={detailSubagent.subagent_id} onBack={backToOverview} />
         </section>
       ) : (
