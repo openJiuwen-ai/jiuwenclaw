@@ -6,7 +6,7 @@
  * 应用主布局，整合所有组件
  */
 
-import { useState, useCallback, useEffect, useRef, Component, ReactNode, useMemo, type PointerEvent as ReactPointerEvent } from 'react';
+import { useState, useCallback, useEffect, useRef, Component, ReactNode, useMemo, lazy, Suspense, type PointerEvent as ReactPointerEvent } from 'react';
 import { ChatPanel } from './components/ChatPanel';
 import { SessionSidebar } from './components/SessionSidebar';
 import { SkillPanel } from './components/SkillPanel';
@@ -129,8 +129,24 @@ import {
 } from './features/modelSetupGuide/ModelSetupGuide';
 import { isSetupGuideEnabled } from './features/modelSetupGuide/modelSetupGuideState';
 import { isTeamAgentMode } from './features/planMode/wireMode';
+import {
+  SingleAgentSurface,
+  type ChatSurfaceView,
+} from './features/trajectory/SingleAgentSurface';
+import {
+  shouldInsetTrajectoryForFloatingTasks,
+} from './features/trajectory/trajectoryLayout';
+import {
+  normalizeTrajectoryUiEnabled,
+  setTrajectoryUiEnabled,
+  useTrajectoryUiEnabled,
+} from './features/trajectory/featureConfig';
 import './App.css';
 
+const LazyTrajectoryPanel = lazy(async () => {
+  const module = await import('./features/trajectory/TrajectoryPanel');
+  return { default: module.TrajectoryPanel };
+});
 const CHAT_PANEL_DEFAULT_WIDTH_PCT = 33.33;
 const CHAT_PANEL_MIN_WIDTH_PCT = 20;
 const CHAT_PANEL_MAX_WIDTH_PCT = 70;
@@ -280,12 +296,15 @@ function AppContent({
     if (route.kind === 'chat-session') return route.sessionId;
     return 'new';
   });
+  const [chatSurfaceViews, setChatSurfaceViews] = useState<Record<string, ChatSurfaceView>>({});
+  const [trajectoryUiRequested, setTrajectoryUiRequested] = useState(false);
 
   const [activeNav, setActiveNav] = useState<MainNavKey>('chat');
   const [serverConfig, setServerConfig] = useState<Record<string, unknown> | null>(null);
   const kvCacheAffinityEnabled = normalizeConfigBoolean(
     serverConfig?.kv_cache_affinity_enabled,
   );
+  const trajectoryUiEnabled = useTrajectoryUiEnabled();
   const [configError, setConfigError] = useState<string | null>(null);
   const [initialDataLoaded, setInitialDataLoaded] = useState(false);
   const [restartModalOpen, setRestartModalOpen] = useState(false);
@@ -578,6 +597,18 @@ function AppContent({
   );
   const effectiveMode =
     mode === 'auto' && lastMacroRoutedMode ? lastMacroRoutedMode : mode;
+  const chatSurfaceView: ChatSurfaceView = trajectoryUiEnabled
+    && (effectiveMode === 'agent' || effectiveMode === 'team')
+    ? (chatSurfaceViews[sessionId] ?? 'chat')
+    : 'chat';
+  const selectChatSurfaceView = useCallback((nextView: ChatSurfaceView) => {
+    if (nextView === 'trajectory') setTrajectoryUiRequested(true);
+    setChatSurfaceViews((current) => (
+      current[sessionId] === nextView
+        ? current
+        : { ...current, [sessionId]: nextView }
+    ));
+  }, [sessionId]);
   const teamTaskEvents = useSessionStore((s) => s.runtimes[sessionId]?.teamTaskEvents ?? []);
   const teamTasks = useSessionStore((s) => s.runtimes[sessionId]?.teamTasks ?? []);
   const teamMembers = useSessionStore((s) => s.runtimes[sessionId]?.teamMembers ?? []);
@@ -817,6 +848,15 @@ function AppContent({
     setTeamAreaExpanded,
     mode,
   });
+  const trajectoryTaskPanelAvailable = toolPanelHasContent || isRestoringTeamHistory;
+  const effectiveTeamAreaExpanded = isTeamAreaExpanded;
+  const insetTrajectoryFloatingTasks = shouldInsetTrajectoryForFloatingTasks(
+    effectiveMode,
+    chatSurfaceView,
+    trajectoryTaskPanelAvailable,
+    toolPanelHidden,
+    isTeamAreaExpanded,
+  );
 
   // WebSocket 连接 - provider 由后端配置决定 - provider 由后端配置决定，前端默认不在 URL query 传递
   const {
@@ -1400,6 +1440,7 @@ function AppContent({
     try {
       const config = await request<Record<string, unknown>>('config.get');
       setA2UIFeatureEnabled(normalizeA2UIEnabled(config.a2ui_enabled));
+      setTrajectoryUiEnabled(normalizeTrajectoryUiEnabled(config.trajectory_ui_enabled));
       setServerConfig(config);
       setConfigError(null);
       if (!modelSetupGuideEvaluatedRef.current) {
@@ -2910,7 +2951,7 @@ function AppContent({
     && missingSessionId === routeSessionId
     && isConversationMissing(routeSessionId, true, sessions);
   const showConversationNotFound = route.kind === 'not-found' || routeSessionMissing;
-  const showWorkspaceDivider = isTeamAreaExpanded && !showConversationNotFound && !shouldFullscreen;
+const showWorkspaceDivider = effectiveTeamAreaExpanded && !showConversationNotFound && !shouldFullscreen;
   const isNewSessionPromotion = Boolean(sessionId && sessionIdsCreatedInThisPageRef.current.has(sessionId));
   const composerFocusKey = showConversationNotFound ? null : `${sessionId}:${composerFocusNonce}`;
 
@@ -2948,7 +2989,7 @@ function AppContent({
       ) : null}
 
       {/* Main Content */}
-      <main className={`content ${activeNav === 'chat' ? 'content--chat' : ''} ${isTeamAreaExpanded ? 'content--team-expanded' : ''}`}>
+      <main className={`content ${activeNav === 'chat' ? 'content--chat' : ''} ${effectiveTeamAreaExpanded ? 'content--team-expanded' : ''}`}>
         {configError && (
           <div className="card mb-4" data-testid="app-config-error">
             <div className="text-sm text-text-muted">
@@ -2975,7 +3016,9 @@ function AppContent({
                 floating={conversationSidebarFloating}
                 onToggleCollapse={() => setConversationSidebarCollapsed((v) => !v)}
               />
-              <div className="chat-workspace flex-1 flex min-h-0 overflow-hidden">
+              <div
+                className={`chat-workspace flex-1 flex min-h-0 overflow-hidden ${insetTrajectoryFloatingTasks ? 'chat-workspace--trajectory-floating-tools' : ''}`}
+              >
                 {showConversationNotFound && (
                   <div className="flex-1 flex flex-col items-center justify-center gap-4" data-testid="app-conversation-not-found">
                     <h1 className="text-lg font-semibold text-text" data-testid="app-conversation-not-found-title">{t('multiSession.notFound.title')}</h1>
@@ -2988,46 +3031,72 @@ function AppContent({
                 )}
                 {/* Chat Panel - 在展开时可拖拽调整宽度 */}
                 <div
-                  className={`${showConversationNotFound || shouldFullscreen ? 'hidden' : 'flex'} chat-layout__surface  pt-0 flex-col ${isTeamAreaExpanded ? '' : 'min-w-0'} min-h-0 ${isTeamAreaExpanded ? '' : 'flex-1'}`}
-                  style={isTeamAreaExpanded ? { width: `${chatPanelWidthPct}%` } : undefined}
+                  className={`${showConversationNotFound || shouldFullscreen ? 'hidden' : 'flex'} chat-layout__surface  pt-0 flex-col ${effectiveTeamAreaExpanded ? '' : 'min-w-0'} min-h-0 ${effectiveTeamAreaExpanded ? '' : 'flex-1'}`}
+                  style={effectiveTeamAreaExpanded ? { width: `${chatPanelWidthPct}%` } : undefined}
                   data-testid="app-chat-surface"
                 >
-                  <div className={`flex-1 min-h-0`}>
-                    <ChatPanel
-                      onSendMessage={handleSendMessage}
-                      onInputIntent={kvCacheAffinityEnabled ? handleKVCInputIntent : undefined}
-                      onPersistMedia={handlePersistMedia}
-                      onPersistDocuments={handlePersistDocuments}
-                      onInterrupt={handleInterrupt}
-                      onCancel={handleCancel}
-                      onSwitchMode={handleSwitchMode}
-                      isProcessing={isProcessing}
-                      onUserAnswer={handleUserAnswer}
-                      onExportShare={handleExportShare}
-                      isExportingShare={isExportingShare}
-                      canExportShare={Boolean(sessionId && sessionId !== NEW_CONVERSATION_ID && (!isProcessing || isPaused))}
-                      sessionTitle={sessionTitle}
-                      sessionProjectName={sessionProjectName}
-                      sessionProject={sessionProject}
-                      teamAreaExpanded={toolPanelHidden ? null : isTeamAreaExpanded}
-                      autoFocusKey={composerFocusKey}
-                      onNavigateToSkills={() => handleNavigate('skills')}
-                      onNavigateToAgents={() => handleNavigate('agents')}
-                      onToggleTeamArea={handleToggleDetailPanel}
-                      onOpenCodeReview={handleOpenCodeReview}
-                      permissionsEnabled={serverConfig?.permissions_enabled !== 'false'}
-                      heartbeatPanelOpen={heartbeatPanelOpen}
-                      onToggleHeartbeatPanel={handleToggleHeartbeatPanel}
-                      onSavePermission={savePermissionSilent}
-                      historyPager={chatHistoryPager}
-                      isHistoryRestoring={isRestoringHistorySession}
-                      onSetGoal={setGoalObjective}
-                      onPauseGoal={pauseGoal}
-                      onResumeGoal={resumeGoal}
-                      onClearGoal={handleClearGoal}
-                      onDrainTaskQueueIfIdle={drainTaskQueueIfIdle}
-                    />
-                  </div>
+<SingleAgentSurface
+                    activeView={chatSurfaceView}
+                    chat={(
+                      <ChatPanel
+                        onSendMessage={handleSendMessage}
+                        onInputIntent={kvCacheAffinityEnabled ? handleKVCInputIntent : undefined}
+                        onPersistMedia={handlePersistMedia}
+                        onPersistDocuments={handlePersistDocuments}
+                        onInterrupt={handleInterrupt}
+                        onCancel={handleCancel}
+                        onSwitchMode={handleSwitchMode}
+                        isProcessing={isProcessing}
+                        onUserAnswer={handleUserAnswer}
+                        onExportShare={handleExportShare}
+                        isExportingShare={isExportingShare}
+                        canExportShare={Boolean(sessionId && sessionId !== NEW_CONVERSATION_ID && (!isProcessing || isPaused))}
+                        sessionTitle={sessionTitle}
+                        sessionProjectName={sessionProjectName}
+                        sessionProject={sessionProject}
+                        teamAreaExpanded={toolPanelHidden ? null : isTeamAreaExpanded}
+                        autoFocusKey={composerFocusKey}
+                        onNavigateToSkills={() => handleNavigate('skills')}
+                        onNavigateToAgents={() => handleNavigate('agents')}
+                        onToggleTeamArea={handleToggleDetailPanel}
+                        onOpenCodeReview={handleOpenCodeReview}
+                        permissionsEnabled={serverConfig?.permissions_enabled !== 'false'}
+                        heartbeatPanelOpen={heartbeatPanelOpen}
+                        onToggleHeartbeatPanel={handleToggleHeartbeatPanel}
+                        onSavePermission={savePermissionSilent}
+                        historyPager={chatHistoryPager}
+                        isHistoryRestoring={isRestoringHistorySession}
+                        onSetGoal={setGoalObjective}
+                        onPauseGoal={pauseGoal}
+                        onResumeGoal={resumeGoal}
+                        onClearGoal={handleClearGoal}
+                        onDrainTaskQueueIfIdle={drainTaskQueueIfIdle}
+                      />
+                    )}
+                    chatLabel={t('nav.chat')}
+                    mode={effectiveMode}
+                    onViewChange={selectChatSurfaceView}
+                    tabListLabel={t('trajectory.tabs.aria')}
+                    trajectory={(
+                      <Suspense
+                        fallback={(
+                          <div className="trajectory-view-loading">
+                            {t('trajectory.loading')}
+                          </div>
+                        )}
+                      >
+                        <LazyTrajectoryPanel
+                          active={chatSurfaceView === 'trajectory'}
+                          mode={effectiveMode}
+                          sessionId={sessionId}
+                        />
+                      </Suspense>
+                    )}
+                    trajectoryEnabled={trajectoryUiEnabled}
+                    trajectoryLabel={t('trajectory.tabs.trajectory')}
+                    showNavigation={sessionId !== NEW_CONVERSATION_ID}
+                    trajectoryRequested={trajectoryUiRequested}
+                  />
                 </div>
 
                 {/* 可拖拽分割线 */}
@@ -3048,7 +3117,7 @@ function AppContent({
                 )}
 
                 {/* Tool Panel / Expanded Team Panel */}
-                {!toolPanelHidden && (toolPanelHasContent || isRestoringTeamHistory) && !showConversationNotFound && !heartbeatPanelOpen && (
+                {!toolPanelHidden && trajectoryTaskPanelAvailable && !showConversationNotFound && !heartbeatPanelOpen && (
                   <ToolPanel
                     sessionId={sessionId}
                     project={sessionProject}

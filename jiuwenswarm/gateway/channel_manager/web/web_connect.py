@@ -1,4 +1,4 @@
-# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+# Copyright (c) Huawei Technologies Co., Ltd. 2025-2026. All rights reserved.
 
 """WebChannel - WebSocket 通道实现.
 
@@ -49,6 +49,7 @@ _HANDLER_BEFORE_CALLBACK_METHODS = frozenset({ReqMethod.CHAT_SEND.value})
 
 _STREAM_COALESCE_EVENT_TYPES = frozenset({"chat.delta", "chat.reasoning"})
 _STREAM_COALESCE_MAX_FRAMES = 32
+_TRAJECTORY_HINT_COALESCE_SECONDS = 0.016
 
 _WEB_FULL_PAYLOAD_EVENT_TYPES = frozenset(
     {
@@ -158,6 +159,11 @@ class WebChannel(BaseWsChannel):
         self.git_watcher_registry: Any = None
         # AgentOSRouterClient for same-port HTTP container file APIs (set by handlers).
         self.container_file_client: Any = None
+        self._trajectory_event_loop: asyncio.AbstractEventLoop | None = None
+        self._trajectory_listener_registered = False
+        self._trajectory_update_listener = self._on_trajectory_updates
+        self._trajectory_pending_updates: dict[tuple[str, str], Any] = {}
+        self._trajectory_send_task: asyncio.Task[None] | None = None
 
     @staticmethod
     def _coalescible_stream_frame(
@@ -583,10 +589,20 @@ class WebChannel(BaseWsChannel):
             logger.warning("WebChannel 未启用（enabled=False）")
             return
 
-        if self.config.dual_protocol:
-            await self._start_dual_protocol()
-            return
-        await self._start_websockets_legacy()
+        self._trajectory_event_loop = asyncio.get_running_loop()
+        if not self._trajectory_listener_registered:
+            from jiuwenswarm.observability.updates import trajectory_update_broker
+
+            trajectory_update_broker.register(self._trajectory_update_listener)
+            self._trajectory_listener_registered = True
+
+        try:
+            if self.config.dual_protocol:
+                await self._start_dual_protocol()
+                return
+            await self._start_websockets_legacy()
+        finally:
+            self._unregister_trajectory_listener()
 
     async def _start_dual_protocol(self) -> None:
         """Same port: FastAPI/uvicorn (WS today; HTTP routes can be mounted later)."""
@@ -648,6 +664,7 @@ class WebChannel(BaseWsChannel):
     async def stop(self) -> None:
         """停止 WebSocket 服务并清理连接."""
         self._running = False
+        self._unregister_trajectory_listener()
 
         all_clients = list(self.clients)
         close_tasks = [client.close(code=1001, reason="server shutdown") for client in all_clients]
@@ -665,6 +682,90 @@ class WebChannel(BaseWsChannel):
         # 兜底清理未走正常断连路径的 writer 协程（正常断连已由 unregister_ws 清理）
         await self._shutdown_all_writers()
         logger.info("WebChannel 已停止")
+
+    def _unregister_trajectory_listener(self) -> None:
+        """Detach the commit listener during every server shutdown path."""
+        if self._trajectory_listener_registered:
+            from jiuwenswarm.observability.updates import trajectory_update_broker
+
+            trajectory_update_broker.unregister(self._trajectory_update_listener)
+            self._trajectory_listener_registered = False
+        send_task = self._trajectory_send_task
+        if send_task is not None and not send_task.done():
+            send_task.cancel()
+        self._trajectory_send_task = None
+        self._trajectory_pending_updates.clear()
+        self._trajectory_event_loop = None
+
+    def _on_trajectory_updates(self, updates: tuple[Any, ...]) -> None:
+        """Move writer-thread commit hints onto the WebChannel event loop."""
+        loop = self._trajectory_event_loop
+        if loop is None or loop.is_closed():
+            return
+        loop.call_soon_threadsafe(self.schedule_trajectory_updates, updates)
+
+    def schedule_trajectory_updates(self, updates: tuple[Any, ...]) -> None:
+        """Coalesce high-frequency Span revisions before WebSocket fan-out.
+
+        Streaming model spans can commit hundreds of revisions per second. A
+        task per commit lets stale ``running`` hints queue ahead of the final
+        record on the same socket, so the trajectory can look open after chat
+        completion. Keep only the highest committed revision for each
+        session/trace during one browser frame and drain it from a single task.
+        The HTTP revision feed remains the recoverable source of truth.
+        """
+        for update in updates:
+            session_id = str(getattr(update, "session_id", "") or "").strip()
+            trace_id = str(getattr(update, "trace_id", "") or "").strip()
+            if not session_id or not trace_id:
+                continue
+            key = (session_id, trace_id)
+            current = self._trajectory_pending_updates.get(key)
+            revision = int(getattr(update, "revision", 0))
+            current_revision = (
+                int(getattr(current, "revision", 0)) if current is not None else -1
+            )
+            if revision >= current_revision:
+                self._trajectory_pending_updates[key] = update
+        task = self._trajectory_send_task
+        if self._trajectory_pending_updates and (task is None or task.done()):
+            self._trajectory_send_task = asyncio.create_task(
+                self._drain_trajectory_updates()
+            )
+
+    async def _drain_trajectory_updates(self) -> None:
+        """Drain coalesced hints without allowing concurrent sender backlogs."""
+        try:
+            while self._trajectory_pending_updates:
+                await asyncio.sleep(_TRAJECTORY_HINT_COALESCE_SECONDS)
+                updates = tuple(self._trajectory_pending_updates.values())
+                self._trajectory_pending_updates.clear()
+                await self._send_trajectory_updates(updates)
+        finally:
+            self._trajectory_send_task = None
+
+    async def _send_trajectory_updates(self, updates: tuple[Any, ...]) -> None:
+        """Send trace.updated only to connections registered for each session."""
+        for update in updates:
+            session_id = str(getattr(update, "session_id", "") or "").strip()
+            if not session_id:
+                continue
+            clients: set[Any] = set()
+            for routing_key, ws_list in self._clients_by_key.items():
+                if routing_key.session_id != session_id:
+                    continue
+                for ws in ws_list:
+                    if not getattr(ws, "closed", False):
+                        clients.add(ws)
+            payload = {
+                "session_id": session_id,
+                "trace_id": str(getattr(update, "trace_id", "") or ""),
+                "revision": int(getattr(update, "revision", 0)),
+                "store_epoch": getattr(update, "store_epoch", None),
+                "lifecycle": str(getattr(update, "lifecycle", "final") or "final"),
+            }
+            for ws in clients:
+                await self.send_event(ws, "trace.updated", payload)
 
     async def connect(self) -> None:
         """兼容方法：调用 start."""

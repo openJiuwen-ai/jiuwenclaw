@@ -102,6 +102,11 @@ DATA_URL_EXPORT_SPECS = {
         allowed_parameters=frozenset({"charset=utf-8"}),
         file_types=("Mermaid Diagram (*.mmd)",),
     ),
+    "application/json": _DataUrlExportSpec(
+        allowed_suffixes=frozenset({".json"}),
+        allowed_parameters=frozenset({"charset=utf-8"}),
+        file_types=("JSON Archive (*.json)",),
+    ),
 }
 DesktopSaveResult = dict[str, bool]
 IMAGE_EXTENSIONS = frozenset({".png", ".jpg", ".jpeg", ".webp", ".gif", ".jfif"})

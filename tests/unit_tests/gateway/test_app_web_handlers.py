@@ -1148,6 +1148,42 @@ async def test_config_get_returns_setup_guide_switch(monkeypatch, raw_config, ex
     assert channel.responses[-1]["payload"]["setup_guide_enabled"] == expected
 
 
+@pytest.mark.asyncio
+async def test_trajectory_ui_switch_round_trips_through_config_rpc(monkeypatch):
+    channel = FakeWebChannel()
+    persisted: list[bool] = []
+    monkeypatch.setattr(
+        app_web_handlers,
+        "get_config_raw",
+        lambda: {"trajectory_ui": {"enabled": False}},
+    )
+    monkeypatch.setattr(
+        app_web_handlers,
+        "get_config",
+        lambda: {"trajectory_ui": {"enabled": False}},
+    )
+    monkeypatch.setattr(
+        app_web_handlers,
+        "update_trajectory_ui_in_config",
+        lambda enabled: persisted.append(enabled),
+    )
+    _register_web_handlers(WebHandlersBindParams(channel=channel))
+
+    await channel.methods["config.get"](object(), "req-trajectory-get", {}, "session")
+    assert channel.responses[-1]["payload"]["trajectory_ui_enabled"] == "false"
+
+    await channel.methods["config.set"](
+        object(),
+        "req-trajectory-set",
+        {"trajectory_ui_enabled": "true"},
+        "session",
+    )
+    assert persisted == [True]
+    assert channel.responses[-1]["payload"]["updated"] == ["trajectory_ui_enabled"]
+    change_set = app_web_handlers._ConfigChangeSet({}, ["trajectory_ui_enabled"])
+    assert change_set.reload_scopes == {"agent_runtime", "web_ui"}
+
+
 def test_media_capability_config_uses_multimodal_hot_reload_scope():
     for env_key in app_web_handlers._MULTIMODAL_RELOAD_ENV_KEYS:
         change_set = app_web_handlers._ConfigChangeSet({env_key: "true"}, [])

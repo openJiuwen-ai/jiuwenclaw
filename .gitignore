@@ -104,3 +104,10 @@ vendor/node/
 
 # JiuwenSwarm runtime file operation logs
 .agent_history/
+/AGENTS.local.md
+report/index.html
+/tmp/
+/memory/
+/sub_agents/
+/context/
+/.plans/
