@@ -6,7 +6,8 @@ import {
 
 type UnknownPayload = Record<string, unknown>;
 
-const CAPABILITY_ID_PATTERN = /^[A-Za-z0-9_-]+$/;
+const MERMAID_DIRECT_ID_PATTERN = /^[A-Za-z0-9_]+(?:-[A-Za-z0-9_]+)*$/;
+const UNICODE_CAPABILITY_ID_PATTERN = /^[\p{L}\p{M}\p{N}_-]+$/u;
 const MERMAID_RESERVED_IDS = new Set([
   'acc_descr',
   'acc_descr_multiline',
@@ -112,16 +113,46 @@ function resolveMemberName(payload: UnknownPayload, fallback?: UnknownPayload): 
 function isValidCapabilityId(value: unknown): value is string {
   return (
     typeof value === 'string' &&
-    CAPABILITY_ID_PATTERN.test(value) &&
+    UNICODE_CAPABILITY_ID_PATTERN.test(value) &&
     !MERMAID_RESERVED_IDS.has(value.toLowerCase())
   );
+}
+
+function isDirectMermaidId(value: string): boolean {
+  const normalized = value.toLowerCase();
+  return (
+    MERMAID_DIRECT_ID_PATTERN.test(value) &&
+    !Array.from(MERMAID_RESERVED_IDS).some((keyword) => normalized.startsWith(keyword))
+  );
+}
+
+function mermaidNodeIds(nodeIds: string[]): Map<string, string> {
+  const usedIds = new Set(nodeIds.filter(isDirectMermaidId));
+  const renderedIds = new Map<string, string>();
+  let aliasIndex = 0;
+
+  for (const nodeId of nodeIds) {
+    if (isDirectMermaidId(nodeId)) {
+      renderedIds.set(nodeId, nodeId);
+      continue;
+    }
+
+    let alias = `capability_${aliasIndex++}`;
+    while (usedIds.has(alias)) {
+      alias = `capability_${aliasIndex++}`;
+    }
+    usedIds.add(alias);
+    renderedIds.set(nodeId, alias);
+  }
+
+  return renderedIds;
 }
 
 function compareStable(left: string, right: string): number {
   return left < right ? -1 : left > right ? 1 : 0;
 }
 
-/** 将合法的 planned_graph JGF 投影成直接使用 capability ID 的 Mermaid。 */
+/** 将合法的 planned_graph JGF 投影成 Mermaid，必要时用安全别名保留原始标签。 */
 export function plannedGraphToMermaid(rawOutput: unknown): string | undefined {
   const output = asRecord(rawOutput);
   const plannedGraph = asRecord(output?.planned_graph);
@@ -163,6 +194,7 @@ export function plannedGraphToMermaid(rawOutput: unknown): string | undefined {
     compareStable(left.source, right.source) || compareStable(left.target, right.target)
   );
   nodeIds.sort(compareStable);
+  const renderedNodeIds = mermaidNodeIds(nodeIds);
 
   return [
     `%%{init: ${JSON.stringify({
@@ -173,8 +205,10 @@ export function plannedGraphToMermaid(rawOutput: unknown): string | undefined {
       },
     })}}%%`,
     'flowchart LR',
-    ...nodeIds.map((nodeId) => `${nodeId}("${nodeId}")`),
-    ...normalizedEdges.map(({ source, target }) => `${source} --> ${target}`),
+    ...nodeIds.map((nodeId) => `${renderedNodeIds.get(nodeId)}("${nodeId}")`),
+    ...normalizedEdges.map(
+      ({ source, target }) => `${renderedNodeIds.get(source)} --> ${renderedNodeIds.get(target)}`,
+    ),
   ].join('\n');
 }
 

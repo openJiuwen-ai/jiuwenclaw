@@ -434,6 +434,12 @@ export function ToolGroupDisplay({
         </div>
       ) : null}
       <div className="min-w-0">
+        {beamSearch && (
+          <BeamSearchTree
+            progress={beamSearch}
+            autoCollapse={collapseSkillTreeWhenContentStarts}
+          />
+        )}
         <div className="tool-tree" data-testid="chat-panel-tool-tree">
           {notices.length > 0 && (
             <div className="tool-tree__notices" data-testid="chat-panel-tool-tree-notices">
@@ -497,12 +503,6 @@ export function ToolGroupDisplay({
           <SkillTreePath
             trees={skillTrees}
             viewedSkillIds={viewedSkillIds}
-            autoCollapse={collapseSkillTreeWhenContentStarts}
-          />
-        )}
-        {beamSearch && (
-          <BeamSearchTree
-            progress={beamSearch}
             autoCollapse={collapseSkillTreeWhenContentStarts}
           />
         )}

@@ -66,6 +66,64 @@ test('accepts digits, underscores, and hyphens without aliases', () => {
   assert.doesNotMatch(mermaid, /n\d+/);
 });
 
+test('aliases Unicode capability IDs while preserving labels and edges', () => {
+  assert.equal(
+    plannedGraphToMermaid(
+      payload(
+        ['capability_0', 'ppt大师', '交付总监'],
+        [
+          { source: 'ppt大师', target: '交付总监', relation: 'can_feed' },
+          { source: '交付总监', target: 'capability_0', relation: 'can_feed' },
+        ],
+      ),
+    ),
+    [
+      plannedGraphInit,
+      'flowchart LR',
+      'capability_0("capability_0")',
+      'capability_1("ppt大师")',
+      'capability_2("交付总监")',
+      'capability_1 --> capability_2',
+      'capability_2 --> capability_0',
+    ].join('\n'),
+  );
+});
+
+test('aliases Mermaid keyword-prefixed ASCII IDs while preserving labels and edges', () => {
+  assert.equal(
+    plannedGraphToMermaid(
+      payload(
+        ['capability_0', 'class-foo', 'graph_step'],
+        [
+          { source: 'class-foo', target: 'graph_step', relation: 'can_feed' },
+          { source: 'graph_step', target: 'capability_0', relation: 'can_feed' },
+        ],
+      ),
+    ),
+    [
+      plannedGraphInit,
+      'flowchart LR',
+      'capability_0("capability_0")',
+      'capability_1("class-foo")',
+      'capability_2("graph_step")',
+      'capability_1 --> capability_2',
+      'capability_2 --> capability_0',
+    ].join('\n'),
+  );
+});
+
+test('aliases ASCII IDs that collide with Mermaid edge syntax', () => {
+  assert.equal(
+    plannedGraphToMermaid(payload(['capability_0', 'foo--bar'])),
+    [
+      plannedGraphInit,
+      'flowchart LR',
+      'capability_0("capability_0")',
+      'capability_1("foo--bar")',
+    ].join('\n'),
+  );
+});
+
 test('falls back when the graph is empty or structurally invalid', () => {
   assert.equal(plannedGraphToMermaid(payload([])), undefined);
   assert.equal(plannedGraphToMermaid({ planned_graph: { graph: { nodes: {}, edges: [] } } }), undefined);
