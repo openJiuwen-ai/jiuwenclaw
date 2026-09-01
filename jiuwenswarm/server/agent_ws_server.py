@@ -3249,15 +3249,21 @@ class AgentWebSocketServer:
                             wire=wire,
                         )
                     )
-                # 诊断：打印前 3 个和每 50 个 chunk 的发送情况
-                if chunk_count <= 3 or chunk_count % 50 == 0:
-                    _pl = getattr(chunk, "payload", None) or {}
-                    _et = _pl.get("event_type", "") if isinstance(_pl, dict) else ""
+                # 诊断：全量打印 chunk 载荷（E2A 帧内容排查，经桌面端 stderr 转发进 app.log）。
+                # chat.reasoning/chat.delta 是高频增量帧：只打印 is_complete=True 的
+                # （增量帧全部 is_complete=False，即不打印，避免淹没其它帧）；
+                # 其余事件（tool_call/tool_result/todo/usage/error/final 等）全量打印。
+                _pl = getattr(chunk, "payload", None) or {}
+                _et = _pl.get("event_type", "") if isinstance(_pl, dict) else ""
+                _is_complete = bool(getattr(chunk, "is_complete", False))
+                if not (_et in ("chat.reasoning", "chat.delta") and not _is_complete):
+                    _pl_repr = repr(_pl)
+                    if len(_pl_repr) > 8000:
+                        _pl_repr = _pl_repr[:8000] + f"…(truncated {len(_pl_repr)})"
                     logger.info(
-                        "[AgentWebSocketServer] chunk sent: request_id=%s seq=%s"
-                        " event_type=%s wire_keys=%s",
-                        request.request_id, chunk_count - 1, _et,
-                        list(wire.keys())[:10] if isinstance(wire, dict) else "non-dict",
+                        "[AgentWebSocketServer] chunk payload: request_id=%s seq=%s"
+                        " event_type=%s is_complete=%s payload=%s",
+                        request.request_id, chunk_count - 1, _et, _is_complete, _pl_repr,
                     )
                 try:
                     async with send_lock:
