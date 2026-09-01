@@ -3164,8 +3164,9 @@
     "configTitle": "动态工作流配置",
     "configReadonlyHint": "会话已开启，配置不可修改",
     "budgetPanelTitle": "SwarmFlow 预算",
-    "budgetPanelHint": "设置本次会话的 token 上限（留空=不限）。仅集群模式可用。",
-    "budgetPlaceholder": "留空=不限",
+    "budgetPanelHint": "设置本次会话的 Token 上限。仅集群模式可用。",
+    "budgetPlaceholder": "输入数字",
+    "budgetActualHint": "实际上限：{{count}} tokens",
     "workflowList": "工作流列表"
   }
 }

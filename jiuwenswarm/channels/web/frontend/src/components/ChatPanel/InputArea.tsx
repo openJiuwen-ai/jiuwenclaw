@@ -58,6 +58,7 @@ import { ExtensionPickerPanel } from './ExtensionPickerPanel';
 import { SkillPickerPanel } from './SkillPickerPanel';
 import { Switch } from '../Switch';
 import { Input } from '../ui';
+import { Select } from '../ui/Select/Select';
 import { ExtensionIcon } from '../ConnectorMarket/icons';
 import {
   isLikelyAbsolutePath,
@@ -3777,25 +3778,95 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
           </div>
           <div className="chat-swarmflow-config-panel__field">
             <label className="chat-swarmflow-config-panel__label">{t('swarmflow.budgetPanelHint')}</label>
-            <Input
-              type="number"
-              value={swarmflowBudget ?? ''}
-              placeholder={t('swarmflow.budgetPlaceholder')}
-              readOnly={swarmflowToggleDisabled}
-              onChange={(v) => {
-                if (swarmflowToggleDisabled) return;
-                const trimmed = v.trim();
-                useSessionStore.getState().setSwarmflowActive(
-                  activeSessionId,
-                  true,
-                  trimmed ? Number(trimmed) : null,
+              {(() => {
+                // 从 store 的 swarmflowBudget（实际 token 数）反推输入框值 + 单位
+                const budgetVal = swarmflowBudget;
+                const isUnlimited = budgetVal == null;
+                let inputValue = '';
+                let inputUnit: 'token' | 'K' | 'M' = 'K';
+                if (!isUnlimited && budgetVal > 0) {
+                  if (budgetVal >= 1_000_000 && budgetVal % 1_000_000 === 0) {
+                    inputValue = String(budgetVal / 1_000_000);
+                    inputUnit = 'M';
+                  } else if (budgetVal >= 1000 && budgetVal % 1000 === 0) {
+                    inputValue = String(budgetVal / 1000);
+                    inputUnit = 'K';
+                  } else {
+                    inputValue = String(budgetVal);
+                    inputUnit = 'token';
+                  }
+                }
+                const computeBudget = (val: string, unit: 'token' | 'K' | 'M', unlimited: boolean) => {
+                  if (unlimited || !val.trim()) return null;
+                  const n = Number(val.trim());
+                  if (!Number.isFinite(n) || n <= 0) return null;
+                  const multiplier = unit === 'M' ? 1_000_000 : unit === 'K' ? 1000 : 1;
+                  return n * multiplier;
+                };
+                return (
+                  <>
+                    <div className="chat-swarmflow-config-panel__budget-row">
+                      <Input
+                        type="number"
+                        value={inputValue}
+                        placeholder={t('swarmflow.budgetPlaceholder')}
+                        readOnly={swarmflowToggleDisabled || isUnlimited}
+                        onChange={(v) => {
+                          if (swarmflowToggleDisabled) return;
+                          const unit = inputUnit;
+                          const actual = computeBudget(v, unit, false);
+                          useSessionStore.getState().setSwarmflowActive(
+                            activeSessionId, true, actual,
+                          );
+                        }}
+                      />
+                      <Select
+                        value={inputUnit}
+                        disabled={swarmflowToggleDisabled || isUnlimited}
+                        options={[
+                          { value: 'token', label: 'token' },
+                          { value: 'K', label: 'K (×1,000)' },
+                          { value: 'M', label: 'M (×1,000,000)' },
+                        ]}
+                        onChange={(val) => {
+                          if (swarmflowToggleDisabled) return;
+                          const unit = val as 'token' | 'K' | 'M';
+                          const actual = computeBudget(inputValue, unit, false);
+                          useSessionStore.getState().setSwarmflowActive(
+                            activeSessionId, true, actual,
+                          );
+                        }}
+                      />
+                    </div>
+                    <label className="chat-swarmflow-config-panel__unlimited-row">
+                      <input
+                        type="checkbox"
+                        checked={isUnlimited}
+                        disabled={swarmflowToggleDisabled}
+                        onChange={(e) => {
+                          if (swarmflowToggleDisabled) return;
+                          useSessionStore.getState().setSwarmflowActive(
+                            activeSessionId, true, e.target.checked ? null : computeBudget(inputValue, inputUnit, false),
+                          );
+                        }}
+                      />
+                      <span className="text-xs text-text-muted">{t('swarmflow.budgetUnlimited')}</span>
+                    </label>
+                    {!isUnlimited && (() => {
+                      const actual = computeBudget(inputValue, inputUnit, false);
+                      return actual != null ? (
+                        <div className="chat-swarmflow-config-panel__actual-hint">
+                          {t('swarmflow.budgetActualHint', { count: actual.toLocaleString() })}
+                        </div>
+                      ) : null;
+                    })()}
+                  </>
                 );
-              }}
-            />
-            {swarmflowToggleDisabled && (
-              <span className="chat-swarmflow-config-panel__readonly-hint">{t('swarmflow.configReadonlyHint')}</span>
-            )}
-          </div>
+              })()}
+              {swarmflowToggleDisabled && (
+                <span className="chat-swarmflow-config-panel__readonly-hint">{t('swarmflow.configReadonlyHint')}</span>
+              )}
+            </div>
         </div>,
         document.body,
       );})()}

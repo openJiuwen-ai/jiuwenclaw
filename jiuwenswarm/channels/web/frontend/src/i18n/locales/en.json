@@ -3183,8 +3183,9 @@
     "configTitle": "SwarmFlow Configuration",
     "configReadonlyHint": "Session is active, config is read-only",
     "budgetPanelTitle": "SwarmFlow Budget",
-    "budgetPanelHint": "Set the token limit for this session (blank = unlimited). Team mode only.",
-    "budgetPlaceholder": "blank = unlimited",
+    "budgetPanelHint": "Set the Token limit for this session. Team mode only.",
+    "budgetPlaceholder": "Enter number",
+    "budgetActualHint": "Actual limit: {{count}} tokens",
     "workflowList": "Workflow List"
   }
 }

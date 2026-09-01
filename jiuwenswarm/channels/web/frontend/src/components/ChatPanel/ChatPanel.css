@@ -3064,6 +3064,42 @@ overflow: hidden;
   line-height: 1.4;
 }
 
+.chat-swarmflow-config-panel__budget-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.chat-swarmflow-config-panel__budget-row .ui-input {
+  flex: 1;
+  min-width: 0;
+}
+
+.chat-swarmflow-config-panel__budget-row .ui-select {
+  width: auto;
+  flex-shrink: 0;
+}
+
+.chat-swarmflow-config-panel__unlimited-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.chat-swarmflow-config-panel__unlimited-row input[type="checkbox"] {
+  width: 14px;
+  height: 14px;
+  cursor: pointer;
+}
+
+.chat-swarmflow-config-panel__actual-hint {
+  font-size: var(--font-size-2xs, 11px);
+  color: var(--color-text-secondary);
+  opacity: 0.8;
+}
+
 .chat-swarmflow-config-panel__readonly-hint {
   font-size: var(--font-size-2xs, 11px);
   color: var(--color-text-secondary);
