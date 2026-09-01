@@ -921,6 +921,7 @@ class JiuWenSwarmDeepAdapter:
                 config,
                 mode=self._session_instance_mode,
                 sub_mode=self._session_instance_sub_mode,
+                config_base=self._config_base_cache,
             )
 
             await adapter.start_interaction(session_id=sid)
@@ -4016,11 +4017,17 @@ class JiuWenSwarmDeepAdapter:
                 self._session_instance_config,
                 mode=self._session_instance_mode or "agent",
                 sub_mode=self._session_instance_sub_mode,
+                config_base=self._config_base_cache,
             )
             return self._instance
 
     async def create_instance(
-        self, config: dict[str, Any] | None = None, *, mode: str = "agent", sub_mode: str = None
+        self,
+        config: dict[str, Any] | None = None,
+        *,
+        mode: str = "agent",
+        sub_mode: str = None,
+        config_base: dict[str, Any] | None = None,
     ) -> None:
         """初始化 DeepAgent 实例.
 
@@ -4031,6 +4038,7 @@ class JiuWenSwarmDeepAdapter:
                 - 其余字段透传给 DeepAgentConfig。
             mode: 实例化模式，默认 "agent"，使用 create_deep_agent。
             sub_mode: 子模式
+            config_base: 可选的已解析配置快照；会话级子适配器复用该快照。
         """
         self._session_instance_config = dict(config or {}) if isinstance(config, dict) else None
         self._session_instance_mode = mode
@@ -4041,7 +4049,12 @@ class JiuWenSwarmDeepAdapter:
         self._dreaming_mode = mode if mode and mode.startswith("agent") else "agent"
         self._instance_overrides = dict(config or {}) if isinstance(config, dict) else {}
         load_dotenv(dotenv_path=get_env_file(), override=True)
-        config_base = get_config()
+        if config_base is None:
+            config_base = get_config()
+        elif not isinstance(config_base, dict):
+            raise TypeError("config_base must be a dict when provided")
+        else:
+            config_base = resolve_env_vars(config_base)
         self._config_base_cache = config_base.copy()
         self._refresh_multimodal_configs(config_base)
         config = config_base.get("react", {}).copy()

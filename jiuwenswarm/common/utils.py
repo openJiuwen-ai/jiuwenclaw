@@ -1018,6 +1018,7 @@ def migrate_legacy_skills_to_default_tenant(
             )
             continue
 
+        installed_by_this_run = False
         try:
             with tempfile.TemporaryDirectory(
                 prefix=".legacy-skill-",
@@ -1038,6 +1039,7 @@ def migrate_legacy_skills_to_default_tenant(
                     continue
                 try:
                     os.rename(staged_skill, destination_skill)
+                    installed_by_this_run = True
                 except OSError:
                     if destination_skill.exists():
                         logger.debug(
@@ -1056,6 +1058,26 @@ def migrate_legacy_skills_to_default_tenant(
                 destination_skill,
             )
         except OSError as exc:
+            if installed_by_this_run and (
+                destination_skill.exists() or destination_skill.is_symlink()
+            ):
+                try:
+                    if destination_skill.is_symlink():
+                        destination_skill.unlink()
+                    elif destination_skill.is_dir():
+                        shutil.rmtree(destination_skill)
+                    else:
+                        destination_skill.unlink()
+                    logger.warning(
+                        "[migration] Removed unverified tenant skill copy: %s",
+                        destination_skill,
+                    )
+                except OSError as cleanup_exc:
+                    logger.error(
+                        "[migration] Failed to remove unverified tenant skill %s: %s",
+                        destination_skill,
+                        cleanup_exc,
+                    )
             # One malformed/unreadable skill must not prevent the service from
             # starting or other independent skills from being migrated.
             logger.warning(

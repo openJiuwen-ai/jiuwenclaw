@@ -6411,19 +6411,23 @@ class JiuWenSwarmDeepAdapter:
         # preparation and the foreground request can straddle an env/config
         # refresh, so reconcile every immutable field before configuring.
         existing_rail = self._skill_evolution_rail
-        existing_language = getattr(existing_rail, "_language", resolved_language)
+        missing_config = object()
+        existing_language = getattr(existing_rail, "_language", missing_config)
         existing_review_trigger = getattr(
             existing_rail,
             "review_trigger",
-            evolution_triggers["review_trigger"],
+            missing_config,
         )
         existing_signal_trigger = getattr(
             existing_rail,
             "signal_trigger",
-            evolution_triggers["signal_trigger"],
+            missing_config,
         )
         if existing_rail is not None and (
-            existing_language != resolved_language
+            existing_language is missing_config
+            or existing_review_trigger is missing_config
+            or existing_signal_trigger is missing_config
+            or existing_language != resolved_language
             or bool(existing_review_trigger) != evolution_triggers["review_trigger"]
             or bool(existing_signal_trigger) != evolution_triggers["signal_trigger"]
         ):

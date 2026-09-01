@@ -36,10 +36,41 @@ import logging
 import os
 import uuid
 from dataclasses import fields
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
 _PATCH_APPLIED = False
+_SCHEMA_FIELD_MISMATCHES_WARNED: set[tuple[type, type, tuple[str, ...]]] = set()
+
+
+def _copy_compatible_dataclass(value: Any, target_cls: type) -> Any:
+    """Copy shared dataclass fields and report protocol drift once."""
+    target_fields = tuple(fields(target_cls))
+    target_names = {field.name for field in target_fields}
+    try:
+        source_names = {field.name for field in fields(value)}
+    except TypeError:
+        source_names = set(vars(value))
+    dropped_fields = tuple(sorted(source_names - target_names))
+    if dropped_fields:
+        mismatch_key = (type(value), target_cls, dropped_fields)
+        if mismatch_key not in _SCHEMA_FIELD_MISMATCHES_WARNED:
+            _SCHEMA_FIELD_MISMATCHES_WARNED.add(mismatch_key)
+            logger.warning(
+                "[DoloresAgent] response schema drift: converting %s to %s "
+                "drops source-only fields=%s",
+                type(value).__name__,
+                target_cls.__name__,
+                ",".join(dropped_fields),
+            )
+    return target_cls(
+        **{
+            field.name: getattr(value, field.name)
+            for field in target_fields
+            if hasattr(value, field.name)
+        }
+    )
 
 
 def _dolores_create_adapter(
@@ -70,13 +101,13 @@ def _dolores_create_adapter(
             sub_mode=None,
             config_base=None,
         ):
-            # Dolores already resolves the active config through get_config().
-            # Accept dev-stable's explicit snapshot without changing that
-            # established initialization path.
+            # Preserve dev-stable's authoritative snapshot (notably the startup
+            # WarmupModelClient config) instead of falling back to the live file.
             result = await super().create_instance(
                 config,
                 mode=mode,
                 sub_mode=sub_mode,
+                config_base=config_base,
             )
             deep_config = getattr(getattr(self, "_instance", None), "_deep_config", None)
             logger.info(
@@ -95,10 +126,20 @@ def _dolores_create_adapter(
             mode,
             project_dir=None,
         ):
-            # The fork already has session-scoped adapters and starts their
-            # interaction loop in this helper.  Reuse it as Dolores's native
-            # equivalent of dev-stable's newer prepare_session contract.
-            await self._get_or_create_session_adapter(session_id)
+            # Session construction starts the interaction loop; then apply the
+            # same stable channel/mode/project context that the stock adapter
+            # installs before publishing a warm-pool slot.
+            adapter = await self._get_or_create_session_adapter(session_id)
+            await adapter._update_runtime_config(
+                adapter._RuntimeConfig(
+                    session_id=session_id,
+                    channel_id=channel_id,
+                    mode=mode,
+                    project_dir=project_dir,
+                    cwd=project_dir,
+                    workspace=project_dir,
+                )
+            )
 
         async def cleanup(self):
             """Release the instance-local callbacks with the adapter lifecycle."""
@@ -258,23 +299,14 @@ def _patch_stock_schema_to_dolores() -> None:
     _orig_response_normalize = _normalize.e2a_response_from_agent_response
     _orig_chunk_normalize = _normalize.e2a_response_from_agent_chunk
 
-    def _copy_dataclass(value, target_cls):
-        return target_cls(
-            **{
-                field.name: getattr(value, field.name)
-                for field in fields(target_cls)
-                if hasattr(value, field.name)
-            }
-        )
-
     def _compat_response_normalize(resp, **kwargs):
         if isinstance(resp, _StockResp) and not isinstance(resp, _DResp):
-            resp = _copy_dataclass(resp, _DResp)
+            resp = _copy_compatible_dataclass(resp, _DResp)
         return _orig_response_normalize(resp, **kwargs)
 
     def _compat_chunk_normalize(chunk, **kwargs):
         if isinstance(chunk, _StockChunk) and not isinstance(chunk, _DChunk):
-            chunk = _copy_dataclass(chunk, _DChunk)
+            chunk = _copy_compatible_dataclass(chunk, _DChunk)
         return _orig_chunk_normalize(chunk, **kwargs)
 
     _normalize.e2a_response_from_agent_response = _compat_response_normalize

@@ -52,6 +52,31 @@ def test_legacy_skill_migration_is_non_destructive_and_idempotent(tmp_path: Path
     assert utils.migrate_legacy_skills_to_default_tenant(tmp_path, target_dir) == []
 
 
+def test_migration_removes_unverified_destination_copy(tmp_path: Path) -> None:
+    legacy_dir = tmp_path / "agent" / "workspace" / "skills"
+    target_dir = (
+        tmp_path
+        / "service_default"
+        / "agent_default"
+        / "agent"
+        / "workspace"
+        / "skills"
+    )
+    source = _write_skill(legacy_dir, "corrupted-copy", "trusted source")
+    real_rename = utils.os.rename
+
+    def _rename_then_corrupt(src, dst) -> None:
+        real_rename(src, dst)
+        Path(dst).joinpath("SKILL.md").write_text("corrupted", encoding="utf-8")
+
+    with patch.object(utils.os, "rename", side_effect=_rename_then_corrupt):
+        copied = utils.migrate_legacy_skills_to_default_tenant(tmp_path, target_dir)
+
+    assert copied == []
+    assert not (target_dir / "corrupted-copy").exists()
+    assert source.joinpath("SKILL.md").read_text(encoding="utf-8") == "trusted source"
+
+
 def test_path_resolution_runs_legacy_skill_migration(tmp_path: Path) -> None:
     (tmp_path / "config").mkdir(parents=True)
     legacy_dir = tmp_path / "agent" / "workspace" / "skills"
