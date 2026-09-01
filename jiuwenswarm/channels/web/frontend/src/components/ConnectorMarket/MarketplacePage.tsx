@@ -646,9 +646,7 @@ export function MarketplacePage({
                       ? 'connectorMarket.empty.loadingMcp'
                       : 'connectorMarket.empty.loadingPlugin',
                 )
-              : topTab === 'my'
-                ? t(myKind === 'mcp' ? 'connectorMarket.empty.myMcp' : 'connectorMarket.empty.myPlugin')
-                : t('connectorMarket.empty.searchNoResult')}
+              : t('connectorMarket.empty.searchNoResult')}
           </div>
         )}
       </div>
