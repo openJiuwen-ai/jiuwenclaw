@@ -35,6 +35,7 @@ _CN_PROTOCOL = """## 技能执行规范（强制）
 - 加载**嵌套子技能**时，`skill_name` 仍填**顶层技能名**，子技能通过 `relative_file_path` 指定，例如 `skill_tool(skill_name="pptx-craft", relative_file_path="designer/SKILL.md")`。**不要**把子目录名当作 `skill_name`——它不是已注册技能，会返回 `Skill not found`。
 - 若你当前可用工具列表中**没有** `skill_tool`：请向用户说明环境未开放该能力；**不得**用其它工具代替。
 - 需要多看或刷新全文时，**只能**再次调用 `skill_tool`。
+- **历史加载内容不跨任务复用**：历史对话轮次中 `skill_tool` 返回的 SKILL.md 内容仅对当时任务有效，**可能已过期**（技能可能已被卸载或更新）。新任务需要使用同一技能时，**必须**重新调用 `skill_tool` 确认技能仍然存在；若返回 `Skill not found`，说明技能已卸载，**禁止**继续使用历史轮次中的技能目录、脚本路径或 SKILL.md 内容执行任务，应告知用户该技能已不可用并征询后续处理方式。
 
 随后按 SKILL 工作流执行；下列规范约束执行过程。
 
@@ -74,6 +75,7 @@ The "Skills" section of this prompt (from SkillUseRail) lists available skills a
 - To load a **nested sub-skill**, keep `skill_name` as the **top-level skill name** and point at the sub-skill via `relative_file_path`, e.g. `skill_tool(skill_name="pptx-craft", relative_file_path="designer/SKILL.md")`. **Do not** pass the sub-directory name as `skill_name` — it is not a registered skill and will return `Skill not found`.
 - If `skill_tool` is **not** in your available tool list, tell the user the capability is not enabled in this environment; **do not** substitute another file-reading tool.
 - To see more or refresh the full SKILL.md, you **may only** call `skill_tool` again.
+- **Loaded content does not carry across tasks**: SKILL.md content returned by `skill_tool` in earlier conversation turns is only valid for that task and **may be stale** — the skill may have been uninstalled or updated. Whenever a new task needs the same skill, you **must** call `skill_tool` again to confirm the skill still exists; if it returns `Skill not found`, the skill has been uninstalled. In that case you **must not** continue using the skill's directory, script paths or SKILL.md content from earlier turns — inform the user the skill is unavailable and ask how to proceed.
 
 Then execute the workflow; the rules below govern execution.
 
