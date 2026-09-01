@@ -573,7 +573,7 @@ body.workspace-resize-active iframe {
     border-color: transparent;
     background: var(--color-connector-tool-icon-surface);
     width: fit-content;
-    max-width: 100%;
+    max-width: calc(100% - 88px);
     margin-left: auto;
   }
 
