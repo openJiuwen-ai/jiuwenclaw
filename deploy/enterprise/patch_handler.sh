@@ -50,6 +50,7 @@ install_agentserver_patch() {
     fi
 
     local runtime_port="${DEPLOY_VARS["AGENT_RUNTIME_NODE_PORT"]}"
+    local host="${DEPLOY_VARS["CURRENT_NODE_IP"]:-127.0.0.1}"
     local yaml_file="${CONFIG["AS_ENV_YAML_FILE"]}"
     local json_file="${CONFIG["AS_JSON_FILE"]}"
 
@@ -59,7 +60,7 @@ install_agentserver_patch() {
     # 下发agentserver服务配置
     info "Pushing AgentServer template"
     set +e
-    local response=$(curl -s --max-time 20 -X POST "http://127.0.0.1:${runtime_port}/api/session/config_sync" \
+    local response=$(curl -s --max-time 20 -X POST "http://${host}:${runtime_port}/api/session/config_sync" \
         -H "Content-Type: application/json" \
         -d @"${json_file}" 2>&1)
     local rc=$?
@@ -77,6 +78,7 @@ install_model_patch() {
     fi
 
     local gw_node_port="${DEPLOY_VARS["GATEWAY_CONFIG_HTTP_NODE_PORT"]:-}"
+    local host="${DEPLOY_VARS["CURRENT_NODE_IP"]:-127.0.0.1}"
     local bot_id="${MODEL_BOT_ID:-default}"
     local agent_template_id="${AGENT_TEMPLATE_ID:-default-agent}"
     local model_template_id="default-model"
@@ -84,7 +86,7 @@ install_model_patch() {
     # 1. 下发 model_template（数据一：模型凭据）
     info "Pushing model template (template_id=${model_template_id})"
     set +e
-    local response=$(curl -s --max-time 20 -X POST "http://127.0.0.1:${gw_node_port}/api/v1/model-templates" \
+    local response=$(curl -s --max-time 20 -X POST "http://${host}:${gw_node_port}/api/v1/model-templates" \
         -H "Content-Type: application/json" \
         -d "{
             \"template_id\":\"${model_template_id}\",
@@ -112,7 +114,7 @@ install_model_patch() {
     # 2. 下发 agent_template（数据二：template_ref 指向 model_template）
     info "Pushing agent template (template_id=${agent_template_id}, ref→${model_template_id})"
     set +e
-    response=$(curl -s --max-time 20 -X POST "http://127.0.0.1:${gw_node_port}/api/v1/agent-templates" \
+    response=$(curl -s --max-time 20 -X POST "http://${host}:${gw_node_port}/api/v1/agent-templates" \
         -H "Content-Type: application/json" \
         -d "{\"template_id\":\"${agent_template_id}\",\"template_name\":\"default agent\",\"template_ref\":{\"default_model\":[\"${model_template_id}\"]},\"enabled\":true}" 2>&1)
     rc=$?
@@ -125,7 +127,7 @@ install_model_patch() {
     # 3. 下发 instance_agent_resource（数据三：resource_id=bot_id, ref_template_id 指向 agent_template）
     info "Pushing instance agent resource (resource_id=${bot_id}, ref→${agent_template_id})"
     set +e
-    response=$(curl -s --max-time 20 -X POST "http://127.0.0.1:${gw_node_port}/api/v1/instance-agent-resources" \
+    response=$(curl -s --max-time 20 -X POST "http://${host}:${gw_node_port}/api/v1/instance-agent-resources" \
         -H "Content-Type: application/json" \
         -d "{\"resource_id\":\"${bot_id}\",\"ref_template_id\":\"${agent_template_id}\",\"resource_name\":\"default agent\",\"match_expr\":[],\"enabled\":true}" 2>&1)
     rc=$?
