@@ -631,12 +631,7 @@ def _install_default_builtin_skills(
     """
     # 定义默认安装的技能列表
     default_skills = [
-        "xiaoyi-web-search",
-        "aigc_marker",
-        "execution-validator-skill",
-        "secret-guardian",
-        "skill-scope",
-        "plugin-audit",
+        "xiaoyi-web-search"
     ]
 
     if not builtin_dir.exists() or not builtin_dir.is_dir():
@@ -691,12 +686,7 @@ def ensure_builtin_skills_installed() -> None:
     """
     # 默认预装的技能列表
     default_skills = [
-        "xiaoyi-web-search",
-        "aigc_marker",
-        "execution-validator-skill",
-        "secret-guardian",
-        "skill-scope",
-        "plugin-audit",
+        "xiaoyi-web-search"
     ]
 
     builtin_dir = get_builtin_skills_dir()
