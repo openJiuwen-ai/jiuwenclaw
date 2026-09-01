@@ -9,10 +9,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Literal
-
-Family = Literal["progress", "node"]
-Kind = Literal["metric", "usage", "created", "stage"]
+from typing import Any
 
 
 @dataclass(slots=True)

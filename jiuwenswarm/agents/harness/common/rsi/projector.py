@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import threading
+from pathlib import Path
 from typing import Any
 
 from jiuwenswarm.agents.harness.common.rsi.errors import RsiTaskNotFound
@@ -31,9 +32,7 @@ class RsiProjector:
         # stage 事件定位的关键映射（内部 v3 §4.4 投影规则：node_ref → N<序号>）。
         self._ref_index: dict[str, dict[str, str]] = {}
 
-    def _tree_path(self, task_id: str):
-        from pathlib import Path
-
+    def _tree_path(self, task_id: str) -> Path:
         return Path(self.tasks_root) / task_id / "tree.json"
 
     def register_root(self, task_id: str, *, baseline: float | None = None, description: str = "基线") -> None:
@@ -69,7 +68,7 @@ class RsiProjector:
             if node_id in nodes:
                 return nodes[node_id]
             parent_ref = node.get("parent_ref") if isinstance(node, dict) else None
-            parent_id = self._map_parent_id(nodes, parent_ref)
+            parent_id = self._map_parent_id(task_id, parent_ref)
             node_type = self._map_type(node)
             tree_node = RsiTreeNode(
                 node_id=node_id,
@@ -138,12 +137,14 @@ class RsiProjector:
         with self._lock:
             nodes = self._nodes.get(task_id)
             metric = self._metric.get(task_id, {})
-        if nodes is None and metric is None:
+        # 真未知任务（无节点也无 metric 快照）才抛 404；仅有 metric 的合法中间态
+        # （root 注册前 P2 链路可能先收到 progress.metric）仍返回零值进度。
+        if nodes is None and not metric:
             raise RsiTaskNotFound(task_id)
-        iteration = int(metric.get("iteration") or (len(nodes) - 1 if nodes else 0))
+        iteration = _safe_int(metric.get("iteration")) or (len(nodes) - 1 if nodes else 0)
         return {
             "iteration": iteration,
-            "total_iterations": int(metric.get("total_iterations") or 0),
+            "total_iterations": _safe_int(metric.get("total_iterations")),
             "score": _safe_float(metric.get("score")),
             "baseline": _safe_float(metric.get("baseline")),
         }
@@ -166,7 +167,7 @@ class RsiProjector:
         return {
             "nodes": [node.to_dict() for node in sorted(nodes.values(), key=lambda n: n.iteration)],
             "depth": depth,
-            "iteration": int(metric.get("iteration") or 0),
+            "iteration": _safe_int(metric.get("iteration")),
         }
 
     def derive_tree_delta(self, task_id: str, since_node_ids: set[str]) -> dict[str, Any]:
@@ -210,8 +211,6 @@ class RsiProjector:
     def _persist_locked(self, task_id: str) -> None:
         if not self._nodes.get(task_id):
             return
-        from pathlib import Path
-
         path = Path(self.tasks_root) / task_id
         path.mkdir(parents=True, exist_ok=True)
         payload = {
@@ -222,12 +221,13 @@ class RsiProjector:
         with (path / "tree.json").open("w", encoding="utf-8") as fh:
             json.dump(payload, fh, ensure_ascii=False, indent=2)
 
-    @staticmethod
-    def _map_parent_id(nodes: dict[str, RsiTreeNode], parent_ref: Any) -> str | None:
+    def _map_parent_id(self, task_id: str, parent_ref: Any) -> str | None:
+        """引擎侧稳定引用 → 服务侧节点 ID 反查（node.created 先于子节点出现）。"""
+        nodes = self._nodes.get(task_id) or {}
         if not parent_ref or str(parent_ref).lower() == "root":
             return _ROOT if _ROOT in nodes else None
-        # 引擎侧稳定候选引用 → 服务侧节点映射：默认按派生序指针表（C3 恢复通道后升级为 read_state 反查）
-        return None
+        mapped = self._ref_index.get(task_id, {}).get(str(parent_ref))
+        return mapped if mapped in nodes else None
 
     @staticmethod
     def _map_type(node: dict[str, Any]) -> str:
@@ -257,3 +257,13 @@ def _safe_float(value: Any) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _safe_int(value: Any) -> int:
+    """畸形引擎载荷防御（PR !5798 #10）：返回 0 而非抛 ValueError/TypeError。"""
+    if value is None or isinstance(value, bool):
+        return 0
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0

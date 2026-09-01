@@ -12,14 +12,13 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 from typing import Any
 
 from jiuwenswarm.agents.harness.common.rsi.errors import RsiTaskStateConflict
 from jiuwenswarm.agents.harness.common.rsi.event_consumer import RsiEventConsumer, consume_queue
 from jiuwenswarm.agents.harness.common.rsi.events import EngineEvent
-from jiuwenswarm.agents.harness.common.rsi.models import TaskStatus, utcnow_iso
+from jiuwenswarm.agents.harness.common.rsi.models import TaskStatus
 
 logger = logging.getLogger(__name__)
 
@@ -55,22 +54,25 @@ class RsiWorker:
         self._queue: asyncio.Queue[str] = asyncio.Queue()
         self._running_task_id: str | None = None
         self._run_task: asyncio.Task[Any] | None = None
-        self._pending_runner = False
         self._last_enqueued: str | None = None
 
     # -- 队列 --
 
     def enqueue(self, task_id: str) -> str:
-        """入队（内部 v3 §4.2 语义）。返回 QUEUED / RUNNING。"""
+        """入队（内部 v3 §4.2 语义）。返回 QUEUED。
+
+        - 单一路径：任何非 PAUSED / 非 QUEUED 任务统一 CREATED→QUEUED 并入队；
+          ``_ensure_runner`` 在运行中时自动跳过（并发=1 语义）。
+        - 已排队任务幂等短路，避免状态机 QUEUED→QUEUED 自冲突。
+        """
         task = self.store.get(task_id)
         if task.status == TaskStatus.PAUSED.value:
             self._conflict(task_id, "PAUSED 任务请走 resume")
-        if self._running_task_id is not None and self._run_task is not None and not self._run_task.done():
-            self.store.update_status(task_id, [TaskStatus.CREATED.value], TaskStatus.QUEUED.value, cause="enqueue")
+        if task.status == TaskStatus.QUEUED.value:
             return TaskStatus.QUEUED.value
         self.store.update_status(
             task_id,
-            [TaskStatus.CREATED.value, TaskStatus.QUEUED.value, TaskStatus.PAUSED.value],
+            [TaskStatus.CREATED.value],
             TaskStatus.QUEUED.value,
             cause="enqueue",
         )
@@ -121,6 +123,7 @@ class RsiWorker:
             # 当前无引擎态 → 日志提示，不误报成功（真实校验在 resume 执行路径）
             logger.warning("[RSI] resume fingerprint 校验未装配（C2 ⚠️外部），task=%s", task_id)
         self.store.update_status(task_id, [TaskStatus.PAUSED.value], TaskStatus.QUEUED.value, cause="resume")
+        self._last_enqueued = task_id
         self._queue.put_nowait(task_id)
         self._ensure_runner()
         return TaskStatus.QUEUED.value
@@ -134,24 +137,27 @@ class RsiWorker:
             self._run_task = asyncio.create_task(self._run_loop())
         except RuntimeError:
             # 无运行中事件循环（同步上下文/单测/冷启动脚本）：入队成功但执行延后，
-            # 由事件循环就绪后的下一次 enqueue 或显式 start_runner 接管（内部 v3 §4.2）。
+            # 由事件循环就绪后的下一次 enqueue 或显式 _ensure_runner 接管（内部 v3 §4.2）。
             logger.warning("[RSI] 无运行中事件循环，任务已入队，等待事件循环接管: task=%s", getattr(self, "_last_enqueued", ""))
             self._run_task = None
-            self._pending_runner = True
 
     async def _run_loop(self) -> None:
         while True:
             task_id = await self._queue.get()
             self._running_task_id = task_id
-            self.store.update_status(
-                task_id,
-                [TaskStatus.QUEUED.value, TaskStatus.PAUSED.value],
-                TaskStatus.RUNNING.value,
-                cause="worker.start",
-            )
-            await self._execute_task(task_id)
-            self._running_task_id = None
-            self._queue.task_done()
+            try:
+                self.store.update_status(
+                    task_id,
+                    [TaskStatus.QUEUED.value, TaskStatus.PAUSED.value],
+                    TaskStatus.RUNNING.value,
+                    cause="worker.start",
+                )
+                await self._execute_task(task_id)
+            except Exception:  # noqa: BLE001 - 单任务状态冲突/异常不拖垮 worker
+                logger.exception("[RSI] 任务执行异常 task=%s，跳过继续取下一个", task_id)
+            finally:
+                self._running_task_id = None
+                self._queue.task_done()
 
     async def _execute_task(self, task_id: str) -> None:
         task_view = self.store.get_view(task_id)
@@ -199,15 +205,15 @@ class RsiWorker:
             self._persist_results(task_id, result)
 
     def _persist_results(self, task_id: str, result: Any) -> None:
-        """引擎结果落盘（IterativeSingleHarnessResult 形状）→ task.json.config.results。"""
+        """引擎结果落盘（IterativeSingleHarnessResult 形状）→ task.json.config.results。
+
+        ``merge_results`` 由 store 在锁内完成读-改-写，避免与 update_status /
+        mark_active_ref_released 并发写同一 task.json（PR !5798 #3）。
+        """
         if result is None:
             return
         try:
-            task = self.store.get(task_id)
-            task_dir = self.store.task_dir(self.store.tasks_root, task_id)
-            payload = task.to_dict()
-            config = dict(payload.get("config") or {})
-            results = dict(config.get("results") or {})
+            results: dict[str, Any] = {}
             for key in (
                 "state_path",
                 "report_path",
@@ -219,13 +225,7 @@ class RsiWorker:
                 value = getattr(result, key, None)
                 if value is not None:
                     results[key] = str(value) if not isinstance(value, float) else value
-            config["results"] = results
-            payload["config"] = config
-            payload["updated_at"] = utcnow_iso()
-            tmp = task_dir / "task.json.tmp"
-            with tmp.open("w", encoding="utf-8") as fh:
-                json.dump(payload, fh, ensure_ascii=False, indent=2)
-            tmp.replace(task_dir / "task.json")
+            self.store.merge_results(task_id, results)
         except Exception:  # noqa: BLE001
             logger.exception("[RSI] 持久化引擎结果失败 task=%s", task_id)
 

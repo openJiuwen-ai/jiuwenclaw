@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +25,9 @@ from jiuwenswarm.agents.harness.common.rsi.models import (
     generate_task_id,
     utcnow_iso,
 )
+
+
+logger = logging.getLogger(__name__)
 
 
 class RsiTaskService:
@@ -327,8 +331,8 @@ class RsiArtifactDownloadService:
         if artifact_id is None or artifact.is_best:
             try:
                 self.store.mark_active_ref_released(task_id)
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("[RSI] 在用产物标记释放失败 task=%s: %s", task_id, exc)
         return {
             "path": artifact.path,
             "kind": artifact.kind,

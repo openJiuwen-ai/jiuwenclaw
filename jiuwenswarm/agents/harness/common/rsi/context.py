@@ -48,8 +48,6 @@ class RsiServiceContext:
         self.usage_service = RsiUsageService(self.usage_recorder)
         self.report_service = RsiReportService(self.store, self.projector, self.usage_recorder, self.artifact_service)
         self.artifact_download_service = RsiArtifactDownloadService(self.artifact_service, self.store)
-        # 推送回调表（worker 装配；AgentServer 注入 P2/P3 send_push 包装）
-        self._worker_push_callbacks: dict[str, Any] = dict(worker_push_callbacks or {})
 
     def bind_task_service(self, *, adapter: Any = None, harness_refs_provider: Callable[[], str | None] | None = None) -> None:
         self.task_service.adapter = adapter

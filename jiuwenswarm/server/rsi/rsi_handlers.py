@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 from typing import Any, Callable
 
@@ -148,7 +149,7 @@ class RsiAgentServerHandlers:
                 },
             )
 
-        self.context.store._on_status_changed = _on_status_changed  # noqa: SLF001
+        self.context.store.set_status_changed_callback(_on_status_changed)
 
     def _bind_event_push(self) -> None:
         async def _on_progress(event_type: str, task_id: str, payload: dict[str, Any]) -> None:
@@ -179,7 +180,7 @@ class RsiAgentServerHandlers:
     def _push(self, event_type: str, payload: dict[str, Any]) -> None:
         """统一推送出口（复用 E2A server_push；零改动）。"""
         try:
-            self.send_push(
+            result = self.send_push(
                 {
                     "channel_id": self.default_channel_id,
                     "payload": {
@@ -188,5 +189,11 @@ class RsiAgentServerHandlers:
                     },
                 }
             )
+            if not inspect.isawaitable(result):
+                return
+            try:
+                asyncio.get_running_loop().create_task(result)
+            except RuntimeError:
+                logger.warning("[RSI] push 无运行中事件循环，丢弃: %s", event_type)
         except Exception:  # noqa: BLE001
             logger.warning("[RSI] push failed: %s", event_type)

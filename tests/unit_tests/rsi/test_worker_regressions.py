@@ -1,0 +1,235 @@
+# -*- coding: utf-8 -*-
+"""RSI PR !5798 检视修复回归测试（worker 队列可靠性 / 推送调度 / 投影契约 / store 锁）。
+
+覆盖：F1 enqueue 运行中入队、F4 QUEUED 幂等、F2 _run_loop 容错、
+F3 merge_results 锁内落盘、F5 async send_push 调度、F7 derive_progress 404、
+F9 树拓扑 parent 解析、F10 畸形载荷防御、F11 rmtree 失败传播、F12 公开回调 setter。
+"""
+import asyncio
+import contextlib
+import tempfile
+from pathlib import Path
+
+import pytest
+
+from jiuwenswarm.agents.harness.common.rsi import build_rsi_service_context
+from jiuwenswarm.agents.harness.common.rsi.errors import (
+    RsiTaskNotFound,
+    RsiTaskStateConflict,
+)
+from jiuwenswarm.agents.harness.common.rsi.models import TaskStatus
+from jiuwenswarm.server.rsi import RsiAgentServerHandlers
+
+
+@pytest.fixture
+def ctx():
+    with tempfile.TemporaryDirectory() as tmp:
+        yield build_rsi_service_context(Path(tmp))
+
+
+def _create(ctx, name="t"):
+    return ctx.task_service.create({
+        "scenario": "HARNESS",
+        "name": name,
+        "input_file": "C:/d.json",
+        "model_refs": {"optimizer": "o", "tester": "e"},
+    })["task_id"]
+
+
+class TestWorkerEnqueue:
+    async def test_enqueue_while_running_still_queues(self, ctx, monkeypatch):
+        """F1：运行中分支必须入队（PR !5798 #1/#60），只改状态会导致任务永久卡 QUEUED。"""
+        monkeypatch.setattr(ctx.worker, "_ensure_runner", lambda: None)
+        t1 = _create(ctx, "t1")
+        t2 = _create(ctx, "t2")
+        ctx.store.update_status(t1, ["CREATED"], "QUEUED", cause="test")
+        ctx.store.update_status(t1, ["QUEUED"], "RUNNING", cause="test")
+        gate = asyncio.Event()
+        blocker = asyncio.create_task(gate.wait())
+        ctx.worker._running_task_id = t1
+        ctx.worker._run_task = blocker
+        try:
+            status = ctx.worker.enqueue(t2)
+            assert status == TaskStatus.QUEUED.value
+            assert ctx.worker._queue.qsize() == 1
+            assert ctx.store.get(t2).status == "QUEUED"
+        finally:
+            blocker.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await blocker
+
+    def test_enqueue_queued_task_idempotent(self, ctx, monkeypatch):
+        """F4：QUEUED 任务重复 enqueue 不抛错、不重复入队（避免 QUEUED→QUEUED 自冲突）。"""
+        monkeypatch.setattr(ctx.worker, "_ensure_runner", lambda: None)
+        t = _create(ctx)
+        assert ctx.worker.enqueue(t) == TaskStatus.QUEUED.value
+        assert ctx.worker.enqueue(t) == TaskStatus.QUEUED.value
+        assert ctx.worker._queue.qsize() == 1
+        assert ctx.store.get(t).status == "QUEUED"
+
+    def test_enqueue_paused_rejected(self, ctx, monkeypatch):
+        monkeypatch.setattr(ctx.worker, "_ensure_runner", lambda: None)
+        t = _create(ctx)
+        ctx.store.update_status(t, ["CREATED"], "QUEUED", cause="t")
+        ctx.store.update_status(t, ["QUEUED"], "PAUSED", cause="t")
+        with pytest.raises(RsiTaskStateConflict):
+            ctx.worker.enqueue(t)
+
+
+class TestWorkerRunLoop:
+    async def test_run_loop_survives_state_conflict(self, ctx, monkeypatch):
+        """F2：单个任务状态冲突不拖垮 worker；finally 清理 _running_task_id + task_done。"""
+        t = _create(ctx)
+        original = ctx.store.update_status
+
+        def _conflicting(task_id, from_states, to_state, cause=""):
+            if cause == "worker.start":
+                raise RsiTaskStateConflict(f"conflict {task_id}")
+            return original(task_id, from_states, to_state, cause)
+
+        monkeypatch.setattr(ctx.store, "update_status", _conflicting)
+        ctx.store.update_status(t, ["CREATED"], "QUEUED", cause="enqueue")
+        ctx.worker._queue.put_nowait(t)
+        ctx.worker._last_enqueued = t
+        runner = asyncio.create_task(ctx.worker._run_loop())
+        await asyncio.sleep(0.05)
+        assert not runner.done()
+        assert ctx.worker._running_task_id is None
+        runner.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await runner
+
+    async def test_persist_results_delegates_to_store_merge(self, ctx, monkeypatch):
+        """F3：_persist_results 委托 store.merge_results（锁内读-改-写），不再直接写 task.json。"""
+        t = _create(ctx)
+        captured: dict = {}
+
+        def fake_merge(task_id, results):
+            captured["task_id"] = task_id
+            captured["results"] = dict(results)
+
+        monkeypatch.setattr(ctx.store, "merge_results", fake_merge)
+
+        class FakeResult:
+            best_score = 0.8
+            state_path = "/s"
+            report_path = None  # None 应跳过
+
+        ctx.worker._persist_results(t, FakeResult())
+        assert captured["task_id"] == t
+        assert captured["results"] == {"best_score": 0.8, "state_path": "/s"}
+
+
+class TestStoreMerge:
+    def test_merge_results_lock_protected(self, ctx):
+        t = _create(ctx)
+        ctx.store.merge_results(t, {"best_score": 0.9, "state_path": "x"})
+        task = ctx.store.get(t)
+        assert task.config["results"]["best_score"] == 0.9
+        assert task.config["results"]["state_path"] == "x"
+        # None 值跳过，保留既有值
+        ctx.store.merge_results(t, {"best_score": None, "report_path": "r"})
+        task = ctx.store.get(t)
+        assert task.config["results"]["best_score"] == 0.9
+        assert task.config["results"]["report_path"] == "r"
+
+
+class TestPushScheduling:
+    async def test_push_schedules_async_send(self, ctx):
+        """F5：async send_push 被调度执行，而非静默丢弃（PR !5798 #5/#59）。"""
+        sent = []
+
+        async def async_send(msg):
+            sent.append(msg)
+
+        h = RsiAgentServerHandlers(ctx, send_push=async_send, harness_refs_provider=lambda: None)
+        h._push("rsi.training.progress", {"task_id": "t"})
+        await asyncio.sleep(0.02)
+        assert len(sent) == 1
+        assert sent[0]["payload"]["event_type"] == "rsi.training.progress"
+        assert sent[0]["payload"]["task_id"] == "t"
+
+    def test_push_sync_send_unchanged(self, ctx):
+        sent = []
+
+        def sync_send(msg):
+            sent.append(msg)
+            return True
+
+        h = RsiAgentServerHandlers(ctx, send_push=sync_send, harness_refs_provider=lambda: None)
+        h._push("rsi.training.status.changed", {"task_id": "t"})
+        assert len(sent) == 1
+        assert sent[0]["payload"]["event_type"] == "rsi.training.status.changed"
+
+
+class TestProjectorContract:
+    def test_derive_progress_unknown_task_raises(self, ctx):
+        """F7：真未知任务（无节点也无 metric）抛 404，不再静默返回零值进度。"""
+        with pytest.raises(RsiTaskNotFound):
+            ctx.projector.derive_progress("rsi-ghost")
+
+    def test_derive_progress_metric_only_ok(self, ctx):
+        """P2 链路先收到 metric 事件（root 尚未注册）仍返回进度，不误抛 404。"""
+        ctx.projector.on_progress_metric("rsi-t1", {"iteration": 1})
+        p = ctx.projector.derive_progress("rsi-t1")
+        assert p["iteration"] == 1
+
+    def test_derive_progress_malformed_metric_safe(self, ctx):
+        """F10：畸形 metric 载荷不抛 ValueError/TypeError。"""
+        ctx.projector.register_root("rsi-t1")
+        ctx.projector.on_progress_metric("rsi-t1", {"iteration": "abc", "total_iterations": None})
+        p = ctx.projector.derive_progress("rsi-t1")
+        assert p["iteration"] == 0
+        assert p["total_iterations"] == 0
+
+    def test_node_parent_ref_resolves_depth(self, ctx):
+        """F9：非 root 父节点经 _ref_index 反查，树深度 >1（PR !5798 #9）。"""
+        ctx.projector.register_root("rsi-t1")
+        ctx.projector.on_node_created("rsi-t1", {
+            "node": {"ref": "c1", "parent_ref": "root", "outcome": "ADOPTED", "accepted": True},
+        })
+        child = ctx.projector.on_node_created("rsi-t1", {
+            "node": {"ref": "c2", "parent_ref": "c1", "outcome": "REJECTED", "accepted": False},
+        })
+        assert child is not None
+        assert child.parent_id == "N1"
+        tree = ctx.projector.derive_tree("rsi-t1")
+        assert tree["depth"] == 2
+
+
+class TestDeleteFailures:
+    def test_delete_propagates_rmtree_failure(self, ctx, monkeypatch):
+        """F11：rmtree 失败不再静默吞掉（PR !5798 #11）。"""
+        ctx.bind_task_service(harness_refs_provider=lambda: None)
+        t = _create(ctx)
+        import jiuwenswarm.agents.harness.common.rsi.task_store as ts
+
+        def _boom(*args, **kwargs):
+            raise PermissionError("locked")
+
+        monkeypatch.setattr(ts.shutil, "rmtree", _boom)
+        with pytest.raises(PermissionError):
+            ctx.task_service.delete({"task_id": t})
+
+    def test_delete_idempotent_when_dir_already_gone(self, ctx):
+        """目录已消失视作幂等成功（guard 通过后 rmtree 抛 FileNotFoundError 不误报）。"""
+        ctx.bind_task_service(harness_refs_provider=lambda: None)
+        t = _create(ctx)
+        ctx.store.mark_active_ref_released(t)
+        task_dir = ctx.store.task_dir(ctx.store.tasks_root, t)
+        assert task_dir.is_dir()
+        # 制造“get 成功但目录已删”的窗口：替换 task.json 后立即删目录不可行，
+        # 直接预删目录 → delete 的 get 会抛 NotFound；此分支无独立可测窗口。
+        # 验证正常删除路径仍工作。
+        assert ctx.task_service.delete({"task_id": t}) == {"ok": True}
+        assert not task_dir.exists()
+
+
+class TestStatusCallback:
+    def test_public_setter_registers_callback(self, ctx):
+        """F12：set_status_changed_callback 公开注入 P1 钩子（替代直接改私有属性）。"""
+        seen = []
+        ctx.store.set_status_changed_callback(lambda task_id, old, new: seen.append((task_id, old, new)))
+        t = _create(ctx)
+        ctx.store.update_status(t, ["CREATED"], "QUEUED", cause="x")
+        assert (t, "CREATED", "QUEUED") in seen

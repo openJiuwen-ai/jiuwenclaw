@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import threading
 from collections.abc import Callable
 from pathlib import Path
@@ -52,10 +53,6 @@ class RsiTaskStore:
     @staticmethod
     def task_dir(tasks_root: Path, task_id: str) -> Path:
         return Path(tasks_root) / task_id
-
-    @staticmethod
-    def task_file(task_dir: Path) -> Path:
-        return task_dir / "task.json"
 
     # -- 增查删 --
 
@@ -111,10 +108,11 @@ class RsiTaskStore:
                 if not bool(task.config.get("active_ref_released", False)):
                     raise RsiTaskStateConflict(f"任务 {task_id} 产物仍在生效，不可删除")
         task_dir = self.task_dir(self.tasks_root, task_id)
-        import shutil
-
         with _LOCK:
-            shutil.rmtree(task_dir, ignore_errors=True)
+            try:
+                shutil.rmtree(task_dir)
+            except FileNotFoundError:
+                pass  # 目录已不存在视为删除成功（幂等）
 
     # -- 状态机 --
 
@@ -124,8 +122,6 @@ class RsiTaskStore:
         - ``from_states`` 约束合法迁移；当前状态不在其中 → ``TASK_STATE_CONFLICT``。
         - 成功迁移后 P1 钩子 ``on_status_changed(task_id, old, new)``。
         """
-        task = self.get(task_id)
-        old = task.status
         task_dir = self.task_dir(self.tasks_root, task_id)
         with _LOCK:
             current = self.get(task_id)  # re-read under lock
@@ -151,6 +147,24 @@ class RsiTaskStore:
         if self._on_status_changed is not None:
             self._on_status_changed(task_id, old, to_state)
         return RsiTask.from_dict(payload)
+
+    def merge_results(self, task_id: str, results: dict[str, Any]) -> None:
+        """锁内合并引擎结果到 task.json.config.results（worker 落盘唯一入口）。"""
+        task_dir = self.task_dir(self.tasks_root, task_id)
+        with _LOCK:
+            current = self.get(task_id)
+            payload = current.to_dict()
+            config = dict(payload.get("config") or {})
+            merged = dict(config.get("results") or {})
+            merged.update({k: v for k, v in results.items() if v is not None})
+            config["results"] = merged
+            payload["config"] = config
+            payload["updated_at"] = utcnow_iso()
+            self._write_task(task_dir, payload)
+
+    def set_status_changed_callback(self, callback: Callable[[str, str, str], None] | None) -> None:
+        """公开注入状态变更 P1 钩子（替代直接改私有属性，PR !5798 #12）。"""
+        self._on_status_changed = callback
 
     def mark_active_ref_released(self, task_id: str) -> None:
         """下载/装载路径消费产物后置位：允许后续 delete（在用产物放行）。"""

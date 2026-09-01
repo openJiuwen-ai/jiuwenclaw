@@ -14,13 +14,6 @@ class RsiError(Exception):
         self.message = message
         self.detail = detail
 
-    def to_payload(self) -> dict[str, Any]:
-        payload: dict[str, Any] = {"error": self.message, "code": self.code}
-        if self.detail is not None:
-            payload["detail"] = self.detail
-        return payload
-
-
 class RsiBadRequest(RsiError):
     def __init__(self, message: str, *, detail: Any = None) -> None:
         super().__init__("BAD_REQUEST", message, detail=detail)

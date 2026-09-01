@@ -48,14 +48,6 @@ class ArtifactType(str, Enum):
     PROGRAM = "PROGRAM"
 
 
-class NodeType(str, Enum):
-    ROOT = "ROOT"
-    ADOPTED = "ADOPTED"
-    REJECTED = "REJECTED"
-    PROVISIONAL = "PROVISIONAL"
-    PRUNED = "PRUNED"
-
-
 class ArtifactKind(str, Enum):
     HARNESS_PLUGIN = "harness_plugin"
     ARTIFACT_PACKAGE = "artifact_package"
