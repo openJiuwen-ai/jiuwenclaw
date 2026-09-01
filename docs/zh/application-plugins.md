@@ -3,11 +3,14 @@
 应用插件可以同时扩展 Jiuwen 的工作区页面、Gateway RPC 和 WebSocket。它与
 Agent 的 skills、tools、rails 插件相互独立。
 
+应用插件统一在侧栏 **扩展** 中安装和管理，配置入口位于 **我的扩展**，不再新增
+独立的“应用插件”管理 Tab；启用后，插件贡献的工作区页面由宿主动态挂载。
+
 ```mermaid
 flowchart LR
     P[插件目录] --> L[ExtensionLoader]
     L --> R[ApplicationPluginExtension]
-    R --> M[插件管理页]
+    R --> M[扩展 / 我的扩展]
     R --> N[工作区导航]
     R --> G[Gateway RPC / WebSocket]
     M --> C[Schema 自动配置]
@@ -85,7 +88,7 @@ extensions:
   extension_dirs: "C:/dev/jiuwen-plugins;D:/team/plugins"
 ```
 
-重启 Gateway 后打开“更多 → 应用插件”。插件清单、配置和资源可通过以下接口检查：
+重启 Gateway 后打开“扩展 → 我的扩展”。插件清单、配置和资源可通过以下接口检查：
 
 ```text
 GET  /api/application-plugins
@@ -204,7 +207,7 @@ WebSocket。Python 扩展与 iframe 当前都运行在 Jiuwen 的信任边界内
 
 `jiuwenswarm/extensions/video_duplex` 是第一个应用插件，演示了 bundled React 页面、
 RPC、WebSocket、Schema 设置以及旧 `.env` 配置兼容。其模型、ASR、TTS 和开关均位于
-侧栏“应用插件 → 全双工”。宿主根据 `extension.yaml` 自动生成设置表单：切换
+“扩展 → 我的扩展 → Full-duplex”。宿主根据 `extension.yaml` 自动生成设置表单：切换
 JoyAI 或 Qwen 时只展示当前 Provider 所需字段，密钥保存后不会回传明文。
 
 设置保存后会更新当前 Gateway 进程及 Jiuwen 实例 `.env`，下一次全双工连接即可使用；
