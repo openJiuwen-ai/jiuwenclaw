@@ -252,6 +252,12 @@ def _build_runtime_prompt_rail(
     # deliverables at the shared team ``outputs/``. Members bound to a project
     # keep the task paths unset so the rail's else branch ("deliverables in the
     # project") applies, matching single-agent behaviour.
+    #
+    # The per-member work directory is resolved through the build context
+    # (``SwarmBuildContext.resolve_member_work_dir``) so there is one creation
+    # point shared with ``AgentConfigurator``, which sets the same path as the
+    # member's shell cwd. Calling the allocator again here would be idempotent
+    # but redundant.
     if inp.project_dir or not inp.team_outputs_dir or not inp.task_workspace_root:
         rail.set_runtime_paths(
             cwd=inp.project_dir or inp.member_workspace_root,
@@ -259,18 +265,18 @@ def _build_runtime_prompt_rail(
             workspace_dir=inp.member_workspace_root,
         )
     else:
-        from jiuwenswarm.common.team_artifacts import resolve_member_work_dir
-
-        work_dir = resolve_member_work_dir(
-            inp.task_workspace_root,
-            context.member_name,
-        )
+        work_dir = context.resolve_member_work_dir()
+        # ``task_workspace_root`` is non-None here (guarded above), and the
+        # context's resolver returns a path whenever that root is set, so a
+        # None would be an internal invariant violation rather than a runtime
+        # condition to paper over.
+        assert work_dir is not None
         rail.set_runtime_paths(
-            cwd=str(work_dir),
+            cwd=work_dir,
             project_dir=inp.project_dir,
             workspace_dir=inp.member_workspace_root,
             task_workspace_root=inp.task_workspace_root,
-            task_work_dir=str(work_dir),
+            task_work_dir=work_dir,
             task_outputs_dir=inp.team_outputs_dir,
         )
     # Without this the member never renders the trusted_dirs policy section a
