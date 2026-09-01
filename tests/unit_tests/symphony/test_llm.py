@@ -49,22 +49,14 @@ def _llm_config():
     )
 
 
-def test_thinking_disabled_request_overrides_returns_isolated_compatibility_fields():
+def test_thinking_disabled_request_overrides_returns_isolated_core_config():
     first = thinking_disabled_request_overrides()
     second = thinking_disabled_request_overrides()
 
-    assert first == {
-        "extra_body": {
-            "thinking": {"type": "disabled"},
-            "enable_thinking": False,
-            "chat_template_kwargs": {"enable_thinking": False},
-        }
-    }
-    first["extra_body"]["thinking"]["type"] = "enabled"
-    first["extra_body"]["chat_template_kwargs"]["enable_thinking"] = True
+    assert first == {"reasoning": {"mode": "disabled"}}
+    first["reasoning"]["mode"] = "enabled"
 
-    assert second["extra_body"]["thinking"]["type"] == "disabled"
-    assert second["extra_body"]["chat_template_kwargs"]["enable_thinking"] is False
+    assert second == {"reasoning": {"mode": "disabled"}}
 
 
 def test_extract_message_content_supports_openjiuwen_response_shape():
@@ -137,10 +129,7 @@ def test_llm_config_removes_internal_reasoning_level():
 
     assert "reasoning_level" not in request_kwargs
     assert request_kwargs["max_tokens"] == 99
-    assert (
-        request_kwargs["extra_body"]
-        == thinking_disabled_request_overrides()["extra_body"]
-    )
+    assert request_kwargs["reasoning"] == {"mode": "disabled"}
 
 
 def test_llm_config_forces_high_reasoning_config_to_disabled():
@@ -163,10 +152,8 @@ def test_llm_config_forces_high_reasoning_config_to_disabled():
     assert "reasoning_level" not in request_kwargs
     assert "reasoning_effort" not in request_kwargs
     assert request_kwargs["max_tokens"] == 99
-    assert request_kwargs["extra_body"] == {
-        "custom_option": {"enabled": True},
-        **thinking_disabled_request_overrides()["extra_body"],
-    }
+    assert request_kwargs["reasoning"] == {"mode": "disabled"}
+    assert request_kwargs["extra_body"] == {"custom_option": {"enabled": True}}
 
 
 def test_llm_config_owns_nested_model_entry_data():

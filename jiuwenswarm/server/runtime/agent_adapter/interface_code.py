@@ -51,11 +51,12 @@ from openjiuwen.harness.tools import WebFetchWebpageTool, WebFreeSearchTool, Web
 from openjiuwen.harness.tools.worktree import WorktreeConfig, WorktreeRail
 
 from jiuwenswarm.server.runtime.agent_adapter.interface_deep import (
+    _ContextEngineModelState,
     JiuWenSwarmDeepAdapter,
     _AGENT_CARD_ID,
     _CRON_TOOL_CHANNEL_ID,
     _RailBuildInfo,
-    _deep_agent_context_engine_config,
+    _deep_agent_context_engine_config_for_model,
     _deep_agent_kv_cache_affinity_config,
     parse_int,
 )
@@ -729,8 +730,15 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
         if self._sys_operation is None or self._sys_operation_card is None:
             raise RuntimeError("code DeepAgent sys_operation is not initialized")
         agent_card = AgentCard(name=self._agent_name, id=_AGENT_CARD_ID)
-        context_engine_config = _deep_agent_context_engine_config(
+        context_model_state = _ContextEngineModelState(
+            full_config=config_base,
+            model_name=getattr(getattr(model, "model_config", None), "model_name", ""),
+            model=model,
+            config_base=config_base,
+        )
+        context_engine_config = _deep_agent_context_engine_config_for_model(
             config,
+            model_state=context_model_state,
         )
         logger.info(
             "[JiuwenSwarmCodeAdapter] ContextEngineConfig resolved: "
@@ -1088,8 +1096,18 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
         config_base: dict[str, Any] | None = None,
         env_overrides: dict[str, Any] | None = None,
         target_session_id: str | None = None,
+        reload_scopes: set[str] | None = None,
     ) -> None:
         """Hot-apply a newly generated DeepAgentSpec to the existing code agent."""
+        scope_set = set(reload_scopes) if reload_scopes else set()
+        if scope_set == {"multimodal"}:
+            await super().reload_agent_config(
+                config_base,
+                env_overrides,
+                target_session_id=target_session_id,
+                reload_scopes=scope_set,
+            )
+            return
         target_sid = str(target_session_id or "").strip() or None
         if self._is_session_scoped_adapter and target_sid:
             own_sid = self._session_adapter_key(self._parent_session_id)
@@ -1127,6 +1145,7 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
                 config_base,
                 env_overrides,
                 target_session_id=target_sid,
+                reload_scopes=scope_set,
             )
             return
 

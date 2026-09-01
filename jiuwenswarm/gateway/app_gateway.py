@@ -32,6 +32,9 @@ from openjiuwen.core.common.logging import LogManager
 from websockets.exceptions import ConnectionClosed, ConnectionClosedError
 
 from jiuwenswarm.common.ws_diagnostics import format_ws_diagnostics, describe_ws_peer, describe_ws_exception
+from jiuwenswarm.common.media_capability_config import (
+    migrate_media_capability_switches,
+)
 
 # user_id 白名单: 仅允许字母数字及 _-, 拒绝路径遍历字符
 _SAFE_USER_ID_RE = re.compile(r"^[a-zA-Z0-9_-]+$")
@@ -94,7 +97,9 @@ else:
     for _lg in LogManager.get_all_loggers().values():
         _lg.set_level(logging.CRITICAL)
 
-load_dotenv_runtime(dotenv_path=get_env_file(), override=True)
+_env_file = get_env_file()
+load_dotenv_runtime(dotenv_path=_env_file, override=True)
+migrate_media_capability_switches(_env_file)
 reset_free_search_runtime_flags()
 
 logger = logging.getLogger("jiuwenswarm.gateway")

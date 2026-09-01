@@ -654,6 +654,18 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
                 )
 
     async def after_model_call(self, ctx: AgentCallbackContext) -> None:
+        # New agent-core versions emit the complete pre/post context usage
+        # snapshots themselves.  The report on the callback context is the
+        # capability marker; emitting the legacy rail event as well would add
+        # a second, incomplete ``context.usage`` frame after the full one.
+        extra = getattr(ctx, "extra", {})
+        if isinstance(extra, dict) and extra.get("_context_usage_event_emitted"):
+            return
+        if getattr(ctx, "context_usage_report", None) is not None:
+            return
+        inputs = getattr(ctx, "inputs", None)
+        if getattr(inputs, "context_usage_report", None) is not None:
+            return
         await self._emit_context_usage(
             ctx,
             member_name=self._member_name or None,

@@ -12,7 +12,7 @@ import logoIcon from '/logo.svg';
 import SettingsIcon from '../../assets/settings/app-navigation/settings.svg?react';
 import UpdateIcon from '../../assets/sidebar/advanced-config.svg?react';
 import WorkIcon from '../../assets/工作.svg?react';
-import SkillDesignIcon from '../../assets/技能.svg?react';
+import SkillDesignIcon from '../../assets/agent-management/agent-skill.svg?react';
 import AgentDesignIcon from '../../assets/智能体.svg?react';
 import type { SidebarNavKey } from '../../utils/frontendPlatform';
 

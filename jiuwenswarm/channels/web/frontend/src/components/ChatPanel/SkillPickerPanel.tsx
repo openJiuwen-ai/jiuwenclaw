@@ -2,9 +2,11 @@
 import { createPortal } from 'react-dom';
 import { useTranslation } from 'react-i18next';
 import clsx from 'clsx';
+import { Check } from 'lucide-react';
 import { useChatStore, useSessionStore } from '../../stores';
 import { webRequest } from '../../services/webClient';
 import { getSkillAvatar } from '../../utils/skillAvatar';
+import SearchIcon from '../../assets/agent-management/agent-search.svg?react';
 
 /** 输入栏下拉所需的最小技能数据结构（与 SkillPanel 中的 SkillItem 保持一致） */
 type SkillItem = {
@@ -200,9 +202,7 @@ export function SkillPickerPanel({
     <div ref={panelRef} className="chat-skill-picker" style={style} role="menu">
       {/* 顶部搜索框 */}
       <div className="chat-skill-select__search" data-testid="chat-panel-skill-select-search">
-        <svg className="chat-skill-select__search-icon" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth={1.8} aria-hidden="true">
-          <path strokeLinecap="round" strokeLinejoin="round" d="M9 3.5a5.5 5.5 0 100 11 5.5 5.5 0 000-11zM17.5 17.5l-3.7-3.7" />
-        </svg>
+        <SearchIcon className="chat-skill-select__search-icon" aria-hidden="true" />
         <input
           type="text"
           value={searchQuery}
@@ -254,9 +254,7 @@ export function SkillPickerPanel({
                   </div>
                 </div>
                 {isSelected && (
-                  <svg className="chat-skill-select__item-check" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth={2.2} aria-hidden="true">
-                    <path strokeLinecap="round" strokeLinejoin="round" d="M5 10.5l3 3L15 6.5" />
-                  </svg>
+                  <Check className="chat-skill-select__item-check" size={16} strokeWidth={2.2} aria-hidden="true" />
                 )}
               </button>
             );

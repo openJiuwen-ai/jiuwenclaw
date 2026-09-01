@@ -97,18 +97,18 @@
   /* 与 .share-export-btn 保持同一套配色：img 资源图标本身带底色不受影响，
      只影响用 currentColor 描边的 lucide 图标（如心跳的 Activity），避免它
      跟着环境文字色走、和旁边几个图标颜色对不上。 */
-  color: var(--color-text-tertiary);
+  color: var(--color-text-primary);
   cursor: pointer;
 }
 
 .chat-header-icon-btn:hover {
-  background: var(--color-action-secondary);
-  color: var(--color-text-primary);
+  background: var(--color-surface-hover);
+  border-radius: 10.67px;
 }
 
 .chat-header-icon-btn--active {
-  background: var(--color-action-secondary);
-  color: var(--color-text-primary);
+  background: var(--color-surface-hover);
+  border-radius: 10.67px;
 }
 
 .chat-header-icon-btn:disabled {
@@ -911,8 +911,8 @@ overflow: hidden;
   position: absolute;
   inset: 0;
   background: var(--color-chat-accent);
-  -webkit-mask: url('../../assets/skillIcon.svg') no-repeat center / contain;
-  mask: url('../../assets/skillIcon.svg') no-repeat center / contain;
+  -webkit-mask: url('../../assets/agent-management/agent-skill.svg') no-repeat center / contain;
+  mask: url('../../assets/agent-management/agent-skill.svg') no-repeat center / contain;
   opacity: 1;
 }
 
@@ -1282,13 +1282,14 @@ overflow: hidden;
 }
 
 .chat-composer-suggestion__label {
+  color: var(--color-text-suggestion-label);
   font-size: 13px;
-  font-weight: 650;
+  font-weight: 400;
   line-height: 18px;
 }
 
 .chat-composer-suggestion__meta {
-  color: var(--color-text-secondary);
+  color: var(--color-text-placeholder);
   font-size: 11px;
   line-height: 14px;
 }
@@ -1329,9 +1330,9 @@ overflow: hidden;
   gap: 4px;
   height: 30px;
   padding: 0 10px;
-  color: var(--color-text-secondary);
+  color: var(--color-text-placeholder);
   font-size: 12px;
-  font-weight: 650;
+  font-weight: 400;
 }
 
 .chat-composer-suggestion__section-title:not(:first-child) {
@@ -1382,13 +1383,13 @@ overflow: hidden;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 24px;
-  height: 24px;
+  width: 16px;
+  height: 16px;
   flex: 0 0 auto;
   border: 1.5px solid currentColor;
-  border-radius: 7px;
+  border-radius: 4px;
   color: var(--color-text-primary);
-  font-size: 15px;
+  font-size: 11px;
   font-weight: 700;
 }
 
@@ -1398,11 +1399,11 @@ overflow: hidden;
 
 .chat-composer-suggestion__slash-icon--skill::before {
   content: '';
-  width: 20px;
-  height: 20px;
+  width: 16px;
+  height: 16px;
   background: currentColor;
-  -webkit-mask: url('../../assets/skillIcon.svg') no-repeat center / contain;
-  mask: url('../../assets/skillIcon.svg') no-repeat center / contain;
+  -webkit-mask: url('../../assets/agent-management/agent-skill.svg') no-repeat center / contain;
+  mask: url('../../assets/agent-management/agent-skill.svg') no-repeat center / contain;
 }
 
 .chat-composer-suggestion__source {
@@ -1477,8 +1478,8 @@ overflow: hidden;
   flex: 0 0 auto;
   position: relative;
   box-sizing: border-box;
-  -webkit-mask: url('../../assets/skillIcon.svg') no-repeat center / contain;
-  mask: url('../../assets/skillIcon.svg') no-repeat center / contain;
+  -webkit-mask: url('../../assets/agent-management/agent-skill.svg') no-repeat center / contain;
+  mask: url('../../assets/agent-management/agent-skill.svg') no-repeat center / contain;
 }
 
 .chat-message-skill-chip__label {
@@ -1538,8 +1539,8 @@ overflow: hidden;
   position: absolute;
   inset: 0;
   background: var(--color-chat-accent);
-  -webkit-mask: url('../../assets/skillIcon.svg') no-repeat center / contain;
-  mask: url('../../assets/skillIcon.svg') no-repeat center / contain;
+  -webkit-mask: url('../../assets/agent-management/agent-skill.svg') no-repeat center / contain;
+  mask: url('../../assets/agent-management/agent-skill.svg') no-repeat center / contain;
   opacity: 1;
 }
 
@@ -1731,8 +1732,8 @@ overflow: hidden;
 .chat-config-icon--skill {
   width: 14px;
   height: 14px;
-  -webkit-mask-image: url('../../assets/skillIcon.svg');
-  mask-image: url('../../assets/skillIcon.svg');
+  -webkit-mask-image: url('../../assets/agent-management/agent-skill.svg');
+  mask-image: url('../../assets/agent-management/agent-skill.svg');
 }
 
 .chat-config-icon--settings {
@@ -1750,12 +1751,9 @@ overflow: hidden;
   height: 14px;
 }
 
-/* "+"菜单的"扩展"项单独放大图标（用户 2026-08-19 反馈手绘拼图图标比旁边 lucide 图标显得小）。
-   选择器叠两个 class（.chat-mode-select__icon.chat-mode-select__icon--lg）保证特异度稳定盖过
-   上面那条共享基础规则，不依赖源码顺序，也不影响其余三个菜单项。 */
-.chat-mode-select__icon.chat-mode-select__icon--lg svg {
-  width: 18px;
-  height: 18px;
+.chat-mode-select__icon.chat-mode-select__icon--asset svg {
+  width: 16px;
+  height: 16px;
 }
 
 .chat-mode-select__label {
@@ -1816,6 +1814,18 @@ overflow: hidden;
 .chat-mode-select__option--active {
   background: rgba(var(--color-text-primary-rgb), 0.08);
   color: var(--color-text-primary);
+}
+
+/* 模式选择菜单（chat-panel-mode-select-menu）：hover 统一 #f5f5f5，选中项不再带背景色 */
+.chat-mode-select__menu--agent-modes .chat-mode-select__option:hover,
+.chat-mode-select__menu--agent-modes .chat-mode-select__option:focus-visible {
+  background: var(--color-icon-btn-hover-surface);
+  color: var(--color-text-primary);
+  outline: none;
+}
+
+.chat-mode-select__menu--agent-modes .chat-mode-select__option--active {
+  background: transparent;
 }
 
 .chat-mode-select__option--active:hover,
@@ -2240,6 +2250,21 @@ overflow: hidden;
 
 .chat-goal-tag__close:disabled:hover {
   background: transparent;
+}
+
+.chat-work-context-wrapper {
+  position: relative;
+}
+
+.chat-work-context-wrapper .chat-composer-suggestion--below {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 4px;
+  width: auto;
+  z-index: 30;
+  margin-top: 0;
+  border-radius: 18px;
 }
 
 .chat-work-context-row {
@@ -4038,14 +4063,37 @@ overflow: hidden;
   font-size: 14px;
   color: var(--color-chat-supporting-text);
   transition: right 0.3s ease, top 0.3s ease;
+  opacity: 0;
+  transform: scale(0);
+  pointer-events: none;
+}
+
+.chat-welcome__banner--bubble--visible {
+  opacity: 1;
+  transform: scale(1);
+  animation: bubble-pop 0.4s ease forwards;
+}
+
+@keyframes bubble-pop {
+  0% {
+    opacity: 0;
+    transform: scale(0);
+  }
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
 }
 
 .chat-welcome__banner--bee {
-  top: -120px;
-  right: -16px;
+  top: -152px;
+  right: 0;
   width: 200px;
   height: auto;
-  z-index: 11;
+  z-index: 9;
+  pointer-events: auto;
+  cursor: pointer;
+  mix-blend-mode: multiply;
 }
 
 .chat-welcome__heading {
