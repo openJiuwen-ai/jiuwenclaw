@@ -2709,9 +2709,10 @@ class TestRebindSessionProjectConcurrency:
         )
         monkeypatch.setattr(sm._METADATA_QUEUE, "put_nowait", original_put)
         assert len(captured) == 1
-        item_sid, _meta, _pin, gen_at_enqueue = captured[0]
+        item_sid, _meta, _pin, gen_at_enqueue, merge_fields = captured[0]
         assert item_sid == sid
         assert gen_at_enqueue == 0
+        assert merge_fields is None
 
         # rebind: bump gen
         _bump_rebind_gen(sid)
