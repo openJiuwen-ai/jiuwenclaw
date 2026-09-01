@@ -11,7 +11,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from jiuwenswarm.common.utils import get_agent_sessions_dir
+from jiuwenswarm.common.utils import get_agent_sessions_dir, is_persistable_session_id
 
 
 logger = logging.getLogger(__name__)
@@ -359,6 +359,12 @@ def write_history_records(
     preserve_existing_format: bool = True,
 ) -> Path:
     """Rewrite a session's history in its current format, defaulting new sessions to jsonl."""
+    if not is_persistable_session_id(session_id):
+        # 空 id 或 "default"（上游兜底占位符）不应落盘，避免凭空 mkdir
+        # 出空的 default 目录。见 is_persistable_session_id 说明。
+        raise ValueError(
+            f"write_history_records: non-persistable session_id={session_id!r}"
+        )
     path = (
         get_read_history_path(session_id)
         if preserve_existing_format
@@ -562,7 +568,12 @@ def append_history_record(
     mode: str | None = None,
 ) -> None:
     """向指定 session 的当前激活历史文件异步追加一条记录."""
-    sid = (session_id or "default").strip() or "default"
+    sid = (session_id or "").strip()
+    if not is_persistable_session_id(sid):
+        # 空 id 或 "default"（上游 or "default" 兜底占位符）不应落盘：
+        # 这类 id 不是真实会话，落盘只会凭空 mkdir 出空的 default 目录。
+        logger.debug("skip history append: non-persistable session_id=%r", sid)
+        return
     if _is_ephemeral_heartbeat_session(sid):
         logger.debug("skip heartbeat session history: session_id=%s event_type=%s", sid, event_type)
         return
@@ -708,7 +719,10 @@ def truncate_history_records(*, session_id: str, cut_index: int) -> dict[str, An
     先等待异步写入队列刷盘，再持锁截断当前激活的历史文件。
     返回截断结果 dict，包含 remaining / removed 计数。
     """
-    sid = (session_id or "default").strip() or "default"
+    sid = (session_id or "").strip()
+    if not is_persistable_session_id(sid):
+        logger.debug("skip history truncate: non-persistable session_id=%r", sid)
+        return {"remaining_records": 0, "removed_records": 0}
     _WRITE_QUEUE.join()
 
     fpath = get_read_history_path(sid)

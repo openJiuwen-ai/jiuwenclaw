@@ -1,5 +1,7 @@
 import time
 
+import pytest
+
 from jiuwenswarm.server.runtime.session import session_history
 
 
@@ -244,3 +246,75 @@ def test_dedup_records_last_wins_legacy_records_without_bubble_seq_unchanged():
     out = session_history._dedup_records_last_wins(records)
     contents = [r["content"] for r in out]
     assert contents == ["完整", "工具"]
+
+
+# ===========================================================================
+# 不可落盘 session_id 守卫：空 id 和 "default" 兜底占位符都不应落盘，
+# 避免凭空 mkdir 空会话目录。
+# ===========================================================================
+@pytest.mark.parametrize("bad_sid", [None, "", "   ", "\t", "default"])
+def test_append_history_non_persistable_session_id_skips_and_no_dir(
+    tmp_path, monkeypatch, bad_sid
+):
+    """空 id 或 "default" 占位符不应落盘，也不应凭空创建 default 空目录。
+
+    回归保护：曾因 ``sid = (session_id or "default")`` 把空 id 兜底成 "default"，
+    导致进程在 mkdir 后、异步 flush 写盘前退出时残留空 default 目录。
+    现在连上游已兜底成字面量 "default" 的也一并拒绝。
+    """
+    monkeypatch.setattr(session_history, "get_agent_sessions_dir", lambda: tmp_path)
+
+    session_history.append_history_record(
+        session_id=bad_sid,
+        request_id="r1",
+        channel_id="web",
+        role="user",
+        content="hello",
+        timestamp=1.0,
+    )
+    session_history.flush_history_writes()
+
+    # 不应出现 default 目录，sessions 根下不应有任何子目录
+    assert not (tmp_path / "default").exists()
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_append_history_valid_session_id_still_writes(tmp_path, monkeypatch):
+    """守卫不影响正常会话：真实 session_id 仍正常落盘。"""
+    monkeypatch.setattr(session_history, "get_agent_sessions_dir", lambda: tmp_path)
+
+    session_history.append_history_record(
+        session_id="s-real",
+        request_id="r1",
+        channel_id="web",
+        role="user",
+        content="hello",
+        timestamp=1.0,
+    )
+    data = _wait_history("s-real", min_count=1)
+    assert len(data) == 1
+    assert data[0]["content"] == "hello"
+
+
+@pytest.mark.parametrize("bad_sid", [None, "", "   ", "default"])
+def test_truncate_history_non_persistable_session_id_no_dir(
+    tmp_path, monkeypatch, bad_sid
+):
+    """空 id 或 "default" 截断历史不应建目录。"""
+    monkeypatch.setattr(session_history, "get_agent_sessions_dir", lambda: tmp_path)
+
+    result = session_history.truncate_history_records(session_id=bad_sid, cut_index=0)
+    assert result == {"remaining_records": 0, "removed_records": 0}
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize("bad_sid", [None, "", "default"])
+def test_write_history_records_non_persistable_session_id_raises(
+    tmp_path, monkeypatch, bad_sid
+):
+    """空 id 或 "default" 重写历史应显式拒绝（不静默建空目录）。"""
+    monkeypatch.setattr(session_history, "get_agent_sessions_dir", lambda: tmp_path)
+
+    with pytest.raises(ValueError):
+        session_history.write_history_records(bad_sid, [{"role": "user", "content": "x"}])
+    assert list(tmp_path.iterdir()) == []
