@@ -2714,19 +2714,7 @@ export class AppScreen implements Component, Focusable {
       return;
     }
 
-    // h key: open pending human-input list from the main chat screen.
-    if (
-      !hasOverlay &&
-      !pendingQuestion &&
-      !this.replyingToHumanPrompt &&
-      data === "h" &&
-      (snapshot.pendingHumanPrompts?.size ?? 0) > 0
-    ) {
-      void this.enterSwarmWorkflowsPendingList();
-      return;
-    }
-
-    // Global ctrl+l/t/g/o only apply on the main screen — defer while an overlay
+    // Global shortcuts only apply on the main screen — defer while an overlay
     // or the team panel is active so context-specific bindings (e.g. ResumeList)
     // can use the same physical keys.
     // Exception: app:toggleTranscript (ctrl+o) is allowed even when overlays are
@@ -2760,6 +2748,13 @@ export class AppScreen implements Component, Focusable {
           this.state.setTranscriptMode(
             snapshot.transcriptMode === "detailed" ? "compact" : "detailed",
           );
+        },
+        viewHumanInputs: () => {
+          if ((snapshot.pendingHumanPrompts?.size ?? 0) > 0) {
+            void this.enterSwarmWorkflowsPendingList();
+            return;
+          }
+          this.showTransientNotice("No human inputs waiting.");
         },
         redraw: () => {
           this.tui.invalidate();
@@ -5769,6 +5764,12 @@ export class AppScreen implements Component, Focusable {
     });
   }
 
+  private globalActionKeyLabel(action: "app:viewHumanInputs"): string | null {
+    return getContextBindings("Global").find(
+      (binding) => binding.action === action,
+    )?.key ?? null;
+  }
+
   private workflowIdForBudgetView(): string | null {
     const state = this.swarmWorkflowsViewState;
     if (!state) return null;
@@ -6897,6 +6898,7 @@ export class AppScreen implements Component, Focusable {
     };
 
     if (totalPending > 0) {
+      const humanInputsKey = this.globalActionKeyLabel("app:viewHumanInputs");
       const runningSuffix =
         runningWorkflows.length > 0
           ? ` · ${palette.text.assistant(runningWorkflowsBannerText(runningWorkflows.length))}`
@@ -6906,7 +6908,7 @@ export class AppScreen implements Component, Focusable {
           ? ` · ${palette.text.assistant(pausedWorkflowsBannerText(pausedWorkflows.length))}`
           : "";
       const firstLine = padToWidth(
-        `${spinner}${palette.text.humanInput(pendingInputsBannerText(totalPending))} · ${palette.text.dim(pendingHumanViewHint())}${runningSuffix}${pausedSuffix}`,
+        `${spinner}${palette.text.humanInput(pendingInputsBannerText(totalPending))} · ${palette.text.dim(pendingHumanViewHint(humanInputsKey))}${runningSuffix}${pausedSuffix}`,
         width,
       );
       const lines = [firstLine];
