@@ -20,9 +20,10 @@ import time
 import uuid
 from ctypes import wintypes
 from dataclasses import dataclass
-from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any, BinaryIO
+
+from logging.handlers import RotatingFileHandler
 
 import webview
 
@@ -32,17 +33,13 @@ from jiuwenswarm.common._build_config import (
     DISPLAY_NAME,
     EXECUTABLE_NAME,
 )
-from jiuwenswarm.common.utils import (
-    get_logs_dir,
-    get_user_workspace_dir,
-    wait_for_pid_exit,
-    wait_for_tcp_port,
-)
+from jiuwenswarm.common.utils import get_user_workspace_dir, get_logs_dir, wait_for_pid_exit, wait_for_tcp_port
 from jiuwenswarm.instance_manager.config import (
     BASE_PORTS,
     PORT_TYPES,
     find_available_ports,
 )
+
 
 BACKEND_HOST = "127.0.0.1"
 BACKEND_PORT = int(BASE_PORTS["web"])

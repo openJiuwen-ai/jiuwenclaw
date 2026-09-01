@@ -17,6 +17,7 @@
 #ifndef BuildSetupBaseName
   #error BuildSetupBaseName is required; run scripts\build-exe.ps1
 #endif
+
 #define MyAppName BuildDisplayName
 #define MyAppVersion BuildVersion
 #define MyAppPublisher "openJiuwen"
