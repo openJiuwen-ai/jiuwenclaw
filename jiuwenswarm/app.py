@@ -23,13 +23,13 @@ from jiuwenswarm.common.media_capability_config import (
     migrate_media_capability_switches,
 )
 from jiuwenswarm.common.utils import (
+    apply_free_search_runtime_defaults,
     cleanup_team_files,
     ensure_config_migrated_from_template,
     ensure_default_builtin_skills,
     get_env_file,
     get_user_workspace_dir,
     prepare_workspace,
-    reset_free_search_runtime_flags,
 )
 
 # Record the parsed dotenv path for subprocess spawning
@@ -65,7 +65,7 @@ ensure_default_builtin_skills()
 _env_file = get_env_file()
 load_dotenv_runtime(dotenv_path=_env_file, override=True)
 migrate_media_capability_switches(_env_file)
-reset_free_search_runtime_flags()
+apply_free_search_runtime_defaults()
 
 
 def main() -> None:

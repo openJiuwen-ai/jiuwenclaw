@@ -51,6 +51,7 @@ from jiuwenswarm.common.security.ws_origin import get_header_value
 from jiuwenswarm.gateway.routing.route_binding import GatewayRouteBinding
 from jiuwenswarm.common.debug_dump import install_async_dump_handler
 from jiuwenswarm.common.utils import (
+    apply_free_search_runtime_defaults,
     ensure_config_migrated_from_template,
     ensure_default_builtin_skills,
     get_cron_jobs_path,
@@ -58,7 +59,6 @@ from jiuwenswarm.common.utils import (
     get_root_dir,
     get_user_workspace_dir,
     prepare_workspace,
-    reset_free_search_runtime_flags,
 )
 from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
 from jiuwenswarm.common.schema.message import ReqMethod, Message, Mode
@@ -100,7 +100,7 @@ else:
 _env_file = get_env_file()
 load_dotenv_runtime(dotenv_path=_env_file, override=True)
 migrate_media_capability_switches(_env_file)
-reset_free_search_runtime_flags()
+apply_free_search_runtime_defaults()
 
 logger = logging.getLogger("jiuwenswarm.gateway")
 

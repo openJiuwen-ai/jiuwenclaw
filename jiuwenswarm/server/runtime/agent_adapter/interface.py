@@ -69,12 +69,12 @@ from jiuwenswarm.extensions.hook_event import AgentServerHookEvents
 from jiuwenswarm.extensions.hooks_context import MemoryHookContext
 from jiuwenswarm.common.schema.message import EventType, ReqMethod
 from jiuwenswarm.common.utils import (
+    apply_free_search_runtime_defaults,
     configure_skill_library,
     get_agent_home_dir,
     get_agent_workspace_dir,
     get_env_file,
     migrate_team_skill_views,
-    reset_free_search_runtime_flags,
 )
 from jiuwenswarm.server.runtime.a2ui.integration import (
     TeamA2UIBlockBuffer,
@@ -532,7 +532,7 @@ def _split_a2ui_stream_content(previous_probe: str, content: str) -> tuple[str, 
 
 
 load_dotenv_runtime(dotenv_path=get_env_file(), override=True)
-reset_free_search_runtime_flags()
+apply_free_search_runtime_defaults()
 
 
 def _trigger_auto_memory_extraction(

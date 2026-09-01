@@ -410,6 +410,96 @@ class TestMultiInstanceEnvVars:
                 os.environ["JIUWENSWARM_DATA_DIR"] = original_workspace_env
 
 
+class TestFreeSearchRuntimeDefaults:
+    """Test apply_free_search_runtime_defaults (free-search opt-in survives process start).
+
+    Every entrypoint calls this immediately after loading `.env`. Its predecessor
+    assigned both flags unconditionally, so a value read from `.env` — including one
+    the config UI had just persisted — was discarded one line later, and enabling free
+    search was silently lost on the next restart.
+    """
+
+    DDG_FLAG = "FREE_SEARCH_DDG_ENABLED"
+    BING_FLAG = "FREE_SEARCH_BING_ENABLED"
+
+    @staticmethod
+    def _unset(monkeypatch, *names):
+        """Unset flags so monkeypatch still restores them after the test.
+
+        `delenv` alone records nothing when the variable is already absent, so the
+        `setdefault` under test would leak its value into later tests.
+        """
+        for name in names:
+            monkeypatch.setenv(name, "")
+            monkeypatch.delenv(name)
+
+    def test_explicit_opt_in_survives(self, monkeypatch):
+        """An explicit opt-in from .env, the config UI, or the shell is preserved."""
+        monkeypatch.setenv(self.DDG_FLAG, "true")
+        monkeypatch.setenv(self.BING_FLAG, "true")
+
+        utils.apply_free_search_runtime_defaults()
+
+        assert os.environ[self.DDG_FLAG] == "true", "explicit DDG opt-in was discarded"
+        assert os.environ[self.BING_FLAG] == "true", "explicit Bing opt-in was discarded"
+
+    def test_explicit_opt_out_is_left_alone(self, monkeypatch):
+        """An explicit "false" stays disabled — the default never re-enables anything."""
+        monkeypatch.setenv(self.DDG_FLAG, "false")
+        monkeypatch.setenv(self.BING_FLAG, "false")
+
+        utils.apply_free_search_runtime_defaults()
+
+        assert os.environ[self.DDG_FLAG] == "false"
+        assert os.environ[self.BING_FLAG] == "false"
+
+    def test_unset_flags_get_the_disabled_default(self, monkeypatch):
+        """A fresh install that configures nothing still starts with both engines off."""
+        self._unset(monkeypatch, self.DDG_FLAG, self.BING_FLAG)
+
+        utils.apply_free_search_runtime_defaults()
+
+        assert os.environ[self.DDG_FLAG] == "false"
+        assert os.environ[self.BING_FLAG] == "false"
+
+    def test_empty_value_is_kept_and_still_reads_as_disabled(self, monkeypatch):
+        """An empty value counts as set, and both consumers still treat it as off."""
+        from jiuwenswarm.agents.harness.common.tools.mcp_toolkits import _is_free_search_enabled
+        from jiuwenswarm.agents.harness.common.tools.search_tools import _env_flag
+
+        monkeypatch.setenv(self.DDG_FLAG, "")
+        monkeypatch.setenv(self.BING_FLAG, "")
+
+        utils.apply_free_search_runtime_defaults()
+
+        assert (
+            os.environ[self.DDG_FLAG] == ""
+        ), "an empty value is set, so it is not a default to fill"
+        assert os.environ[self.BING_FLAG] == ""
+        # Blank reads as disabled on both sides, so keeping it changes no behaviour.
+        assert _env_flag(self.DDG_FLAG, default=False) is False
+        assert _env_flag(self.BING_FLAG, default=False) is False
+        assert _is_free_search_enabled() is False
+
+    def test_flags_are_handled_independently(self, monkeypatch):
+        """Opting one engine in leaves the other at the disabled default."""
+        self._unset(monkeypatch, self.BING_FLAG)
+        monkeypatch.setenv(self.DDG_FLAG, "true")
+
+        utils.apply_free_search_runtime_defaults()
+
+        assert os.environ[self.DDG_FLAG] == "true", "DDG opt-in was discarded"
+        assert os.environ[self.BING_FLAG] == "false", "unset Bing flag should take the default"
+
+        self._unset(monkeypatch, self.DDG_FLAG)
+        monkeypatch.setenv(self.BING_FLAG, "true")
+
+        utils.apply_free_search_runtime_defaults()
+
+        assert os.environ[self.BING_FLAG] == "true", "Bing opt-in was discarded"
+        assert os.environ[self.DDG_FLAG] == "false", "unset DDG flag should take the default"
+
+
 class TestHardcodedPathsPhase2:
     """Test that hardcoded paths are fixed to use getter functions (Phase 2).
 
