@@ -457,6 +457,35 @@ function isImageFile(file: File): boolean {
   return IMAGE_EXTENSIONS.has(getFileExtension(file.name || ''));
 }
 
+function ensureClipboardImageFilename(file: File): File {
+  if (file.name && getFileExtension(file.name)) return file;
+  const ext =
+    file.type === 'image/jpeg' ? '.jpg'
+    : file.type === 'image/webp' ? '.webp'
+    : file.type === 'image/gif' ? '.gif'
+    : '.png';
+  const type = ACCEPTED_IMAGE_TYPES.has(file.type) ? file.type : 'image/png';
+  return new File([file], `clipboard-image${ext}`, { type, lastModified: file.lastModified });
+}
+
+/** Prefer clipboardData.items only — Chromium often mirrors the same screenshot in files. */
+function getClipboardImageFiles(clipboardData: DataTransfer | null | undefined): File[] {
+  if (!clipboardData) return [];
+  const files: File[] = [];
+  const seen = new Set<string>();
+  for (const item of Array.from(clipboardData.items || [])) {
+    if (item.kind !== 'file') continue;
+    const file = item.getAsFile();
+    if (!file || !isImageFile(file)) continue;
+    const keyed = ensureClipboardImageFilename(file);
+    const key = `${keyed.name}:${keyed.size}:${keyed.type}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    files.push(keyed);
+  }
+  return files;
+}
+
 function isForbiddenDocumentFile(file: File): boolean {
   const ext = getFileExtension(file.name || '');
   return Boolean(ext) && FORBIDDEN_DOCUMENT_EXTENSIONS.has(ext);
@@ -2185,12 +2214,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
 
       const hasBrowserFiles = clipboardHasFileItems(event.clipboardData);
       // Capture File blobs before any await; clipboardData can become unavailable.
-      const imageFiles = hasBrowserFiles
-        ? Array.from(event.clipboardData?.items || [])
-            .filter((item) => item.kind === 'file')
-            .map((item) => item.getAsFile())
-            .filter((file): file is File => Boolean(file && isImageFile(file)))
-        : [];
+      const imageFiles = hasBrowserFiles ? getClipboardImageFiles(event.clipboardData) : [];
 
       if (hasBrowserFiles) {
         event.preventDefault();
@@ -2225,15 +2249,28 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
 
   const handlePaste = useCallback(
     (event: ClipboardEvent<HTMLDivElement>) => {
-      if (event.clipboardData.getData('text/plain').trim()) {
+      const hasText = Boolean(event.clipboardData.getData('text/plain').trim());
+      if (hasText) {
         notifyKVCInputIntent();
       }
       if (handleDesktopFilePaste(event)) return;
-      if (clipboardHasFileItems(event.clipboardData)) {
+
+      const imageFiles = getClipboardImageFiles(event.clipboardData);
+      if (imageFiles.length && !hasText) {
+        event.preventDefault();
+        if (imageInputDisabled) {
+          pushAttachmentAlert(t('chat.addFileDisabled'));
+          return;
+        }
+        appendAttachmentFiles(imageFiles);
+        return;
+      }
+
+      if (clipboardHasFileItems(event.clipboardData) && !hasText) {
         event.preventDefault();
       }
     },
-    [handleDesktopFilePaste, notifyKVCInputIntent],
+    [appendAttachmentFiles, handleDesktopFilePaste, imageInputDisabled, notifyKVCInputIntent, pushAttachmentAlert, t],
   );
 
   useEffect(() => {
