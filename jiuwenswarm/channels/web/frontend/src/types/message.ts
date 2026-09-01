@@ -4,6 +4,7 @@
 
 import type { SkillTreePath } from './skillTree';
 import type { BeamSearchProgress } from './beamSearch';
+import type { HeartbeatAutomationMetadata } from './heartbeat';
 
 export type MessageRole = 'user' | 'assistant' | 'system' | 'tool';
 
@@ -86,6 +87,8 @@ export interface Message {
   // 主动推荐消息标记
   isProactiveRecommendation?: boolean;
   proactiveType?: 'skill_recommend' | 'task_reminder' | 'need_exploration';
+  /** Web 单 Agent 回复产生时显式选中的专家；历史恢复不能依赖当前选择状态。 */
+  agentTemplateName?: string;
   /**
    * 这条用户消息是否曾经用于设置/修改持续目标（"设为目标"徽章）。发送那一刻本地回显消息
    * 直接置 true；历史消息刷新后重新加载时，优先读后端 history 字段
@@ -100,6 +103,13 @@ export interface Message {
   commandName?: string;
   commandInput?: string;
   commandOutput?: string;
+  /**
+   * Heartbeat 自动轮的身份标记。后端在自动触发时把 metadata.automation 随实时事件 payload
+   * 下发，并随 user/assistant 历史落盘。前端按 run_id 为每轮建独立 user/assistant/error 消息
+   * （见 heartbeatAutomation.ts），避免覆盖上一条普通回答。刷新/切会话后历史恢复也读同一个
+   * 字段重新盖章，保证实时与历史共用同一识别逻辑。对齐「心跳任务前端开发与接口规格说明2」§7-§9。
+   */
+  automation?: HeartbeatAutomationMetadata;
 }
 
 export interface ToolCall {
@@ -125,6 +135,8 @@ export interface ToolResult {
   // agentic search（symphony 技能检索）下发的技能树路径，用于内联回放路径流转
   skillTree?: SkillTreePath;
   beamSearch?: BeamSearchProgress;
+  /** 仅 symphony_compose_graph 的合法 planned_graph Mermaid 展示投影。 */
+  mermaid?: string;
 }
 
 export type ToolExecutionStatus = 'pending' | 'timeout' | 'completed' | 'error';
@@ -140,6 +152,8 @@ export interface ToolExecution {
   timedOutAt?: string;
   resultArrivedAfterTimeout?: boolean;
   requestId?: string;
+  /** Web 单 Agent 工具调用所属的专家；Team 工具不设置。 */
+  agentTemplateName?: string;
 }
 
 export interface Conversation {

@@ -48,6 +48,11 @@ class _FakeHost:
             "nodes": [],
             "edges": [],
         }
+        self.tree: dict[str, object] = {
+            "context_ready": True,
+            "nodes": [],
+            "edges": [],
+        }
 
     def _record(self, name: str, value: object, result: object) -> object:
         if self.failure is not None:
@@ -58,11 +63,18 @@ class _FakeHost:
     async def get_status(self) -> dict[str, object]:
         return self._record("get_status", None, {"state": "RUNNING"})
 
-    async def set_runtime_enabled(self, enabled: bool) -> dict[str, object]:
+    async def set_collection_enabled(self, enabled: bool) -> dict[str, object]:
         return self._record(
-            "set_runtime_enabled",
+            "set_collection_enabled",
             enabled,
-            {"enabled": enabled},
+            {"collection_enabled": enabled},
+        )
+
+    async def set_agent_use_enabled(self, enabled: bool) -> dict[str, object]:
+        return self._record(
+            "set_agent_use_enabled",
+            enabled,
+            {"agent_use_enabled": enabled},
         )
 
     async def get_runtime_config(self) -> dict[str, object]:
@@ -114,13 +126,12 @@ class _FakeHost:
             {"service_id": service_id, **patch},
         )
 
-    async def set_fetching(
+    async def set_fetch_service_enabled(
         self,
-        *,
+        service_id: str,
         enabled: bool,
-        service_id: str | None = None,
     ) -> None:
-        self._record("set_fetching", (enabled, service_id), None)
+        self._record("set_fetch_service_enabled", (service_id, enabled), None)
 
     async def run_fetch(
         self,
@@ -172,8 +183,21 @@ class _FakeHost:
             },
         )
 
-    async def get_graph(self) -> dict[str, object]:
-        return self._record("get_graph", None, self.graph)
+    async def get_graph(
+        self,
+        *,
+        root_id: str | None = None,
+        depth: int = 3,
+    ) -> dict[str, object]:
+        return self._record("get_graph", (root_id, depth), self.graph)
+
+    async def get_tree(
+        self,
+        *,
+        root_id: str | None = None,
+        depth: int = 3,
+    ) -> dict[str, object]:
+        return self._record("get_tree", (root_id, depth), self.tree)
 
     async def search_graph(self, query: str) -> dict[str, object]:
         return self._record("search_graph", query, {"results": []})
@@ -183,6 +207,13 @@ class _FakeHost:
             "get_graph_page",
             node_id,
             {"node_id": node_id, "markdown": "# PersonalContext\n"},
+        )
+
+    async def get_source(self, source_id: str) -> dict[str, object]:
+        return self._record(
+            "get_source",
+            source_id,
+            {"source_id": source_id, "title": "Source"},
         )
 
 
@@ -250,6 +281,7 @@ SERVICE_PAYLOAD: dict[str, object] = {
     "enabled": True,
     "interval_seconds": 3_600,
     "max_items_per_run": 100,
+    "time_range": {"mode": "all"},
     "source": {"root_dir": "D:/context"},
     "credentials": {},
 }
@@ -257,8 +289,34 @@ SERVICE_PAYLOAD: dict[str, object] = {
 
 PERSONAL_CONTEXT_HOST_CALLS = [
     (ReqMethod.PERSONAL_CONTEXT_RUNTIME_STATUS, {}, "get_status", None, None),
-    (ReqMethod.PERSONAL_CONTEXT_RUNTIME_START, {}, "set_runtime_enabled", True, None),
-    (ReqMethod.PERSONAL_CONTEXT_RUNTIME_STOP, {}, "set_runtime_enabled", False, None),
+    (
+        ReqMethod.PERSONAL_CONTEXT_RUNTIME_START_COLLECTION,
+        {},
+        "set_collection_enabled",
+        True,
+        None,
+    ),
+    (
+        ReqMethod.PERSONAL_CONTEXT_RUNTIME_STOP_COLLECTION,
+        {},
+        "set_collection_enabled",
+        False,
+        None,
+    ),
+    (
+        ReqMethod.PERSONAL_CONTEXT_RUNTIME_START_AGENT_USE,
+        {},
+        "set_agent_use_enabled",
+        True,
+        None,
+    ),
+    (
+        ReqMethod.PERSONAL_CONTEXT_RUNTIME_STOP_AGENT_USE,
+        {},
+        "set_agent_use_enabled",
+        False,
+        None,
+    ),
     (
         ReqMethod.PERSONAL_CONTEXT_RUNTIME_GET_CONFIG,
         {},
@@ -311,29 +369,15 @@ PERSONAL_CONTEXT_HOST_CALLS = [
     (
         ReqMethod.PERSONAL_CONTEXT_FETCH_START_SERVICE,
         {"service_id": " github-main "},
-        "set_fetching",
-        (True, "github-main"),
+        "set_fetch_service_enabled",
+        ("github-main", True),
         None,
     ),
     (
         ReqMethod.PERSONAL_CONTEXT_FETCH_STOP_SERVICE,
         {"service_id": "github-main"},
-        "set_fetching",
-        (False, "github-main"),
-        None,
-    ),
-    (
-        ReqMethod.PERSONAL_CONTEXT_FETCH_START_SCHEDULER,
-        {},
-        "set_fetching",
-        (True, None),
-        None,
-    ),
-    (
-        ReqMethod.PERSONAL_CONTEXT_FETCH_STOP_SCHEDULER,
-        {},
-        "set_fetching",
-        (False, None),
+        "set_fetch_service_enabled",
+        ("github-main", False),
         None,
     ),
     (ReqMethod.PERSONAL_CONTEXT_FETCH_RUN_ALL, {}, "run_fetch", None, None),
@@ -391,14 +435,21 @@ PERSONAL_CONTEXT_HOST_CALLS = [
         "page:topics/personal_context.md",
         None,
     ),
+    (
+        ReqMethod.PERSONAL_CONTEXT_CONTEXT_GET_SOURCE,
+        {"source_id": "src_abc"},
+        "get_source",
+        "src_abc",
+        {"source_id": "src_abc", "title": "Source"},
+    ),
 ]
 
 
-def test_agentserver_registers_exact_22_personal_context_methods() -> None:
+def test_agentserver_registers_exact_24_personal_context_methods() -> None:
     assert server_module._PERSONAL_CONTEXT_REQ_METHODS == {
         item for item in ReqMethod if item.value.startswith("personal_context.")
     }
-    assert len(server_module._PERSONAL_CONTEXT_REQ_METHODS) == 22
+    assert len(server_module._PERSONAL_CONTEXT_REQ_METHODS) == 24
 
 
 @pytest.mark.asyncio
@@ -436,8 +487,8 @@ async def test_non_graph_methods_call_exact_host_operation(
 @pytest.mark.parametrize(
     ("method", "enabled"),
     [
-        (ReqMethod.PERSONAL_CONTEXT_RUNTIME_START, True),
-        (ReqMethod.PERSONAL_CONTEXT_RUNTIME_STOP, False),
+        (ReqMethod.PERSONAL_CONTEXT_RUNTIME_START_AGENT_USE, True),
+        (ReqMethod.PERSONAL_CONTEXT_RUNTIME_STOP_AGENT_USE, False),
     ],
 )
 async def test_runtime_switch_notifies_agent_manager_after_host_success(
@@ -460,7 +511,7 @@ async def test_runtime_switch_notifies_agent_manager_after_host_success(
         runtime_enabled_changed=_runtime_changed,
     )
 
-    assert host.calls == [("set_runtime_enabled", enabled)]
+    assert host.calls == [("set_agent_use_enabled", enabled)]
     assert notifications == [(enabled, host.calls)]
     assert ws.sent[0]["status"] == "succeeded"
 
@@ -478,12 +529,12 @@ async def test_runtime_switch_callback_failure_is_fail_open(
     await handle_personal_context_request(
         host,
         ws,
-        _request(ReqMethod.PERSONAL_CONTEXT_RUNTIME_START),
+        _request(ReqMethod.PERSONAL_CONTEXT_RUNTIME_START_AGENT_USE),
         asyncio.Lock(),
         runtime_enabled_changed=_failed_callback,
     )
 
-    assert host.calls == [("set_runtime_enabled", True)]
+    assert host.calls == [("set_agent_use_enabled", True)]
     assert ws.sent[0]["status"] == "succeeded"
 
 
@@ -630,11 +681,15 @@ async def test_graph_stream_is_bounded_ordered_and_final(
     await handle_personal_context_request(
         host,
         ws,
-        _request(ReqMethod.PERSONAL_CONTEXT_CONTEXT_STREAM_GRAPH, is_stream=True),
+        _request(
+            ReqMethod.PERSONAL_CONTEXT_CONTEXT_STREAM_GRAPH,
+            {"root_id": None, "depth": 3},
+            is_stream=True,
+        ),
         asyncio.Lock(),
     )
 
-    assert host.calls == [("get_graph", None)]
+    assert host.calls == [("get_graph", (None, 3))]
     assert [frame["sequence"] for frame in ws.sent] == list(range(7))
     assert [frame["is_final"] for frame in ws.sent] == [
         False,
@@ -650,16 +705,64 @@ async def test_graph_stream_is_bounded_ordered_and_final(
         for frame in ws.sent
     ]
     assert [event["event_type"] for event in events] == [
-        "personal_context.graph.start",
-        "personal_context.graph.nodes",
-        "personal_context.graph.nodes",
-        "personal_context.graph.nodes",
-        "personal_context.graph.edges",
-        "personal_context.graph.edges",
-        "personal_context.graph.end",
+        "personal_context.context.start",
+        "personal_context.context.nodes",
+        "personal_context.context.nodes",
+        "personal_context.context.nodes",
+        "personal_context.context.edges",
+        "personal_context.context.edges",
+        "personal_context.context.end",
     ]
+    assert events[0]["root_id"] is None
+    assert events[0]["depth"] == 3
+    assert all(len(event.get("nodes", [])) <= 200 for event in events)
+    assert all(len(event.get("edges", [])) <= 200 for event in events)
     assert events[-1]["node_count"] == 450
     assert events[-1]["edge_count"] == 250
+
+
+@pytest.mark.asyncio
+async def test_tree_stream_passes_root_and_depth_to_host(capture_wire: None) -> None:
+    _server_instance, host = _server()
+    ws = _FakeWebSocket()
+
+    await handle_personal_context_request(
+        host,
+        ws,
+        _request(
+            ReqMethod.PERSONAL_CONTEXT_CONTEXT_STREAM_TREE,
+            {"root_id": "page:topics", "depth": 1},
+            is_stream=True,
+        ),
+        asyncio.Lock(),
+    )
+
+    assert host.calls == [("get_tree", ("page:topics", 1))]
+    assert ws.sent[0]["body"]["delta"]["event_type"] == "personal_context.context.start"
+    assert ws.sent[0]["body"]["delta"]["root_id"] == "page:topics"
+    assert ws.sent[0]["body"]["delta"]["depth"] == 1
+    assert ws.sent[-1]["is_final"] is True
+
+
+@pytest.mark.asyncio
+async def test_graph_rejects_depth_above_contract_limit(capture_wire: None) -> None:
+    _server_instance, host = _server()
+    ws = _FakeWebSocket()
+
+    await handle_personal_context_request(
+        host,
+        ws,
+        _request(
+            ReqMethod.PERSONAL_CONTEXT_CONTEXT_STREAM_GRAPH,
+            {"root_id": None, "depth": 11},
+            is_stream=True,
+        ),
+        asyncio.Lock(),
+    )
+
+    assert host.calls == []
+    assert ws.sent[0]["status"] == "failed"
+    assert ws.sent[0]["body"]["details"]["code"] == "BAD_REQUEST"
 
 
 @pytest.mark.asyncio
@@ -753,7 +856,7 @@ async def test_personal_context_failure_keeps_connection_and_ordinary_request_av
 
     await server._handle_message(
         ws,
-        _canonical("personal_context.runtime.start"),
+        _canonical("personal_context.runtime.start_collection"),
         asyncio.Lock(),
     )
 

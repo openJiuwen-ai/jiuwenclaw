@@ -59,6 +59,8 @@ export type NewConversationOptions = {
   project?: Pick<ProjectInfo, 'project_id' | 'project_dir'>;
   /** 进入新对话时预填到输入框的文本（例如"通过聊天创建定时任务"引导语），见 App.tsx enterNewConversation */
   initialInputValue?: string;
+  /** 进入新对话时一次性预选的技能，随首条消息迁移到真实会话。 */
+  initialSelectedSkills?: string[];
   /** 扩展详情页"使用"按钮跳转——进入新对话时顺带打开这些插件/MCP 的会话内启用开关，
    * 见 App.tsx enterNewConversation。 */
   initialEnabledPlugins?: string[];

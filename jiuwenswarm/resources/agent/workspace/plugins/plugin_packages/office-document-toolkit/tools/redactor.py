@@ -219,7 +219,7 @@ class Redactor(Tool):
     def _redact_pdf(
         self, file_path: str, patterns: list, output_dir: str
     ) -> tuple:
-        from pypdf import PdfReader, PdfWriter
+        from PyPDF2 import PdfReader, PdfWriter
 
         reader = PdfReader(file_path)
         writer = PdfWriter()

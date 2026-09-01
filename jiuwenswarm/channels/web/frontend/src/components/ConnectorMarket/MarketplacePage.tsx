@@ -248,13 +248,23 @@ export function MarketplacePage({
   // id 起的——原因同 PluginDetailPage.tsx 的 pendingUseAfterConnectRef：onAllConnected 里要读到
   // 的是"发起连接续跑那一刻"的 id，用 state 会有同一渲染周期内 setState 未生效的陈旧闭包问题。
   const pendingInstallIdRef = useRef<string | null>(null);
-  const pluginInstallFlow = usePendingConnectorFlow(() => {
-    const id = pendingInstallIdRef.current;
-    if (!id) return;
-    pendingInstallIdRef.current = null;
-    clearPluginInstallPending(id);
-    void installPlugin(id);
-  });
+  const pluginInstallFlow = usePendingConnectorFlow(
+    () => {
+      const id = pendingInstallIdRef.current;
+      if (!id) return;
+      pendingInstallIdRef.current = null;
+      clearPluginInstallPending(id);
+      void installPlugin(id);
+    },
+    () => {
+      // 依赖 connector 自动连接失败/被取消：清掉这条 pending 记录。不清的话下面这个 effect 会
+      // 立刻再匹配到它、又 start() 一遍——尤其是以前 deps 里带着 pluginInstallFlow.active 时，
+      // flow 一结束 active 变 false 就重新触发，直接死循环狂打 mcp.connect（2026-08-31 修）。
+      const id = pendingInstallIdRef.current;
+      pendingInstallIdRef.current = null;
+      if (id) clearPluginInstallPending(id);
+    },
+  );
 
   useEffect(() => {
     if (pluginInstallFlow.active) return;
@@ -263,8 +273,11 @@ export function MarketplacePage({
     const [id, names] = entry;
     pendingInstallIdRef.current = id;
     pluginInstallFlow.start(names!);
+    // deps 不放 pluginInstallFlow.active：flow 成功/失败收尾都会改写 pluginInstallPendingMap
+    // （onAllConnected→clearPluginInstallPending、onAborted→clearPluginInstallPending），靠 map
+    // 变化重新驱动就够了；放 active 反而会在 flow 中止时立刻重启，造成死循环。
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pluginInstallPendingMap, pluginInstallFlow.active]);
+  }, [pluginInstallPendingMap]);
 
   // 分类 tab 只在"MCP广场"用，统计源直接是 builtinConnectors（filter=builtin 的结果，恒为
   // built_in），不再需要按 source 过滤——后端已经按 filter 分好了。
@@ -480,7 +493,8 @@ export function MarketplacePage({
         </div>
       </div>
 
-      {topTab === 'mcp' && categoryTabs.length > 1 && (
+      {/* 2026-08-29 MCP 广场目前都不带 tag（category 多为空），分类 tab 行先隐藏——去掉 false 即恢复 */}
+      {false && topTab === 'mcp' && categoryTabs.length > 1 && (
         <div className="mb-5 flex flex-wrap items-center">
           {categoryTabs.map((tab, index) => (
             <span key={tab.key} className="flex items-center">

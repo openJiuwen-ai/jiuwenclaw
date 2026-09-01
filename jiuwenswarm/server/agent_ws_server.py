@@ -63,6 +63,7 @@ from jiuwenswarm.agents.harness.common.rails.permissions.permissions_persist imp
 from jiuwenswarm.extensions.hooks_context import AgentServerChatHookContext
 from jiuwenswarm.server.runtime.agent_manager import AgentManager, ACP_DEFAULT_CAPABILITIES
 from jiuwenswarm.server.runtime.agent_warm_pool import WarmClaim
+from jiuwenswarm.server.runtime.tokenizer_service import TokenizerService
 from jiuwenswarm.server.runtime.session.session_metadata import get_all_sessions_metadata, remove_session_metadata_cache
 from jiuwenswarm.server.runtime.session.session_history import (
     append_compact_history_records,
@@ -357,12 +358,14 @@ from jiuwenswarm.server.wire_truncate import (  # noqa: F401  — re-exported fo
     _TEAM_HISTORY_MIN_MAX_BYTES,
     _TEAM_HISTORY_MAX_MAX_BYTES,
     _TEAM_HISTORY_FRAME_OVERHEAD_BYTES,
-    _WORKFLOW_SNAPSHOT_MAX_BYTES,
-    _WORKFLOW_SNAPSHOT_FRAME_OVERHEAD_BYTES,
-    _WORKFLOW_SNAPSHOT_MAX_WORKFLOWS,
-    _WORKFLOW_LIST_SUMMARY_STRING_LIMIT,
-    _WORKFLOW_COLLAPSED_AGENT_TEXT_LIMIT,
-    _WORKFLOW_WAITING_HUMAN_PROMPT_MAX_BYTES,
+    _WORKFLOW_AGENT_FIELD_PART_BYTES,
+    _WORKFLOW_LIST_DEFAULT_LIMIT,
+    _WORKFLOW_LIST_MAX_LIMIT,
+    _WORKFLOW_PHASE_DEFAULT_LIMIT,
+    _WORKFLOW_PHASE_MAX_LIMIT,
+    _WORKFLOW_AGENT_DEFAULT_LIMIT,
+    _WORKFLOW_AGENT_MAX_LIMIT,
+    _SPLITTABLE_AGENT_FIELDS,
     _HISTORY_RESTORABLE_ASSISTANT_EVENT_TYPES,
     _json_wire_size,
     _coerce_int,
@@ -374,24 +377,16 @@ from jiuwenswarm.server.wire_truncate import (  # noqa: F401  — re-exported fo
     _sanitize_history_record_for_wire,
     split_history_record_for_stream,
     _select_history_record_page,
-    _is_waiting_human_agent,
-    _extract_waiting_human_prompts,
-    _restore_waiting_human_prompts,
-    _workflow_agent_for_collapse,
-    _collapse_oversized_workflow_snapshot_item,
-    _minimal_workflow_snapshot_item_for_wire,
-    _minimal_workflow_detail_preserving_waiting_human,
-    _sanitize_workflow_snapshot_item_for_wire,
-    _fit_workflow_detail_to_budget,
-    _workflow_list_summary_phase,
+    _split_oversized_agent_fields,
     _workflow_list_summary_item,
-    _minimal_workflow_list_item,
-    _fit_workflow_list_item_for_budget,
+    _workflow_phase_summary,
+    _workflow_run_meta,
+    _find_phase,
+    _find_agent,
     _build_workflow_list_payload,
-    _build_workflow_detail_payload,
-    _find_workflow_agent,
-    _build_workflow_human_prompt_payload,
-    _build_workflow_snapshot_payload,
+    _build_workflow_detail_paginated,
+    _build_phase_detail_paginated,
+    _build_agent_detail,
 )
 
 
@@ -1137,6 +1132,12 @@ class AgentWebSocketServer:
             ConfigAdapter(),
         ):
             self._adapter_registry.register(adapter)
+        # AgentServer-side tokenizer cache/download service. The Gateway only
+        # persists model profiles and notifies this process to refresh them.
+        self._tokenizer_service = TokenizerService()
+        # Tokenizer downloads are best-effort background work. Context creation
+        # is local-only and falls back to string length while these tasks run.
+        self._tokenizer_warmup_tasks: set[asyncio.Task] = set()
         # skills.* 等无状态 RPC：AgentManager 未缓存 agent 时复用的轻量 JiuWenSwarm，
         # 避免每次 cache miss 都 new 导致 SkillNet 异步安装等实例态断裂。
         self._stateless_fallback_agents: dict[str, Any] = {}
@@ -1230,6 +1231,49 @@ class AgentWebSocketServer:
 
     # ---------- 生命周期 ----------
 
+    def _schedule_tokenizer_warmup(
+        self,
+        config: dict[str, Any] | None,
+        *,
+        reason: str,
+    ) -> None:
+        """Schedule a non-blocking tokenizer warm-up task.
+
+        The service-level lock deduplicates overlapping resolutions. Keeping
+        each task until completion lets a reload submit its newest config
+        without cancelling an in-flight worker-thread download.
+        """
+
+        async def _run() -> None:
+            try:
+                result = await self._tokenizer_service.warm(config, reason=reason)
+                logger.info(
+                    "[AgentWebSocketServer] tokenizer warm-up finished: "
+                    "reason=%s warmed=%d degraded=%d failed=%d",
+                    reason,
+                    result.get("warmed", 0),
+                    result.get("degraded", 0),
+                    result.get("failed", 0),
+                )
+            except (
+                AttributeError,
+                ImportError,
+                KeyError,
+                OSError,
+                RuntimeError,
+                TypeError,
+                ValueError,
+            ) as exc:
+                logger.warning(
+                    "[AgentWebSocketServer] tokenizer warm-up failed: reason=%s error=%s",
+                    reason,
+                    exc,
+                )
+
+        task = asyncio.create_task(_run(), name=f"tokenizer-warmup:{reason}")
+        self._tokenizer_warmup_tasks.add(task)
+        task.add_done_callback(self._tokenizer_warmup_tasks.discard)
+
     async def start(self) -> None:
         """启动 WebSocket 服务端，开始监听连接。优先使用 legacy.server.serve 以与 Gateway 的 legacy client 握手兼容.
 
@@ -1271,6 +1315,11 @@ class AgentWebSocketServer:
         logger.info(
             "[AgentWebSocketServer] 已启动: ws://%s:%s", self._host, self._port
         )
+
+        # The port is already listening. Remote tokenizer downloads must not
+        # delay startup; ContextEngine is local-only and uses string fallback
+        # if this task has not completed when the first context is created.
+        self._schedule_tokenizer_warmup(get_config(), reason="startup")
 
         # 端口已 listen, 后台预热 checkpointer, 不阻塞启动与握手.
         # _checkpointer_warmup_task 供 shutdown 时 cancel, 避免任务悬挂.
@@ -1319,6 +1368,36 @@ class AgentWebSocketServer:
         # startup_mode 决定要不要自动把 jiuwenbox 子进程也拉起来。失败不阻塞
         # 启动 (用户依然可以在 TUI 里跑 /sandbox enable 重试)。
         await self._bootstrap_internal_jiuwenbox()
+
+    def schedule_image_modality_warmup(
+        self, *, reason: str, reset_cache: bool = False
+    ) -> None:
+        """把图像模态探针任务放进统一槽位调度。
+
+        启动预热与模型配置变更重探共用 ``_image_modality_refresh_task`` 这一个
+        任务槽位：新任务启动前取消上一轮未完成的任务，避免启动预热在配置变化
+        后继续跑完并写回过期结论（新配置先 reset 缓存、旧任务随后覆盖）。
+        任务由 ``_stop_main_services`` 在 shutdown 时统一 cancel 回收。
+
+        Args:
+            reason: 传给 warm/refresh 的日志标签（"startup" / "model config change"）。
+            reset_cache: True 时先清空旧结论再探（配置变更场景），False 仅补探。
+        """
+        from jiuwenswarm.server.runtime.image_modality_warmup import (
+            refresh_image_modality_cache,
+            warm_image_modality_cache,
+        )
+
+        previous_task = self._image_modality_refresh_task
+        if previous_task is not None and not previous_task.done():
+            previous_task.cancel()
+        if reset_cache:
+            coro = refresh_image_modality_cache(get_config(), reason=reason)
+        else:
+            coro = warm_image_modality_cache(get_config(), reason=reason)
+        self._image_modality_refresh_task = asyncio.create_task(
+            coro, name=f"image-modality-warmup-{reason}"
+        )
 
     async def _start_personal_context_best_effort(self) -> None:
         """Start optional PersonalContext without changing AgentServer readiness."""
@@ -1617,6 +1696,13 @@ class AgentWebSocketServer:
 
     async def _stop_main_services(self) -> None:
         """Run the unchanged AgentServer shutdown before optional PersonalContext cleanup."""
+        tokenizer_tasks = tuple(self._tokenizer_warmup_tasks)
+        self._tokenizer_warmup_tasks.clear()
+        for task in tokenizer_tasks:
+            if not task.done():
+                task.cancel()
+        if tokenizer_tasks:
+            await asyncio.gather(*tokenizer_tasks, return_exceptions=True)
         # 先取消 checkpointer 预热任务, 避免在 server 关闭后仍在后台跑.
         warmup = self._checkpointer_warmup_task
         self._checkpointer_warmup_task = None
@@ -2032,6 +2118,15 @@ class AgentWebSocketServer:
                 return
             if request.req_method == ReqMethod.COMMAND_WORKFLOWS:
                 await self._handle_command_workflows(ws, request, send_lock)
+                return
+            if request.req_method == ReqMethod.SWARMFLOW_PAUSE:
+                await self._handle_swarmflow_pause(ws, request, send_lock)
+                return
+            if request.req_method == ReqMethod.SWARMFLOW_RESUME:
+                await self._handle_swarmflow_resume(ws, request, send_lock)
+                return
+            if request.req_method == ReqMethod.SWARMFLOW_STOP:
+                await self._handle_swarmflow_stop(ws, request, send_lock)
                 return
             if request.req_method == ReqMethod.TEAM_HISTORY_GET:
                 await self._handle_team_history_get(ws, request, send_lock)
@@ -2718,7 +2813,7 @@ class AgentWebSocketServer:
             request.req_method is not None
             and request.req_method.value.startswith(
                 ("skills.", "skilldev.", "plugins.", "symphony.",
-                 "agent_templates.", "plugin_packages.")
+                 "agent_groups.", "agent_templates.", "plugin_packages.")
             )
         )
 
@@ -2819,7 +2914,17 @@ class AgentWebSocketServer:
                 else None
             )
             if isinstance(stored_session_mode, str) and stored_session_mode.strip():
-                params[_SESSION_PREVIOUS_MODE_KEY] = stored_session_mode.strip()
+                stored_session_mode = stored_session_mode.strip()
+                params[_SESSION_PREVIOUS_MODE_KEY] = stored_session_mode
+                if not explicit_mode_provided:
+                    # Internal Heartbeat requests are ordinary CHAT_SENDs and
+                    # intentionally omit ``mode``.  Runtime selection must
+                    # therefore inherit the Session's locked canonical mode;
+                    # otherwise the generic resolver falls back to ``agent``
+                    # and a Team Heartbeat silently runs through the wrong
+                    # adapter.  Keep ``explicit_mode_provided`` false: this is
+                    # inheritance, not a client-requested mode transition.
+                    params["mode"] = stored_session_mode
             if isinstance(stored_work_mode, str) and stored_work_mode.strip().lower() in {
                 "code",
                 "work",
@@ -3206,7 +3311,10 @@ class AgentWebSocketServer:
             await self._record_kvc_chat_started(request)
         if foreground:
             await manager.begin_foreground_chat()
-        admitted = request.req_method in _CODE_MODE_SYNC_METHODS
+        admitted = (
+            request.req_method in _CODE_MODE_SYNC_METHODS
+            and not is_team_params(request.params)
+        )
         session_id = request.session_id or "default"
         if admitted:
             await self._heartbeat_runtime.admission.begin_user(session_id)
@@ -3319,7 +3427,10 @@ class AgentWebSocketServer:
             await self._record_kvc_chat_started(request)
         if foreground:
             await manager.begin_foreground_chat()
-        admitted = request.req_method in _CODE_MODE_SYNC_METHODS
+        admitted = (
+            request.req_method in _CODE_MODE_SYNC_METHODS
+            and not is_team_params(request.params)
+        )
         session_id = request.session_id or "default"
         if admitted:
             await self._heartbeat_runtime.admission.begin_user(session_id)
@@ -5809,20 +5920,49 @@ class AgentWebSocketServer:
         source_count = len(workflows)
         source_bytes = sum(_json_wire_size(item) for item in workflows if isinstance(item, dict))
 
-        if action == "get":
-            if not isinstance(workflow_id, str) or not workflow_id.strip():
+        target_id = workflow_id.strip() if isinstance(workflow_id, str) and workflow_id.strip() else None
+
+        def _find_workflow() -> dict[str, Any] | None:
+            if not target_id:
+                return None
+            return next(
+                (item for item in workflows if isinstance(item, dict) and item.get("id") == target_id),
+                None,
+            )
+
+        if action == "list":
+            offset = _coerce_int(
+                params.get("offset"), default=0, minimum=0, maximum=10_000_000
+            )
+            limit = _coerce_int(
+                params.get("limit"),
+                default=_WORKFLOW_LIST_DEFAULT_LIMIT,
+                minimum=1,
+                maximum=_WORKFLOW_LIST_MAX_LIMIT,
+            )
+            payload = _build_workflow_list_payload(
+                workflows,
+                session_id=session_id,
+                offset=offset,
+                limit=limit,
+                total=source_count,
+            )
+            resp = AgentResponse(
+                request_id=request.request_id,
+                channel_id=channel_id,
+                ok=True,
+                payload=payload,
+            )
+        elif action == "get_workflow":
+            if not target_id:
                 resp = AgentResponse(
                     request_id=request.request_id,
                     channel_id=channel_id,
                     ok=False,
-                    payload={"error": "workflow_id is required for action=get"},
+                    payload={"error": "workflow_id is required for action=get_workflow"},
                 )
             else:
-                target_id = workflow_id.strip()
-                match = next(
-                    (item for item in workflows if isinstance(item, dict) and item.get("id") == target_id),
-                    None,
-                )
+                match = _find_workflow()
                 if match is None:
                     resp = AgentResponse(
                         request_id=request.request_id,
@@ -5832,41 +5972,41 @@ class AgentWebSocketServer:
                     )
                 else:
                     detail_raw_bytes = _json_wire_size(match)
+                    phase_offset = _coerce_int(
+                        params.get("phase_offset"), default=0, minimum=0, maximum=10_000_000
+                    )
+                    phase_limit = _coerce_int(
+                        params.get("phase_limit"),
+                        default=_WORKFLOW_PHASE_DEFAULT_LIMIT,
+                        minimum=1,
+                        maximum=_WORKFLOW_PHASE_MAX_LIMIT,
+                    )
+                    payload = _build_workflow_detail_paginated(
+                        match,
+                        session_id=session_id,
+                        phase_offset=phase_offset,
+                        phase_limit=phase_limit,
+                    )
                     resp = AgentResponse(
                         request_id=request.request_id,
                         channel_id=channel_id,
                         ok=True,
-                        payload=_build_workflow_detail_payload(match, session_id=session_id),
+                        payload=payload,
                     )
-        elif action == "get_human_prompt":
-            agent_id = params.get("agent_id")
-            correlation_id = params.get("correlation_id")
-            agent_id_str = agent_id.strip() if isinstance(agent_id, str) and agent_id.strip() else None
-            corr_id_str = (
-                correlation_id.strip()
-                if isinstance(correlation_id, str) and correlation_id.strip()
-                else None
-            )
-            if not isinstance(workflow_id, str) or not workflow_id.strip():
+        elif action == "get_phase":
+            phase_id = params.get("phase_id")
+            phase_id_str = phase_id.strip() if isinstance(phase_id, str) and phase_id.strip() else None
+            if not target_id or not phase_id_str:
                 resp = AgentResponse(
                     request_id=request.request_id,
                     channel_id=channel_id,
                     ok=False,
-                    payload={"error": "workflow_id is required for action=get_human_prompt"},
-                )
-            elif not agent_id_str and not corr_id_str:
-                resp = AgentResponse(
-                    request_id=request.request_id,
-                    channel_id=channel_id,
-                    ok=False,
-                    payload={"error": "agent_id or correlation_id is required for action=get_human_prompt"},
+                    payload={
+                        "error": "workflow_id and phase_id are required for action=get_phase",
+                    },
                 )
             else:
-                target_id = workflow_id.strip()
-                match = next(
-                    (item for item in workflows if isinstance(item, dict) and item.get("id") == target_id),
-                    None,
-                )
+                match = _find_workflow()
                 if match is None:
                     resp = AgentResponse(
                         request_id=request.request_id,
@@ -5875,68 +6015,181 @@ class AgentWebSocketServer:
                         payload={"error": f"workflow not found: {target_id}"},
                     )
                 else:
-                    prompt_payload = _build_workflow_human_prompt_payload(
+                    agent_offset = _coerce_int(
+                        params.get("agent_offset"), default=0, minimum=0, maximum=10_000_000
+                    )
+                    agent_limit = _coerce_int(
+                        params.get("agent_limit"),
+                        default=_WORKFLOW_AGENT_DEFAULT_LIMIT,
+                        minimum=1,
+                        maximum=_WORKFLOW_AGENT_MAX_LIMIT,
+                    )
+                    payload = _build_phase_detail_paginated(
                         match,
                         session_id=session_id,
-                        agent_id=agent_id_str,
-                        correlation_id=corr_id_str,
+                        phase_id=phase_id_str,
+                        agent_offset=agent_offset,
+                        agent_limit=agent_limit,
                     )
                     resp = AgentResponse(
                         request_id=request.request_id,
                         channel_id=channel_id,
-                        ok="error" not in prompt_payload,
-                        payload=prompt_payload,
+                        ok=payload.get("ok", True),
+                        payload=payload,
+                    )
+        elif action == "get_agent":
+            phase_id = params.get("phase_id")
+            agent_id = params.get("agent_id")
+            phase_id_str = phase_id.strip() if isinstance(phase_id, str) and phase_id.strip() else None
+            agent_id_str = agent_id.strip() if isinstance(agent_id, str) and agent_id.strip() else None
+            if not target_id or not phase_id_str or not agent_id_str:
+                resp = AgentResponse(
+                    request_id=request.request_id,
+                    channel_id=channel_id,
+                    ok=False,
+                    payload={
+                        "error": "workflow_id, phase_id and agent_id are required for action=get_agent",
+                    },
+                )
+            else:
+                match = _find_workflow()
+                if match is None:
+                    resp = AgentResponse(
+                        request_id=request.request_id,
+                        channel_id=channel_id,
+                        ok=False,
+                        payload={"error": f"workflow not found: {target_id}"},
+                    )
+                else:
+                    payload = _build_agent_detail(
+                        match,
+                        session_id=session_id,
+                        phase_id=phase_id_str,
+                        agent_id=agent_id_str,
+                    )
+                    resp = AgentResponse(
+                        request_id=request.request_id,
+                        channel_id=channel_id,
+                        ok=payload.get("ok", True),
+                        payload=payload,
                     )
         else:
             resp = AgentResponse(
                 request_id=request.request_id,
                 channel_id=channel_id,
-                ok=True,
-                payload=_build_workflow_list_payload(workflows, session_id=session_id),
+                ok=False,
+                payload={"error": f"unknown action: {action}"},
             )
 
         payload = resp.payload if isinstance(resp.payload, dict) else {}
         payload_bytes = _json_wire_size(payload)
-        truncated = bool(payload.get("truncated")) if isinstance(payload, dict) else False
-        included = len(payload.get("workflows", [])) if payload.get("action") == "list" else None
+        has_more = bool(payload.get("has_more")) if isinstance(payload, dict) else False
+        included = (
+            len(payload.get("workflows", []))
+            if payload.get("action") == "list"
+            else None
+        )
         error = payload.get("error") if isinstance(payload, dict) and not resp.ok else None
-        log_level = logging.WARNING if (not resp.ok or truncated) else logging.INFO
-        if action == "list":
-            logger.log(
-                log_level,
-                "[WF_DBG] command.workflows res ok=%s action=list source=%s count=%d source_bytes=%d "
-                "payload_bytes=%d included=%d/%d truncated=%s error=%s",
-                resp.ok,
-                source,
-                source_count,
-                source_bytes,
-                payload_bytes,
-                included or 0,
-                source_count,
-                truncated,
-                error,
+        log_level = logging.WARNING if (not resp.ok or has_more) else logging.INFO
+        logger.log(
+            log_level,
+            "[WF_DBG] command.workflows res ok=%s action=%s source=%s session_id=%s "
+            "workflow_id=%s count=%d source_bytes=%d payload_bytes=%d has_more=%s error=%s",
+            resp.ok,
+            action,
+            source,
+            session_id,
+            wf_id_log,
+            source_count,
+            source_bytes,
+            payload_bytes,
+            has_more,
+            error,
+        )
+
+        wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
+        async with send_lock:
+            await send_wire_payload(ws, wire)
+
+    async def _handle_swarmflow_pause(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
+        """Handle swarmflow.pause RPC — pause a live swarmflow run by run_id."""
+        await self._run_swarmflow_control(ws, request, send_lock, action="pause")
+
+    async def _handle_swarmflow_resume(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
+        """Handle swarmflow.resume RPC — resume a paused swarmflow run by run_id."""
+        await self._run_swarmflow_control(ws, request, send_lock, action="resume")
+
+    async def _handle_swarmflow_stop(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
+        """Handle swarmflow.stop RPC — stop a swarmflow run by run_id."""
+        await self._run_swarmflow_control(ws, request, send_lock, action="stop")
+
+    async def _run_swarmflow_control(
+        self,
+        ws: Any,
+        request: AgentRequest,
+        send_lock: asyncio.Lock,
+        *,
+        action: str,
+    ) -> None:
+        """Shared pause/resume/stop control-path handler for a swarmflow run.
+
+        Looks up the session's BackgroundTaskController and applies the requested
+        control to the run identified by ``run_id`` (accepting ``run_id`` or the
+        ``workflow_run_id`` alias). Returns ok=False with a reason when run_id is
+        missing or no matching live run is registered on the controller.
+        """
+        from jiuwenswarm.server.runtime.agent_adapter.team_helpers import (
+            get_background_task_controller,
+        )
+
+        session_id = request.session_id or ""
+        channel_id = request.channel_id or "web"
+        params = request.params if isinstance(request.params, dict) else {}
+        run_id = params.get("run_id") or params.get("workflow_run_id")
+
+        if not isinstance(run_id, str) or not run_id.strip():
+            resp = AgentResponse(
+                request_id=request.request_id,
+                channel_id=channel_id,
+                ok=False,
+                payload={"error": "run_id is required"},
             )
         else:
-            prompt_len = None
-            if action == "get_human_prompt" and isinstance(payload, dict):
-                human_prompt = payload.get("human_prompt")
-                if isinstance(human_prompt, str):
-                    prompt_len = len(human_prompt.encode("utf-8"))
-            logger.log(
-                log_level,
-                "[WF_DBG] command.workflows res ok=%s action=%s source=%s workflow_id=%s "
-                "raw_bytes=%s payload_bytes=%d truncated=%s prompt_len=%s error=%s",
-                resp.ok,
-                action,
-                source,
-                wf_id_log,
-                detail_raw_bytes,
-                payload_bytes,
-                truncated,
-                prompt_len,
-                error,
-            )
+            run_id = run_id.strip()
+            controller = get_background_task_controller(session_id)
+            status = {"pause": "paused", "resume": "resumed", "stop": "stopped"}.get(action, "")
+            if action == "pause":
+                acted = await controller.pause(run_id)
+            elif action == "resume":
+                acted = await controller.resume(run_id)
+            elif action == "stop":
+                acted = await controller.stop(run_id)
+            else:  # pragma: no cover - internal dispatch only
+                acted = False
+            if not acted:
+                resp = AgentResponse(
+                    request_id=request.request_id,
+                    channel_id=channel_id,
+                    ok=False,
+                    payload={"error": "workflow run not found"},
+                )
+            else:
+                resp = AgentResponse(
+                    request_id=request.request_id,
+                    channel_id=channel_id,
+                    ok=True,
+                    payload={"run_id": run_id, "status": status},
+                )
 
+        logger.info(
+            "[SWARMFLOW] %s req channel_id=%s session_id=%s request_id=%s run_id=%s ok=%s",
+            action,
+            channel_id,
+            session_id,
+            request.request_id,
+            run_id,
+            resp.ok,
+        )
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
         async with send_lock:
             await send_wire_payload(ws, wire)
@@ -9428,27 +9681,37 @@ class AgentWebSocketServer:
                 reload_kwargs["target_session_id"] = target_session_id
             if reload_scopes:
                 reload_kwargs["reload_scopes"] = reload_scopes
-            agent_reload_scopes = {"model", "team", "permissions", "agent_runtime"}
+            agent_reload_scopes = {
+                "model",
+                "multimodal",
+                "team",
+                "permissions",
+                "agent_runtime",
+            }
             should_reload_agents = not reload_scopes or bool(reload_scopes & agent_reload_scopes)
+
+            # Model profiles are persisted by Gateway, but tokenizer artifacts
+            # are owned by this AgentServer process. Submit the warm-up in the
+            # background; context creation itself never downloads or waits.
+            should_warm_tokenizers = True
+            if reload_scopes:
+                should_warm_tokenizers = "model" in reload_scopes
+            if should_warm_tokenizers:
+                self._schedule_tokenizer_warmup(
+                    config_payload if isinstance(config_payload, dict) else get_config(),
+                    reason="model config change",
+                )
 
             # 模型配置变了就重探图像模态：同一个 (api_base, model_name) 背后可能已换
             # 端点 / 密钥 / 后端，旧结论不能留。跑在后台任务里——探针每个最多 5s，不该
             # 把 reload 响应拖在这里；这个 loop 活到进程结束，结论一定能落进缓存。
-            should_refresh_image_modality = not reload_scopes or "model" in reload_scopes
+            should_refresh_image_modality = should_warm_tokenizers
             if should_refresh_image_modality:
-                from jiuwenswarm.server.runtime.image_modality_warmup import (
-                    refresh_image_modality_cache,
-                )
-
-                # 上一轮还没探完就又改了配置：旧结论已经作废，直接取消。
-                previous_task = self._image_modality_refresh_task
-                if previous_task is not None and not previous_task.done():
-                    previous_task.cancel()
-                self._image_modality_refresh_task = asyncio.create_task(
-                    refresh_image_modality_cache(
-                        get_config(),
-                        reason="model config change",
-                    )
+                # 上一轮还没探完就又改了配置：旧结论已经作废，由统一调度入口
+                # 取消旧任务（含启动预热轮）后再 reset 缓存并重探。
+                self.schedule_image_modality_warmup(
+                    reason="model config change",
+                    reset_cache=True,
                 )
             # 模型配置变更时同步刷新本进程（AgentServer）的 Zen 免费模型缓存
             # （与上方 image modality 刷新同一 model scope）。Gateway 进程在
@@ -10771,6 +11034,17 @@ class AgentWebSocketServer:
         if model_name and model_name in self._model_cache:
             return self._model_cache[model_name]
         return self._default_model
+
+    def reset_model_cache(self) -> None:
+        """清空模型缓存,下次 _resolve_model 触发懒重建。
+
+        供 Zen 免费模型就绪回调使用:预热异步化后首个请求可能早于 Zen 拉取
+        完成构建不含 Zen 条目的缓存(一次性、不自动重建),就绪后清空即可让
+        重建带上 Zen 免费模型及占位符默认模型的 Zen 兜底。
+        """
+        if self._model_cache:
+            self._model_cache.clear()
+        self._default_model = None
 
     def _build_model_cache(self) -> None:
         """Build model cache from jiuwenswarm config.yaml (reuse interface_deep logic)."""

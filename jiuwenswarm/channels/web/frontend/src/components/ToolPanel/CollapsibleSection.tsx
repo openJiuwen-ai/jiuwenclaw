@@ -83,6 +83,8 @@ export function CollapsibleSection({
       <div
         className={`collapsible-section__header flex w-full shrink-0 items-center justify-between bg-card ${collapsed ? 'py-6' : 'pt-6 pb-4'}`}
         data-testid={`${dataTestId}-header`}
+        onClick={showCollapseButton ? handleToggleCollapse : undefined}
+        style={showCollapseButton ? { cursor: 'pointer' } : undefined}
       >
         <div className="flex items-center gap-2">
           {icon && (
@@ -95,7 +97,10 @@ export function CollapsibleSection({
           </span>
           {showCollapseButton && (
             <button
-              onClick={handleToggleCollapse}
+              onClick={e => {
+                e.stopPropagation();
+                handleToggleCollapse();
+              }}
               data-testid={`${dataTestId}-collapse-button`}
               className="rounded p-1 text-text-muted hover:bg-secondary hover:text-text"
             >
@@ -105,7 +110,10 @@ export function CollapsibleSection({
         </div>
         {showExpandButton && (
           <button
-            onClick={onExpand}
+            onClick={e => {
+              e.stopPropagation();
+              onExpand?.();
+            }}
             data-testid={`${dataTestId}-expand-button`}
             className="rounded p-2 text-text-muted hover:bg-secondary hover:text-text"
             title={t('team.expand')}

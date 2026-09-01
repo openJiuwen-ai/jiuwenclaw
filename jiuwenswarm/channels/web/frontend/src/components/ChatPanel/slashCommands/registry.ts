@@ -1,9 +1,10 @@
 import { webRequest } from '../../../services/webClient';
 import type { Message } from '../../../types/message';
 import { usePlanStore } from '../../../stores/planStore';
+import { NEW_CONVERSATION_ID } from '../../../multi-session/state/newConversationLifecycle';
 
 /**
- * 斜杠命令注册表（/btw、/compact、/plan，对齐 TUI）。
+ * 斜杠命令注册表（/btw、/compact、/plan、/persist，对齐 TUI）。
  * 后端与 TUI 共用 agent_ws_server；命令结果以 system 消息留痕，
  * 第一行回显命令行，MessageItem 按 isCommandOutput 渲染。
  */
@@ -124,13 +125,14 @@ const compactCommand: SlashCommand = {
 
 /**
  * /plan —— 翻转 planStore 的 Plan 开关（纯本地，不调后端）。
+ * 面板选中或精确输入 `/plan` 时立即翻转，带参数的文本不进入此路径。
  * 开启时置 explicitEntry，下一条真实消息带 agent.plan + plan_entry_source；
  * 集群（team）不支持，与工具栏开关一致。
  */
 const planCommand: SlashCommand = {
   name: 'plan',
   requiresSession: false,
-  execute: async (ctx, args) => {
+  execute: async (ctx) => {
     // 集群不支持：仅回提示；正常开关静默（状态已由工具栏可视化）
     if (ctx.mode === 'team') {
       ctx.addMessage(
@@ -141,21 +143,46 @@ const planCommand: SlashCommand = {
     }
     const store = usePlanStore.getState();
     store.ensureRuntime(ctx.sessionId);
-    const request = args.trim();
-    if (!request && store.isActive(ctx.sessionId)) {
+    if (store.isActive(ctx.sessionId)) {
       store.setActive(ctx.sessionId, false);
-    } else {
-      if (!store.isActive(ctx.sessionId)) {
-        store.setActive(ctx.sessionId, true, {
-          explicitEntry: true,
-          entrySource: 'slash_command',
-        });
-      }
-      if (request && request !== 'open') {
-        ctx.submitMessage?.(request);
-      }
+      return;
     }
+    store.setActive(ctx.sessionId, true, {
+      explicitEntry: true,
+      entrySource: 'slash_command',
+    });
   },
 };
 
-export const SLASH_COMMANDS: SlashCommand[] = [btwCommand, compactCommand, planCommand];
+/** /persist —— 在欢迎页创建 Persist Session，具体创建仍复用 App.tsx 现有入口。 */
+const persistCommand: SlashCommand = {
+  name: 'persist',
+  requiresSession: false,
+  execute: async (ctx, args) => {
+    if (ctx.sessionId !== NEW_CONVERSATION_ID) {
+      ctx.addMessage(
+        ctx.sessionId,
+        commandResultMessage(
+          ctx.inputLine,
+          'Persist Session 只能在创建新会话时开启，并且创建后不可更改。请点击“新建任务”后再使用 /persist <任务>。',
+        ),
+      );
+      return;
+    }
+    if (!args.trim()) {
+      ctx.addMessage(
+        ctx.sessionId,
+        commandResultMessage(ctx.inputLine, '用法：/persist <任务>'),
+      );
+      return;
+    }
+    ctx.submitMessage?.(ctx.inputLine);
+  },
+};
+
+export const SLASH_COMMANDS: SlashCommand[] = [
+  btwCommand,
+  compactCommand,
+  planCommand,
+  persistCommand,
+];

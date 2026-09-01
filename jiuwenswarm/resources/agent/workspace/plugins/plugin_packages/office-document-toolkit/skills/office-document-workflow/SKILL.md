@@ -45,6 +45,7 @@ description: 办公文档处理工作流：指导PDF、Word、Excel、PPT文档�
 
 - 指定 `format`、`filename` 和 `content`
 - `content` 结构：`{title, paragraphs[], tables[], sheets[], slides[]}`
+- 含中文内容且请求 PDF 时，会自动改为 Word（`.docx`）输出
 
 **调用时机**：需要将处理后的内容输出为文档文件时。
 
@@ -54,6 +55,7 @@ description: 办公文档处理工作流：指导PDF、Word、Excel、PPT文档�
 
 - 输入 `source_path` 和 `target_format`（word/pdf/excel/csv/ppt）
 - 支持 PDF→Word、PDF→Excel、Word→PDF、Excel↔CSV、PPT→PDF、Markdown→Word/PPT
+- Word/PPT 转 PDF 时，若源文档含中文会拒绝转换，请保留 Word 格式
 
 **调用时机**：用户需要转换文档格式时。
 

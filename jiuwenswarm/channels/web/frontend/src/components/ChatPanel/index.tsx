@@ -6,7 +6,7 @@
 
 import React, { useRef, useEffect, useLayoutEffect, useCallback, useMemo, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { ArrowRight, CheckCircle2, ClipboardList, Copy, Info, LoaderCircle, Share2, Sparkles, X } from 'lucide-react';
+import { Activity, ArrowRight, CheckCircle2, ClipboardList, Copy, Info, LoaderCircle, Share2, Sparkles, X } from 'lucide-react';
 import type { TFunction } from 'i18next';
 import { useTranslation } from 'react-i18next';
 import { useChatStore, useHarnessStore, useSessionStore, useTodoStore } from '../../stores';
@@ -18,6 +18,9 @@ import { InputArea, type InputAreaHandle } from './InputArea';
 import ChatOverviewIcon from '../../assets/chat-overview.svg?react';
 import PanelCollapseIcon from '../../assets/panel-collapse.svg?react';
 import lineUpIcon from '../../assets/lineUp.svg';
+import beeFlyingIcon from '../../assets/bee-flying.png';
+import beeStaticIcon from '../../assets/bee-static.png';
+import { NEW_CONVERSATION_ID } from '../../multi-session/state/newConversationLifecycle';
 import loadSendIcon from '../../assets/load-send.svg';
 import editIcon from '../../assets/edit.svg';
 import deleteIcon from '../../assets/delete.svg';
@@ -32,7 +35,6 @@ import { AgentTeamActivityCard } from './TeamEventGroupDisplay';
 import { isTeamActivityMessage, parseTeamEventMessage } from './teamEventUtils';
 import { isTeamLeaderMember, type TeamMemberIdentity } from '../../utils/teamMemberAvatar';
 import { TeamMemberAvatar } from '../TeamMemberAvatar';
-import welcomeBanner from '../../assets/home-banner-workswarm.svg';
 import './ChatPanel.css';
 import { CodeChangesCard } from '../../features/code-mode/CodeChangesCard';
 import { useCodeTurnDiffHistory } from '../../features/code-mode/useCodeTurnDiffHistory';
@@ -51,7 +53,7 @@ import {
   type DesktopLocalFilesEventDetail,
   type LocalFilePick,
 } from '../../features/workspace/localFilePicker';
-import { useDesktopLocalFilePickerReady } from '../../hooks';
+import { useDesktopLocalFilePickerReady, useWelcomeBubblePosition } from '../../hooks';
 
 export interface ChatHistoryPagerProps {
   loadedPages: number;
@@ -97,11 +99,17 @@ interface ChatPanelProps {
   autoFocusKey?: string | null;
   /** 跳转到技能管理页 */
   onNavigateToSkills?: () => void;
+  /** 跳转到智能体管理页 */
+  onNavigateToAgents?: () => void;
   /** 切换右侧紧缩面板展开状态，传 null 表示隐藏面板 */
   onToggleTeamArea?: (expanded: boolean | null) => void;
   /** 打开右侧面板并切换到代码审核 Tab */
   onOpenCodeReview?: (target: CodeReviewTarget) => void;
   permissionsEnabled: boolean;
+  /** 心跳面板展开状态：由 App.tsx 统一管理，跟团队/代码审核面板一样占用右侧工作区一栏 */
+  heartbeatPanelOpen?: boolean;
+  /** 切换心跳面板展开状态 */
+  onToggleHeartbeatPanel?: () => void;
   onSavePermission: (updates: Record<string, string>) => Promise<void>;
   /** Goal（持续目标）控制，见 GoalBar 组件 */
   onSetGoal?: (sessionId: string, objective: string) => void;
@@ -466,14 +474,14 @@ function WelcomeHeading() {
   if (isZh) {
     return (
       <>
-        WorkSwarm 轻松解决工作每个问题！
+        <span className="chat-welcome__heading-highlight">WorkSwarm</span> 轻松解决工作每个问题！
       </>
     );
   }
 
   return (
     <>
-      WorkSwarm makes work easier!
+      <span className="chat-welcome__heading-highlight">WorkSwarm</span> makes work easier!
     </>
   );
 }
@@ -736,6 +744,40 @@ function scrollToBottom(el: HTMLDivElement): void {
   el.scrollTop = Math.max(0, el.scrollHeight - el.clientHeight);
 }
 
+function BeeBanner({ className, altText, onTrigger }: { className: string; altText: string; onTrigger: () => void }) {
+  const [isPlaying, setIsPlaying] = useState(false);
+  const playingRef = useRef(false);
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const handleMouseEnter = useCallback(() => {
+    if (playingRef.current) return;
+    playingRef.current = true;
+    setIsPlaying(true);
+    onTrigger();
+    if (timerRef.current) clearTimeout(timerRef.current);
+    timerRef.current = setTimeout(() => {
+      playingRef.current = false;
+      setIsPlaying(false);
+    }, 3000);
+  }, [onTrigger]);
+
+  useEffect(() => {
+    return () => {
+      if (timerRef.current) clearTimeout(timerRef.current);
+    };
+  }, []);
+
+  return (
+    <img
+      className={className}
+      src={isPlaying ? beeFlyingIcon : beeStaticIcon}
+      alt={altText}
+      data-testid="chat-panel-welcome-banner"
+      onMouseEnter={handleMouseEnter}
+    />
+  );
+}
+
 export function ChatPanel({
   onSendMessage,
   onInputIntent,
@@ -754,10 +796,14 @@ export function ChatPanel({
   sessionProject = null,
   historyPager = null,
   isHistoryRestoring = false,
-  teamAreaExpanded = false,  autoFocusKey = null,
+  teamAreaExpanded = false,
+  autoFocusKey = null,
   onNavigateToSkills,
+  onNavigateToAgents,
   onToggleTeamArea,
   onOpenCodeReview,
+  heartbeatPanelOpen = false,
+  onToggleHeartbeatPanel,
   permissionsEnabled,
   onSavePermission,
   onSetGoal,
@@ -784,6 +830,8 @@ export function ChatPanel({
   ));
   const teamHumanShareCommands = useSessionStore((s) => s.runtimes[activeSessionId ?? '']?.teamHumanShareCommands ?? []);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
+  const panelShellRef = useRef<HTMLDivElement>(null);
+  const bubbleRef = useRef<HTMLDivElement>(null);
   const inputAreaRef = useRef<InputAreaHandle>(null);
   const desktopFileDropAcceptUntilRef = useRef(0);
   const lastConsumedDesktopDropIdRef = useRef<string | null>(null);
@@ -834,6 +882,9 @@ export function ChatPanel({
   const shouldShowShareExport = Boolean(onExportShare);
   const shouldShowHumanShare = effectiveMode === 'team' && teamHumanShareCommands.length > 0;
   const [humanShareOpen, setHumanShareOpen] = React.useState(false);
+  const [bubbleVisible, setBubbleVisible] = useState(false);
+  // 新会话占位符 'new' 还没有真实 session_id，隐藏心跳入口，见接口规格说明 §16.2
+  const heartbeatAvailable = Boolean(activeSessionId && activeSessionId !== NEW_CONVERSATION_ID);
   const {
     turnsByMessageId: codeTurnsByMessageId,
     loading: codeTurnHistoryLoading,
@@ -966,6 +1017,13 @@ export function ChatPanel({
     historyPrepending,
     updateHistoryLayoutSnapshot,
   ]);
+
+  // 根据 chat-panel 宽度动态调整 welcome bubble 的 right 值
+  useWelcomeBubblePosition({
+    panelRef: panelShellRef,
+    bubbleRef,
+    active: !hasConversation,
+  });
 
   // 检测鼠标滚轮事件，即使没有滚动条也能触发加载更多
   const handleWheel = useCallback((e: React.WheelEvent<HTMLDivElement>) => {
@@ -1235,6 +1293,7 @@ export function ChatPanel({
 
   return (
     <div
+      ref={panelShellRef}
       className={`chat-panel-shell flex flex-col h-full ${teamAreaExpanded === false ? 'chat-panel-shell--team-floating' : ''}`}
       data-testid="chat-panel"
       onDragEnter={handleDesktopFileDragEnter}
@@ -1264,7 +1323,7 @@ export function ChatPanel({
             {shouldShowShareExport && (
               <button
                 type="button"
-                className={`icon-btn share-export-btn ${isExportingShare ? 'share-export-btn--loading' : ''}`}
+                className={`chat-header-icon-btn icon-btn share-export-btn ${isExportingShare ? 'share-export-btn--loading' : ''}`}
                 data-testid="chat-panel-share-export"
                 data-variant={isExportingShare ? 'exporting' : 'ready'}
                 title={shareExportTitle}
@@ -1296,11 +1355,22 @@ export function ChatPanel({
                 <Sparkles size={16} strokeWidth={2} />
               </button>
             )}
+            {heartbeatAvailable && (
+              <button
+                type="button"
+                className={`chat-header-icon-btn ${heartbeatPanelOpen ? 'chat-header-icon-btn--active' : ''}`}
+                onClick={() => onToggleHeartbeatPanel?.()}
+                title={t('heartbeat.panel.title')}
+              >
+                <Activity size={14} strokeWidth={2} />
+              </button>
+            )}
             <button
               type="button"
-              className={`chat-header-icon-btn ${teamAreaExpanded === false ? 'chat-header-icon-btn--active' : ''}`}
+              className={`chat-header-icon-btn ${teamAreaExpanded === false && !heartbeatPanelOpen ? 'chat-header-icon-btn--active' : ''}`}
               data-testid="chat-panel-header-chat-toggle"
               data-variant="collapse"
+              data-team-area-toggle="true"
               onClick={() => onToggleTeamArea?.(teamAreaExpanded === false ? null : false)}
             >
               <ChatOverviewIcon className="h-[32px] w-[32px]" aria-hidden />
@@ -1308,9 +1378,10 @@ export function ChatPanel({
             {!(teamAreaExpanded && mode !== 'team') && (
               <button
                 type="button"
-                className={`chat-header-icon-btn ${teamAreaExpanded === true ? 'chat-header-icon-btn--active' : ''}`}
+                className={`chat-header-icon-btn ${teamAreaExpanded === true && !heartbeatPanelOpen ? 'chat-header-icon-btn--active' : ''}`}
                 data-testid="chat-panel-header-expand-toggle"
                 data-variant="expand"
+                data-team-area-toggle="true"
                 onClick={() => onToggleTeamArea?.(teamAreaExpanded === true ? null : true)}
               >
                 <PanelCollapseIcon className="h-[32px] w-[32px]" aria-hidden />
@@ -1372,9 +1443,16 @@ export function ChatPanel({
             </>
           ) : (
             <div className="chat-welcome" data-testid="chat-panel-welcome">
+              <div
+                ref={bubbleRef}
+                className={`chat-welcome__banner chat-welcome__banner--bubble${bubbleVisible ? ' chat-welcome__banner--bubble--visible' : ''}`}
+                data-testid="chat-panel-welcome-banner-bubble"
+              >
+                {t('chat.welcomeBubbleText')}
+              </div>
               <h2 className="chat-welcome__heading" data-testid="chat-panel-welcome-heading"><WelcomeHeading /></h2>
               <div className="chat-welcome__composer" data-testid="chat-panel-welcome-composer">
-                <img className="chat-welcome__banner" src={welcomeBanner} alt={t('chat.welcomeLogoAlt')} data-testid="chat-panel-welcome-banner" />
+                <BeeBanner className="chat-welcome__banner chat-welcome__banner--bee" altText={t('chat.welcomeLogoAlt')} onTrigger={() => setBubbleVisible(true)} />
                 <ActiveTeamGroupEntry isProcessing={isProcessing} teamAreaExpanded={teamAreaExpanded} />
                 <AgentActivityCard isProcessing={isProcessing} onSendTask={handleSendMessage} />
                 <InterruptResultBubble />
@@ -1391,6 +1469,7 @@ export function ChatPanel({
                   isProcessing={isProcessing}
                   autoFocusKey={autoFocusKey}
                   onNavigateToSkills={onNavigateToSkills}
+                  onNavigateToAgents={onNavigateToAgents}
                   permissionsEnabled={permissionsEnabled}
                   onSavePermission={onSavePermission}
                   onSetGoal={onSetGoal}
@@ -1434,6 +1513,7 @@ export function ChatPanel({
             isProcessing={isProcessing}
             autoFocusKey={autoFocusKey}
             onNavigateToSkills={onNavigateToSkills}
+            onNavigateToAgents={onNavigateToAgents}
             permissionsEnabled={permissionsEnabled}
             onSavePermission={onSavePermission}
             onSetGoal={onSetGoal}

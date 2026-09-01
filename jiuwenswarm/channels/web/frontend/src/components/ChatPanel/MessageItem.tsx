@@ -35,12 +35,13 @@ import { isQaSummaryContent } from '../InteractionSlot/qaSummary';
 import { GoalCompletedCard } from '../GoalBar/GoalCompletedCard';
 import { isGoalCompletedContent } from '../GoalBar/goalCompletedMessage';
 import { a2uiContentToText } from '../../features/a2ui/a2uiContent';
-import { formatTimestamp, onTtsStop, sanitizeTtsText } from '../../utils';
+import { onTtsStop, sanitizeTtsText } from '../../utils';
 import { useSpeechSynthesis } from '../../hooks';
 import clsx from 'clsx';
 import { MarkdownRenderer } from '../../components/MarkdownRenderer';
 import { isTeamP2PMessageToUser, parseTeamEventMessage } from './teamEventUtils';
 import { TeamMemberAvatar } from '../TeamMemberAvatar';
+import { AgentAvatar } from '../AgentAvatar';
 import { ProactiveRecommendationCard } from './ProactiveRecommendationCard';
 import { fileArtifactId } from '../ArtifactsPanel';
 import { openArtifactPanel } from '../../features/teamPanelState';
@@ -201,10 +202,12 @@ export function TeamMemberMessageFrame({
 }) {
   return (
     <div className="team-member-message animate-fade-in" data-testid="chat-panel-team-member-message">
-      {/* 始终占住头像列，避免 showAvatar 在多轮/折叠间切换时整列塌掉看起来像「头像消失」。 */}
-      <div className="team-member-message__header" aria-hidden={!showAvatar} data-testid="chat-panel-team-member-message-header">
-        {showAvatar ? <TeamMemberAvatar member={member} /> : null}
-      </div>
+      {/* 与单 agent 的 assistant-row 一致：无头像时整列不渲染，正文直接对齐最左边。 */}
+      {showAvatar ? (
+        <div className="team-member-message__header" data-testid="chat-panel-team-member-message-header">
+          <TeamMemberAvatar member={member} />
+        </div>
+      ) : null}
       <div className={clsx('team-member-message__body', contentClassName)} data-testid="chat-panel-team-member-message-body">
         {children}
       </div>
@@ -378,7 +381,6 @@ export const MessageItem = memo(function MessageItem({
     id,
     role,
     content,
-    timestamp,
     isStreaming,
     toolCall,
     toolResult,
@@ -391,6 +393,7 @@ export const MessageItem = memo(function MessageItem({
     commandName,
     commandInput,
     commandOutput,
+    agentTemplateName,
   } = message;
   const [hasAutoSpoken, setHasAutoSpoken] = useState(false);
   const [isAudioPlaying, setIsAudioPlaying] = useState(false);
@@ -525,7 +528,7 @@ export const MessageItem = memo(function MessageItem({
             {showAvatar ? <TeamMemberAvatar member="team_leader" /> : null}
           </div>
         )}
-        <div className="chat-bubble-wrapper max-w-[82%] min-w-0 flex-1" data-testid="chat-panel-proactive-bubble-wrapper">
+        <div className="chat-bubble-wrapper  min-w-0 flex-1" data-testid="chat-panel-proactive-bubble-wrapper">
           <ProactiveRecommendationCard message={message} />
         </div>
       </div>
@@ -777,17 +780,22 @@ export const MessageItem = memo(function MessageItem({
     className={clsx(
       'flex animate-rise',
       isUser ? 'justify-end' : 'justify-start',
-      withAssistantAvatar && 'assistant-row'
+      withAssistantAvatar && 'assistant-row',
+      withAssistantAvatar && !showAvatar && 'assistant-row--no-avatar'
     )}>
-      {withAssistantAvatar && (
-        // 始终保留头像占位，与 team 布局一致，避免连续气泡时整列消失。
-        <div className="assistant-row__avatar" aria-hidden={!showAvatar} data-testid="chat-panel-assistant-row-avatar">
-          {showAvatar ? <TeamMemberAvatar member="team_leader" /> : null}
+      {withAssistantAvatar && showAvatar ? (
+        <div className="assistant-row__avatar" data-testid="chat-panel-assistant-row-avatar">
+          {role === 'assistant' && agentTemplateName ? (
+            <AgentAvatar agentId={agentTemplateName} alt="" />
+          ) : (
+            <TeamMemberAvatar member="team_leader" />
+          )}
         </div>
-      )}
+      ) : null}
       <div
         className={clsx(
-          'chat-bubble-wrapper max-w-[82%] min-w-0',
+          'chat-bubble-wrapper  min-w-0',
+          isUser && 'flex-1',
           !isUser && visibleFileItems && 'chat-bubble-wrapper--with-files'
         )}
         data-testid="chat-panel-bubble-wrapper"
@@ -877,12 +885,10 @@ export const MessageItem = memo(function MessageItem({
           <div
             data-testid="chat-panel-message-meta"
             className={clsx(
-              'flex items-center gap-3 text-sm mt-2 text-text-muted',
+              'flex items-center gap-1 text-sm mt-2 text-text-muted',
               isUser ? 'justify-end' : 'justify-start'
             )}
           >
-            <span data-testid="chat-panel-message-timestamp">{formatTimestamp(timestamp)}</span>
-
             {isUser && isGoalObjectiveMessage && (
               <span className="inline-flex items-center gap-1 rounded-full bg-secondary px-2 py-0.5 text-xs text-text-muted" data-testid="chat-panel-message-goal-badge">
                 <Target className="w-3 h-3" strokeWidth={2} />

@@ -120,6 +120,8 @@ models:
       api_key: ${API_KEY}
       model_name: ${MODEL_NAME}
       client_provider: ${MODEL_PROVIDER}
+      # endpoint_profile：仅 OpenAI 协议生效的端点方言；Anthropic 时忽略。
+      endpoint_profile: ${ENDPOINT_PROFILE:-openai}
       timeout: 1800
       verify_ssl: false
       custom_headers: {}
@@ -161,6 +163,8 @@ models:
       api_key: ${IMAGE_GEN_API_KEY}
       model_name: ${IMAGE_GEN_MODEL_NAME}
       client_provider: ${IMAGE_GEN_PROVIDER}
+      # 多模态生图走 DashScope SDK 需 endpoint_profile=dashscope。
+      endpoint_profile: ${IMAGE_GEN_ENDPOINT_PROFILE:-dashscope}
       verify_ssl: false
       timeout: 1800
     model_config_obj:
@@ -207,6 +211,14 @@ react:
     enable_kv_cache_release: false
     enable_kv_cache_affinity: false
   context_engine_config:
+    # 是否预下载/使用模型词表；关闭时使用字符串长度兜底，默认不联网。
+    enable_tiktoken_counter: false
+    tokenizer_cache_dir: tokenizers
+    tokenizer_offline: false
+    # 开发调试时打开：落盘 core 最终发送给模型的完整 messages/tools。
+    # 内容可能包含用户数据和系统提示词，默认关闭。
+    enable_context_debug: false
+    # context_debug_dir: context-debug
     enable_reload: true
     enabled: true
     message_summary_offloader_config:

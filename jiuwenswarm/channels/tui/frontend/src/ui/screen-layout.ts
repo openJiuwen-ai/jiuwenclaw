@@ -159,6 +159,12 @@ function buildStatusLines(
       : formatModeForDisplay(snapshot.mode);
   left.push(`mode:${modeLabel}`);
   if (snapshot.transcriptFoldMode !== "none") left.push(`fold:${snapshot.transcriptFoldMode}`);
+  // agentos 模型：非空表示当前对话走的是手动添加的 AgentOS 模型，
+  // 而非启动默认；用户切回 defaults 模型时此字段被清空。
+  if (snapshot.selectedAgentosModel) {
+    const m = snapshot.selectedAgentosModel;
+    left.push(`agentos:${m.length > 20 ? m.slice(0, 20) + "…" : m}`);
+  }
   const teamWorking =
     isEffectiveTeamMode(snapshot.mode, snapshot.lastMacroRoutedMode) &&
     isTeamWorking(snapshot.teamMemberEvents, snapshot.teamMessageEvents);

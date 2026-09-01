@@ -1,7 +1,11 @@
+import asyncio
 from copy import deepcopy
 from types import SimpleNamespace
 
 import pytest
+
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import BaseError, build_error
 
 from jiuwenswarm.symphony.adapter import llm_config_signature
 from jiuwenswarm.symphony.llm import (
@@ -10,6 +14,7 @@ from jiuwenswarm.symphony.llm import (
     create_model_response_observer,
     extract_message_content,
     get_llm_token_usage_summary,
+    probe_model_connection,
     reset_llm_token_usage,
     thinking_disabled_request_overrides,
     _record_usage_from_response,
@@ -49,22 +54,14 @@ def _llm_config():
     )
 
 
-def test_thinking_disabled_request_overrides_returns_isolated_compatibility_fields():
+def test_thinking_disabled_request_overrides_returns_isolated_core_config():
     first = thinking_disabled_request_overrides()
     second = thinking_disabled_request_overrides()
 
-    assert first == {
-        "extra_body": {
-            "thinking": {"type": "disabled"},
-            "enable_thinking": False,
-            "chat_template_kwargs": {"enable_thinking": False},
-        }
-    }
-    first["extra_body"]["thinking"]["type"] = "enabled"
-    first["extra_body"]["chat_template_kwargs"]["enable_thinking"] = True
+    assert first == {"reasoning": {"mode": "disabled"}}
+    first["reasoning"]["mode"] = "enabled"
 
-    assert second["extra_body"]["thinking"]["type"] == "disabled"
-    assert second["extra_body"]["chat_template_kwargs"]["enable_thinking"] is False
+    assert second == {"reasoning": {"mode": "disabled"}}
 
 
 def test_extract_message_content_supports_openjiuwen_response_shape():
@@ -137,10 +134,7 @@ def test_llm_config_removes_internal_reasoning_level():
 
     assert "reasoning_level" not in request_kwargs
     assert request_kwargs["max_tokens"] == 99
-    assert (
-        request_kwargs["extra_body"]
-        == thinking_disabled_request_overrides()["extra_body"]
-    )
+    assert request_kwargs["reasoning"] == {"mode": "disabled"}
 
 
 def test_llm_config_forces_high_reasoning_config_to_disabled():
@@ -163,10 +157,8 @@ def test_llm_config_forces_high_reasoning_config_to_disabled():
     assert "reasoning_level" not in request_kwargs
     assert "reasoning_effort" not in request_kwargs
     assert request_kwargs["max_tokens"] == 99
-    assert request_kwargs["extra_body"] == {
-        "custom_option": {"enabled": True},
-        **thinking_disabled_request_overrides()["extra_body"],
-    }
+    assert request_kwargs["reasoning"] == {"mode": "disabled"}
+    assert request_kwargs["extra_body"] == {"custom_option": {"enabled": True}}
 
 
 def test_llm_config_owns_nested_model_entry_data():
@@ -270,6 +262,88 @@ def test_llm_config_creates_native_openjiuwen_model(monkeypatch):
     assert isinstance(model, FakeModel)
     assert captured["request"].model_name == "model-a"
     assert captured["client"].api_base == "https://example.test/v1"
+
+
+@pytest.mark.asyncio
+async def test_probe_model_connection_uses_bounded_low_cost_request(monkeypatch):
+    model = _FakeInvokeModel()
+    monkeypatch.setattr(LLMConfig, "create_model", lambda _config: model)
+
+    await probe_model_connection(_llm_config())
+
+    assert model.calls == [
+        {
+            "messages": [{"role": "user", "content": "Hi"}],
+            "max_tokens": 16,
+            "timeout": 25,
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_probe_model_connection_preserves_framework_model_error(monkeypatch):
+    expected = build_error(
+        StatusCode.MODEL_CALL_FAILED,
+        error_msg="model unavailable",
+    )
+
+    class FailingModel:
+        async def invoke(self, **kwargs):
+            del kwargs
+            raise expected
+
+    monkeypatch.setattr(LLMConfig, "create_model", lambda _config: FailingModel())
+
+    with pytest.raises(BaseError) as exc_info:
+        await probe_model_connection(_llm_config())
+
+    assert exc_info.value is expected
+    assert (
+        str(exc_info.value) == "[181001] model call failed, reason: model unavailable"
+    )
+
+
+@pytest.mark.asyncio
+async def test_probe_model_connection_wraps_untyped_provider_error(monkeypatch):
+    class FailingModel:
+        async def invoke(self, **kwargs):
+            del kwargs
+            raise OSError("connection refused")
+
+    monkeypatch.setattr(LLMConfig, "create_model", lambda _config: FailingModel())
+
+    with pytest.raises(BaseError) as exc_info:
+        await probe_model_connection(_llm_config())
+
+    assert exc_info.value.status is StatusCode.MODEL_CALL_FAILED
+    assert (
+        str(exc_info.value) == "[181001] model call failed, reason: connection refused"
+    )
+    assert isinstance(exc_info.value.cause, OSError)
+
+
+@pytest.mark.asyncio
+async def test_probe_model_connection_enforces_coroutine_deadline(monkeypatch):
+    class HangingModel:
+        async def invoke(self, **kwargs):
+            del kwargs
+            await asyncio.Event().wait()
+
+    monkeypatch.setattr(LLMConfig, "create_model", lambda _config: HangingModel())
+    monkeypatch.setattr(
+        "jiuwenswarm.symphony.llm._MODEL_CONNECTION_PROBE_TIMEOUT_SECONDS",
+        0.01,
+    )
+
+    with pytest.raises(BaseError) as exc_info:
+        await probe_model_connection(_llm_config())
+
+    assert exc_info.value.status is StatusCode.MODEL_CALL_FAILED
+    assert str(exc_info.value) == (
+        "[181001] model call failed, reason: "
+        "model connection test timed out after 0.01s"
+    )
+    assert isinstance(exc_info.value.cause, TimeoutError)
 
 
 def test_model_response_observer_preserves_orchestration_usage_context():

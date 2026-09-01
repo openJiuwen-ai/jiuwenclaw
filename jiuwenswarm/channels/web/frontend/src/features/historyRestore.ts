@@ -3,6 +3,7 @@ import { webClient } from '../services/webClient';
 import { normalizeFinalContent } from '../utils/finalContent';
 import { mergeFileDownloadItems } from '../utils/fileDownloadDedup';
 import { parseTimestampToMs, timestampMsToIso } from '../utils/timestamp';
+import { extractAutomation } from '../utils/heartbeatAutomation';
 import { isA2UIClientEventContent } from './a2ui/a2uiContent';
 import { normalizeToolCallPayload, normalizeToolResultPayload } from './tool-events/toolEventNormalizer';
 import {
@@ -10,6 +11,7 @@ import {
   isGoalCompletedContent,
 } from '../components/GoalBar/goalCompletedMessage';
 import { HistoryRecordReassembler } from './historyRecordReassembler';
+import { readAgentTemplateName } from './agentIdentity';
 
 export { HistoryRecordReassembler };
 
@@ -400,6 +402,8 @@ export function recoverSubagentToolHistory(
 export interface HistoryReasoningReplayItem {
   at: string;
   text: string;
+  /** Web 单 Agent reasoning 所属的专家；Team/旧 history 缺失时为空。 */
+  agentTemplateName?: string;
   /** 末帧时刻（epoch ms）；异常结束时即使无收尾事件，耗时终点也能落在最后一个真实帧。 */
   updatedAt?: number;
 }
@@ -442,7 +446,7 @@ type HistoryTimelineEntry =
   | { kind: 'harness_message'; at: string; content: string; stage?: string }
   | { kind: 'harness_stage_result'; at: string; stage: string; status: string; error: string; messages: string[]; metrics: Record<string, unknown> }
   | { kind: 'compaction'; at: string; summary: string }
-  | { kind: 'reasoning'; at: string; text: string; updatedAt?: number }
+  | { kind: 'reasoning'; at: string; text: string; agentTemplateName?: string; updatedAt?: number }
   | { kind: 'subagent_update'; at: string; payload: Record<string, unknown> }
   | { kind: 'subagent_message'; at: string; payload: Record<string, unknown> }
   | { kind: 'subagent_activity'; at: string; payload: Record<string, unknown> };
@@ -677,6 +681,12 @@ function buildEventPayloadForRecord(record: Record<string, unknown>): Record<str
   return base;
 }
 
+function readHistoryAgentTemplateName(record: Record<string, unknown>): string | undefined {
+  if (isProactiveRecommendationRecord(record)) return undefined;
+  const payload = buildEventPayloadForRecord(record);
+  return readAgentTemplateName(payload) ?? readAgentTemplateName(record);
+}
+
 function hasMismatchedHistoryBoundary(value: unknown, sessionId: string): boolean {
   if (Array.isArray(value)) {
     return value.some((item) => hasMismatchedHistoryBoundary(item, sessionId));
@@ -900,7 +910,6 @@ function parseHistoryTimelineEntry(
   subagentId?: string,
 ): HistoryTimelineEntry | null {
   const role = normalizeHistoryRole(record.role);
-  // 无有效时间戳时用空串占位（勿用 Date.now()）；排序/工具构建侧已对空串做防护。
   const at = recordTimestampIso(record) ?? '';
 
   if (role === 'user') {
@@ -922,6 +931,10 @@ function parseHistoryTimelineEntry(
     const skills = Array.isArray(rawSkills)
       ? rawSkills.filter((s): s is string => typeof s === 'string' && s.trim().length > 0)
       : undefined;
+    // §9：Heartbeat 自动轮的 user/assistant 消息后端会带 metadata.automation 落盘，
+    // 历史恢复时读回同一个标记，保证刷新/切会话/后端重启后仍能识别 Heartbeat 轮。
+    // 与实时链路（useWebSocket.ts）共用同一个 extractAutomation。
+    const userAutomation = extractAutomation(record) ?? extractAutomation(buildEventPayloadForRecord(record));
     return {
       kind: 'message',
       message: {
@@ -932,6 +945,7 @@ function parseHistoryTimelineEntry(
         ...(mediaItems.length > 0 ? { mediaItems } : {}),
         ...(isGoalObjectiveMessage ? { isGoalObjectiveMessage: true } : {}),
         ...(skills && skills.length > 0 ? { skills } : {}),
+        ...(userAutomation ? { automation: userAutomation } : {}),
       },
     };
   }
@@ -1051,6 +1065,9 @@ function parseHistoryTimelineEntry(
     const histSource = typeof payload.source === 'string' ? payload.source : '';
     const isProactiveRecommendation = histSource === 'proactive_recommendation';
     const histProactiveType = typeof payload.proactive_type === 'string' ? payload.proactive_type : '';
+    const agentTemplateName = isProactiveRecommendation
+      ? undefined
+      : readAgentTemplateName(payload) ?? readAgentTemplateName(record);
     // completed_at：收尾时刻（耗时）；timestamp 已是气泡出现/首包时刻（排序）
     const completedAt =
       (typeof record.completed_at === 'number' || typeof record.completed_at === 'string'
@@ -1070,6 +1087,12 @@ function parseHistoryTimelineEntry(
         ...(isProactiveRecommendation ? { isProactiveRecommendation } : {}),
         ...(isProactiveRecommendation && histProactiveType
           ? { proactiveType: histProactiveType as 'skill_recommend' | 'task_reminder' | 'need_exploration' }
+          : {}),
+        ...(agentTemplateName ? { agentTemplateName } : {}),
+        // §9：Heartbeat 自动轮的 assistant 消息同样带 metadata.automation 落盘，恢复时读回。
+        // 优先读 payload（event_payload 已提升），再回退到 record 顶层。
+        ...((extractAutomation(payload) ?? extractAutomation(record))
+          ? { automation: (extractAutomation(payload) ?? extractAutomation(record))! }
           : {}),
       },
     };
@@ -1337,7 +1360,12 @@ function materializeHistoryTimeline(
       continue;
     }
     if (e.kind === 'reasoning') {
-      reasoningReplay.push({ at: e.at, text: e.text, updatedAt: e.updatedAt });
+      reasoningReplay.push({
+        at: e.at,
+        text: e.text,
+        agentTemplateName: e.agentTemplateName,
+        updatedAt: e.updatedAt,
+      });
       continue;
     }
     if (e.kind === 'compaction') {
@@ -1364,7 +1392,15 @@ export function parseHistoryJsonFileToPreviewMessages(
 export interface HistoryTimelinePreview {
   messages: Message[];
   executions: ToolExecution[];
-  reasoningSegments: { id: string; text: string; startedAt: number; closed: true; updatedAt?: number; closedAt?: number }[];
+  reasoningSegments: {
+    id: string;
+    text: string;
+    startedAt: number;
+    closed: true;
+    agentTemplateName?: string;
+    updatedAt?: number;
+    closedAt?: number;
+  }[];
   mode: 'team' | null;
 }
 
@@ -1399,6 +1435,7 @@ export function parseHistoryJsonFileToTimelinePreview(
         kind: 'reasoning',
         at: recordTimestampIso(item) ?? '',
         text: reasoningText,
+        agentTemplateName: readHistoryAgentTemplateName(item),
         updatedAt: extractHistoryReasoningUpdatedAt(item),
       });
     }
@@ -1453,6 +1490,7 @@ function buildReasoningSegmentsFromReplay(
       text,
       startedAt,
       closed: true,
+      ...(item.agentTemplateName ? { agentTemplateName: item.agentTemplateName } : {}),
       closedAt: startedAt,
       updatedAt,
     });
@@ -1480,6 +1518,7 @@ function buildToolExecutionsFromReplay(toolReplay: HistoryToolReplayItem[]): Too
       if (!startedAt) {
         continue;
       }
+      const agentTemplateName = readAgentTemplateName(item.payload);
       byId.set(n.id, {
         toolCallId: n.id,
         toolCall: {
@@ -1496,6 +1535,7 @@ function buildToolExecutionsFromReplay(toolReplay: HistoryToolReplayItem[]): Too
         startedAt,
         updatedAt: startedAt,
         timeoutAt: startedAt,
+        ...(agentTemplateName ? { agentTemplateName } : {}),
       });
       order.push(n.id);
       continue;
@@ -1514,6 +1554,7 @@ function buildToolExecutionsFromReplay(toolReplay: HistoryToolReplayItem[]): Too
       toolCallId: n.toolCallId,
       summary: n.summary,
       skillTree: n.skillTree,
+      ...(n.mermaid ? { mermaid: n.mermaid } : {}),
       ...(n.timedOut ? { timedOut: true as const } : {}),
       ...(n.beamSearch ? { beamSearch: n.beamSearch } : {}),
     };
@@ -1685,6 +1726,7 @@ export function beginHistoryRestore(options: BeginHistoryRestoreOptions): Histor
           kind: 'reasoning',
           at: recordTimestampIso(full) ?? '',
           text: reasoningText,
+          agentTemplateName: readHistoryAgentTemplateName(full),
           updatedAt: extractHistoryReasoningUpdatedAt(full),
         });
       }
@@ -1849,6 +1891,7 @@ export function fetchHistoryPage(options: FetchHistoryPageOptions): HistoryResto
           kind: 'reasoning',
           at: recordTimestampIso(full) ?? '',
           text: reasoningText,
+          agentTemplateName: readHistoryAgentTemplateName(full),
           updatedAt: extractHistoryReasoningUpdatedAt(full),
         });
       }

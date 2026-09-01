@@ -10,6 +10,9 @@ from openjiuwen.harness.subagent_runtime import (
     SUBAGENT_UPDATED_EVENT_TYPE,
 )
 
+from jiuwenswarm.agents.harness.common.rails.browser_task_prompt_rail import (
+    BrowserTaskPromptRail,
+)
 from jiuwenswarm.common.config import is_subagent_runtime_enabled
 from jiuwenswarm.server.runtime.agent_adapter import interface_deep as interface_deep_module
 from jiuwenswarm.server.runtime.agent_adapter.interface_deep import JiuWenSwarmDeepAdapter
@@ -24,6 +27,22 @@ class TestSubagentRuntimeConfig:
     def test_enabled_when_configured() -> None:
         config = {"react": {"subagent_runtime": {"enabled": True}}}
         assert is_subagent_runtime_enabled(config) is True
+
+    @staticmethod
+    def test_runtime_flag_follows_config() -> None:
+        enabled_rail = BrowserTaskPromptRail(
+            enable_subagent_runtime=is_subagent_runtime_enabled(
+                {"react": {"subagent_runtime": {"enabled": True}}},
+            ),
+        )
+        assert enabled_rail.enable_subagent_runtime is True
+
+        disabled_rail = BrowserTaskPromptRail(
+            enable_subagent_runtime=is_subagent_runtime_enabled(
+                {"react": {"subagent_runtime": {"enabled": False}}},
+            ),
+        )
+        assert disabled_rail.enable_subagent_runtime is False
 
 
 def _map_subagent_updated_chunk(chunk_type: str, payload: dict) -> dict | None:

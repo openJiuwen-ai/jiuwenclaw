@@ -68,6 +68,7 @@ from jiuwenswarm.agents.harness.common.browser_defaults import (
 from jiuwenswarm.agents.swarm import (
     SwarmBuildContext,
     enrich_team_spec_for_swarm,
+    preflight_team_mcps,
     register_swarm_providers,
 )
 from openjiuwen.agent_teams.rails.elements import TEAM_SKILL_USE
@@ -1204,6 +1205,134 @@ def test_enrich_team_spec_for_swarm_injects_config_mcp_servers(
     }
 
 
+@pytest.mark.asyncio
+async def test_preflight_team_mcps_drops_unreachable_and_degrades_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One bad HTTP MCP is dropped from every member + degraded to disconnected;
+    the good MCP stays; the team assembly doesn't raise."""
+    good_mcp = McpServerConfig(
+        server_id="good-sid",
+        server_name="good_http",
+        server_path="https://good.example.com/mcp",
+        client_type="streamable-http",
+        auth_headers={"Authorization": "Bearer real-token"},
+    )
+    bad_mcp = McpServerConfig(
+        server_id="bad-sid",
+        server_name="bad_http",
+        server_path="https://bad.example.com/mcp",
+        client_type="streamable-http",
+        auth_headers={"Authorization": "Bearer ${GITHUB_TOKEN}"},
+    )
+    spec = TeamAgentSpec(
+        agents={
+            "leader": DeepAgentSpec(mcps=[good_mcp, bad_mcp]),
+            "teammate": DeepAgentSpec(mcps=[good_mcp, bad_mcp]),
+        },
+        team_name="probe_team",
+        leader=LeaderSpec(member_name="team_leader"),
+    )
+
+    # Probe: good → reachable, bad → 401. Names drive the verdict so the
+    # shared-config dedup path (by server_id) is also exercised.
+    async def fake_probe(cfg: McpServerConfig, *args: Any, **kwargs: Any) -> tuple[bool, str]:
+        if cfg.server_name == "bad_http":
+            return False, "http 401 from server"
+        return True, ""
+
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.swarm.assembly.preflight_mcp_server_reachable",
+        fake_probe,
+    )
+    degraded: list[str] = []
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.mcp.state_store.set_mcp_state",
+        lambda name, *, state: degraded.append(name),
+    )
+
+    dropped = await preflight_team_mcps(spec)
+
+    assert dropped == ["bad_http"]
+    assert degraded == ["bad_http"]
+    leader_names = [c.server_name for c in (spec.agents["leader"].mcps or [])]
+    teammate_names = [c.server_name for c in (spec.agents["teammate"].mcps or [])]
+    assert leader_names == ["good_http"]
+    assert teammate_names == ["good_http"]
+
+
+@pytest.mark.asyncio
+async def test_preflight_team_mcps_keeps_stdio_without_probing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """stdio MCPs report reachable (no HTTP probe) and are kept as-is."""
+    stdio_mcp = McpServerConfig(
+        server_id="stdio-sid",
+        server_name="local_tool",
+        server_path="stdio://local_tool",
+        client_type="stdio",
+        params={"command": "python"},
+    )
+    spec = TeamAgentSpec(
+        agents={"leader": DeepAgentSpec(mcps=[stdio_mcp])},
+        team_name="stdio_team",
+        leader=LeaderSpec(member_name="team_leader"),
+    )
+
+    probe_calls: list[str] = []
+    real_probe = __import__(
+        "jiuwenswarm.common.mcp_config", fromlist=["preflight_mcp_server_reachable"]
+    ).preflight_mcp_server_reachable
+
+    async def spy(cfg: McpServerConfig, *args: Any, **kwargs: Any) -> tuple[bool, str]:
+        probe_calls.append(cfg.server_name)
+        return await real_probe(cfg)
+
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.swarm.assembly.preflight_mcp_server_reachable",
+        spy,
+    )
+
+    dropped = await preflight_team_mcps(spec)
+
+    assert dropped == []
+    assert (spec.agents["leader"].mcps or [])[0].server_name == "local_tool"
+    # stdio is reported reachable without a real HTTP probe (no network).
+    assert probe_calls == ["local_tool"]
+
+
+def test_build_enabled_mcp_server_configs_resolves_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """resolve_credentials=True substitutes ${VAR} from CredentialStore."""
+    entry = {
+        "name": "github_http",
+        "enabled": True,
+        "transport": "streamable-http",
+        "url": "https://api.githubcopilot.com/mcp/",
+        "headers": {"Authorization": "Bearer ${GITHUB_TOKEN}"},
+    }
+    monkeypatch.setattr(
+        "jiuwenswarm.common.config.get_mcp_servers",
+        lambda: [entry],
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.common.mcp_config.CredentialStore.get_all",
+        lambda self, name: {"GITHUB_TOKEN": "ghp_real_123"} if name == "github_http" else {},
+    )
+
+    from jiuwenswarm.common.mcp_config import build_enabled_mcp_server_configs
+
+    configs = build_enabled_mcp_server_configs(
+        {}, server_id_scope="team:unit_team", resolve_credentials=True
+    )
+    assert len(configs) == 1
+    cfg = configs[0]
+    assert cfg.server_name == "github_http"
+    # auth_headers carry the resolved real token, not the literal placeholder.
+    assert cfg.auth_headers["Authorization"] == "Bearer ghp_real_123"
+
+
 def test_enrich_skips_absent_roles_gracefully() -> None:
     """A team without a teammate role is enriched without error."""
     spec = TeamAgentSpec(
@@ -1245,8 +1374,17 @@ def test_enriched_spec_serialization_round_trip() -> None:
     assert any(not name.startswith("swarm.") for name in rail_types)
 
 
-def test_enrich_applies_agent_group_as_hybrid_member_snapshots() -> None:
+def test_enrich_applies_agent_group_as_hybrid_member_snapshots(monkeypatch) -> None:
     """AgentGroup prompts stay Team-owned while capabilities use snapshots."""
+    from jiuwenswarm.server.runtime import extension_package_manager as package_manager
+
+    resources = package_manager.get_equipment_resources_agent_groups_dir()
+    assert resources is not None
+    monkeypatch.setattr(
+        package_manager,
+        "resolve_agent_group_dir",
+        lambda _name: resources / "sample-expert-group",
+    )
     spec = _make_team_spec()
     spec.leader.prompt = "existing leader agreement"
 
@@ -1559,6 +1697,7 @@ def test_video_tool_gated_by_config(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         tools, "complete_multimodal_model_configured", lambda cfg, kind: True
     )
+    monkeypatch.setattr(tools, "multimodal_model_enabled", lambda cfg, kind: True)
     monkeypatch.setenv("VIDEO_API_KEY", "k")
     monkeypatch.setenv("VIDEO_API_BASE", "https://video.example/v1")
     monkeypatch.setenv("VIDEO_MODEL_NAME", "video-model")
@@ -1656,8 +1795,9 @@ def test_vision_model_config_params_gating(monkeypatch: pytest.MonkeyPatch) -> N
     assert tools.vision_model_config_params({}) == {}
 
     monkeypatch.setattr(
-        tools, "dedicated_multimodal_model_configured", lambda cfg, kind: True
+        tools, "complete_multimodal_model_configured", lambda cfg, kind: True
     )
+    monkeypatch.setattr(tools, "multimodal_model_enabled", lambda cfg, kind: True)
     monkeypatch.setattr(tools, "apply_vision_model_config_from_yaml", lambda cfg: None)
     monkeypatch.setenv("VISION_API_KEY", "key")
     monkeypatch.setenv("VISION_BASE_URL", "https://vision.example")

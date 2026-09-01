@@ -15,7 +15,7 @@
     "zh": "专注A股行情分析与基金研究，提供实时行情查询、个股分析、板块研判、基金组合规划及交易策略建议。"
   },
   "category": "IndustryConsultant",
-  "avatar": "",
+  "avatar": "avatars/avatar.png",
   "source": "builtin",
   "default_init_input": {
     "zh": "帮我分析一下贵州茅台（600519）最近的走势和交易策略",

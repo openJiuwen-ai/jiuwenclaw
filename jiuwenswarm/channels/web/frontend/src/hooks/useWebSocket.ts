@@ -68,6 +68,10 @@ import {
   shouldCollapseTurnFinal,
   parseTimestampToMs,
   timestampMsToIso,
+  extractAutomation,
+  heartbeatUserMessageId,
+  heartbeatAssistantMessageId,
+  heartbeatErrorMessageId,
 } from '../utils';
 import {
   findOverlappingFileExecutionEvent,
@@ -96,6 +100,8 @@ import {
   normalizeSubagentWaitResults,
   normalizeSubagentStatusEvent,
 } from '../features/subagent/subagentNormalizer';
+import { buildDefinitionSelectionPayloadForMode } from '../features/agentManagement/port';
+import { readAgentTemplateName } from '../features/agentIdentity';
 
 const WS_RECONNECT_EVENT = 'jiuwenclaw:ws-reconnect-request';
 
@@ -573,6 +579,17 @@ function getShutdownMemberFromToolResult(toolResult: ToolResult): string | undef
   return parseShutdownMemberName(toolResult.result) || parseShutdownMemberName(toolResult.summary);
 }
 
+/** 交接文档 §2.4：这些 Heartbeat 管理 Tool 成功执行后要刷新已打开面板的任务列表；
+ * heartbeat_list_jobs/heartbeat_get_job/heartbeat_preview_job 是只读 Tool，不在其列。 */
+const HEARTBEAT_MUTATION_TOOL_NAMES = new Set([
+  'heartbeat_create_job',
+  'heartbeat_update_job',
+  'heartbeat_delete_job',
+  'heartbeat_toggle_job',
+  'heartbeat_run_now',
+  'heartbeat_cancel_run',
+]);
+
 // The task card's title/content are now sourced solely from the backend
 // `team.task` events (which carry the DB task_id + body) and the `team.snapshot`
 // fallback — never from tool_call arguments. Building an optimistic card from
@@ -643,7 +660,6 @@ interface UseWebSocketReturn {
   clearGoal: (sessionId: string) => Promise<void>;
   refreshGoal: (sessionId: string) => Promise<void>;
   drainTaskQueueIfIdle: (sessionId: string) => void;
-  getInflightCount: () => number;
 }
 
 interface PersistMediaResponse {
@@ -959,12 +975,6 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     useRef<Map<string, PendingContextCompressionStart>>(new Map());
   const pendingTeamMemberContextCompressionStartRef =
     useRef<Map<string, PendingContextCompressionStart>>(new Map());
-  const heldContextUsageSessionsRef = useRef<Set<string>>(new Set());
-  const pendingContextUsageRef = useRef<Map<string, {
-    rate: number;
-    beforeCompressed: number | null;
-    afterCompressed: number | null;
-  }>>(new Map());
   const streamDeltaBatcherRef = useRef<ReturnType<typeof createStreamDeltaBatcher> | null>(null);
   if (streamDeltaBatcherRef.current === null) {
     streamDeltaBatcherRef.current = createStreamDeltaBatcher();
@@ -974,13 +984,12 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
   const {
     setConnected,
     setAvailableTools,
-    setConnectionStats,
     updateSession,
-    setContextCompressionStats,
+    receiveContextUsage,
     setTeamMemberContextCompressionStatus,
     clearTeamMemberContextCompressionStatus,
     clearAllTeamMemberContextCompressionStatus,
-  } = useSessionStore();
+  } = useSessionStore.getState();
 
   const resolveEventSessionId = useCallback(
     (payload: Record<string, unknown>): string | null => {
@@ -1490,20 +1499,6 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         return false;
       }
 
-      const isInitialUserMessage = !useChatStore
-        .getState()
-        .getRuntime(sessionId)
-        ?.messages.some((message) => message.role === 'user');
-      if (isInitialUserMessage) {
-        heldContextUsageSessionsRef.current.add(sessionId);
-        pendingContextUsageRef.current.delete(sessionId);
-        setContextCompressionStats(sessionId, {
-          rate: 0,
-          beforeCompressed: 0,
-          afterCompressed: 0,
-        });
-      }
-
       resetContextCompressionTurn(sessionId);
       userInputVersionRef.current += 1;
       stopAllTts();
@@ -1515,7 +1510,10 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
 
       // 添加用户消息（附带输入栏选中的技能）
       // 气泡只展示用户原文；路径提示仅随 chat.send 发给 Agent。
-      const selectedSkills = useSessionStore.getState().getRuntime(sessionId)?.selectedSkills ?? [];
+      const sessionRuntime = useSessionStore.getState().getRuntime(sessionId);
+      const selectedSkills = sessionRuntime?.selectedSkills ?? [];
+      const agentSelectionIntent = sessionRuntime?.agentSelectionIntent ?? { kind: 'keep' as const };
+      const agentSelectionPayload = buildDefinitionSelectionPayloadForMode(currentMode, agentSelectionIntent);
       // 插件/MCP 是"+"菜单"扩展"面板里的会话级开关，和 selectedSkills 不同——不随发送清空，
       // 持续带在本会话之后每一条消息里，直到用户在面板里手动关闭开关（见 sessionStore.ts
       // SessionRuntime.enabledPlugins/enabledMcps 头部注释）。插件（plugin_names）后端还没有
@@ -1613,6 +1611,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         const inputMode = activeGoal?.status === 'active' ? 'steer' : undefined;
         const outgoingMode = resolveOutgoingMode(sessionId, currentMode);
         const sessionMetadata = useSessionStore.getState().getRuntime(sessionId)?.metadata;
+        const sessionRt = useSessionStore.getState().getRuntime(sessionId);
         await request('chat.send', {
           session_id: sessionId,
           content: outgoingContent,
@@ -1622,22 +1621,27 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           ...(selectedModel ? { model_name: selectedModel } : {}),
           ...workContext,
           skills: selectedSkills,
+          ...agentSelectionPayload,
           // plugin_names/mcp 的组装+字段语义说明见 utils/enabledExtensions.ts 的
           // buildExtensionSendPayload 头注释（plugin_names 恒传含空数组，mcp 只在非空时才带）。
           ...extensionPayload,
           ...(inputMode ? { input_mode: inputMode } : {}),
           ...resolvePlanEntryPayload(sessionId, outgoingMode),
           ...(sessionMetadata ? { metadata: sessionMetadata } : {}),
+          enable_swarmflow: Boolean(sessionRt?.enableSwarmflow),
+          ...(sessionRt?.enableSwarmflow && sessionRt.swarmflowBudget != null
+            ? { swarmflow_budget: sessionRt.swarmflowBudget }
+            : {}),
         });
         if (sessionMetadata) {
           useSessionStore.getState().setSessionMetadata(sessionId, null);
         }
         consumePlanEntryMark(sessionId, outgoingMode);
+        useSessionStore.getState().clearAgentSelectionIntent(sessionId, agentSelectionIntent);
         return true;
       } catch (error) {
         const webError = error as WebError;
         localSendPendingRef.current.delete(sessionId);
-        setConnectionStats({ lastError: webError.message });
         useChatStore.getState().setProcessing(sessionId, false);
         useChatStore.getState().setThinking(sessionId, false);
         const errorMsg = webError.message || t('network.sendMessageFailed');
@@ -1657,8 +1661,6 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
       persistMedia,
       request,
       resetContextCompressionTurn,
-      setContextCompressionStats,
-      setConnectionStats,
       t,
     ]
   );
@@ -1675,6 +1677,8 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
       const currentSessionState = useSessionStore.getState();
       const workContext = getSessionWorkContext(sessionId);
       const currentMode = currentSessionState.getRuntime(sessionId)?.mode;
+      const agentSelectionIntent =
+        currentSessionState.getRuntime(sessionId)?.agentSelectionIntent ?? { kind: 'keep' as const };
       const selectedModel = currentSessionState.getEffectiveModelName(sessionId);
       if (currentMode === 'auto_harness') {
         useHarnessStore.getState().reset(sessionId);
@@ -1684,6 +1688,10 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
       }
       try {
         const outgoingMode = resolveOutgoingMode(sessionId, currentMode);
+        const agentSelectionPayload = buildDefinitionSelectionPayloadForMode(
+          currentMode,
+          agentSelectionIntent,
+        );
         await request('chat.send', {
           session_id: sessionId,
           content,
@@ -1691,12 +1699,13 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           ...(selectedModel ? { model_name: selectedModel } : {}),
           ...workContext,
           ...buildExtensionSendPayload(sessionId),
+          ...agentSelectionPayload,
           ...resolvePlanEntryPayload(sessionId, outgoingMode),
         });
         consumePlanEntryMark(sessionId, outgoingMode);
+        useSessionStore.getState().clearAgentSelectionIntent(sessionId, agentSelectionIntent);
       } catch (error) {
         const webError = error as WebError;
-        setConnectionStats({ lastError: webError.message });
         useChatStore.getState().setProcessing(sessionId, false);
         useChatStore.getState().setThinking(sessionId, false);
         const errorMsg = webError.message || t('network.sendMessageFailed');
@@ -1709,7 +1718,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         });
       }
     },
-    [request, resetContextCompressionTurn, setConnectionStats, t]
+    [request, resetContextCompressionTurn, t]
   );
 
   // 存储sendMessage函数到ref
@@ -1737,6 +1746,27 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
       sendMessageRef.current(nextTask.content, sessionId, nextTask.mediaItems ?? []);
     }
   }, []);
+
+  /**
+   * Heartbeat 自动轮的会话级收口：chat.final/execution.error/chat.error 三个终态事件里
+   * 都可能触发一次，但同一个 run_id 只能真正收口一次——否则一次意外的"第二次终态事件"
+   * 会把刚被 drainTaskQueueIfIdle 重新拉起的 isProcessing 又关掉，导致第二条排队消息在
+   * 第一条还没收尾时就被并发发出去。收口动作本身沿用普通轮 chat.final 兜底同款的三个
+   * 前置条件（历史加载中/Team 模式/Goal 续跑中都不动这个状态），不能只搬动作不搬护栏。
+   */
+  const heartbeatSessionCloseHandledRunIdsRef = useRef<Set<string>>(new Set());
+  const closeHeartbeatSessionState = useCallback((sessionId: string, runId: string) => {
+    if (heartbeatSessionCloseHandledRunIdsRef.current.has(runId)) return;
+    heartbeatSessionCloseHandledRunIdsRef.current.add(runId);
+    if (useChatStore.getState().getRuntime(sessionId)?.isLoadingHistory) return;
+    const currentMode = useSessionStore.getState().getRuntime(sessionId)?.mode;
+    if (currentMode === 'team') return;
+    const goalStillActive = useGoalStore.getState().runtimes[sessionId]?.goal?.status === 'active';
+    if (goalStillActive) return;
+    useChatStore.getState().setProcessing(sessionId, false);
+    useChatStore.getState().setThinking(sessionId, false);
+    drainTaskQueueIfIdle(sessionId);
+  }, [drainTaskQueueIfIdle]);
 
   // 统一中断接口 - pause/cancel/supplement/resume
   const interrupt = useCallback(
@@ -1796,7 +1826,6 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         return true;
       } catch (error) {
         const webError = error as WebError;
-        setConnectionStats({ lastError: webError.message });
         onErrorRef.current?.(webError.message || t('network.interruptFailed'));
         return false;
       }
@@ -1805,7 +1834,6 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
       closeActiveTeamLeaderMessages,
       request,
       resetContextCompressionTurn,
-      setConnectionStats,
       t,
     ]
   );
@@ -1817,11 +1845,10 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         await interrupt(sessionId, 'pause');
       } catch (error) {
         const webError = error as WebError;
-        setConnectionStats({ lastError: webError.message });
         onErrorRef.current?.(webError.message || t('network.pauseFailed'));
       }
     },
-    [interrupt, setConnectionStats, t]
+    [interrupt, t]
   );
 
   const cancel = useCallback(
@@ -1833,11 +1860,10 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         }
       } catch (error) {
         const webError = error as WebError;
-        setConnectionStats({ lastError: webError.message });
         onErrorRef.current?.(webError.message || t('network.cancelFailed'));
       }
     },
-    [interrupt, setConnectionStats, t]
+    [interrupt, t]
   );
 
   const supplement = useCallback(
@@ -1846,11 +1872,10 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         await interrupt(sessionId, 'supplement', { newInput });
       } catch (error) {
         const webError = error as WebError;
-        setConnectionStats({ lastError: webError.message });
         onErrorRef.current?.(webError.message || t('network.supplementFailed'));
       }
     },
-    [interrupt, setConnectionStats, t]
+    [interrupt, t]
   );
 
   // 恢复 - 恢复暂停的任务
@@ -1861,11 +1886,10 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         useChatStore.getState().setPaused(sessionId, false);
       } catch (error) {
         const webError = error as WebError;
-        setConnectionStats({ lastError: webError.message });
         onErrorRef.current?.(webError.message || t('network.resumeFailed'));
       }
     },
-    [interrupt, setConnectionStats, t]
+    [interrupt, t]
   );
 
   // 切换模式
@@ -1927,6 +1951,33 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
             : {};
         const approvalSchemaPayload = approvalSchema ? { approval_schema: approvalSchema } : {};
         const sourcePayload = effectiveSource ? { source: effectiveSource } : {};
+
+        // ── SwarmFlow human 回复 → chat.swarmflow_reply ──
+        if (effectiveSource === 'swarmflow_human') {
+          const meta = pendingMatches ? pendingQuestion?.swarmflowMeta : undefined;
+          const answerText =
+            answers[0]?.custom_input?.trim()
+            || answers[0]?.selected_options.join(', ').trim()
+            || '';
+          // 取消/跳过：不发送 reply，仅关闭对话框（prompt 在后端仍 pending）
+          if (!answerText || answerText.includes('已跳过') || answerText.includes('已取消')) {
+            useChatStore.getState().setPendingQuestion(sessionId, null);
+            return;
+          }
+          try {
+            await request('chat.swarmflow_reply', {
+              session_id: sessionId,
+              run_id: meta?.run_id ?? '',
+              correlation_id: meta?.correlation_id ?? '',
+              answer: answerText,
+            });
+          } catch (err) {
+            console.error('[swarmflow_human] chat.swarmflow_reply failed:', err);
+          }
+          useChatStore.getState().setPendingQuestion(sessionId, null);
+          return;
+        }
+
         const isPlanApproval =
           pendingMatches && pendingQuestion?.planApprovalKind === 'plan_approval';
         const structuredPlanPayload = isPlanApproval
@@ -1954,9 +2005,13 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         ) {
           // Plan 审批的 resume 必须带回 Plan wire mode，否则后端会把这次回答
           // 当成普通模式请求，进而把会话踢出 Plan。
-          const resolvedResumeMode = resolveOutgoingMode(
-            sessionId,
-            resolveInterruptResumeMode(sessionId)
+          const resumeMode = resolveInterruptResumeMode(sessionId);
+          const resolvedResumeMode = resolveOutgoingMode(sessionId, resumeMode);
+          const agentSelectionIntent =
+            useSessionStore.getState().getRuntime(sessionId)?.agentSelectionIntent ?? { kind: 'keep' as const };
+          const agentSelectionPayload = buildDefinitionSelectionPayloadForMode(
+            resumeMode,
+            agentSelectionIntent,
           );
           // 必须在请求发出**之前**登记：本次请求的 mode 已经定格在
           // resolvedResumeMode 里，不再看 Plan 开关；而后端很可能在 await 挂起期间
@@ -1975,6 +2030,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
             ...getSessionWorkContext(sessionId),
             request_id: requestId,
             answers: answers,
+            ...agentSelectionPayload,
             ...sourcePayload,
             ...structuredPlanPayload,
             ...approvalSchemaPayload,
@@ -1983,6 +2039,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
             // 会话选中的插件/MCP 在 resume 后就丢了，见 buildExtensionSendPayload 头注释。
             ...buildExtensionSendPayload(sessionId),
           });
+          useSessionStore.getState().clearAgentSelectionIntent(sessionId, agentSelectionIntent);
         } else if (effectiveSource === 'activate_confirm') {
           const action = answers[0]?.selected_options[0] === '拒绝' ? 'reject' : 'accept';
           const interactionId = requestId || useHarnessStore.getState().getRuntime(sessionId)?.activateInteraction?.interactionId || '';
@@ -2001,6 +2058,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
             },
             ...buildExtensionSendPayload(sessionId),
           });
+          useSessionStore.getState().clearAgentSelectionIntent(sessionId);
           useHarnessStore.getState().setActivateInteraction(sessionId, null);
         } else {
           // 否则发送 chat.user_answer（自进化确认）
@@ -2023,11 +2081,10 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           usePlanStore.getState().setActive(sessionId, true);
         }
         const webError = error as WebError;
-        setConnectionStats({ lastError: webError.message });
         onErrorRef.current?.(webError.message || t('network.submitAnswerFailed'));
       }
     },
-    [request, setConnectionStats, t]
+    [request, t]
   );
 
   const respondActivate = useCallback(
@@ -2045,28 +2102,14 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           },
           ...buildExtensionSendPayload(sessionId),
         });
+        useSessionStore.getState().clearAgentSelectionIntent(sessionId);
         useHarnessStore.getState().setActivateInteraction(sessionId, null);
-      } catch (error) {
-        const webError = error as WebError;
-        setConnectionStats({ lastError: webError.message });
+      } catch {
+        // Keep the activation interaction open so the user can retry.
       }
     },
-    [request, setConnectionStats]
+    [request]
   );
-
-  const revealPendingContextUsage = useCallback((sessionId: string) => {
-    heldContextUsageSessionsRef.current.delete(sessionId);
-    const pending = pendingContextUsageRef.current.get(sessionId);
-    pendingContextUsageRef.current.delete(sessionId);
-    if (pending) {
-      setContextCompressionStats(sessionId, pending);
-    }
-  }, [setContextCompressionStats]);
-
-  // 会话切换时不再重置上下文压缩信息，保持本地存储的状态
-  // useEffect(() => {
-  //   setContextCompressionStats(null);
-  // }, [activeSessionId, setContextCompressionStats]);
 
   useEffect(() => {
     onConnectRef.current = onConnect;
@@ -2342,6 +2385,10 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         }
 
         const currentMode = useSessionStore.getState().getRuntime(sessionId)?.mode;
+        const agentTemplateName =
+          !isProactiveRecommendationPayload(payload)
+            ? readAgentTemplateName(payload)
+            : undefined;
         const content = unescapeLiteralNewlines(
           typeof payload.content === 'string' ? payload.content : ''
         );
@@ -2352,9 +2399,6 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
             appendTeamMemberOutputDelta(sessionId, payload, memberId, content);
           }
           return;
-        }
-        if (content) {
-          revealPendingContextUsage(sessionId);
         }
         if (currentMode === 'team' && content) {
           if (!isProactiveRecommendationPayload(payload)) {
@@ -2396,6 +2440,29 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           return;
         }
 
+        // §8 步骤2：Heartbeat 自动轮的 delta 只追加到相同 run_id 的 assistant 消息
+        // （id=heartbeat-assistant-<run_id>），不走全局 currentStreamId，不复用上一条
+        // 普通回答——否则会覆盖用户刚发的普通提问的回答。
+        const hbAutomation = extractAutomation(payload);
+        if (hbAutomation && content) {
+          const assistantMsgId = heartbeatAssistantMessageId(hbAutomation.run_id);
+          const chatStore = useChatStore.getState();
+          const existing = chatStore.getRuntime(sessionId)?.messages.find((m) => m.id === assistantMsgId);
+          if (existing) {
+            chatStore.updateMessage(sessionId, assistantMsgId, { content: (existing.content || '') + content });
+          } else {
+            chatStore.addMessage(sessionId, {
+              id: assistantMsgId,
+              role: 'assistant',
+              content,
+              timestamp: new Date().toISOString(),
+              isStreaming: true,
+              automation: hbAutomation,
+            });
+          }
+          return;
+        }
+
         let currentStreamId = useChatStore.getState().getRuntime(sessionId)?.currentStreamId;
         if (!isProactiveRecommendationPayload(payload)) {
           clearThinkingForVisibleOutput(sessionId);
@@ -2414,12 +2481,19 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
             content: '',
             timestamp: new Date().toISOString(),
             isStreaming: true,
+            ...(agentTemplateName ? { agentTemplateName } : {}),
           });
           useChatStore.getState().startStreaming(sessionId, assistantMsgId);
           currentStreamId = assistantMsgId;
         }
         if (!currentStreamId || !content) return;
         const streamId = currentStreamId;
+        if (agentTemplateName) {
+          const streamMessage = useChatStore.getState().getRuntime(sessionId)?.messages.find((message) => message.id === streamId);
+          if (streamMessage?.agentTemplateName !== agentTemplateName) {
+            useChatStore.getState().updateMessage(sessionId, streamId, { agentTemplateName });
+          }
+        }
         streamDeltaBatcherRef.current?.enqueue(streamDeltaBatchKey(sessionId, streamId), content, batchedContent => {
           const chatStore = useChatStore.getState();
           if (chatStore.getRuntime(sessionId)?.currentStreamId !== streamId) {
@@ -2442,11 +2516,16 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           useChatStore.getState().setProcessing(sessionId, true);
         }
 
+        const agentTemplateName =
+          !isProactiveRecommendationPayload(payload)
+            ? readAgentTemplateName(payload)
+            : undefined;
         const reasoningContent =
           typeof payload.content === 'string' ? payload.content : '';
         if (reasoningContent) {
           useChatStore.getState().appendReasoning(sessionId, reasoningContent, {
             atMs: eventTimestampMs(payload),
+            ...(agentTemplateName ? { agentTemplateName } : {}),
           });
         }
       }),
@@ -2602,6 +2681,43 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           }
           return;
         }
+
+        // §8 步骤3：Heartbeat 自动轮的 final 只完成相同 run_id 的 assistant 消息，
+        // 不进全局 currentStreamId 收尾、不触发 Goal 续跑判断——Heartbeat 不复用普通轮的
+        // 整段收尾逻辑。execution.error 已在独立处理器里按 run_id 生成可见错误并立即结束
+        // processing（§10），不在此等待。session 级 processing/thinking 收口 + 排空队列
+        // 现在统一走 closeHeartbeatSessionState（按 run_id 去重，避免多个终态事件重复收口
+        // 造成并发发送），见该函数定义处注释。
+        const hbFinalAutomation = extractAutomation(payload);
+        if (hbFinalAutomation) {
+          const assistantMsgId = heartbeatAssistantMessageId(hbFinalAutomation.run_id);
+          const chatStore = useChatStore.getState();
+          const existing = chatStore.getRuntime(sessionId)?.messages.find((m) => m.id === assistantMsgId);
+          if (existing) {
+            // 已有 delta 起的消息：用 final 的归一化内容覆盖（后端 final 是这一轮的完整正文），
+            // 关闭 streaming。content 为空时保留已有 delta 内容，只关 streaming。
+            const patch: Partial<Message> = { isStreaming: false };
+            if (content.trim()) patch.content = content;
+            chatStore.updateMessage(sessionId, assistantMsgId, patch);
+          } else if (content.trim()) {
+            // delta 全丢帧，仅有 final：补建一条已完成的消息
+            chatStore.addMessage(sessionId, {
+              id: assistantMsgId,
+              role: 'assistant',
+              content,
+              timestamp: new Date().toISOString(),
+              isStreaming: false,
+              automation: hbFinalAutomation,
+            });
+          }
+          // §2.2 兜底：chat.final 是这一轮的收尾标志之一，正常应该由紧随其后的
+          // chat.processing_status(false) 关闭 session 级 isProcessing/isThinking；
+          // 这里是它丢帧时的兜底，避免输入区转圈/停止按钮卡死。只关这个 session 的
+          // 状态，不碰任何消息内容，不会影响另一条普通聊天或另一条 Heartbeat run。
+          closeHeartbeatSessionState(sessionId, hbFinalAutomation.run_id);
+          return;
+        }
+
         const teamLeaderMessageToFinalize =
           currentMode === 'team' && content
             ? findActiveTeamLeaderMessage(sessionId)
@@ -2634,9 +2750,6 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           } else {
             useChatStore.getState().setThinking(sessionId, false);
           }
-        }
-        if (content) {
-          revealPendingContextUsage(sessionId);
         }
         const finalAction = interpretChatFinalAction(payload);
         if (currentMode === 'team' && content) {
@@ -2711,6 +2824,11 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         const source = typeof payload.source === 'string' ? payload.source : '';
         const isProactiveRecommendation = source === 'proactive_recommendation';
         const proactiveType = typeof payload.proactive_type === 'string' ? payload.proactive_type : '';
+        const agentTemplateName =
+          !isProactiveRecommendation
+            ? readAgentTemplateName(payload)
+            : undefined;
+        const agentIdentityPatch = agentTemplateName ? { agentTemplateName } : {};
 
         const streamId = currentStreamId;
         const preferredSegmentId =
@@ -2733,6 +2851,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
                 content,
                 finalId,
                 timestampIso: completedAtIso,
+                ...agentIdentityPatch,
               });
               if (!content.includes('MEDIA:')) {
                 handleTtsPlayback(sessionId, finalId, content);
@@ -2750,6 +2869,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
                   content,
                   isStreaming: false,
                   completedAt: completedAtIso,
+                  ...agentIdentityPatch,
                 });
                 if (!content.includes('MEDIA:')) {
                   handleTtsPlayback(sessionId, rewriteId, content);
@@ -2771,6 +2891,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
             ...(content ? { content } : {}),
             isStreaming: false,
             completedAt: completedAtIso,
+            ...agentIdentityPatch,
             ...(isProactiveRecommendation ? { isProactiveRecommendation, ...(proactiveType ? { proactiveType: proactiveType as 'skill_recommend' | 'task_reminder' | 'need_exploration' } : {}) } : {}),
           });
           useChatStore.getState().stopStreaming(sessionId);
@@ -2797,6 +2918,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
               content: nextContent,
               isStreaming: false,
               completedAt: completedAtIso,
+              ...agentIdentityPatch,
               ...(isProactiveRecommendation ? { isProactiveRecommendation, ...(proactiveType ? { proactiveType: proactiveType as 'skill_recommend' | 'task_reminder' | 'need_exploration' } : {}) } : {}),
             });
             useChatStore.getState().stopStreaming(sessionId);
@@ -2808,6 +2930,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           useChatStore.getState().updateMessage(sessionId, streamId, {
             isStreaming: false,
             completedAt: completedAtIso,
+            ...agentIdentityPatch,
           });
           useChatStore.getState().stopStreaming(sessionId);
         }
@@ -2865,6 +2988,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
               useChatStore.getState().updateMessage(sessionId, messageId, {
                 isStreaming: false,
                 completedAt: completedAtIso,
+                ...agentIdentityPatch,
               });
               return;
             }
@@ -2872,6 +2996,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
               content,
               isStreaming: false,
               completedAt: completedAtIso,
+              ...agentIdentityPatch,
             });
             if (!content.includes('MEDIA:')) {
               handleTtsPlayback(sessionId, messageId, content);
@@ -2918,6 +3043,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
                   content,
                   isStreaming: false,
                   completedAt: completedAtIso,
+                  ...agentIdentityPatch,
                 });
                 if (!content.includes('MEDIA:')) {
                   handleTtsPlayback(sessionId, rewriteId, content);
@@ -2932,6 +3058,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
               content: remainder,
               timestamp: completedAtIso,
               completedAt: completedAtIso,
+              ...agentIdentityPatch,
               isProactiveRecommendation,
               ...(proactiveType ? { proactiveType: proactiveType as 'skill_recommend' | 'task_reminder' | 'need_exploration' } : {}),
             });
@@ -2951,6 +3078,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
               content,
               isStreaming: false,
               completedAt: completedAtIso,
+              ...agentIdentityPatch,
             });
             if (!content.includes('MEDIA:')) {
               handleTtsPlayback(sessionId, rewriteId, content);
@@ -2962,6 +3090,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
             useChatStore.getState().updateMessage(sessionId, last.id, {
               isStreaming: false,
               completedAt: completedAtIso,
+              ...agentIdentityPatch,
             });
             return;
           }
@@ -2971,6 +3100,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
             content,
             timestamp: completedAtIso,
             completedAt: completedAtIso,
+            ...agentIdentityPatch,
             isProactiveRecommendation,
             ...(proactiveType ? { proactiveType: proactiveType as 'skill_recommend' | 'task_reminder' | 'need_exploration' } : {}),
           });
@@ -3154,11 +3284,16 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         const runtime = useChatStore.getState().getRuntime(sessionId);
         const currentStreamId = runtime?.currentStreamId;
         const toolRequestId = getPayloadRequestId(payload) || activeRequestIdRef.current;
+        const agentTemplateName =
+          !isProactiveRecommendationPayload(payload)
+            ? readAgentTemplateName(payload)
+            : undefined;
         // 工具时间戳一律用事件自身时间，与 history 回放（item.at）对齐；勿绑气泡 timestamp。
         const toolStartedAt = normalizeEventTimestampIso(payload.timestamp);
         useChatStore.getState().addToolCall(sessionId, toolCall, {
           startedAt: toolStartedAt,
           requestId: toolRequestId,
+          ...(agentTemplateName ? { agentTemplateName } : {}),
         });
         // 工具调用会打断当前这段助手文字：收尾当前流式气泡，令后续文字另起新气泡，
         // 从而实现 codex 风格的「文字 → 工具 → 文字 → 工具」分段交错。
@@ -3235,6 +3370,13 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         // do NOT match the regex, so a failed shutdown will NOT remove the
         // member from the frontend panel.
         const shutdownMemberId = getShutdownMemberFromToolResult(toolResult);
+        // §2.4：聊天中用 Heartbeat 管理 Tool 改动任务后，若面板已打开需要立即刷新，不能要求
+        // 用户手动刷新页面。只对写操作、且 Tool 执行成功时触发；只读 Tool（list/get/preview）
+        // 和失败结果不触发。必须放在下面 Team 隐藏成员分支的 return 之前，保证单 Agent 和
+        // Team 场景都能命中（Team 模式下隐藏队友的 Tool result 会在下面提前 return）。
+        if (toolResult.success && HEARTBEAT_MUTATION_TOOL_NAMES.has(toolResult.toolName)) {
+          window.dispatchEvent(new CustomEvent('heartbeat-list-refresh', { detail: { sessionId } }));
+        }
         if (isHiddenTeamTeammateMessagePayload(currentMode ?? 'agent', payload)) {
           const memberId =
             getTeamPayloadMemberName(payload) ||
@@ -3283,6 +3425,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
             summary: toolResult.summary,
             skillTree: toolResult.skillTree,
             beamSearch: toolResult.beamSearch,
+            ...(toolResult.mermaid ? { mermaid: toolResult.mermaid } : {}),
             ...(toolResult.timedOut ? { timedOut: true } : {}),
           },
           {
@@ -3352,39 +3495,41 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         if (goal !== undefined) {
           applyGoalSnapshot(payload);
         }
+        // §10：Heartbeat 运行遇到 execution.error 时，后端把本轮结算为 last_run_status=failed，
+        // 前端应立即结束该 run 的 processing 展示并生成可见错误消息，不要等可能为空的 chat.final。
+        // §8 步骤4：错误消息按 run_id 去重（id=heartbeat-error-<run_id>），同一 run 不重复生成。
+        const hbErrorAutomation = extractAutomation(payload);
+        if (hbErrorAutomation) {
+          const sessionId = resolveEventSessionId(payload);
+          if (!sessionId) return;
+          const chatStore = useChatStore.getState();
+          const errorMsg =
+            typeof payload.error === 'string' && payload.error.trim()
+              ? payload.error
+              : t('network.unknownError');
+          const errorId = heartbeatErrorMessageId(hbErrorAutomation.run_id);
+          // 同一 run 已有错误消息则不重复添加（去重）
+          const existingError = chatStore.getRuntime(sessionId)?.messages.find((m) => m.id === errorId);
+          if (!existingError) {
+            chatStore.addMessage(sessionId, {
+              id: errorId,
+              role: 'system',
+              content: t('network.errorPrefix', { message: errorMsg }),
+              timestamp: new Date().toISOString(),
+              automation: hbErrorAutomation,
+            });
+          }
+          // 关掉该 run 的 assistant 消息 streaming（若有），避免光标永久闪烁
+          const assistantMsgId = heartbeatAssistantMessageId(hbErrorAutomation.run_id);
+          chatStore.updateMessage(sessionId, assistantMsgId, { isStreaming: false });
+          // §2.2/§10 兜底：execution.error 已经确定这一 run 失败，不等可能不会再来的
+          // chat.final/chat.processing_status(false)，立即关闭 session 级 processing 展示
+          // （统一走 closeHeartbeatSessionState，按 run_id 去重）。
+          closeHeartbeatSessionState(sessionId, hbErrorAutomation.run_id);
+        }
       }),
       webClient.on('context.usage', ({ payload }) => {
-        const sessionId = resolveEventSessionId(payload);
-        if (!sessionId) return;
-        const currentMode = useSessionStore.getState().getRuntime(sessionId)?.mode;
-        if (isHiddenTeamTeammateMessagePayload(currentMode ?? 'agent', payload)) return;
-        const rate =
-          typeof payload.rate === 'number' ? payload.rate : 0;
-        const contextMax =
-          typeof payload.context_max === 'number' && Number.isFinite(payload.context_max)
-            ? payload.context_max
-            : null;
-        const tokensUsed =
-          typeof payload.tokens_used === 'number' && Number.isFinite(payload.tokens_used)
-            ? payload.tokens_used
-            : null;
-        const stats = { rate, beforeCompressed: contextMax, afterCompressed: tokensUsed };
-        if (heldContextUsageSessionsRef.current.has(sessionId)) {
-          pendingContextUsageRef.current.set(sessionId, stats);
-          setContextCompressionStats(sessionId, {
-            rate: 0,
-            beforeCompressed: 0,
-            afterCompressed: 0,
-          });
-        } else {
-          setContextCompressionStats(sessionId, stats);
-        }
-        console.debug('[ws] context.usage', {
-          session_id: payload.session_id,
-          rate,
-          context_max: contextMax,
-          tokens_used: tokensUsed,
-        });
+        receiveContextUsage(payload);
       }),
       webClient.on<ContextCompressionStatePayload>(
         'context.compression_state',
@@ -3428,6 +3573,32 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         // 加载历史消息时忽略处理状态更新
         if (useChatStore.getState().getRuntime(sessionId)?.isLoadingHistory) return;
         const isProcessingNow = Boolean(payload.is_processing);
+
+        // §8 步骤1：Heartbeat 自动触发开始时（processing_status=true 带 metadata.automation），
+        // 用 payload.content upsert 本轮 user 消息（id=heartbeat-user-<run_id>）。
+        // 不走全局 currentStreamId，避免覆盖上一条普通回答。
+        const hbAutomation = extractAutomation(payload);
+        if (hbAutomation && isProcessingNow) {
+          const userMsgId = heartbeatUserMessageId(hbAutomation.run_id);
+          const prompt = typeof payload.content === 'string' ? payload.content : '';
+          const existing = useChatStore.getState().getRuntime(sessionId)?.messages.find((m) => m.id === userMsgId);
+          if (existing) {
+            // 同一 run 重复帧：只在内容非空且发生变化时更新，避免空 content 的重复/延迟帧
+            // 覆盖掉已经正确显示的提示词（§2.1：空 content 不能覆盖此前已经显示的非空提示词）。
+            if (prompt && existing.content !== prompt) {
+              useChatStore.getState().updateMessage(sessionId, userMsgId, { content: prompt });
+            }
+          } else {
+            useChatStore.getState().addMessage(sessionId, {
+              id: userMsgId,
+              role: 'user',
+              content: prompt,
+              timestamp: new Date().toISOString(),
+              automation: hbAutomation,
+            });
+          }
+        }
+
         // 后端确认 processing=true 时清除本地发送标记——新任务已由后端接管
         if (isProcessingNow) {
           localSendPendingRef.current.delete(sessionId);
@@ -3455,6 +3626,16 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           useChatStore.getState().setThinking(sessionId, false);
           useChatStore.getState().stopStreaming(sessionId);
           useChatStore.getState().settleHistoricalToolExecutions(sessionId);
+
+          // §8 步骤5：Heartbeat 自动轮结束时，把对应 assistant 消息的 streaming 关掉
+          // （chat.delta 可能因丢帧未收到 final；这里兜底收尾），并静默刷新 Heartbeat
+          // list/get 以同步 run_state。不依赖全局 currentStreamId——Heartbeat 轮不走它。
+          if (hbAutomation) {
+            const assistantMsgId = heartbeatAssistantMessageId(hbAutomation.run_id);
+            useChatStore.getState().updateMessage(sessionId, assistantMsgId, { isStreaming: false });
+            // 静默刷新心跳列表，拉取本轮 run_state（last_run_status/skipped_count 等）
+            window.dispatchEvent(new CustomEvent('heartbeat-list-refresh', { detail: { sessionId } }));
+          }
 
           // 检查是否有等待的任务队列
           const currentMode = useSessionStore.getState().getRuntime(sessionId)?.mode;
@@ -3606,6 +3787,28 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           typeof payload.error === 'string' ? payload.error : t('network.unknownError');
         // 忽略 "invalid page_idx or session history not found" 错误，因为这是新会话的正常情况
         if (errorMsg.includes('invalid page_idx or session history not found')) {
+          return;
+        }
+        // §8 步骤4：Heartbeat 轮的 chat.error 按 run_id 去重（id=heartbeat-error-<run_id>），
+        // 并关掉该 run 的 assistant streaming，避免光标永久闪烁。
+        const hbChatErrorAutomation = extractAutomation(payload);
+        if (hbChatErrorAutomation) {
+          const chatStore = useChatStore.getState();
+          const errorId = heartbeatErrorMessageId(hbChatErrorAutomation.run_id);
+          const existing = chatStore.getRuntime(sessionId)?.messages.find((m) => m.id === errorId);
+          if (!existing) {
+            chatStore.addMessage(sessionId, {
+              id: errorId,
+              role: 'system',
+              content: t('network.errorPrefix', { message: errorMsg }),
+              timestamp: new Date().toISOString(),
+              automation: hbChatErrorAutomation,
+            });
+          }
+          chatStore.updateMessage(sessionId, heartbeatAssistantMessageId(hbChatErrorAutomation.run_id), { isStreaming: false });
+          // §2.2 兜底：setThinking 已经在上面统一关过，这里补 setProcessing + 排空队列
+          // （统一走 closeHeartbeatSessionState，按 run_id 去重）。
+          closeHeartbeatSessionState(sessionId, hbChatErrorAutomation.run_id);
           return;
         }
         useChatStore.getState().setExecutionError(sessionId, errorMsg);
@@ -3874,6 +4077,9 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           ...(planApprovalKind ? { planApprovalKind } : {}),
           ...(planContent !== undefined ? { planContent } : {}),
           ...(planLanguage ? { planLanguage } : {}),
+          ...(questionPayload.swarmflow_meta && typeof questionPayload.swarmflow_meta === 'object'
+            ? { swarmflowMeta: questionPayload.swarmflow_meta as AskUserQuestionPayload['swarmflowMeta'] }
+            : {}),
         };
         // 计划正文走对话气泡，不再塞进审批卡片：审批栏只保留「执行」和
         // 「改进意见 + 下一步/跳过」。修订后再次提交会是新的 request_id，
@@ -3958,6 +4164,35 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           timestamp: new Date().toISOString(),
         });
       }),
+      // ── SwarmFlow: workflow.updated → 增量合并到 workflowRuns（树视图渲染）──
+      webClient.on('workflow.updated', ({ payload }) => {
+        const sessionId = resolveEventSessionId(payload);
+        if (!sessionId) return;
+        const p = payload as { workflow?: unknown; event?: { workflow?: unknown } };
+        const workflow = (p.workflow ?? p.event?.workflow) as
+          | import('../components/teamArea/workflowTypes').WorkflowRun
+          | undefined;
+        if (workflow && typeof workflow === 'object' && workflow.id) {
+          useSessionStore.getState().applyWorkflowUpdate(sessionId, workflow);
+        }
+      }),
+
+      // ── SwarmFlow: swarmflow.activated → 前端切换树视图（黏性视图标志，不触碰用户配置）──
+      webClient.on('swarmflow.activated', ({ payload }) => {
+        const sessionId = resolveEventSessionId(payload);
+        if (!sessionId) return;
+        useSessionStore.getState().setSwarmflowViewActive(sessionId);
+      }),
+
+      // ── SwarmFlow: swarmflow.deactivated → 不切回看板 ──
+      // 一旦会话出现过 swarmflow 事件，就保持树视图布局。
+      // deactivated 事件仅用于日志/状态标记，不改变视图。
+      webClient.on('swarmflow.deactivated', ({ payload }) => {
+        const sessionId = resolveEventSessionId(payload);
+        if (!sessionId) return;
+        // 粘性标志：不设回 false，保持树视图
+      }),
+
       webClient.on('team.task', ({ payload }) => {
         const sessionId = resolveEventSessionId(payload);
         if (!sessionId) return;
@@ -3985,6 +4220,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
             description?: string;
             content?: string;
             updated_at?: number | string | null;
+            workflow_run_id?: string;
           };
           if (e.type === 'team.task.created' && e.task_id) {
             useSessionStore.getState().registerConfirmedTeamTaskCreation(sessionId, e.task_id);
@@ -4002,6 +4238,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
             title: e.title || e.name || e.description,
             content: e.content,
             updated_at: e.updated_at,
+            workflow_run_id: e.workflow_run_id,
           });
           const normalizedTask = normalizeTaskEvent(event);
           if (normalizedTask) {
@@ -4289,8 +4526,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     handleContextCompressionState,
     handleTeamMemberContextCompressionState,
     handleTtsPlayback,
-    revealPendingContextUsage,
-    setContextCompressionStats,
+    receiveContextUsage,
     clearThinkingForVisibleOutput,
     findActiveTeamLeaderMessage,
     closeActiveTeamLeaderMessages,
@@ -4327,7 +4563,6 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         await webClient.connect(connectOptions);
       } catch (error) {
         const webError = error as WebError;
-        setConnectionStats({ lastError: webError.message });
         onErrorRef.current?.(webError.message || 'WebSocket connection error');
       }
     };
@@ -4339,7 +4574,6 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     model,
     projectDir,
     provider,
-    setConnectionStats,
   ]);
 
   useEffect(() => {
@@ -4349,13 +4583,8 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
       clearPendingSubagentCorrelations();
       webClient.disconnect();
       setConnected(false);
-      // 不再重置上下文压缩信息，保持本地存储的状态
-      // setContextCompressionStats(null);
-      setConnectionStats({ state: 'closed', inflight: 0 });
     };
   }, [
-    setContextCompressionStats,
-    setConnectionStats,
     setConnected,
     clearPendingSubagentCorrelations,
   ]);
@@ -4372,7 +4601,6 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
       void webClient.disconnect('debug mode toggled').then(() => {
         void webClient.connect(connectOptions).catch((error) => {
           const webError = error as WebError;
-          setConnectionStats({ lastError: webError.message });
           onErrorRef.current?.(webError.message || 'WebSocket reconnect error');
         });
       });
@@ -4381,7 +4609,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     return () => {
       window.removeEventListener(WS_RECONNECT_EVENT, reconnectByDebugToggle);
     };
-  }, [apiBase, apiKey, model, projectDir, provider, setConnectionStats]);
+  }, [apiBase, apiKey, model, projectDir, provider]);
 
   useEffect(() => {
     const unsub = webClient.onStateChange((state) => {
@@ -4389,11 +4617,6 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
       const connected = state === 'ready';
       setIsConnected(connected);
       setConnected(connected);
-      setConnectionStats({
-        state,
-        inflight: webClient.getInflightCount(),
-        lastError: null,
-      });
       if (!connected && (state === 'reconnecting' || state === 'closed')) {
         streamDeltaBatcherRef.current?.flushAll();
         clearPendingSubagentCorrelations();
@@ -4415,18 +4638,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     return () => {
       unsub();
     };
-  }, [clearPendingSubagentCorrelations, setConnected, setConnectionStats]);
-
-  useEffect(() => {
-    const timer = window.setInterval(() => {
-      setConnectionStats({
-        inflight: webClient.getInflightCount(),
-      });
-    }, 1000);
-    return () => {
-      window.clearInterval(timer);
-    };
-  }, [setConnectionStats]);
+  }, [clearPendingSubagentCorrelations, setConnected]);
 
   useEffect(() => {
     // 真实环境联调方案 9c：未完成目标超过 1 分钟没收到新的 goal.snapshot/goal.updated 事件，
@@ -4502,6 +4714,5 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     clearGoal,
     refreshGoal,
     drainTaskQueueIfIdle,
-    getInflightCount: () => webClient.getInflightCount(),
   };
 }

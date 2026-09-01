@@ -25,6 +25,9 @@ from openjiuwen.symphony.discovery import SkillPromptBranch, SkillPromptSnapshot
 from jiuwenswarm.agents.harness.common.browser_defaults import (
     DEFAULT_BROWSER_AGENT_MAX_ITERATIONS,
 )
+from jiuwenswarm.agents.harness.common.rails.browser_task_prompt_rail import (
+    BrowserTaskPromptRail,
+)
 from jiuwenswarm.common import utils as _utils_mod
 from jiuwenswarm.server.runtime.agent_adapter import interface_deep as interface_module
 from jiuwenswarm.server.runtime.agent_adapter.interface_deep import JiuWenSwarmDeepAdapter
@@ -287,6 +290,13 @@ async def test_symphony_orchestration_rail_injects_when_tool_visible(
     assert "Calling `skill_branch_explore` creates a mandatory orchestration follow-up" in prompt
     assert "never pass every Skill returned by exploration" in prompt
     assert "still call `symphony_compose_graph`" in prompt
+    assert "`planned_graph.graph.metadata.status`" in prompt
+    assert "`planned_graph.graph.nodes`" in prompt
+    assert "`planned_graph.graph.edges`" in prompt
+    assert "Do not present a planning" in prompt
+    assert "search_skill" not in prompt
+    assert "install_skill" not in prompt
+    assert "returned\n`content` directly" not in prompt
     assert "none of the three trigger conditions is true" in prompt
     assert "Symphony" not in prompt
 
@@ -816,8 +826,69 @@ async def test_runtime_dynamic_sections_go_to_prompt_attachment_when_manager_ava
 
 
 @pytest.mark.asyncio
+async def test_runtime_attachment_request_mode_wins_over_localized_snapshot(tmp_path, monkeypatch):
+    monkeypatch.setattr(_utils_mod, "get_config_dir", lambda: tmp_path)
+    builder = SystemPromptBuilder(language="cn")
+    agent = _FakeAgent(builder)
+    runtime_rail = RuntimePromptRail(language="cn", channel="web")
+    runtime_rail.init(agent)
+    runtime_rail.set_mode("agent")
+    ctx = AgentCallbackContext(
+        agent=agent,
+        inputs=None,
+        session=_FakeSession(),
+        extra={},
+    )
+
+    # The first refresh falls back to the request-bound canonical mode while
+    # the asynchronous diagnostic snapshot does not exist yet.
+    await runtime_rail.before_invoke(ctx)
+    items = await agent.prompt_attachment_manager.collect_for_session("sess1")
+    first_rendered = agent.prompt_attachment_manager.render(items)
+    assert "当前模式：agent" in first_rendered
+
+    # Once the snapshot appears, its localized representation must not create
+    # a false attachment update for the same effective mode.
+    runtime_state = tmp_path / "runtime_state" / "default.yaml"
+    runtime_state.parent.mkdir(parents=True, exist_ok=True)
+    runtime_state.write_text("mode: 智能体模式\n", encoding="utf-8")
+    await runtime_rail.before_model_call(ctx)
+    items = await agent.prompt_attachment_manager.collect_for_session("sess1")
+    second_rendered = agent.prompt_attachment_manager.render(items)
+    assert second_rendered == first_rendered
+
+
+@pytest.mark.asyncio
+async def test_runtime_attachment_tracks_request_mode_change(tmp_path, monkeypatch):
+    monkeypatch.setattr(_utils_mod, "get_config_dir", lambda: tmp_path)
+    builder = SystemPromptBuilder(language="en")
+    agent = _FakeAgent(builder)
+    runtime_rail = RuntimePromptRail(language="en", channel="web")
+    runtime_rail.init(agent)
+    runtime_rail.set_mode("agent")
+    ctx = AgentCallbackContext(
+        agent=agent,
+        inputs=None,
+        session=_FakeSession(),
+        extra={},
+    )
+
+    await runtime_rail.before_model_call(ctx)
+    items = await agent.prompt_attachment_manager.collect_for_session("sess1")
+    rendered = agent.prompt_attachment_manager.render(items)
+    assert "Current mode: agent" in rendered
+
+    runtime_rail.set_mode("team")
+    await runtime_rail.before_model_call(ctx)
+    items = await agent.prompt_attachment_manager.collect_for_session("sess1")
+    rendered = agent.prompt_attachment_manager.render(items)
+    assert "Current mode: team" in rendered
+    assert "Current mode: agent" not in rendered
+
+
+@pytest.mark.asyncio
 async def test_browser_policy_is_injected_only_when_browser_agent_is_loaded():
-    rail = JiuWenSwarmDeepAdapter._build_subagent_rail()
+    rail = BrowserTaskPromptRail()
     assert rail is not None
     rail.tools = [object()]
     rail.system_prompt_builder = SystemPromptBuilder(language="en")
@@ -880,6 +951,7 @@ async def test_runtime_attachment_tracks_live_code_agent_mode(tmp_path, monkeypa
     agent = _FakeLiveModeAgent(builder, mode="plan")
     runtime_rail = RuntimePromptRail(language="en", channel="tui")
     runtime_rail.init(agent)
+    runtime_rail.set_mode("code.normal")
     ctx = AgentCallbackContext(
         # Inner ReactAgent callbacks do not expose DeepAgent.load_state().
         agent=SimpleNamespace(),

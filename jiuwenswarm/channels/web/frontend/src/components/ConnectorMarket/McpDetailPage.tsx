@@ -7,7 +7,7 @@ import { ChevronLeft, Unlink2, Trash2, Plus, Wrench, Terminal, Loader2, AlertCir
 // 用在"删除"上不对，见下方按钮渲染处的 icon 条件。
 // 跟左侧导航栏"技能"入口用同一个图标（SessionSidebar/index.tsx 的 nav.skills），而不是随手挑一个
 // lucide 图标——用户明确要求技能展示区的图标要跟左侧栏"技能"视觉统一。
-import SkillIcon from '../../assets/技能.svg?react';
+import SkillIcon from '../../assets/agent-management/agent-skill.svg?react';
 import { useConnectorStore } from '../../stores/connectorStore';
 import { NewConversationIcon } from './icons';
 import { getSkillAvatar } from '../../utils/skillAvatar';

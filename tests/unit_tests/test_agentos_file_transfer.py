@@ -52,7 +52,13 @@ class _FakeYuanrong:
         self.upload_calls: list[dict[str, Any]] = []
         self.download_calls: list[dict[str, Any]] = []
         self.list_calls: list[dict[str, Any]] = []
+        self.mkdir_calls: list[dict[str, Any]] = []
         self.create_calls = 0
+        self.mkdir_result: dict[str, Any] = {
+            "success": True,
+            "path": "/home/agentos/sub",
+            "created": True,
+        }
         self.list_result: list[dict[str, Any]] = [
             {
                 "name": "README.md",
@@ -169,6 +175,28 @@ class _FakeYuanrong:
             }
         )
         return list(self.list_result)
+
+    async def mkdir_agent_dir(
+        self,
+        instance_id: str,
+        path: str,
+        *,
+        mode: str | None = None,
+        recursive: bool = False,
+        auth_headers: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        self.mkdir_calls.append(
+            {
+                "instance_id": instance_id,
+                "path": path,
+                "mode": mode,
+                "recursive": recursive,
+                "auth_headers": dict(auth_headers or {}),
+            }
+        )
+        result = dict(self.mkdir_result)
+        result["path"] = path
+        return result
 
 
 def _make_router_with_runtime(*, sandbox_id: str = "inst-1") -> AgentOSRouterClient:
@@ -347,6 +375,62 @@ async def test_router_list_container_files_forwards_dir_and_auth() -> None:
             max_depth=-1,
         )
     assert depth.value.code == "BAD_REQUEST"
+
+
+@pytest.mark.asyncio
+async def test_router_mkdir_container_dir_forwards_path_mode_and_auth() -> None:
+    router = _make_router_with_runtime()
+    yuanrong: _FakeYuanrong = router._yuanrong  # type: ignore[assignment]
+
+    payload = await router.mkdir_container_dir(
+        user_id="user-1",
+        path="/home/agentos/sub",
+        mode="0755",
+        recursive=True,
+        session_id="sess-1",
+        auth_headers={"Authorization": "Bearer token-1"},
+    )
+
+    assert payload == {
+        "success": True,
+        "path": "/home/agentos/sub",
+        "created": True,
+    }
+    assert yuanrong.mkdir_calls == [
+        {
+            "instance_id": "inst-1",
+            "path": "/home/agentos/sub",
+            "mode": "0755",
+            "recursive": True,
+            "auth_headers": {"Authorization": "Bearer token-1"},
+        }
+    ]
+    with pytest.raises(AgentOSFileTransferError) as relative:
+        await router.mkdir_container_dir(user_id="user-1", path="sub")
+    assert relative.value.code == "BAD_REQUEST"
+    with pytest.raises(AgentOSFileTransferError) as outside:
+        await router.mkdir_container_dir(user_id="user-1", path="/workspace/sub")
+    assert outside.value.code == "BAD_REQUEST"
+
+
+@pytest.mark.asyncio
+async def test_router_mkdir_container_dir_idempotent_created_false() -> None:
+    router = _make_router_with_runtime()
+    yuanrong: _FakeYuanrong = router._yuanrong  # type: ignore[assignment]
+    yuanrong.mkdir_result = {
+        "success": True,
+        "path": "/home/agentos/sub",
+        "created": False,
+    }
+
+    payload = await router.mkdir_container_dir(
+        user_id="user-1",
+        path="/home/agentos/sub",
+        recursive=True,
+        session_id="sess-1",
+    )
+
+    assert payload["created"] is False
 
 
 @pytest.mark.asyncio
@@ -980,4 +1064,60 @@ async def test_container_file_http_list_files_and_markdown() -> None:
     assert kwargs["max_depth"] == 3
     assert kwargs["user_id"] == "user-1"
     assert kwargs["session_id"] == ""
+
+
+@pytest.mark.asyncio
+async def test_container_file_http_mkdir() -> None:
+    import httpx
+
+    from jiuwenswarm.gateway.channel_manager.base import RobotMessageRouter
+    from jiuwenswarm.gateway.channel_manager.web.web_channel_app import build_web_channel_app
+    from jiuwenswarm.gateway.channel_manager.web.web_connect import WebChannelConfig
+
+    router = _make_router_with_runtime()
+    router.mkdir_container_dir = AsyncMock(  # type: ignore[method-assign]
+        return_value={
+            "success": True,
+            "path": "/home/agentos/sub",
+            "created": True,
+        }
+    )
+    channel = WebChannel(WebChannelConfig(enabled=True, dual_protocol=True), RobotMessageRouter())
+    channel.container_file_client = router
+    app = build_web_channel_app(channel)
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        missing_path = await client.post(
+            "/file-api/mkdir",
+            params={"user_id": "user-1"},
+            headers={"Authorization": "Bearer tok-1"},
+        )
+        created = await client.post(
+            "/file-api/mkdir",
+            params={
+                "path": "/home/agentos/sub",
+                "mode": "0755",
+                "recursive": "true",
+                "user_id": "user-1",
+                "session_id": "sess-1",
+            },
+            headers={"Authorization": "Bearer tok-1"},
+        )
+
+    assert missing_path.status_code == 400
+    assert missing_path.json()["error"] == "missing_path"
+    assert created.status_code == 200
+    assert created.json() == {
+        "success": True,
+        "path": "/home/agentos/sub",
+        "created": True,
+    }
+    kwargs = router.mkdir_container_dir.await_args.kwargs
+    assert kwargs["path"] == "/home/agentos/sub"
+    assert kwargs["mode"] == "0755"
+    assert kwargs["recursive"] is True
+    assert kwargs["user_id"] == "user-1"
+    assert kwargs["session_id"] == "sess-1"
+    assert kwargs["auth_headers"].get("Authorization") == "Bearer tok-1"
 

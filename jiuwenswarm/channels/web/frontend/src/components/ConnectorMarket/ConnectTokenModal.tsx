@@ -97,6 +97,8 @@ export function ConnectTokenModal({ name, displayName, iconUrl, response, onCanc
               <label className="mb-1.5 block text-[13px] font-medium text-text">{field?.label ?? key}</label>
               <input
                 type={field?.type === 'password' ? 'password' : 'text'}
+                name={`connector-token-${key}`}
+                autoComplete={field?.type === 'password' ? 'new-password' : 'off'}
                 value={tokens[key] ?? ''}
                 onChange={(event) => setTokens((prev) => ({ ...prev, [key]: event.target.value }))}
                 placeholder={field?.placeholder ?? t('connectorMarket.tokenModal.placeholder', { name: displayName })}

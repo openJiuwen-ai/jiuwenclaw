@@ -6,10 +6,69 @@ import {
   parseSubagentHistoryReplay,
   recoverSubagentToolHistory,
   shouldProcessHistoryPayload,
+  parseHistoryJsonFileToPreviewMessages,
+  parseHistoryJsonFileToTimelinePreview,
 } from '../node_modules/.cache/subagent-history/historyRestore.mjs';
 
 const sessionId = 'web_session';
 const subagentId = 'web_session_sub_general-purpose_1';
+
+test('history restores the selected Agent identity from top-level and event payload fields', () => {
+  const messages = parseHistoryJsonFileToPreviewMessages([
+    {
+      id: 'user-1',
+      role: 'user',
+      content: 'first',
+      timestamp: '2026-08-31T10:00:00.000Z',
+    },
+    {
+      id: 'final-a',
+      role: 'assistant',
+      event_type: 'chat.final',
+      content: 'from A',
+      agent_template_name: 'expert-a',
+      timestamp: '2026-08-31T10:00:01.000Z',
+    },
+    {
+      id: 'final-b',
+      role: 'assistant',
+      event_type: 'chat.final',
+      content: 'from B',
+      event_payload: { agent_template_name: 'expert-b' },
+      timestamp: '2026-08-31T10:00:02.000Z',
+    },
+    {
+      id: 'final-old',
+      role: 'assistant',
+      event_type: 'chat.final',
+      content: 'legacy',
+      timestamp: '2026-08-31T10:00:03.000Z',
+    },
+  ], 'web_session');
+
+  assert.deepEqual(messages.map(({ id, agentTemplateName }) => ({ id, agentTemplateName })), [
+    { id: 'user-1', agentTemplateName: undefined },
+    { id: 'final-a', agentTemplateName: 'expert-a' },
+    { id: 'final-b', agentTemplateName: 'expert-b' },
+    { id: 'final-old', agentTemplateName: undefined },
+  ]);
+});
+
+test('history restores the selected Agent identity on reasoning segments', () => {
+  const preview = parseHistoryJsonFileToTimelinePreview([
+    {
+      id: 'final-with-reasoning',
+      role: 'assistant',
+      event_type: 'chat.final',
+      content: 'answer',
+      reasoning_content: 'thinking',
+      agent_template_name: 'expert-a',
+      timestamp: '2026-08-31T10:00:01.000Z',
+    },
+  ], sessionId);
+
+  assert.equal(preview.reasoningSegments[0]?.agentTemplateName, 'expert-a');
+});
 
 test('subagent history replays persisted activity without treating it as final text', () => {
   const replay = parseSubagentHistoryReplay({

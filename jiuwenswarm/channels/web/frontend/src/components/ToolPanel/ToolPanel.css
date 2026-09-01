@@ -21,6 +21,7 @@
   width: 340px;
   max-height: calc(100vh - 68px - 32px);
   overflow-y: auto;
+  scrollbar-gutter: stable;
   border-left: 1px solid var(--color-border-default, rgb(240, 240, 240));
   border-radius: 16px;
   box-shadow: 0 2px 16px 0 rgba(0, 0, 0, 0.08);
@@ -36,7 +37,6 @@
   box-shadow: var(--effect-tool-panel-shadow);
   transform: translateY(-1px);
 }
-
 
 .toolpanel-collapsed-task-section > * {
   min-height: 0;

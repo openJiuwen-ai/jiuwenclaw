@@ -204,7 +204,7 @@ class WebSocketAgentServerClient(AgentServerClient):
     async def connect(self, uri: str) -> None:
         if self._ws is not None:
             await self.disconnect()
-        logger.info("[WebSocketAgentServerClient] 正在连接: %s", uri)
+        logger.debug("[WebSocketAgentServerClient] 正在连接: %s", uri)
         self._uri = uri
         self._server_ready = False
         origin = _build_ws_origin(uri)
@@ -227,9 +227,9 @@ class WebSocketAgentServerClient(AgentServerClient):
         # 读取 AgentServer 的 connection.ack 事件
         try:
             raw = await asyncio.wait_for(self._ws.recv(), timeout=5.0)
-            logger.info("[WebSocketAgentServerClient] connect 首帧(raw): %s", raw)
+            logger.debug("[WebSocketAgentServerClient] connect 首帧(raw): %s", raw)
             data = json.loads(raw)
-            logger.info("[WebSocketAgentServerClient] connect 首帧(parsed): %s", _to_json(data))
+            logger.debug("[WebSocketAgentServerClient] connect 首帧(parsed): %s", _to_json(data))
             if data.get("type") == "event" and data.get("event") == "connection.ack":
                 self._server_ready = True
                 logger.info("[WebSocketAgentServerClient] 收到 connection.ack，AgentServer 已就绪")
@@ -442,12 +442,15 @@ class WebSocketAgentServerClient(AgentServerClient):
         effective_timeout = (
             float(timeout) if timeout is not None else _UNARY_REQUEST_TIMEOUT_SECONDS
         )
+        sid = str(envelope.session_id or "")
         logger.info(
-            "[E2A][out][nostream] request_id=%s channel=%s method=%s is_stream=%s",
+            "[E2A][out][nostream] request_id=%s channel=%s method=%s session_id=%s is_stream=%s",
             rid,
             envelope.channel,
             envelope.method,
+            sid,
             envelope.is_stream,
+            extra={"session_id": sid} if sid else {},
         )
         logger.debug(
             "[WebSocketAgentServerClient] 发送请求(非流式) E2A: %s",
@@ -468,7 +471,7 @@ class WebSocketAgentServerClient(AgentServerClient):
             # 发送请求
             async with self._lock:
                 payload = _e2a_to_wire(envelope)
-                logger.info("[WebSocketAgentServerClient] 发送请求(非流式) payload: %s", _to_json(payload))
+                logger.debug("[WebSocketAgentServerClient] 发送请求(非流式) payload: %s", _to_json(payload))
                 await self._send_wire_payload(payload)
 
             try:
@@ -494,12 +497,15 @@ class WebSocketAgentServerClient(AgentServerClient):
         await self._ensure_connected_for_request()
         envelope.is_stream = True
         rid = _wire_request_id_key(envelope.request_id)
+        sid = str(envelope.session_id or "")
         logger.info(
-            "[E2A][out][stream] request_id=%s channel=%s method=%s is_stream=%s",
+            "[E2A][out][stream] request_id=%s channel=%s method=%s session_id=%s is_stream=%s",
             rid,
             envelope.channel,
             envelope.method,
+            sid,
             envelope.is_stream,
+            extra={"session_id": sid} if sid else {},
         )
         logger.debug(
             "[WebSocketAgentServerClient] 发送请求(流式) E2A: %s",
@@ -520,7 +526,7 @@ class WebSocketAgentServerClient(AgentServerClient):
             # 发送请求
             async with self._lock:
                 payload = _e2a_to_wire(envelope)
-                logger.info("[WebSocketAgentServerClient] 发送请求(流式) payload: %s", _to_json(payload))
+                logger.debug("[WebSocketAgentServerClient] 发送请求(流式) payload: %s", _to_json(payload))
                 await self._send_wire_payload(payload)
 
             # 从队列中接收流式响应
@@ -544,7 +550,7 @@ class WebSocketAgentServerClient(AgentServerClient):
                 if chunk_count <= 3:
                     _pl = getattr(chunk, "payload", None) or {}
                     _et = _pl.get("event_type", "") if isinstance(_pl, dict) else ""
-                    logger.info(
+                    logger.debug(
                         "[WebSocketAgentServerClient] stream chunk received:"
                         " request_id=%s seq=%s event_type=%s",
                         rid, chunk_count, _et,
