@@ -20,11 +20,6 @@ from openjiuwen.harness.prompts import PromptSection, SystemPromptBuilder
 
 from jiuwenswarm.agents.harness.common.prompt import safety_override  # noqa: F401  — patches openjiuwen SAFETY_PROMPT
 from jiuwenswarm.agents.harness.common.prompt import skills_goal_override  # noqa: F401  — patches openjiuwen Skills + Goal sections
-from jiuwenswarm.agents.harness.common.tools.invoke_meta.plugin_skill_catalog import (
-    plugin_skill_bundle,
-    seedream_lite_function_name,
-    seedream_pro_function_name,
-)
 
 
 # ─── Priority ────────────────────────────────────
@@ -132,18 +127,6 @@ def _design_role_prompt() -> PromptSection:
 
 
 def _design_product_fundamentals_prompt() -> PromptSection:
-    lite = seedream_lite_function_name()
-    pro = seedream_pro_function_name()
-    lite_bundle = plugin_skill_bundle(lite)
-    pro_bundle = plugin_skill_bundle(pro)
-    music_bundle = plugin_skill_bundle("musicGeneration")
-    if lite_bundle == pro_bundle:
-        image_bundle_clause = f"plus `bundleName={lite_bundle}` "
-    else:
-        image_bundle_clause = (
-            f"`{lite}` uses `bundleName={lite_bundle}`, "
-            f"`{pro}` uses `bundleName={pro_bundle}`, "
-        )
     content = (
         "## Product Fundamentals\n"
         "\n"
@@ -154,22 +137,16 @@ def _design_product_fundamentals_prompt() -> PromptSection:
         "polished .pptx. Follow the programmatic-generation workflow in the "
         "`ppt-creation` skill — you MUST load it via `skill_tool` before "
         "generating any PPT.\n"
-        "- **Poster / brand / illustration**: generate visual assets (images) "
-        "directly via `invoke` — call `invoke` with "
-        "`functionName=PluginSkillExecTool` and `arguments.functionName="
-        f"{lite}` (up to 15 images via `max_images`) or "
-        f"`{pro}` (single high-quality image, do NOT pass "
-        f"`max_images`), {image_bundle_clause}"
-        "and a `prompt` written as a full sentence. Size is `1K` (1024×1024) "
-        "or `2K` (2048×2048). Do not stop after writing only a prompt or "
-        "script; the user-facing deliverable is the image file.\n"
-        "- **Video**: generate a finished short video (mp4, 4–15 seconds per "
-        "clip) via `invoke` (`seedanceMiniTask`). A storyboard "
-        "markdown file is **not** a valid final deliverable.\n"
-        "- **Song**: generate a finished audio track via `invoke` "
-        "(`lyricsGeneration` / `musicGeneration`, "
-        f"bundleName={music_bundle}). A lyrics markdown "
-        "or LRC text file alone is **not** a valid final deliverable.\n"
+        "- **Poster / brand / illustration**: load `seedream-image-gen` via "
+        "`skill_tool`, then follow its SKILL.md to call `invoke`. Do not stop "
+        "after writing only a prompt or script; the user-facing deliverable "
+        "is the image file.\n"
+        "- **Video**: load `seedance-video-gen` via `skill_tool`, then follow "
+        "its SKILL.md to call `invoke`. A storyboard markdown file is **not** "
+        "a valid final deliverable.\n"
+        "- **Song**: load `music-generation` via `skill_tool`, then follow its "
+        "SKILL.md to call `invoke`. A lyrics markdown or LRC text file alone "
+        "is **not** a valid final deliverable.\n"
         "\n"
         "Match the user's requested medium. Do not steer video, poster, or "
         "illustration work back to PPT.\n"
@@ -248,7 +225,6 @@ def _design_interaction_principles_prompt() -> PromptSection:
 
 
 def _design_core_capabilities_prompt() -> PromptSection:
-    music_bundle = plugin_skill_bundle("musicGeneration")
     content = (
         "# Core capabilities\n"
         "\n"
@@ -302,20 +278,16 @@ def _design_core_capabilities_prompt() -> PromptSection:
         "1. **Duration**: each clip MUST be 4–15 seconds. If the user asks for "
         "60s / 3min / 5min, do not write a storyboard md and stop; either confirm "
         "a single 10–15s clip or explain the per-clip limit.\n"
-        "2. **Generate via invoke**: Call `invoke` with "
-        "`functionName=PluginSkillExecTool` and `arguments.functionName="
-        "seedanceMiniTask`, plus "
-        f"`bundleName={plugin_skill_bundle('seedanceMiniTask')}` "
-        "and a `content` array (first item `type=text`). Wait for the finished "
-        "clip (`video_url`); if only `task_id` is returned, call "
-        "`seedanceMiniTaskQuery` until `status=succeeded`.\n"
-        "3. **Deliver the mp4**: download `content.video_url` and send the file "
+        "2. **Load the skill first**: Call `skill_tool` to look up "
+        "`seedance-video-gen` and follow its SKILL.md to call `invoke`. Do not "
+        "invent `functionName` / `bundleName` or skip the query step the skill "
+        "describes.\n"
+        "3. **Deliver the mp4**: download the finished clip and send the file "
         "to the user.\n"
         "\n"
         "**Forbidden**: delivering only a storyboard / 分镜 markdown as the "
         "final result. A storyboard may be used internally to write the "
-        "`content` text prompt, but the user-facing deliverable is the video "
-        "file.\n"
+        "prompt, but the user-facing deliverable is the video file.\n"
         "\n"
         "## 3. Song Design\n"
         "\n"
@@ -323,33 +295,13 @@ def _design_core_capabilities_prompt() -> PromptSection:
         "include \"写歌\", \"做一首歌\", \"生成音乐\", \"配乐\", \"make a song\", "
         "\"compose music\" — **follow this mandatory workflow**:\n"
         "\n"
-        "1. **Decide vocal vs instrumental**: Ask (or infer from context) "
-        "whether the user wants a human-voice song or a pure instrumental "
-        "track. The two paths differ below.\n"
-        "2. **Write the prompt as a full sentence**: emotion + genre + "
-        "vocal/instrumental + narrative/scene (e.g. \"a melancholic folk "
-        "ballad with female vocals about a rainy farewell\"). Do NOT submit "
-        "comma-separated keyword lists.\n"
-        "3. **Generate via invoke**: Call `invoke` with "
-        "`functionName=PluginSkillExecTool` and `arguments.functionName="
-        "lyricsGeneration` or `musicGeneration`, plus "
-        f"`bundleName={music_bundle}`. Business fields "
-        "(`prompt`, `mode`, `lyrics`, `is_instrumental`, `lyrics_optimizer`) "
-        "are flat at the top level — do NOT wrap them in a `content` array.\n"
-        "   - **Basic instrumental**: `musicGeneration` with "
-        "`is_instrumental=true` (no `lyrics` / `lyrics_optimizer`).\n"
-        "   - **Basic vocal**: `musicGeneration` with "
-        "`lyrics_optimizer=true` (the platform auto-writes lyrics from your "
-        "prompt).\n"
-        "   - **Advanced vocal (custom lyrics)**: first `lyricsGeneration` "
-        "with `mode=write_full_song` (or `mode=edit` + `lyrics` to revise), "
-        "confirm the returned lyrics with the user, then `musicGeneration` "
-        "carrying the confirmed `lyrics`.\n"
-        "4. **Confirm before generating**: Before calling `musicGeneration`, "
-        "show the user the song type (vocal/instrumental), language, prompt, "
-        "and (if any) lyrics, and get explicit confirmation.\n"
-        "5. **Deliver the audio**: download the returned audio URL and send "
-        "the file to the user.\n"
+        "1. **Load the skill first**: Call `skill_tool` to look up "
+        "`music-generation` and follow its SKILL.md to call `invoke`.\n"
+        "2. **Confirm before generating**: Before generating audio, show the "
+        "user the song type (vocal/instrumental), language, prompt, and (if "
+        "any) lyrics, and get explicit confirmation.\n"
+        "3. **Deliver the audio**: download the returned audio and send the "
+        "file to the user.\n"
         "\n"
         "**Forbidden**: delivering only a lyrics markdown / LRC as the final "
         "result. Lyrics text may be shown for confirmation, but the "

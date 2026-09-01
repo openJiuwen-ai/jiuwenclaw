@@ -4,10 +4,8 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import os
-import time
 from typing import Any, AsyncIterator, Dict
 
 from openjiuwen.core.common.exception.codes import StatusCode
@@ -22,16 +20,9 @@ from jiuwenswarm.agents.harness.common.tools.invoke_meta.external_tool_registry 
     load_external_tools,
 )
 from jiuwenswarm.agents.harness.common.tools.invoke_meta.plugin_skill_catalog import (
-    extract_seedance_query_state,
-    extract_seedance_task_id,
     invoke_arguments_description,
     invoke_function_name_description,
     invoke_tool_description,
-    is_plugin_skill_function,
-    normalize_plugin_skill_args,
-    seedream_lite_function_name,
-    validate_plugin_skill_args,
-    want_seedance_wait,
 )
 from jiuwenswarm.agents.harness.common.tools.invoke_meta.schema_context import (
     resolve_session_id,
@@ -53,8 +44,6 @@ _AGENT_FUNC_NAME = "agent_as_a_tool"
 _PLUGIN_SKILL_EXEC = "PluginSkillExecTool"
 _BUNDLE_NAME_KEY = "bundleName"
 _DEVICE_UNSUPPORTED_MSG = "当前不支持pluginType为Device的端插件调用，请到真机进行测试"
-_SEEDANCE_TASK = "seedanceMiniTask"
-_SEEDANCE_QUERY = "seedanceMiniTaskQuery"
 _MUSIC_FUNC = "musicGeneration"
 
 
@@ -66,16 +55,7 @@ def _parse_invoke_inputs(inputs: dict[str, Any]) -> tuple[str, dict[str, Any]]:
         raise ValueError("arguments 必须是对象")
     params = dict(params)
 
-    # Prefer top-level functionName (InvokeTool schema). Models often omit
-    # the PluginSkillExecTool wrapper and only put the real capability on
-    # arguments.functionName.
     func_name = str(inputs.get("functionName") or inputs.get("funcName") or "").strip()
-    if not func_name:
-        nested = str(params.get("functionName") or params.get("funcName") or "").strip()
-        if nested and is_plugin_skill_function(nested):
-            func_name = _PLUGIN_SKILL_EXEC
-        else:
-            func_name = nested
     return func_name, params
 
 
@@ -92,8 +72,7 @@ def _normalize_plugin_skill_call(
     if not nested_name:
         raise ValueError(
             "functionName=PluginSkillExecTool 时，arguments.functionName 为必填"
-            f"（如 {seedream_lite_function_name()} / imageUnderStandStream / seedanceMiniTask / "
-            "lyricsGeneration / musicGeneration）"
+            "（真实云端能力名，如 seedreamLite4Skill / seedanceMiniTask / musicGeneration）"
         )
     return nested_name, dict(params), True
 
@@ -217,97 +196,6 @@ def _plugin_ws_timeout(tool_name: str) -> float | None:
     return float(os.getenv("MUSIC_WS_TIMEOUT", "600") or "600")
 
 
-def _seedance_poll_settings() -> tuple[float, float]:
-    timeout = float(os.getenv("SEEDANCE_POLL_TIMEOUT", "300") or "300")
-    interval = float(os.getenv("SEEDANCE_POLL_INTERVAL", "8") or "8")
-    return max(timeout, 1.0), max(interval, 0.0)
-
-
-async def _poll_seedance_task(
-    submit_spec: ExternalToolSpec,
-    _params: dict[str, Any],
-    submit_result: dict[str, Any],
-    *,
-    session_id: str | None,
-) -> dict[str, Any]:
-    task_id = extract_seedance_task_id(submit_result)
-    if not task_id:
-        return {
-            **submit_result,
-            "success": False,
-            "error": (
-                "seedanceMiniTask 未返回 task_id，无法轮询成片。"
-                "可传 arguments.wait=false 只取提交结果。"
-            ),
-            "task_id": "",
-        }
-
-    query_spec = ExternalToolSpec(
-        plugin_id=submit_spec.plugin_id,
-        tool_name=_SEEDANCE_QUERY,
-        description=submit_spec.description,
-        protocol=submit_spec.protocol,
-        plugin_type=submit_spec.plugin_type,
-    )
-    query_params = {
-        _BUNDLE_NAME_KEY: submit_spec.plugin_id,
-        "functionName": _SEEDANCE_QUERY,
-        "id": task_id,
-    }
-    timeout_s, interval_s = _seedance_poll_settings()
-    deadline = time.monotonic() + timeout_s
-    last_query: dict[str, Any] = {}
-    status = ""
-    video_url = ""
-
-    logger.info(
-        "[InvokeTool] seedance poll start task_id=%s timeout=%ss interval=%ss",
-        task_id,
-        timeout_s,
-        interval_s,
-    )
-    while time.monotonic() < deadline:
-        last_query = await _invoke_cloud_plugin(
-            query_spec, query_params, session_id=session_id
-        )
-        if not isinstance(last_query, dict):
-            last_query = {"success": False, "error": str(last_query)}
-        if not last_query.get("success"):
-            return {
-                **last_query,
-                "task_id": task_id,
-                "error": last_query.get("error") or "seedanceMiniTaskQuery 失败",
-            }
-        status, video_url = extract_seedance_query_state(last_query)
-        if status == "succeeded" or video_url:
-            merged = dict(last_query)
-            merged["success"] = True
-            merged["task_id"] = task_id
-            merged["status"] = status or "succeeded"
-            merged["video_url"] = video_url
-            if video_url and not merged.get("content"):
-                merged["content"] = video_url
-            return merged
-        if status and status not in {"running", "queued", "pending", "processing"}:
-            return {
-                "success": False,
-                "error": f"seedance 任务失败 status={status}",
-                "task_id": task_id,
-                "status": status,
-                "content": last_query.get("content", ""),
-            }
-        if interval_s > 0:
-            await asyncio.sleep(interval_s)
-
-    return {
-        "success": False,
-        "error": f"seedance 轮询超时 ({timeout_s}s) task_id={task_id} status={status or 'unknown'}",
-        "task_id": task_id,
-        "status": status or "timeout",
-        "content": last_query.get("content", "") if isinstance(last_query, dict) else "",
-    }
-
-
 async def _dispatch_invoke(
     func_name: str,
     params: dict[str, Any],
@@ -319,31 +207,21 @@ async def _dispatch_invoke(
         return await invoke_remote_agent(params, **kwargs)
 
     try:
-        func_name, params, via_plugin_skill = _normalize_plugin_skill_call(func_name, params)
+        func_name, params, _via_plugin_skill = _normalize_plugin_skill_call(func_name, params)
     except ValueError as exc:
         return {"success": False, "error": str(exc)}
 
-    # PLUGIN_SKILL_CATALOG: coerce then validate (fail fast, skip waiting on WS).
-    if via_plugin_skill or is_plugin_skill_function(func_name):
-        params, norm_err = normalize_plugin_skill_args(func_name, params)
-        if norm_err is not None:
-            return {"success": False, "error": norm_err}
-        catalog_err = validate_plugin_skill_args(func_name, params)
-        if catalog_err is not None:
-            return {"success": False, "error": catalog_err}
+    if not str(params.get(_BUNDLE_NAME_KEY) or "").strip() and not _resolve_plugin_id(func_name, params):
+        return {
+            "success": False,
+            "error": "无法解析 bundleName/pluginId，请在 arguments 中提供 bundleName",
+            "toolName": func_name,
+        }
 
     built = _build_plugin_spec(func_name, params)
     if isinstance(built, dict):
         return built
-    result = await _invoke_cloud_plugin(built, params, session_id=session_id)
-    if (
-        func_name == _SEEDANCE_TASK
-        and isinstance(result, dict)
-        and result.get("success")
-        and want_seedance_wait(params)
-    ):
-        return await _poll_seedance_task(built, params, result, session_id=session_id)
-    return result
+    return await _invoke_cloud_plugin(built, params, session_id=session_id)
 
 
 def _build_invoke_tool_card() -> ToolCard:
