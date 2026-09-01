@@ -1647,6 +1647,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         localSendPendingRef.current.delete(sessionId);
         useChatStore.getState().setProcessing(sessionId, false);
         useChatStore.getState().setThinking(sessionId, false);
+        useChatStore.getState().settleLiveTurnWork(sessionId);
         const errorMsg = webError.message || t('network.sendMessageFailed');
         onErrorRef.current?.(errorMsg);
         useChatStore.getState().addMessage(sessionId, {
@@ -1710,6 +1711,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         const webError = error as WebError;
         useChatStore.getState().setProcessing(sessionId, false);
         useChatStore.getState().setThinking(sessionId, false);
+        useChatStore.getState().settleLiveTurnWork(sessionId);
         const errorMsg = webError.message || t('network.sendMessageFailed');
         onErrorRef.current?.(errorMsg);
         useChatStore.getState().addMessage(sessionId, {
@@ -2724,6 +2726,11 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           } else {
             useChatStore.getState().setThinking(sessionId, false);
           }
+          // 回答已定稿：关掉「思考中…」。pending 工具仅在 isProcessing 已落下时结算，
+          // Team / Goal 续跑不会被误标完成。
+          useChatStore.getState().settleLiveTurnWork(sessionId, {
+            atMs: eventTimestampMs(payload),
+          });
         }
         if (content) {
           revealPendingContextUsage(sessionId);
@@ -3587,7 +3594,9 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         if (!isProcessingNow) {
           useChatStore.getState().setThinking(sessionId, false);
           useChatStore.getState().stopStreaming(sessionId);
-          useChatStore.getState().settleHistoricalToolExecutions(sessionId);
+          useChatStore.getState().settleLiveTurnWork(sessionId, {
+            atMs: eventTimestampMs(payload),
+          });
 
           // §8 步骤5：Heartbeat 自动轮结束时，把对应 assistant 消息的 streaming 关掉
           // （chat.delta 可能因丢帧未收到 final；这里兜底收尾），并静默刷新 Heartbeat
@@ -3776,6 +3785,9 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         useChatStore.getState().setExecutionError(sessionId, errorMsg);
         onErrorRef.current?.(errorMsg);
         useChatStore.getState().setSessionError(sessionId, errorMsg);
+        useChatStore.getState().settleLiveTurnWork(sessionId, {
+          atMs: eventTimestampMs(payload),
+        });
         useChatStore.getState().addMessage(sessionId, {
           id: `error-${Date.now()}`,
           role: 'system',
@@ -3848,6 +3860,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
 
         useChatStore.getState().setProcessing(sessionId, false);
         useChatStore.getState().setThinking(sessionId, false);
+        useChatStore.getState().settleLiveTurnWork(sessionId);
         activeRequestIdRef.current = undefined;
 
         const retractRequestId = typeof event.payload.request_id === 'string' ? event.payload.request_id : undefined;
@@ -3874,6 +3887,9 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
             );
             useChatStore.getState().setProcessing(sessionId, false);
             useChatStore.getState().setThinking(sessionId, false);
+            useChatStore.getState().settleLiveTurnWork(sessionId, {
+              atMs: eventTimestampMs(payload),
+            });
             const sessionPatch: Partial<Session> = {
               is_processing: false,
               updated_at: new Date().toISOString(),
@@ -3897,6 +3913,9 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
               useChatStore.getState().setPaused(sessionId, false);
               useChatStore.getState().setProcessing(sessionId, false);
               useChatStore.getState().setThinking(sessionId, false);
+              useChatStore.getState().settleLiveTurnWork(sessionId, {
+                atMs: eventTimestampMs(payload),
+              });
               // 任务已完成时，检查并触发队列中的下一个任务
               const currentMode = useSessionStore.getState().getRuntime(sessionId)?.mode;
               const runtime = useChatStore.getState().getRuntime(sessionId);
@@ -3915,6 +3934,9 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           useChatStore.getState().setPaused(sessionId, false);
           useChatStore.getState().setProcessing(sessionId, false);
           useChatStore.getState().setThinking(sessionId, false);
+          useChatStore.getState().settleLiveTurnWork(sessionId, {
+            atMs: eventTimestampMs(payload),
+          });
           // chat.interrupt_result 是一元响应，跟流式分片的 goal_intermediate 判断走的是完全
           // 独立的通道——不依赖后端把"目标已清除/暂停后这一轮该不该被当成中间态"判断对，
           // 用户主动点了停止/删除就该让当前气泡收尾，不再等一个可能被误判、永远不会来的
@@ -4434,6 +4456,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         useChatStore.getState().setExecutionError(sessionId, null);
         useChatStore.getState().setProcessing(sessionId, false);
         useChatStore.getState().setThinking(sessionId, false);
+        useChatStore.getState().settleLiveTurnWork(sessionId);
         useHarnessStore.getState().setHarnessRunning(sessionId, false);
       }),
     ];
