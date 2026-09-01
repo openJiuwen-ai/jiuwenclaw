@@ -1233,12 +1233,14 @@ def cleanup_stale_openjiuwen_descs() -> None:
         return
 
     for lang_dir in sorted(path for path in descs_dir.iterdir() if path.is_dir()):
-        nested_stems = {
-            path.stem
-            for path in lang_dir.rglob("*.md")
-            if path.parent != lang_dir
-            and "fragments" not in path.relative_to(lang_dir).parts
-        }
+        nested_stems = set()
+        for desc_path in lang_dir.rglob("*.md"):
+            if desc_path.parent == lang_dir:
+                continue
+            if "fragments" in desc_path.relative_to(lang_dir).parts:
+                continue
+            nested_stems.add(desc_path.stem)
+
         for flat_md in sorted(lang_dir.glob("*.md")):
             if flat_md.stem not in nested_stems:
                 continue

@@ -29,7 +29,7 @@ parse_dotenv_early("jiuwenswarm-agentserver")
 from jiuwenswarm.common.utils import cleanup_stale_openjiuwen_descs
 cleanup_stale_openjiuwen_descs()
 
-from openjiuwen.core.common.logging import LogManager
+from openjiuwen.core.common.logging import LogManager  # pylint: disable=wrong-import-order
 
 # --- Now safe to import jiuwenswarm modules ---
 from jiuwenswarm.common.debug_dump import install_async_dump_handler

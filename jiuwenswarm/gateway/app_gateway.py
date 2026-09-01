@@ -47,7 +47,7 @@ parse_dotenv_early("jiuwenswarm-gateway")
 from jiuwenswarm.common.utils import cleanup_stale_openjiuwen_descs
 cleanup_stale_openjiuwen_descs()
 
-from openjiuwen.core.common.logging import LogManager
+from openjiuwen.core.common.logging import LogManager  # pylint: disable=wrong-import-order
 from jiuwenswarm.gateway.channel_manager.base import BaseWebChannel
 
 # --- Now safe to import jiuwenswarm modules ---
