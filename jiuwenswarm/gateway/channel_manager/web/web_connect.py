@@ -1300,9 +1300,16 @@ class WebChannel(BaseWsChannel):
             logger.error("[WebChannel] 命名管道传输不可用，跳过 cron 管道 server: %s", exc)
             return
 
-        # 对端进程身份校验：密钥包携带桌面主进程 exe 路径时启用 PID→镜像白名单
+        # 对端进程身份校验：cron 由桌面主进程调用，Gateway 控制由同一后端
+        # 运行时的 AgentServer 调用。uv venv 在 Windows 上可能是 trampoline，
+        # 此时真实进程镜像为 sys._base_executable；exe 发布形态两者恒等。
         desktop_exe = str(get_secret("desktopExe", "") or "").strip()
-        verify_client = make_image_verifier([desktop_exe]) if desktop_exe else None
+        allowed_images = {
+            path
+            for path in (desktop_exe, sys.executable, sys._base_executable)
+            if path
+        }
+        verify_client = make_image_verifier(allowed_images) if allowed_images else None
         try:
             self._pipe_server = await serve_pipe(
                 pipe_path,
