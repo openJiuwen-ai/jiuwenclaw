@@ -28,7 +28,6 @@ spec:
               value: "0.0.0.0"
             - name: MANAGER_WEB_PORT
               value: "<<MANAGER_WEB_PORT>>"
-            # 浏览器只能访问 Manager Web 同源路径，不能暴露 Kubernetes 内部 DNS。
             - name: VITE_API_BASE
               value: "/api"
             - name: VITE_IDP_BASE
@@ -47,7 +46,7 @@ spec:
               value: "<<TIMEZONE>>"
 
 ---
-# NodePort Service：供外连接 Manager Web UI
+# NodePort Service：供外连接
 apiVersion: v1
 kind: Service
 metadata:

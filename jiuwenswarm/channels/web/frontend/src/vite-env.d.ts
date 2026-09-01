@@ -10,7 +10,6 @@ interface ImportMetaEnv {
   readonly VITE_WEB_HTTP_BASE?: string;
   readonly VITE_JIUWENSWARM_EDITION?: string;
   readonly VITE_LOGIN_AUTH_SIMULATE?: string;
-  readonly VITE_LOGIN_AUTH_SIMULATE_AVAILABLE?: string;
 }
 
 interface ImportMeta {
@@ -51,8 +50,8 @@ interface Window {
   __JIUWENSWARM_EDITION__?: string;
   /** Login simulation switch injected by the User Web server. */
   __JIUWEN_LOGIN_AUTH_SIMULATE__?: boolean | string;
-  /** Whether this frontend artifact contains the optional simulation plugin. */
-  __JIUWEN_LOGIN_AUTH_SIMULATE_AVAILABLE__?: boolean | string;
+  /** Web transport mode injected by the User Web server (websocket | http). */
+  __JIUWEN_WEB_TRANSPORT__?: string;
 }
 
 declare module 'virtual:login-auth-simulate-provider' {

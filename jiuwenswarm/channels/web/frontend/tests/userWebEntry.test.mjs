@@ -74,10 +74,10 @@ test('simulated enterprise login uses local defaults without an access token', (
   resetBrowserState();
   const context = buildSimulatedEnterpriseContext('');
 
-  assert.equal(context.user.user_id, 'debug-user');
-  assert.equal(context.org.group_id, 'debug-group');
+  assert.equal(context.user.user_id, 'default');
+  assert.equal(context.org.group_id, 'default');
   assert.equal(context.gateway.jiuwenclaw_id, 'debug-gateway');
-  assert.equal(context.selectedBot, 'debug-agent');
+  assert.equal(context.selectedBot, 'default');
   assert.doesNotMatch(renderEntry('enterprise', true), /正在前往登录页/);
 });
 

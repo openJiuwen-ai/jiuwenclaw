@@ -72,7 +72,7 @@ def _default_dist_dir() -> Path:
 def _inject_user_web_runtime_config(
     document: str,
     login_auth_simulate: bool = True,
-    login_auth_simulate_available: bool = True,
+    web_transport: str = "websocket",
 ) -> str:
     """Inject runtime edition and login-auth flags into index.html."""
     edition = "enterprise" if is_enterprise() else "personal"
@@ -82,10 +82,7 @@ def _inject_user_web_runtime_config(
             "__JIUWEN_LOGIN_AUTH_SIMULATE_VALUE__",
             "true" if login_auth_simulate else "false",
         )
-        .replace(
-            "__JIUWEN_LOGIN_AUTH_SIMULATE_AVAILABLE_VALUE__",
-            "true" if login_auth_simulate_available else "false",
-        )
+        .replace("__JIUWEN_WEB_TRANSPORT_VALUE__", web_transport)
     )
 
 
@@ -98,6 +95,13 @@ def _parse_login_auth_simulate(raw: str | None) -> bool:
     raise ValueError(
         f"LOGIN_AUTH_SIMULATE 配置非法：期望 true 或 false，实际为 {raw!r}"
     )
+
+
+def _parse_web_transport(raw: str | None) -> str:
+    value = (raw or "").strip().lower()
+    if value in ("http", "a2"):
+        return "http"
+    return "websocket"
 
 
 def _probe_http_service(
@@ -155,7 +159,7 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
     manager_api_target = ""
     ws_disable_compress = False
     login_auth_simulate = True
-    login_auth_simulate_available = True
+    web_transport = "websocket"
     logger = logging.getLogger(__name__)
 
     _HOP_BY_HOP_HEADERS = {
@@ -688,7 +692,7 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
             body = _inject_user_web_runtime_config(
                 index.read_text(encoding="utf-8"),
                 self.login_auth_simulate,
-                self.login_auth_simulate_available,
+                self.web_transport,
             ).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -921,23 +925,15 @@ def main() -> None:
     _ConfiguredHandler.manager_api_target = os.getenv("USER_WEB_MANAGER_TARGET", "").strip()
     enterprise = is_enterprise()
     login_auth_simulate_raw = os.getenv("LOGIN_AUTH_SIMULATE")
-    login_auth_simulate_available_raw = os.getenv("LOGIN_AUTH_SIMULATE_AVAILABLE")
     try:
         login_auth_simulate = _parse_login_auth_simulate(
             login_auth_simulate_raw
         )
-        login_auth_simulate_available = _parse_login_auth_simulate(
-            login_auth_simulate_available_raw
-        )
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
     _ConfiguredHandler.login_auth_simulate = login_auth_simulate
-    _ConfiguredHandler.login_auth_simulate_available = login_auth_simulate_available
-    if enterprise and login_auth_simulate and not login_auth_simulate_available:
-        raise SystemExit(
-            "配置冲突：LOGIN_AUTH_SIMULATE=true，但当前客户交付制品未包含登录认证模拟插件；"
-            "请设置 LOGIN_AUTH_SIMULATE=false 并接入 manager ID认证服务"
-        )
+    web_transport = _parse_web_transport(os.getenv("WEB_TRANSPORT"))
+    _ConfiguredHandler.web_transport = web_transport
     _ConfiguredHandler.web_http_target = web_http_target
     _ConfiguredHandler.ws_disable_compress = args.ws_disable_compress
     _ConfiguredHandler.logger = logger

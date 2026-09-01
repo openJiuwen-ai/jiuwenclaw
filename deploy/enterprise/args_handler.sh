@@ -51,12 +51,7 @@ parse_args() {
 }
 
 process_modules() {
-    # personal 默认不带 Manager；enterprise 需要 Manager 作为统一入口
-    if [[ "${DEPLOY_VARS["JIUWENSWARM_EDITION"]:-enterprise}" == "enterprise" ]]; then
-        MODULES=("GATEWAY" "WEB" "MANAGER" "RUNTIME")
-    else
-        MODULES=("GATEWAY" "WEB" "RUNTIME")
-    fi
+    MODULES=("GATEWAY" "WEB" "RUNTIME")
 }
 
 # Print help info and exit

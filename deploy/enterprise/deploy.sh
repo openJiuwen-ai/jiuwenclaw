@@ -23,6 +23,7 @@ source "gateway_handler.sh"
 source "manager_handler.sh"
 source "web_handler.sh"
 source "runtime_handler.sh"
+source "patch_handler.sh"
 
 process_up() {
     # MODULES是ALL_MODULES的子集，启动顺序正着来
@@ -92,52 +93,6 @@ process_restart() {
 # ==================== Main function ====================
 main() {
     read_env_from_file "${CUSTOM_ENV_FILE}" "DEPLOY_VARS"
-
-    # JIUWENSWARM_EDITION 是产品形态的唯一开关；USER_WEB_MODE / ENABLE_USER_WEB_EMBEDDING 仅作兼容输入。
-    if [[ -z "${DEPLOY_VARS["JIUWENSWARM_EDITION"]:-}" ]]; then
-        if [[ -n "${DEPLOY_VARS["USER_WEB_MODE"]:-}" ]]; then
-            DEPLOY_VARS["JIUWENSWARM_EDITION"]="${DEPLOY_VARS["USER_WEB_MODE"]}"
-            warning "USER_WEB_MODE is deprecated; use JIUWENSWARM_EDITION=${DEPLOY_VARS["JIUWENSWARM_EDITION"]}"
-        elif [[ "${DEPLOY_VARS["ENABLE_USER_WEB_EMBEDDING"]:-false}" == "true" ]]; then
-            DEPLOY_VARS["JIUWENSWARM_EDITION"]="enterprise"
-            warning "ENABLE_USER_WEB_EMBEDDING is deprecated; use JIUWENSWARM_EDITION=enterprise"
-        else
-            DEPLOY_VARS["JIUWENSWARM_EDITION"]="enterprise"
-        fi
-    fi
-    DEPLOY_VARS["USER_WEB_MODE"]="${DEPLOY_VARS["JIUWENSWARM_EDITION"]}"
-    DEPLOY_VARS["ENABLE_USER_WEB_EMBEDDING"]=$(
-        [[ "${DEPLOY_VARS["JIUWENSWARM_EDITION"]}" == "enterprise" ]] && printf true || printf false
-    )
-    if [[ -z "${DEPLOY_VARS["LOGIN_AUTH_SIMULATE"]:-}" ]]; then
-        DEPLOY_VARS["LOGIN_AUTH_SIMULATE"]="true"
-    fi
-    local user_web_idp_defaulted="false"
-    local user_web_manager_defaulted="false"
-    if [[ -z "${DEPLOY_VARS["USER_WEB_IDP_TARGET"]:-}" ]]; then
-        DEPLOY_VARS["USER_WEB_IDP_TARGET"]="http://${DEPLOY_VARS["IDENTITY_NAME"]}:${DEPLOY_VARS["IDENTITY_REST_PORT"]}"
-        user_web_idp_defaulted="true"
-    fi
-    if [[ -z "${DEPLOY_VARS["USER_WEB_MANAGER_TARGET"]:-}" ]]; then
-        DEPLOY_VARS["USER_WEB_MANAGER_TARGET"]="http://${DEPLOY_VARS["MANAGER_SERVER_NAME"]}:${DEPLOY_VARS["MANAGER_REST_PORT"]}"
-        user_web_manager_defaulted="true"
-    fi
-    if [[ "${DEPLOY_VARS["JIUWENSWARM_EDITION"]}" == "enterprise" ]]; then
-        if [[ "${DEPLOY_VARS["LOGIN_AUTH_SIMULATE"]}" == "true" ]]; then
-            info "【登录认证模拟调试模式已开启】"
-        elif [[ "${DEPLOY_VARS["LOGIN_AUTH_SIMULATE"]}" == "false" ]]; then
-            info "【正式身份认证模式，依赖manager ID认证服务】"
-            if [[ "${user_web_idp_defaulted}" == "true" ]]; then
-                info "USER_WEB_IDP_TARGET 未配置，暂使用当前集群 Identity：${DEPLOY_VARS["USER_WEB_IDP_TARGET"]}"
-            fi
-            if [[ "${user_web_manager_defaulted}" == "true" ]]; then
-                info "USER_WEB_MANAGER_TARGET 未配置，暂使用当前集群 Manager：${DEPLOY_VARS["USER_WEB_MANAGER_TARGET"]}"
-            fi
-        fi
-    elif [[ "${DEPLOY_VARS["LOGIN_AUTH_SIMULATE"]}" == "false" ]]; then
-        warning "配置冲突：personal 模式仍将跳过企业登录认证"
-    fi
-
     parse_args "$@"
     detect_os
     check_dependency

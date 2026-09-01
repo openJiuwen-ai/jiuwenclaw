@@ -8,7 +8,7 @@
     "prebuild": "cd ../../../.. && node ./jiuwenswarm/scripts/generate-agent-folders.js",
     "dev": "vite",
     "build": "tsc && vite build",
-    "build:customer": "tsc && INCLUDE_LOGIN_AUTH_SIMULATE=false VITE_LOGIN_AUTH_SIMULATE_AVAILABLE=false VITE_LOGIN_AUTH_SIMULATE=false vite build",
+    "build:customer": "tsc && VITE_LOGIN_AUTH_SIMULATE=false vite build",
     "test:code-turn-diff-binding": "tsc src/features/code-mode/codeTurnDiffBinding.ts --target ES2020 --module ES2020 --moduleResolution Bundler --rootDir src --outDir node_modules/.cache/code-turn-diff-binding --skipLibCheck --noEmitOnError && node --test tests/codeTurnDiffBinding.test.mjs",
     "test:openai-account-model-state": "tsc src/components/ConfigPanel/openaiAccountModelState.ts --target ES2020 --module ES2020 --moduleResolution Bundler --rootDir src --outDir node_modules/.cache/openai-account-model-state --skipLibCheck && node --test tests/openaiAccountModelState.test.mjs",
     "test:spreadsheet-preview": "esbuild src/components/ArtifactsPanel/spreadsheetWorkbookParser.ts src/components/ArtifactsPanel/spreadsheetPreviewModel.ts src/components/ArtifactsPanel/filePreviewModel.ts src/components/ArtifactsPanel/chartGeometry.ts --bundle --packages=external --platform=node --format=esm --outdir=node_modules/.cache/spreadsheet-preview && node --test tests/spreadsheetPreview.test.mjs",

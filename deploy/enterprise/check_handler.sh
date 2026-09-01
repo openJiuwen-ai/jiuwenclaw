@@ -9,53 +9,6 @@ check_cmd() {
     fi
 }
 
-check_boolean_value() {
-    local name="$1"
-    local value="${DEPLOY_VARS["${name}"]:-}"
-    if [[ "${value}" != "true" && "${value}" != "false" ]]; then
-        error "${name} must be true or false, current value: ${value}"
-    fi
-}
-
-check_jiuwenswarm_edition_config() {
-    local edition="${DEPLOY_VARS["JIUWENSWARM_EDITION"]:-enterprise}"
-    if [[ "${edition}" != "personal" && "${edition}" != "enterprise" ]]; then
-        error "JIUWENSWARM_EDITION must be personal or enterprise, current value: ${edition}"
-    fi
-    check_boolean_value "IS_UP_MANAGER_WEB"
-    check_boolean_value "LOGIN_AUTH_SIMULATE"
-    check_boolean_value "LOGIN_AUTH_SIMULATE_AVAILABLE"
-    if [[ "${edition}" == "enterprise" && "${DEPLOY_VARS["LOGIN_AUTH_SIMULATE"]}" == "true" && "${DEPLOY_VARS["LOGIN_AUTH_SIMULATE_AVAILABLE"]}" == "false" ]]; then
-        error "配置冲突：LOGIN_AUTH_SIMULATE=true，但当前客户交付制品未包含登录认证模拟插件；请设置 LOGIN_AUTH_SIMULATE=false"
-    fi
-    if [[ "${edition}" == "personal" && "${DEPLOY_VARS["LOGIN_AUTH_SIMULATE"]}" == "false" ]]; then
-        warning "配置冲突：JIUWENSWARM_EDITION=personal 始终跳过企业登录；LOGIN_AUTH_SIMULATE=false 不会启用正式身份认证"
-    fi
-    if [[ "${edition}" == "enterprise" && "${DEPLOY_VARS["LOGIN_AUTH_SIMULATE"]}" == "false" ]]; then
-        if [[ -z "${DEPLOY_VARS["USER_WEB_IDP_TARGET"]:-}" ]]; then
-            error "正式身份认证模式缺少 USER_WEB_IDP_TARGET"
-        fi
-        if [[ -z "${DEPLOY_VARS["USER_WEB_MANAGER_TARGET"]:-}" ]]; then
-            error "正式身份认证模式缺少 USER_WEB_MANAGER_TARGET"
-        fi
-    fi
-}
-
-check_user_web_mode_config() {
-    check_jiuwenswarm_edition_config
-}
-
-module_is_selected() {
-    local expected="$1"
-    local module=""
-    for module in "${MODULES[@]}"; do
-        if [ "${module}" == "${expected}" ]; then
-            return 0
-        fi
-    done
-    return 1
-}
-
 check_yq() {
     local YQ_VERSION=$(yq --version 2>&1)
 
@@ -509,12 +462,10 @@ check_gateway_up_dependency(){
 
     check_if_db_up
     check_if_jina_up
-
     ensure_redis_up
 }
 
 check_web_up_dependency(){
-    check_jiuwenswarm_edition_config
     check_if_db_up
     check_if_obs_up
 
@@ -524,7 +475,6 @@ check_web_up_dependency(){
 }
 
 check_manager_up_dependency(){
-    check_jiuwenswarm_edition_config
     #check_if_rabbitmq_up
     check_if_db_up
 }
