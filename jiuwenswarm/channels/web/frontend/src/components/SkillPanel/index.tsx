@@ -354,6 +354,7 @@ export function SkillPanel({
   const [hubLoading, setHubLoading] = useState(false);
   const [search, setSearch] = useState("");
   const prevIsActiveRef = useRef(isActive);
+  const mountedRef = useRef(false);
   const [selectedSkill, setSelectedSkill] = useState<SkillDetail | null>(null);
   const [listState, setListState] = useState<LoadState>("idle");
   const [detailState, setDetailState] = useState<LoadState>("idle");
@@ -1130,9 +1131,11 @@ export function SkillPanel({
   // 当左边栏切换到技能页面时，或切换到"我的技能"页签时，调用 list 接口
   useEffect(() => {
     const prevIsActive = prevIsActiveRef.current;
+    const isInitialMount = !mountedRef.current;
+    mountedRef.current = true;
 
-    // 场景1：从其他页面切换到技能页面（isActive 变为 true）
-    if (isActive && !prevIsActive) {
+    // 场景1：从其他页面切换到技能页面（isActive 变为 true），或首次挂载且已激活
+    if (isActive && (!prevIsActive || isInitialMount)) {
       fetchSkills();
     }
 
@@ -1143,7 +1146,7 @@ export function SkillPanel({
 
     // 更新 ref
     prevIsActiveRef.current = isActive;
-  }, [isActive, activeTab, fetchSkills]);
+  }, [isActive, activeTab, fetchSkills, mountedRef]);
 
   // OAuth 回调后恢复技能详情页 + 打开发布抽屉
   // 在 isActive 变为 true 后执行（确保 WebSocket 已连接、SkillPanel 已挂载）
@@ -2217,7 +2220,7 @@ export function SkillPanel({
                             </div>
                           )}
                         </div>
-                        <div className="shrink-0">
+                          <div className="shrink-0">
                           {(() => {
                             const isInstalled = installedSkillMap.has(skill.name);
                             if (isInstalled) {
@@ -2314,6 +2317,36 @@ export function SkillPanel({
                               </span>
                             </div>
                           </div>
+                          <div className="shrink-0">
+                            {(() => {
+                              const isInstalled = installedSkillMap.has(skill.name);
+                              if (isInstalled) {
+                                return (
+                                  <button
+                                    onClick={(e) => { e.stopPropagation(); handleGoToChat(skill.name); }}
+                                    onMouseEnter={(e) => {
+                                      const rect = e.currentTarget.getBoundingClientRect();
+                                      setGoTryTooltip({ left: rect.left + rect.width / 2, top: rect.top });
+                                    }}
+                                    onMouseLeave={() => setGoTryTooltip(null)}
+                                    className="w-8 h-8 flex items-center justify-center rounded-[8px] hover:bg-[#F0F7FF] text-text-muted hover:text-[#1476FF] transition-colors"
+                                  >
+                                    <NewConversationIcon aria-hidden width="20" height="20" />
+                                  </button>
+                                );
+                              }
+                              return (
+                                <button
+                                  onClick={(e) => { e.stopPropagation(); handleInstallHubSkill(skill); }}
+                                  className="w-8 h-8 flex items-center justify-center rounded-[8px] hover:bg-[#F0F7FF] text-text-muted hover:text-[#1476FF] transition-colors"
+                                >
+                                  <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
+                                    <path strokeLinecap="round" strokeLinejoin="round" d="M12 5v14M5 12h14" />
+                                  </svg>
+                                </button>
+                              );
+                            })()}
+                            </div>
                         </div>
                         <div className="text-xs text-text-muted mt-4 line-clamp-2">
                           {skill.short_desc || skill.detail_desc || t('skills.noDescription')}

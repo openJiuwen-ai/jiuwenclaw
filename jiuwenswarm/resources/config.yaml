@@ -579,18 +579,31 @@ react:
   context_engine_config:
     enabled: true # 全局开关：false 时整个上下文引擎（含下列所有处理器）不生效
     enable_openrouter_model_context_window_tokens: true # 从 OpenRouter 拉取模型的上下文窗口大小；false 时按内置模型表解析
-    # 显式覆盖上下文窗口 token 上限（正整数），优先级最高，会覆盖当前模型的 context_window；
-    # 注释掉或留空则按当前模型的 context_window / 显式映射 / 自动解析
+    # 是否预下载/使用模型词表进行精确 token 计算；关闭时使用字符串长度兜底，默认不联网。
+    enable_tiktoken_counter: false
+    # 词表统一缓存目录；相对路径相对于 ~/.jiuwenswarm（可由 JIUWENSWARM_DATA_DIR 改变）。
+    tokenizer_cache_dir: tokenizers
+    tokenizer_offline: false
+    # 开发调试时打开：落盘 core 最终发送给模型的完整 messages/tools，
+    # 以及上下文处理器的阈值判断、片段切分、压缩重试和前后对比等 JSONL 记录。
+    # 内容可能包含用户数据和系统提示词，默认关闭。
+    enable_context_debug: false
+    # context_debug_dir: context-debug
+    # 留空则按环境变量 OPENJIUWEN_CONTEXT_DEBUG_DIR，
+    # 再缺省落到 {workspace}/context/{session_id}_context/context_debug/
+    # 已知模型会按模型名自动解析并预热 tokenizer；模型条目也可直接配置
+    # tokenizer/tokenizer_spec 覆盖默认映射。自定义别名无法推断时需声明 tokenizer。
+    # tokenizer_registry:
+    #   - provider: qwen
+    #     model: qwen-max
+    #     source: modelscope
+    #     id: Qwen/Qwen2.5-72B-Instruct
+    # 显式覆盖上下文窗口 token 上限（正整数）；注释掉或留空则按模型自动解析
     # context_window_tokens: 131072
     # 可选的模型名到上下文窗口映射；优先级低于全局值和当前模型的 context_window
     # model_context_window_tokens:
     #   some-model: 131072
     enable_reload: true    # 卸载重载：开启后模型可通过 [[HANDLE:xxx]] 标记把已卸载的大消息原文拉回上下文
-
-    enable_context_debug: false     # 上下文压缩 debug 模式：开启后各处理器在阈值判断、片段切分、压缩重试、 前后对比等每个阶段落盘 JSONL 记录，便于排查压缩问题。关闭时零开销。默认关闭
-    # debug 记录目录；留空则按环境变量 OPENJIUWEN_CONTEXT_DEBUG_DIR，
-    # 再缺省落到 {workspace}/context/{session_id}_context/context_debug/
-    # context_debug_dir:
 
     # 压缩召回：压缩器替换原始消息时，把原文分块归档到会话目录 compression_recall/，
     # 模型可通过 [[COMPRESSION_RECALL: id=...]] 标记按需召回原文。默认关闭。

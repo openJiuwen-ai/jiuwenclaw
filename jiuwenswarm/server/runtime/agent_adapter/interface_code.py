@@ -51,11 +51,12 @@ from openjiuwen.harness.tools import WebFetchWebpageTool, WebFreeSearchTool, Web
 from openjiuwen.harness.tools.worktree import WorktreeConfig, WorktreeRail
 
 from jiuwenswarm.server.runtime.agent_adapter.interface_deep import (
+    _ContextEngineModelState,
     JiuWenSwarmDeepAdapter,
     _AGENT_CARD_ID,
     _CRON_TOOL_CHANNEL_ID,
     _RailBuildInfo,
-    _deep_agent_context_engine_config,
+    _deep_agent_context_engine_config_for_model,
     _deep_agent_kv_cache_affinity_config,
     parse_int,
 )
@@ -729,8 +730,15 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
         if self._sys_operation is None or self._sys_operation_card is None:
             raise RuntimeError("code DeepAgent sys_operation is not initialized")
         agent_card = AgentCard(name=self._agent_name, id=_AGENT_CARD_ID)
-        context_engine_config = _deep_agent_context_engine_config(
+        context_model_state = _ContextEngineModelState(
+            full_config=config_base,
+            model_name=getattr(getattr(model, "model_config", None), "model_name", ""),
+            model=model,
+            config_base=config_base,
+        )
+        context_engine_config = _deep_agent_context_engine_config_for_model(
             config,
+            model_state=context_model_state,
         )
         logger.info(
             "[JiuwenSwarmCodeAdapter] ContextEngineConfig resolved: "

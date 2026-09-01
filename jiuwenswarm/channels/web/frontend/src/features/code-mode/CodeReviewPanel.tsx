@@ -12,6 +12,7 @@ import { subscribeCodeTurnChange } from './codeTurnChangeEvents';
 import { gitClient } from './gitClient';
 import type { CodeReviewTarget, GitDiffFile, GitDiffHunk, GitDiffStats, GitTurnDiff } from './types';
 import type { CodeGitDiffWatchController } from './useCodeGitDiffWatch';
+import { useAdaptiveTooltip } from '../../hooks/useAdaptiveTooltip';
 
 type DiffViewMode = 'unified' | 'split';
 type DiffLineKind = 'added' | 'removed' | 'context' | 'meta';
@@ -289,6 +290,7 @@ export function CodeReviewPanel({ project, sessionId, target = null, diffWatch, 
   const sourceMenuRef = useRef<HTMLDivElement>(null);
   const loadSequenceRef = useRef(0);
   const workingTreeIdentityRef = useRef('');
+  const { tooltip, handlers: tooltipHandlers } = useAdaptiveTooltip();
 
   const loadTurnDiff = useCallback(async () => {
     const loadSequence = loadSequenceRef.current + 1;
@@ -680,8 +682,9 @@ export function CodeReviewPanel({ project, sessionId, target = null, diffWatch, 
                 setExpandedPaths(new Set(files.map(file => file.file_path)));
               }
             }}
-            title={files.length > 0 && expandedPaths.size === files.length ? '收起全部文件' : '展开全部文件'}
+            data-tooltip={files.length > 0 && expandedPaths.size === files.length ? '全部收起' : '全部展开'}
             data-testid="code-mode-review-collapse"
+            {...tooltipHandlers}
           >
             {files.length > 0 && expandedPaths.size === files.length ? (
               <CollapseAllIcon className="h-[24px] w-[24px]" aria-hidden="true" />
@@ -693,9 +696,10 @@ export function CodeReviewPanel({ project, sessionId, target = null, diffWatch, 
             type="button"
             className="code-review__icon-button"
             onClick={() => setViewMode(viewMode === 'unified' ? 'split' : 'unified')}
-            title={viewMode === 'unified' ? '拆分差异视图' : '统一差异视图'}
+            data-tooltip={viewMode === 'unified' ? '切换到统一差异视图' : '切换到拆分差异视图'}
             data-testid="code-mode-review-view-mode"
             data-variant={viewMode}
+            {...tooltipHandlers}
           >
             {viewMode === 'unified' ? (
               <ViewVerticalIcon className="h-[24px] w-[24px]" aria-hidden="true" />
@@ -726,6 +730,7 @@ export function CodeReviewPanel({ project, sessionId, target = null, diffWatch, 
             : '上一轮使用固定历史快照，后续修改不会覆盖该轮差异。'
           : '当前展示工作区相对 HEAD 的修改，文件变化会实时更新。'}
       </footer>
+      {tooltip}
     </section>
   );
 }

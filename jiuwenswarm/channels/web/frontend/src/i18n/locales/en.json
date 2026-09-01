@@ -584,11 +584,11 @@
     }
   },
   "chat": {
-    "placeholder": "Enter to send, Shift+Enter for new line",
+    "placeholder": "What can I do for you? Type \"/\" to quickly reference skills and commands",
     "placeholderCompacting": "Context compression in progress. Messages are temporarily disabled",
     "placeholderProcessing": "Processing, enter to interrupt...",
     "placeholderProcessingQueue": "Processing, new input will join the queue...",
-    "placeholderTeamMode": "Team mode, new input will run in parallel...",
+    "placeholderTeamMode": "What can I do for you? Type \"/\" to quickly reference skills and commands",
     "placeholderTeamModeProcessing": "Team mode processing, new input will run in parallel...",
     "placeholderVoice": "Listening...",
     "welcomeLogoAlt": "WorkSwarm logo",
@@ -646,7 +646,7 @@
     "noInstalledSwarmSkills": "No installed swarm skills",
     "noInstalledSkills": "No installed skills",
     "skillsSearchPlaceholder": "Search skill name or description",
-    "skillsManage": "Skill Management",
+    "skillsManage": "More skills",
     "skillsAdd": "Add to composer",
     "skillsRemove": "Remove",
     "agent": "Agents",
