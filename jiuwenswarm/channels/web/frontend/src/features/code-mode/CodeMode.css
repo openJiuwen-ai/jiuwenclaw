@@ -423,8 +423,7 @@
 
 .code-changes-card {
   container-type: inline-size;
-  width: min(720px, calc(100% - 24px));
-  margin: 14px auto;
+  width: 100%;
   overflow: hidden;
   border: 1px solid var(--color-border-default);
   border-radius: 14px;

@@ -272,6 +272,7 @@ function ReasoningSegmentBlock({
   const userToggledRef = useRef(false);
   const prevClosedRef = useRef(segment.closed);
   const bodyRef = useRef<HTMLDivElement>(null);
+  const autoScrollRef = useRef(true);
 
   useEffect(() => {
     if (!prevClosedRef.current && segment.closed && !userToggledRef.current) {
@@ -294,7 +295,7 @@ function ReasoningSegmentBlock({
       return;
     }
     const el = bodyRef.current;
-    if (!el) {
+    if (!el || !autoScrollRef.current) {
       return;
     }
     el.scrollTop = el.scrollHeight;
@@ -340,7 +341,18 @@ function ReasoningSegmentBlock({
       </button>
       <div className={clsx('reasoning-panel__collapse', open && 'is-open')}>
         <div className="reasoning-panel__collapse-inner">
-          <div ref={bodyRef} className="reasoning-panel__body" data-testid="chat-panel-reasoning-panel-body">
+          <div
+            ref={bodyRef}
+            className="reasoning-panel__body"
+            data-testid="chat-panel-reasoning-panel-body"
+            onScroll={() => {
+              const el = bodyRef.current;
+              if (!el) {
+                return;
+              }
+              autoScrollRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 32;
+            }}
+          >
             {body}
           </div>
         </div>

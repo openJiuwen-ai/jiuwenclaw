@@ -359,7 +359,6 @@
 .conversation-sidebar__group {
   display: flex;
   flex-direction: column;
-  gap: 10px;
 }
 
 .conversation-sidebar__body > .conversation-sidebar__group + .conversation-sidebar__group {
@@ -369,7 +368,6 @@
 .conversation-sidebar__group-list {
   display: flex;
   flex-direction: column;
-  gap: 10px;
 }
 
 .conversation-sidebar__pagination {

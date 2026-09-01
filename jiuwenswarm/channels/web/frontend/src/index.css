@@ -609,7 +609,7 @@ body.workspace-resize-active iframe {
   }
 
   .chat-bubble-wrapper--with-files {
-    width: min(82%, 720px);
+    width: 100%;
   }
 
   /* AI disclaimer — footer note pinned below the composer */
@@ -1061,7 +1061,6 @@ body.workspace-resize-active iframe {
 
   .chat-message-file-list {
     width: 100%;
-    max-width: min(100%, 720px);
   }
 
   .team-member-message__card {
