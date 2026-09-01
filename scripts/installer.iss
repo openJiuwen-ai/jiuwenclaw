@@ -17,13 +17,6 @@
 #ifndef BuildSetupBaseName
   #error BuildSetupBaseName is required; run scripts\build-exe.ps1
 #endif
-#ifndef BuildWebView2InstallerPath
-  #error BuildWebView2InstallerPath is required; run scripts\build-exe.ps1
-#endif
-#ifndef BuildWebView2InstallerFileName
-  #error BuildWebView2InstallerFileName is required; run scripts\build-exe.ps1
-#endif
-
 #define MyAppName BuildDisplayName
 #define MyAppVersion BuildVersion
 #define MyAppPublisher "openJiuwen"
@@ -72,11 +65,6 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 
 [Files]
 Source: "..\dist\{#BuildDistDirName}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
-; Keep the Microsoft-signed offline prerequisite inside Setup only. It is
-; extracted to {tmp} solely when no usable Evergreen Runtime is registered.
-; Keep it outside the main solid-compression stream so PrepareToInstall can
-; reach the already-compressed installer without decoding the app payload.
-Source: "{#BuildWebView2InstallerPath}"; Flags: dontcopy solidbreak nocompression
 
 [UninstallRun]
 Filename: "{app}\{#MyAppExeName}"; Parameters: "--desktop-reset-external-cli-config"; Flags: runhidden waituntilterminated; RunOnceId: "ResetExternalCliConfig"
@@ -103,19 +91,30 @@ Filename: "{win}\explorer.exe"; Parameters: """{app}\{#MyAppExeName}"""; Descrip
 [Code]
 const
   WebView2RuntimeId = '{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}';
+  WebView2StandaloneUrl = 'https://go.microsoft.com/fwlink/?linkid=2124701';
+  WebView2StandaloneFileName = 'MicrosoftEdgeWebView2RuntimeInstallerX64.exe';
+  WebView2DownloadPageUrl = 'https://developer.microsoft.com/microsoft-edge/webview2/';
   // Inno writes the uninstall entry as "<AppId>_is1" under HKLM. The old admin
   // install registers in the 64-bit view; WOW6432Node is checked as a fallback.
   LegacyUninstallNativeSubkey = 'SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{6DC96977-C194-44FE-812D-D4F0B576BD905}_is1';
   LegacyUninstallWowSubkey = 'SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\{6DC96977-C194-44FE-812D-D4F0B576BD905}_is1';
 
 var
-  WebView2ProgressPage: TOutputMarqueeProgressWizardPage;
+  WebView2DownloadPage: TDownloadWizardPage;
+  WebView2InstallPage: TOutputMarqueeProgressWizardPage;
 
 procedure InitializeWizard;
 begin
-  WebView2ProgressPage := CreateOutputMarqueeProgressPage(
-    '正在准备 ' + '{#MyAppName}',
-    '首次安装 Microsoft Edge WebView2 Runtime 可能需要 1–3 分钟，请勿关闭安装程序。'
+  WebView2DownloadPage := CreateDownloadPage(
+    '正在下载 Microsoft Edge WebView2 Runtime',
+    '桌面 App 需要此运行环境。下载期间可以取消，WorkSwarm 主体安装仍可继续。',
+    nil
+  );
+  WebView2DownloadPage.ShowBaseNameInsteadOfUrl := True;
+  WebView2DownloadPage.AbortButton.Caption := '取消下载';
+  WebView2InstallPage := CreateOutputMarqueeProgressPage(
+    '正在安装 Microsoft Edge WebView2 Runtime',
+    '请在弹出的微软安装窗口中查看进度或取消安装。'
   );
 end;
 
@@ -132,12 +131,115 @@ begin
       (Trim(Version) <> '') and (CompareText(Trim(Version), '0.0.0.0') <> 0);
 end;
 
+procedure ShowWebView2UnavailableMessage(const Reason: String);
+begin
+  Log(Reason + ' WorkSwarm installation will continue without a usable WebView2 Runtime.');
+  if WizardSilent then
+    exit;
+
+  MsgBox(
+    Reason + #13#10 + #13#10 +
+    '{#MyAppName} 将继续安装。安装完成后 Web 端仍可正常使用；' +
+    '桌面 App 必须安装 Microsoft Edge WebView2 Runtime 才能正常运行。' + #13#10 + #13#10 +
+    '可稍后从微软官方页面下载安装：' + #13#10 + WebView2DownloadPageUrl,
+    mbError,
+    MB_OK
+  );
+end;
+
+function DownloadWebView2Installer(
+  var RuntimeInstaller: String;
+  var FailureReason: String
+): Boolean;
+var
+  DownloadError: String;
+begin
+  Result := False;
+  FailureReason := '';
+  RuntimeInstaller := ExpandConstant('{tmp}\') + WebView2StandaloneFileName;
+  DeleteFile(RuntimeInstaller);
+  WebView2DownloadPage.Clear;
+  WebView2DownloadPage.Add(
+    WebView2StandaloneUrl,
+    WebView2StandaloneFileName,
+    ''
+  );
+  WebView2DownloadPage.Show;
+  try
+    try
+      WebView2DownloadPage.Download;
+      Result := FileExists(RuntimeInstaller);
+      if not Result then
+        Log('WebView2 Runtime download completed but the temporary file is missing.');
+    except
+      DownloadError := GetExceptionMessage;
+      if WebView2DownloadPage.AbortedByUser then
+      begin
+        FailureReason := '已取消下载 Microsoft Edge WebView2 Runtime。';
+        Log('WebView2 Runtime download was cancelled by the user.');
+      end
+      else
+      begin
+        FailureReason :=
+          '未能下载 Microsoft Edge WebView2 Runtime。请检查网络、代理或防火墙设置。';
+        Log('WebView2 Runtime download failed: ' + DownloadError);
+      end;
+    end;
+  finally
+    WebView2DownloadPage.Hide;
+  end;
+end;
+
+function VerifyDownloadedWebView2Installer(const RuntimeInstaller: String): Boolean;
+var
+  PowerShellPath: String;
+  ScriptPath: String;
+  ScriptBody: AnsiString;
+  ResultCode: Integer;
+begin
+  Result := False;
+  PowerShellPath := ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe');
+  ScriptPath := ExpandConstant('{tmp}\verify-workswarm-webview2.ps1');
+  ScriptBody :=
+    '$signature = Get-AuthenticodeSignature -LiteralPath $args[0]' + #13#10 +
+    'if (($signature.Status -eq ''Valid'') -and $signature.SignerCertificate -and ' +
+    '($signature.SignerCertificate.Subject -match ''(^|,\s*)O=Microsoft Corporation(,|$)'')) { exit 0 }' + #13#10 +
+    'exit 1' + #13#10;
+
+  if not SaveStringToFile(ScriptPath, ScriptBody, False) then
+  begin
+    Log('Could not create the WebView2 signature verification script.');
+    exit;
+  end;
+
+  if not Exec(
+    PowerShellPath,
+    '-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' +
+      ScriptPath + '" "' + RuntimeInstaller + '"',
+    '',
+    SW_HIDE,
+    ewWaitUntilTerminated,
+    ResultCode
+  ) then
+  begin
+    Log('Could not start WebView2 signature verification.');
+    exit;
+  end;
+
+  Result := ResultCode = 0;
+  if not Result then
+    Log('Downloaded WebView2 installer failed Microsoft Authenticode verification.');
+end;
+
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 var
   RuntimeVersion: String;
   RuntimeInstaller: String;
   ResultCode: Integer;
   Executed: Boolean;
+  InstallParameters: String;
+  InstallShowCmd: Integer;
+  DownloadFailureReason: String;
 begin
   Result := '';
 
@@ -147,33 +249,61 @@ begin
     exit;
   end;
 
-  Log('Microsoft Edge WebView2 Runtime is missing; running bundled installer.');
-  WebView2ProgressPage.Show;
-  try
-    WebView2ProgressPage.SetText(
-      '正在准备 Microsoft Edge WebView2 Runtime…',
-      '即将开始安装运行环境。'
+  Log('Microsoft Edge WebView2 Runtime is missing; starting the online prerequisite flow.');
+  if not WizardSilent then
+    MsgBox(
+      '未检测到可用的 Microsoft Edge WebView2 Runtime。' + #13#10 + #13#10 +
+      '安装程序将从微软官方下载约 250 MB 的运行环境，并显示下载进度。' +
+      '下载期间可以取消；如果网络不可用，WorkSwarm 主体安装仍会继续。',
+      mbInformation,
+      MB_OK
     );
-    WebView2ProgressPage.Animate;
-    ExtractTemporaryFile('{#BuildWebView2InstallerFileName}');
-    RuntimeInstaller := ExpandConstant('{tmp}\{#BuildWebView2InstallerFileName}');
 
-    WebView2ProgressPage.SetText(
-      '正在安装 Microsoft Edge WebView2 Runtime…',
-      '首次安装可能需要 1–3 分钟，请勿关闭安装程序。'
+  if not DownloadWebView2Installer(RuntimeInstaller, DownloadFailureReason) then
+  begin
+    if DownloadFailureReason = '' then
+      DownloadFailureReason := 'Microsoft Edge WebView2 Runtime 下载文件不可用。';
+    ShowWebView2UnavailableMessage(DownloadFailureReason);
+    exit;
+  end;
+
+  if not VerifyDownloadedWebView2Installer(RuntimeInstaller) then
+  begin
+    DeleteFile(RuntimeInstaller);
+    ShowWebView2UnavailableMessage(
+      '下载的 Microsoft Edge WebView2 Runtime 未通过微软数字签名验证，已停止执行。'
     );
-    WebView2ProgressPage.Animate;
+    exit;
+  end;
+
+  WebView2InstallPage.Show;
+  try
+    WebView2InstallPage.SetText(
+      '正在安装 Microsoft Edge WebView2 Runtime…',
+      '请在弹出的微软安装窗口中查看进度或取消安装。'
+    );
+    WebView2InstallPage.Animate;
     ResultCode := -1;
+    if WizardSilent then
+    begin
+      InstallParameters := '/silent /install';
+      InstallShowCmd := SW_HIDE;
+    end
+    else
+    begin
+      InstallParameters := '/install';
+      InstallShowCmd := SW_SHOWNORMAL;
+    end;
     Executed := Exec(
       RuntimeInstaller,
-      '/silent /install',
+      InstallParameters,
       '',
-      SW_HIDE,
+      InstallShowCmd,
       ewWaitUntilTerminated,
       ResultCode
     );
   finally
-    WebView2ProgressPage.Hide;
+    WebView2InstallPage.Hide;
   end;
 
   { The Evergreen installer can return a non-zero code even when registration
@@ -193,9 +323,9 @@ begin
   else
     Log('WebView2 Runtime installer could not be started.');
 
-  Result :=
-    'Microsoft Edge WebView2 Runtime 安装失败。' + #13#10 + #13#10 +
-    '{#MyAppName} 桌面端需要此运行环境。请检查系统策略或安全软件后重试安装。';
+  ShowWebView2UnavailableMessage(
+    'Microsoft Edge WebView2 Runtime 未能完成安装或已被取消。'
+  );
 end;
 
 // Migration: remove a previous admin-lineage install (AppId

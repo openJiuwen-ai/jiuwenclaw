@@ -6,7 +6,7 @@ This guide explains how to build a desktop app with **uv**, **PyInstaller**, and
 
 - **uv**: Python package manager used by the project
 - **Node.js**: **Build-time only** for the web UI; the shipped app does not require Node at runtime
-- **WebView2 Runtime offline installer**: download Microsoft's x64 Evergreen Standalone Installer into a build cache outside the repository
+- **Target-machine network access**: Setup uses Microsoft's download service when WebView2 Runtime is missing; an unavailable network does not block the main installation
 - **Windows**: `onedir` output for Inno Setup installers
 - **macOS**: `.app` bundle and `.dmg`
 
@@ -28,11 +28,10 @@ This guide explains how to build a desktop app with **uv**, **PyInstaller**, and
 From the repo root:
 
 ```powershell
-$env:WEBVIEW2_INSTALLER_PATH = "$env:LOCALAPPDATA\jiuwenswarm-build-cache\webview2\MicrosoftEdgeWebView2RuntimeInstallerX64.exe"
 .\scripts\build-exe.ps1
 ```
 
-Alternatively, pass `-WebView2InstallerPath` explicitly. The build verifies the expected filename and Microsoft Authenticode signature. The binary is embedded in the final Setup executable only and is not committed to the repository.
+The Setup executable no longer embeds the full WebView2 offline installer. When the target machine has no WebView2 Runtime, Setup downloads the x64 Evergreen Standalone Installer from Microsoft with a visible progress page and verifies its Microsoft Authenticode signature. A network failure or user cancellation does not block the main WorkSwarm installation: the web application remains available, while the desktop App requires WebView2 to be installed later.
 
 Or double-click `scripts\build-exe.bat`.
 

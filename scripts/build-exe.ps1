@@ -1,10 +1,9 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025-2026. All rights reserved.
 # Windows 打包 exe 脚本
-# 用法: .\scripts\build-exe.ps1 -WebView2InstallerPath <x64 Evergreen 离线安装器>
+# 用法: .\scripts\build-exe.ps1 [-NodeDir <已验证的 Node.js 运行时目录>]
 
 param(
-    [string]$NodeDir = "",
-    [string]$WebView2InstallerPath = $env:WEBVIEW2_INSTALLER_PATH
+    [string]$NodeDir = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -20,41 +19,6 @@ Set-Location $ProjectRoot
 $BundleNode = if ($env:BUNDLE_NODE) { $env:BUNDLE_NODE } else { "1" }
 $NodeVersion = if ($env:NODE_VERSION) { $env:NODE_VERSION } else { "v22.11.0" }
 $NodeSource = $null
-
-function Resolve-WebView2Installer {
-    param([string]$ExplicitPath)
-
-    if (-not $ExplicitPath) {
-        throw (
-            "WebView2InstallerPath is required. Download the Microsoft Edge " +
-            "WebView2 Evergreen Standalone Installer (x64) into an external " +
-            "build cache, then pass -WebView2InstallerPath or set " +
-            "WEBVIEW2_INSTALLER_PATH."
-        )
-    }
-
-    $resolved = (Resolve-Path -LiteralPath $ExplicitPath -ErrorAction Stop).Path
-    if ([IO.Path]::GetExtension($resolved) -ne ".exe") {
-        throw "WebView2InstallerPath must point to an .exe file: $resolved"
-    }
-    if ((Split-Path -Leaf $resolved) -ne "MicrosoftEdgeWebView2RuntimeInstallerX64.exe") {
-        throw (
-            "WebView2InstallerPath must point to the x64 Evergreen Standalone " +
-            "Installer named MicrosoftEdgeWebView2RuntimeInstallerX64.exe: $resolved"
-        )
-    }
-
-    $signature = Get-AuthenticodeSignature -LiteralPath $resolved
-    if ($signature.Status -ne [System.Management.Automation.SignatureStatus]::Valid) {
-        throw "WebView2 installer Authenticode signature is not valid: $($signature.Status)"
-    }
-    if (-not $signature.SignerCertificate -or
-        $signature.SignerCertificate.Subject -notmatch "O=Microsoft Corporation") {
-        throw "WebView2 installer is not signed by Microsoft Corporation: $resolved"
-    }
-
-    return $resolved
-}
 
 function Test-Truthy {
     param([string]$Value)
@@ -203,9 +167,6 @@ function Copy-NodeRuntime {
     Write-Host "[runtime] Bundled Node $nodeVersion into $target" -ForegroundColor Green
 }
 
-$ResolvedWebView2Installer = Resolve-WebView2Installer -ExplicitPath $WebView2InstallerPath
-$WebView2InstallerFileName = Split-Path -Leaf $ResolvedWebView2Installer
-
 if (Test-Truthy $BundleNode) {
     $NodeSource = Resolve-NodeRuntimeDir `
         -ProjectRoot $ProjectRoot `
@@ -312,9 +273,7 @@ $InnoDefines = @(
     "/DBuildVersion=$BuildVersion",
     "/DBuildExecutableNameWindows=$BuildExecutableNameWindows",
     "/DBuildDistDirName=$BuildDistDirName",
-    "/DBuildSetupBaseName=$BuildSetupBaseName",
-    "/DBuildWebView2InstallerPath=$ResolvedWebView2Installer",
-    "/DBuildWebView2InstallerFileName=$WebView2InstallerFileName"
+    "/DBuildSetupBaseName=$BuildSetupBaseName"
 )
 & $Iscc @InnoDefines "$ProjectRoot\scripts\installer.iss"
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
