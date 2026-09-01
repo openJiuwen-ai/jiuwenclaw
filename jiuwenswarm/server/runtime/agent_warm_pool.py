@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any, TYPE_CHECKING
 
 from jiuwenswarm.common.utils import get_agent_sessions_dir
+from jiuwenswarm.common.utils import prewarm_enabled_by_env
 from jiuwenswarm.common.work_mode import (
     DEFAULT_PROJECT_ID_CODE,
     DEFAULT_PROJECT_ID_WORK,
@@ -32,28 +33,6 @@ logger = logging.getLogger(__name__)
 # Background prewarming is off by default and is only activated through the
 # environment. Once off, sessions are allocated an id immediately and initialize
 # lazily on their first request.
-_PREWARM_ENABLED_ENV_KEY = "JIUWENSWARM_AGENT_PREWARM"
-_PREWARM_ON_VALUES = frozenset({"1", "true", "yes", "on"})
-_PREWARM_OFF_VALUES = frozenset({"0", "false", "no", "off"})
-
-
-def _prewarm_enabled_by_env() -> bool:
-    """Return whether background session prewarming is switched on.
-
-    Returns:
-        True only when the environment explicitly opts in; False when the
-        switch is unset or carries an unrecognized value.
-    """
-    raw = str(os.environ.get(_PREWARM_ENABLED_ENV_KEY, "") or "").strip().lower()
-    if raw in _PREWARM_ON_VALUES:
-        return True
-    if raw and raw not in _PREWARM_OFF_VALUES:
-        logger.warning(
-            "Ignoring unrecognized %s value %r; keeping prewarming disabled.",
-            _PREWARM_ENABLED_ENV_KEY,
-            raw,
-        )
-    return False
 
 
 def _zero_stats() -> dict[str, int]:
@@ -128,7 +107,7 @@ class AgentWarmPool:
         enabled: bool | None = None,
     ) -> None:
         self._manager = manager
-        self._enabled = _prewarm_enabled_by_env() if enabled is None else bool(enabled)
+        self._enabled = prewarm_enabled_by_env() if enabled is None else bool(enabled)
         self._boot_id = uuid.uuid4().hex
         self._sequence = 0
         self._revision = WarmRevision(self._boot_id, "", 0)
@@ -485,11 +464,12 @@ class AgentWarmPool:
             self._foreground_count = max(0, self._foreground_count - 1)
             if self._foreground_count == 0:
                 self._foreground_idle.set()
-                self._schedule_background_pump_locked()
-                logger.info(
-                    "Agent prewarm background resumed: pending=%s",
-                    len(self._pending),
-                )
+                if self._enabled:
+                    self._schedule_background_pump_locked()
+                    logger.info(
+                        "Agent prewarm background resumed: pending=%s",
+                        len(self._pending),
+                    )
 
     async def _prepare(
         self,

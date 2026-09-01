@@ -443,3 +443,34 @@ def test_new_boot_cleans_only_metadata_less_marked_workspace(
 
     assert not (tmp_path / stale_id).exists()
     assert (tmp_path / persisted_id / "metadata.json").is_file()
+
+
+@pytest.mark.asyncio
+async def test_end_foreground_skips_background_pump_when_disabled(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """When prewarm is disabled, end_foreground must not schedule the
+    background pump or emit the 'resumed' log line."""
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.agent_warm_pool.get_agent_sessions_dir",
+        lambda: tmp_path,
+    )
+    monkeypatch.delenv("JIUWENSWARM_AGENT_PREWARM", raising=False)
+    pool = AgentWarmPool(_FakeManager(_FakeRootAgent()), enabled=False)
+    pump_calls: list[bool] = []
+
+    original_schedule = pool._schedule_background_pump_locked
+
+    def _tracking_schedule() -> None:
+        pump_calls.append(True)
+        original_schedule()
+
+    pool._schedule_background_pump_locked = _tracking_schedule  # type: ignore[assignment]
+
+    # Simulate a foreground session that begins and ends.
+    await pool.begin_foreground()
+    await pool.end_foreground()
+
+    assert pump_calls == []
+    assert pool._foreground_count == 0
+    await pool.close()

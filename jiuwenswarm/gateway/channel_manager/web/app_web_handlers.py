@@ -105,6 +105,7 @@ from jiuwenswarm.common.updater import DEFAULT_SOURCE_CONFIG, UpdaterService
 from jiuwenswarm.common.utils import (
     get_env_file,
     get_root_dir,
+    prewarm_enabled_by_env,
 )
 from jiuwenswarm.dotenv_early import load_dotenv_runtime
 from jiuwenswarm.common.work_mode import (
@@ -2678,6 +2679,8 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
 
     def _schedule_agent_prewarm_sync(name: str) -> None:
         """Reconcile project-derived warm keys without delaying the Web RPC."""
+        if not prewarm_enabled_by_env():
+            return
 
         async def _sync() -> None:
             try:
