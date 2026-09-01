@@ -80,6 +80,25 @@ def tools_workspace(tmp_path: Path) -> Path:
     return tmp_path
 
 
+def _recording_cloud_client(
+    return_value: dict[str, Any] | None = None,
+) -> tuple[dict[str, Any], type]:
+    captured: dict[str, Any] = {"calls": 0}
+    payload = return_value or {"success": True, "content": "ok"}
+
+    class _FakeCloudClient:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            captured["timeout"] = kwargs.get("timeout")
+
+        async def invoke(self, spec: ExternalToolSpec, arguments: dict, **kwargs: Any):
+            captured["calls"] = int(captured["calls"]) + 1
+            captured["spec"] = spec
+            captured["arguments"] = dict(arguments)
+            return payload
+
+    return captured, _FakeCloudClient
+
+
 def test_normalize_seedream_pro_size_and_drops_max_images():
     out, err = normalize_plugin_skill_args(
         "SeedreamPro4Skill",
@@ -243,81 +262,88 @@ async def test_invoke_plugin_routes_to_cloud_client(tools_workspace: Path, monke
 
 
 @pytest.mark.asyncio
-async def test_invoke_rejects_invented_bundle(monkeypatch):
+async def test_invoke_unknown_bundle_reaches_plugin(monkeypatch):
     monkeypatch.setenv("AGENT_RUNTIME_MCP_RUN", "wss://example.test/v1/mcp/run")
-    tool = InvokeTool()
-    result = await tool.invoke(
-        {
-            "functionName": "PluginSkillExecTool",
-            "arguments": {
-                "functionName": "generate",
-                "bundleName": "image-generation",
-                "prompt": "a dog",
-            },
-        }
+    captured, fake = _recording_cloud_client(
+        {"success": True, "content": '{"items":["https://x"]}'}
     )
-    assert result.get("success") is False
-    err = result.get("error", "")
-    assert "不支持" in err or "seedreamLite4Skill" in err
-
-
-@pytest.mark.asyncio
-async def test_invoke_rejects_wrong_bundle_for_seedream(monkeypatch):
-    monkeypatch.setenv("AGENT_RUNTIME_MCP_RUN", "wss://example.test/v1/mcp/run")
-    tool = InvokeTool()
-    result = await tool.invoke(
-        {
-            "functionName": "PluginSkillExecTool",
-            "arguments": {
-                "functionName": "seedreamLite4Skill",
-                "bundleName": "xiaoyi",
-                "prompt": "a dog",
-            },
-        }
-    )
-    assert result.get("success") is False
-    assert "com.atomicservice.5765880207845681341" in result.get("error", "")
-
-
-@pytest.mark.asyncio
-async def test_invoke_rejects_seedream_without_prompt(monkeypatch):
-    monkeypatch.setenv("AGENT_RUNTIME_MCP_RUN", "wss://example.test/v1/mcp/run")
-    tool = InvokeTool()
-    result = await tool.invoke(
-        {
-            "functionName": "PluginSkillExecTool",
-            "arguments": {
-                "functionName": "seedreamLite4Skill",
-                "bundleName": "com.atomicservice.5765880207845681341",
-            },
-        }
-    )
-    assert result.get("success") is False
-    assert "prompt" in result.get("error", "")
-
-
-@pytest.mark.asyncio
-async def test_invoke_nested_function_name_without_wrapper(monkeypatch):
-    """Skill-doc inner args only: arguments.functionName present, top-level omitted."""
-    monkeypatch.setenv("AGENT_RUNTIME_MCP_RUN", "wss://example.test/v1/mcp/run")
-    captured: dict[str, Any] = {}
-
-    mock_invoke = AsyncMock(
-        return_value={"success": True, "content": '{"items":["https://x"]}'}
-    )
-
-    class _FakeCloudClient:
-        def __init__(self, *args: Any, **kwargs: Any) -> None:
-            pass
-
-        async def invoke(self, spec: ExternalToolSpec, arguments: dict, **kwargs: Any):
-            captured["spec"] = spec
-            captured["arguments"] = arguments
-            return await mock_invoke(spec, arguments, **kwargs)
-
     with patch(
         "jiuwenswarm.agents.harness.common.tools.invoke_meta.cloud_plugin_client.CloudPluginClient",
-        _FakeCloudClient,
+        fake,
+    ):
+        tool = InvokeTool()
+        result = await tool.invoke(
+            {
+                "functionName": "generate",
+                "arguments": {
+                    "bundleName": "image-generation",
+                    "prompt": "a dog",
+                },
+            }
+        )
+
+    assert result.get("success") is True
+    assert captured["calls"] == 1
+    spec = captured["spec"]
+    assert spec.plugin_id == "image-generation"
+    assert spec.tool_name == "generate"
+
+
+@pytest.mark.asyncio
+async def test_invoke_wrong_zone_bundle_still_reaches_plugin(monkeypatch):
+    monkeypatch.setenv("AGENT_RUNTIME_MCP_RUN", "wss://example.test/v1/mcp/run")
+    captured, fake = _recording_cloud_client()
+    with patch(
+        "jiuwenswarm.agents.harness.common.tools.invoke_meta.cloud_plugin_client.CloudPluginClient",
+        fake,
+    ):
+        tool = InvokeTool()
+        result = await tool.invoke(
+            {
+                "functionName": "PluginSkillExecTool",
+                "arguments": {
+                    "functionName": "seedreamLite4Skill",
+                    "bundleName": "xiaoyi",
+                    "prompt": "a dog",
+                },
+            }
+        )
+
+    assert result.get("success") is True
+    assert captured["spec"].plugin_id == "xiaoyi"
+    assert captured["spec"].tool_name == "seedreamLite4Skill"
+
+
+@pytest.mark.asyncio
+async def test_invoke_missing_prompt_still_reaches_plugin(monkeypatch):
+    monkeypatch.setenv("AGENT_RUNTIME_MCP_RUN", "wss://example.test/v1/mcp/run")
+    captured, fake = _recording_cloud_client()
+    with patch(
+        "jiuwenswarm.agents.harness.common.tools.invoke_meta.cloud_plugin_client.CloudPluginClient",
+        fake,
+    ):
+        tool = InvokeTool()
+        result = await tool.invoke(
+            {
+                "functionName": "seedreamLite4Skill",
+                "arguments": {
+                    "bundleName": "com.atomicservice.5765880207845681341",
+                },
+            }
+        )
+
+    assert result.get("success") is True
+    assert captured["calls"] == 1
+    assert "prompt" not in captured["arguments"]
+
+
+@pytest.mark.asyncio
+async def test_invoke_requires_top_level_function_name(monkeypatch):
+    monkeypatch.setenv("AGENT_RUNTIME_MCP_RUN", "wss://example.test/v1/mcp/run")
+    captured, fake = _recording_cloud_client()
+    with patch(
+        "jiuwenswarm.agents.harness.common.tools.invoke_meta.cloud_plugin_client.CloudPluginClient",
+        fake,
     ):
         tool = InvokeTool()
         result = await tool.invoke(
@@ -325,60 +351,40 @@ async def test_invoke_nested_function_name_without_wrapper(monkeypatch):
                 "arguments": {
                     "bundleName": "com.atomicservice.5765880207845681341",
                     "functionName": "SeedreamPro4Skill",
-                    "max_images": 4,
-                    "prompt": "Trendy logo design for Gen Z beauty brand 'LUMI'.",
-                    "size": "1024x1024",
+                    "prompt": "Trendy logo",
                 }
             }
         )
 
-    assert result.get("success") is True
-    spec = captured["spec"]
-    assert isinstance(spec, ExternalToolSpec)
-    assert spec.plugin_id == "com.atomicservice.5765880207845681341"
-    assert spec.tool_name == "SeedreamPro4Skill"
-    assert captured["arguments"]["prompt"].startswith("Trendy logo")
-    assert captured["arguments"]["functionName"] == "SeedreamPro4Skill"
-    assert captured["arguments"]["size"] == "1K"
-    assert "max_images" not in captured["arguments"]
+    assert result.get("success") is False
+    assert "functionName" in result.get("error", "")
+    assert captured["calls"] == 0
 
 
 @pytest.mark.asyncio
-async def test_invoke_rejects_invalid_seedream_size(monkeypatch):
+async def test_invoke_passthrough_does_not_normalize_size(monkeypatch):
     monkeypatch.setenv("AGENT_RUNTIME_MCP_RUN", "wss://example.test/v1/mcp/run")
-    tool = InvokeTool()
-    result = await tool.invoke(
-        {
-            "functionName": "PluginSkillExecTool",
-            "arguments": {
+    captured, fake = _recording_cloud_client()
+    with patch(
+        "jiuwenswarm.agents.harness.common.tools.invoke_meta.cloud_plugin_client.CloudPluginClient",
+        fake,
+    ):
+        tool = InvokeTool()
+        result = await tool.invoke(
+            {
                 "functionName": "SeedreamPro4Skill",
-                "bundleName": "com.atomicservice.5765880207845681341",
-                "prompt": "a dog",
-                "size": "4K",
-            },
-        }
-    )
-    assert result.get("success") is False
-    assert "1K" in result.get("error", "")
+                "arguments": {
+                    "bundleName": "com.atomicservice.5765880207845681341",
+                    "prompt": "a dog",
+                    "size": "4K",
+                    "max_images": 99,
+                },
+            }
+        )
 
-
-@pytest.mark.asyncio
-async def test_invoke_lite_rejects_bad_max_images(monkeypatch):
-    monkeypatch.setenv("AGENT_RUNTIME_MCP_RUN", "wss://example.test/v1/mcp/run")
-    tool = InvokeTool()
-    result = await tool.invoke(
-        {
-            "functionName": "PluginSkillExecTool",
-            "arguments": {
-                "functionName": "seedreamLite4Skill",
-                "bundleName": "com.atomicservice.5765880207845681341",
-                "prompt": "a dog",
-                "max_images": 99,
-            },
-        }
-    )
-    assert result.get("success") is False
-    assert "max_images" in result.get("error", "")
+    assert result.get("success") is True
+    assert captured["arguments"]["size"] == "4K"
+    assert captured["arguments"]["max_images"] == 99
 
 
 @pytest.mark.asyncio
@@ -422,11 +428,75 @@ async def test_invoke_plugin_skill_exec_tool_unwraps(monkeypatch):
     assert spec.tool_name == "seedreamLite4Skill"
 
 
+@pytest.mark.asyncio
+async def test_invoke_flattened_capability_matches_wrapper(monkeypatch):
+    monkeypatch.setenv("AGENT_RUNTIME_MCP_RUN", "wss://example.test/v1/mcp/run")
+    seen: list[tuple[str, str, dict[str, Any]]] = []
+
+    class _FakeCloudClient:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            pass
+
+        async def invoke(self, spec: ExternalToolSpec, arguments: dict, **kwargs: Any):
+            seen.append((spec.plugin_id, spec.tool_name, dict(arguments)))
+            return {"success": True, "content": "ok"}
+
+    with patch(
+        "jiuwenswarm.agents.harness.common.tools.invoke_meta.cloud_plugin_client.CloudPluginClient",
+        _FakeCloudClient,
+    ):
+        tool = InvokeTool()
+        args = {
+            "bundleName": "com.atomicservice.5765880207845681341",
+            "prompt": "a dog",
+            "size": "1K",
+        }
+        flat = await tool.invoke(
+            {"functionName": "seedreamLite4Skill", "arguments": dict(args)}
+        )
+        wrapped = await tool.invoke(
+            {
+                "functionName": "PluginSkillExecTool",
+                "arguments": {"functionName": "seedreamLite4Skill", **args},
+            }
+        )
+
+    assert flat.get("success") is True
+    assert wrapped.get("success") is True
+    assert seen[0][0] == seen[1][0] == "com.atomicservice.5765880207845681341"
+    assert seen[0][1] == seen[1][1] == "seedreamLite4Skill"
+    assert seen[0][2]["prompt"] == seen[1][2]["prompt"] == "a dog"
+    assert seen[0][2]["functionName"] == seen[1][2]["functionName"] == "seedreamLite4Skill"
+
+
+@pytest.mark.asyncio
+async def test_invoke_missing_bundle_name_errors(monkeypatch):
+    monkeypatch.setenv("AGENT_RUNTIME_MCP_RUN", "wss://example.test/v1/mcp/run")
+    captured, fake = _recording_cloud_client()
+    with patch(
+        "jiuwenswarm.agents.harness.common.tools.invoke_meta.cloud_plugin_client.CloudPluginClient",
+        fake,
+    ):
+        tool = InvokeTool()
+        result = await tool.invoke(
+            {
+                "functionName": "seedreamLite4Skill",
+                "arguments": {"prompt": "a dog"},
+            }
+        )
+
+    assert result.get("success") is False
+    assert "bundleName" in result.get("error", "")
+    assert captured["calls"] == 0
+
+
 def test_invoke_tool_description_omits_internal_transport():
     desc = invoke_tool_description()
-    assert "PluginSkillExec" in desc
+    assert "当前插件运行区：" in desc
+    assert "skill_tool" in desc
     assert "CloudWsRelay" not in desc
     assert "/ws/link" not in desc
+    assert "PluginSkillExecTool" not in desc
 
 
 @pytest.mark.asyncio
@@ -783,10 +853,8 @@ def _seedance_task_args(**extra: Any) -> dict[str, Any]:
 
 
 @pytest.mark.asyncio
-async def test_invoke_seedance_auto_polls_until_video_url(monkeypatch):
+async def test_invoke_seedance_submit_does_not_auto_poll(monkeypatch):
     monkeypatch.setenv("AGENT_RUNTIME_MCP_RUN", "wss://example.test/v1/mcp/run")
-    monkeypatch.setenv("SEEDANCE_POLL_INTERVAL", "0")
-    monkeypatch.setenv("SEEDANCE_POLL_TIMEOUT", "30")
     names: list[str] = []
 
     class _FakeCloudClient:
@@ -795,32 +863,9 @@ async def test_invoke_seedance_auto_polls_until_video_url(monkeypatch):
 
         async def invoke(self, spec: ExternalToolSpec, arguments: dict, **kwargs: Any):
             names.append(spec.tool_name)
-            if spec.tool_name == "seedanceMiniTask":
-                return {
-                    "success": True,
-                    "content": json.dumps({"items": [{"id": "cgt-1"}]}),
-                }
-            query_count = names.count("seedanceMiniTaskQuery")
-            if query_count == 1:
-                return {
-                    "success": True,
-                    "content": json.dumps(
-                        {"items": [{"id": "cgt-1", "status": "running"}]}
-                    ),
-                }
             return {
                 "success": True,
-                "content": json.dumps(
-                    {
-                        "items": [
-                            {
-                                "id": "cgt-1",
-                                "status": "succeeded",
-                                "video_url": "https://cdn.example/a.mp4",
-                            }
-                        ]
-                    }
-                ),
+                "content": json.dumps({"items": [{"id": "cgt-1"}]}),
             }
 
     with patch(
@@ -833,14 +878,12 @@ async def test_invoke_seedance_auto_polls_until_video_url(monkeypatch):
         )
 
     assert result.get("success") is True
-    assert result.get("task_id") == "cgt-1"
-    assert result.get("video_url") == "https://cdn.example/a.mp4"
-    assert names[0] == "seedanceMiniTask"
-    assert names.count("seedanceMiniTaskQuery") >= 2
+    assert names == ["seedanceMiniTask"]
+    assert "cgt-1" in str(result.get("content", ""))
 
 
 @pytest.mark.asyncio
-async def test_invoke_seedance_wait_false_skips_poll(monkeypatch):
+async def test_invoke_seedance_wait_is_stripped_from_plugin_args(monkeypatch):
     monkeypatch.setenv("AGENT_RUNTIME_MCP_RUN", "wss://example.test/v1/mcp/run")
     names: list[str] = []
 
@@ -871,7 +914,7 @@ async def test_invoke_seedance_wait_false_skips_poll(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_invoke_seedance_string_content_reaches_plugin(monkeypatch):
+async def test_invoke_seedance_string_content_passthrough(monkeypatch):
     monkeypatch.setenv("AGENT_RUNTIME_MCP_RUN", "wss://example.test/v1/mcp/run")
     seen: list[dict[str, Any]] = []
 
@@ -902,9 +945,8 @@ async def test_invoke_seedance_string_content_reaches_plugin(monkeypatch):
         )
 
     assert result.get("success") is True
-    assert "须提供 arguments.content 数组" not in str(result.get("error") or "")
     assert seen
-    assert seen[0]["content"] == [{"type": "text", "text": "一只在月光下奔跑的狐狸"}]
+    assert seen[0]["content"] == "一只在月光下奔跑的狐狸"
 
 
 _ATOMIC_BUNDLE = "com.atomicservice.5765880207845681341"
@@ -1089,15 +1131,14 @@ def test_validate_music_instrumental_rejects_lyrics():
     assert "不能传 lyrics" in msg
 
 
-def test_invoke_tool_description_includes_music_skills():
+def test_invoke_tool_description_points_at_skills_not_recipes():
     text = invoke_tool_description()
-    assert "lyricsGeneration" in text
-    assert "musicGeneration" in text
-    assert "不要包 content" in text
-    assert "只放 content" not in text
-    assert "content.prompt" not in text
-    assert "完整句子" in text
-    assert "明确确认" in text
+    assert "skill_tool" in text
+    assert "当前插件运行区：" in text
+    assert "lyricsGeneration" not in text
+    assert "musicGeneration" not in text
+    assert "PluginSkillExecTool" not in text
+    assert "完整句子" not in text
 
 
 @pytest.mark.asyncio
@@ -1133,22 +1174,12 @@ async def test_invoke_lyrics_generation_reaches_plugin(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_invoke_lyrics_missing_prompt_skips_ws(monkeypatch):
+async def test_invoke_lyrics_missing_prompt_still_reaches_plugin(monkeypatch):
     monkeypatch.setenv("AGENT_RUNTIME_MCP_RUN", "wss://example.test/v1/mcp/run")
-    called = False
-
-    class _FakeCloudClient:
-        def __init__(self, *args: Any, **kwargs: Any) -> None:
-            pass
-
-        async def invoke(self, *args: Any, **kwargs: Any):
-            nonlocal called
-            called = True
-            return {"success": True, "content": "ok"}
-
+    captured, fake = _recording_cloud_client()
     with patch(
         "jiuwenswarm.agents.harness.common.tools.invoke_meta.cloud_plugin_client.CloudPluginClient",
-        _FakeCloudClient,
+        fake,
     ):
         tool = InvokeTool()
         result = await tool.invoke(
@@ -1162,9 +1193,10 @@ async def test_invoke_lyrics_missing_prompt_skips_ws(monkeypatch):
             }
         )
 
-    assert result.get("success") is False
-    assert "prompt" in result.get("error", "")
-    assert called is False
+    assert result.get("success") is True
+    assert captured["calls"] == 1
+    assert captured["spec"].tool_name == "lyricsGeneration"
+    assert captured["arguments"]["content"] == {"mode": "write_full_song"}
 
 
 @pytest.mark.asyncio
@@ -1237,22 +1269,12 @@ async def test_invoke_music_instrumental_keeps_top_level_prompt(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_invoke_music_missing_prompt_skips_ws(monkeypatch):
+async def test_invoke_music_missing_prompt_still_reaches_plugin(monkeypatch):
     monkeypatch.setenv("AGENT_RUNTIME_MCP_RUN", "wss://example.test/v1/mcp/run")
-    called = False
-
-    class _FakeCloudClient:
-        def __init__(self, *args: Any, **kwargs: Any) -> None:
-            pass
-
-        async def invoke(self, *args: Any, **kwargs: Any):
-            nonlocal called
-            called = True
-            return {"success": True}
-
+    captured, fake = _recording_cloud_client()
     with patch(
         "jiuwenswarm.agents.harness.common.tools.invoke_meta.cloud_plugin_client.CloudPluginClient",
-        _FakeCloudClient,
+        fake,
     ):
         tool = InvokeTool()
         result = await tool.invoke(
@@ -1266,52 +1288,62 @@ async def test_invoke_music_missing_prompt_skips_ws(monkeypatch):
             }
         )
 
-    assert result.get("success") is False
-    assert "prompt" in result.get("error", "")
-    assert called is False
+    assert result.get("success") is True
+    assert captured["calls"] == 1
+    assert captured["arguments"]["is_instrumental"] is True
 
 
 @pytest.mark.asyncio
-async def test_invoke_rejects_wrong_bundle_for_music(monkeypatch):
+async def test_invoke_wrong_bundle_for_music_still_reaches_plugin(monkeypatch):
     monkeypatch.setenv("AGENT_RUNTIME_MCP_RUN", "wss://example.test/v1/mcp/run")
-    tool = InvokeTool()
-    result = await tool.invoke(
-        {
-            "functionName": "PluginSkillExecTool",
-            "arguments": {
-                "functionName": "musicGeneration",
-                "bundleName": "xiaoyi",
-                "prompt": "钢琴",
-                "is_instrumental": True,
-            },
-        }
-    )
-    assert result.get("success") is False
-    assert _ATOMIC_BUNDLE in result.get("error", "")
+    captured, fake = _recording_cloud_client()
+    with patch(
+        "jiuwenswarm.agents.harness.common.tools.invoke_meta.cloud_plugin_client.CloudPluginClient",
+        fake,
+    ):
+        tool = InvokeTool()
+        result = await tool.invoke(
+            {
+                "functionName": "PluginSkillExecTool",
+                "arguments": {
+                    "functionName": "musicGeneration",
+                    "bundleName": "xiaoyi",
+                    "prompt": "钢琴",
+                    "is_instrumental": True,
+                },
+            }
+        )
+
+    assert result.get("success") is True
+    assert captured["spec"].plugin_id == "xiaoyi"
+    assert captured["spec"].tool_name == "musicGeneration"
 
 
-def test_design_system_prompt_includes_video_workflow():
+def test_design_system_prompt_points_at_skills_not_catalog():
     from jiuwenswarm.agents.harness.design.prompt.design_prompt_builder import (
         build_design_system_prompt,
     )
 
     prompt = build_design_system_prompt()
-    assert "seedanceMiniTask" in prompt
-    assert "seedance-video-gen" not in prompt
-    assert "image-generation skill" not in prompt
+    assert "seedance-video-gen" in prompt
+    assert "seedream-image-gen" in prompt
+    assert "music-generation" in prompt
+    assert "skill_tool" in prompt
+    assert "ppt-creation" in prompt
     assert "分镜" in prompt
     assert "invoke" in prompt.lower() or "`invoke`" in prompt
-    # New-contract locks: image invoke uses real cloud functionNames, the
-    # redundant Doing-tasks chapter has been removed.
-    assert "seedreamLite4Skill" in prompt
-    assert "SeedreamPro4Skill" in prompt
+    assert "`image-generation`" not in prompt
+    assert "PluginSkillExecTool" not in prompt
+    assert "seedanceMiniTask" not in prompt
+    assert "seedreamLite4Skill" not in prompt
+    assert "SeedreamPro4Skill" not in prompt
     assert "# Doing tasks" not in prompt
-    assert "com.atomicservice.5765880207845681341" in prompt
+    assert "com.atomicservice.5765880207845681341" not in prompt
+    assert "com.huawei.pluginPlatform" not in prompt
 
 
 _PROD_MCP = "wss://hag-drcn.op.dbankcloud.com/agent-runtime-service-ws/v1/mcp/run"
 _PLUGIN_PLATFORM = "com.huawei.pluginPlatform"
-_LITE_BUNDLE = "com.example.aikitdemo"
 
 
 @pytest.mark.asyncio
@@ -1338,7 +1370,7 @@ async def test_invoke_prod_seedream_batch5_reaches_plugin(monkeypatch):
                 "functionName": "PluginSkillExecTool",
                 "arguments": {
                     "functionName": "seedreamBatch5",
-                    "bundleName": _LITE_BUNDLE,
+                    "bundleName": _PLUGIN_PLATFORM,
                     "prompt": "一只柯基",
                     "size": "2K",
                 },
@@ -1347,65 +1379,78 @@ async def test_invoke_prod_seedream_batch5_reaches_plugin(monkeypatch):
 
     assert result.get("success") is True
     spec = captured["spec"]
-    assert spec.plugin_id == _LITE_BUNDLE
+    assert spec.plugin_id == _PLUGIN_PLATFORM
     assert spec.tool_name == "seedreamBatch5"
-    assert captured["arguments"]["size"] == "2k"
+    assert captured["arguments"]["size"] == "2K"
 
 
 @pytest.mark.asyncio
-async def test_invoke_prod_rejects_atomic_seedream(monkeypatch):
+async def test_invoke_prod_accepts_atomic_seedream_passthrough(monkeypatch):
     monkeypatch.setenv("AGENT_RUNTIME_MCP_RUN", _PROD_MCP)
-    tool = InvokeTool()
-    result = await tool.invoke(
-        {
-            "functionName": "PluginSkillExecTool",
-            "arguments": {
-                "functionName": "seedreamLite4Skill",
-                "bundleName": "com.atomicservice.5765880207845681341",
-                "prompt": "一只柯基",
-            },
-        }
+    captured, fake = _recording_cloud_client(
+        {"success": True, "content": '{"items":["https://x"]}'}
     )
-    assert result.get("success") is False
-    err = result.get("error", "")
-    assert "不支持" in err
-    assert "seedreamBatch5" in err
+    with patch(
+        "jiuwenswarm.agents.harness.common.tools.invoke_meta.cloud_plugin_client.CloudPluginClient",
+        fake,
+    ):
+        tool = InvokeTool()
+        result = await tool.invoke(
+            {
+                "functionName": "PluginSkillExecTool",
+                "arguments": {
+                    "functionName": "seedreamLite4Skill",
+                    "bundleName": "com.atomicservice.5765880207845681341",
+                    "prompt": "一只柯基",
+                },
+            }
+        )
+
+    assert result.get("success") is True
+    assert captured["spec"].plugin_id == "com.atomicservice.5765880207845681341"
+    assert captured["spec"].tool_name == "seedreamLite4Skill"
 
 
 @pytest.mark.asyncio
-async def test_invoke_test_zone_rejects_prod_seedream(monkeypatch):
+async def test_invoke_test_zone_accepts_prod_seedream_passthrough(monkeypatch):
     monkeypatch.setenv(
         "AGENT_RUNTIME_MCP_RUN",
         "wss://lfhagmirror.hwcloudtest.cn:18449/agent-runtime-service-ws/v1/mcp/run",
     )
-    tool = InvokeTool()
-    result = await tool.invoke(
-        {
-            "functionName": "PluginSkillExecTool",
-            "arguments": {
-                "functionName": "SeedreamPro_5",
-                "bundleName": _PLUGIN_PLATFORM,
-                "prompt": "一只柯基",
-            },
-        }
-    )
-    assert result.get("success") is False
-    err = result.get("error", "")
-    assert "不支持" in err
-    assert "SeedreamPro4Skill" in err
+    captured, fake = _recording_cloud_client()
+    with patch(
+        "jiuwenswarm.agents.harness.common.tools.invoke_meta.cloud_plugin_client.CloudPluginClient",
+        fake,
+    ):
+        tool = InvokeTool()
+        result = await tool.invoke(
+            {
+                "functionName": "PluginSkillExecTool",
+                "arguments": {
+                    "functionName": "SeedreamPro_5",
+                    "bundleName": _PLUGIN_PLATFORM,
+                    "prompt": "一只柯基",
+                },
+            }
+        )
+
+    assert result.get("success") is True
+    assert captured["spec"].plugin_id == _PLUGIN_PLATFORM
+    assert captured["spec"].tool_name == "SeedreamPro_5"
 
 
-def test_invoke_tool_description_prod_uses_new_names(monkeypatch):
+def test_invoke_tool_description_prod_uses_zone_sentence(monkeypatch):
     monkeypatch.setenv("AGENT_RUNTIME_MCP_RUN", _PROD_MCP)
     text = invoke_tool_description()
-    assert "seedreamBatch5" in text
-    assert "SeedreamPro_5" in text
-    assert _LITE_BUNDLE in text
-    assert _PLUGIN_PLATFORM in text
+    assert "当前插件运行区：现网" in text
+    assert "「现网」表" in text
+    assert "seedreamBatch5" not in text
+    assert "SeedreamPro_5" not in text
+    assert _PLUGIN_PLATFORM not in text
+    assert "com.example.aikitdemo" not in text
     assert "seedreamLite4Skill" not in text
     assert "com.atomicservice.5765880207845681341" not in text
-    assert "WIDTHxHEIGHT" in text
-    assert "2k|3k|4k" in text
+    assert "WIDTHxHEIGHT" not in text
 
 
 def test_active_catalog_helpers_follow_zone(monkeypatch):
@@ -1417,18 +1462,41 @@ def test_active_catalog_helpers_follow_zone(monkeypatch):
     assert seedream_lite_function_name() == "seedreamBatch5"
     assert seedream_pro_function_name() == "SeedreamPro_5"
     assert plugin_skill_bundle("seedanceMiniTask") == _PLUGIN_PLATFORM
-    assert plugin_skill_bundle("seedreamBatch5") == _LITE_BUNDLE
+    assert plugin_skill_bundle("seedreamBatch5") == _PLUGIN_PLATFORM
 
 
-def test_design_system_prompt_prod_uses_plugin_platform(monkeypatch):
+def test_design_system_prompt_prod_omits_catalog_names(monkeypatch):
     monkeypatch.setenv("AGENT_RUNTIME_MCP_RUN", _PROD_MCP)
     from jiuwenswarm.agents.harness.design.prompt.design_prompt_builder import (
         build_design_system_prompt,
     )
 
     prompt = build_design_system_prompt()
-    assert _PLUGIN_PLATFORM in prompt
-    assert "seedreamBatch5" in prompt
+    assert "seedream-image-gen" in prompt
+    assert "seedance-video-gen" in prompt
+    assert "music-generation" in prompt
+    assert _PLUGIN_PLATFORM not in prompt
+    assert "seedreamBatch5" not in prompt
     assert "com.atomicservice.5765880207845681341" not in prompt
     assert "seedreamLite4Skill" not in prompt
+    assert "PluginSkillExecTool" not in prompt
+
+
+def test_skills_goal_override_uses_real_skill_slugs():
+    from jiuwenswarm.agents.harness.common.prompt.skills_goal_override import (
+        _STATIC_BLOCK,
+        _STATIC_SKILL_NAMES,
+    )
+
+    assert "seedream-image-gen" in _STATIC_SKILL_NAMES
+    assert "seedance-video-gen" in _STATIC_SKILL_NAMES
+    assert "music-generation" in _STATIC_SKILL_NAMES
+    assert "xiaoyi-image-understanding" in _STATIC_SKILL_NAMES
+    assert "image-generation" not in _STATIC_SKILL_NAMES
+    for text in _STATIC_BLOCK.values():
+        assert "seedream-image-gen" in text
+        assert "skill_tool" in text
+        assert "PluginSkillExecTool" not in text
+        assert "com.atomicservice" not in text
+        assert "seedreamLite4Skill" not in text
 

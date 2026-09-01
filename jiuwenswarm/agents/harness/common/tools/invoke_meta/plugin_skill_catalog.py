@@ -12,10 +12,8 @@ from urllib.parse import urlparse
 
 # 蓝区/绿区：原子服务包
 _ATOMIC_BUNDLE = "com.atomicservice.5765880207845681341"
-# 现网：视频/音乐/生图 Pro
+# 现网：视频/音乐/生图（Lite + Pro）
 _PLUGIN_PLATFORM = "com.huawei.pluginPlatform"
-# 现网：生图 Lite
-_LITE_BUNDLE = "com.example.aikitdemo"
 # bundleName for image understanding（各区相同）
 _XIAOYI_BUNDLE = "xiaoyi"
 
@@ -30,7 +28,7 @@ _TEST_CATALOG: dict[str, str] = {
 }
 
 _PROD_CATALOG: dict[str, str] = {
-    "seedreamBatch5": _LITE_BUNDLE,
+    "seedreamBatch5": _PLUGIN_PLATFORM,
     "SeedreamPro_5": _PLUGIN_PLATFORM,
     "seedanceMiniTask": _PLUGIN_PLATFORM,
     "seedanceMiniTaskQuery": _PLUGIN_PLATFORM,
@@ -494,82 +492,41 @@ def validate_plugin_skill_args(func_name: str, params: dict[str, Any]) -> str | 
     return None
 
 
+def plugin_runtime_zone_label() -> str:
+    """LLM-facing zone name for ToolCard: 现网 vs 蓝绿."""
+    return "现网" if is_prod_plugin_runtime() else "蓝绿"
+
+
 def invoke_arguments_description() -> str:
-    """ToolCard arguments.description for the current zone."""
-    catalog = active_plugin_skill_catalog()
-    lite = seedream_lite_function_name(catalog)
-    pro = seedream_pro_function_name(catalog)
-    lite_bundle = catalog[lite]
-    pro_bundle = catalog[pro]
-    video_bundle = catalog["seedanceMiniTask"]
-    if lite_bundle == pro_bundle:
-        image_line = (
-            f"生图：bundleName={lite_bundle}，functionName={lite}|{pro}，prompt=...；"
-        )
-    else:
-        image_line = (
-            f"生图 Lite：bundleName={lite_bundle}，functionName={lite}；"
-            f"生图 Pro：bundleName={pro_bundle}，functionName={pro}；prompt=...；"
-        )
+    """ToolCard arguments.description — passthrough; names come from SKILL.md."""
     return (
-        "必含 bundleName + functionName（真实能力名）+ 业务字段。"
-        f"{image_line}"
-        "图像理解：bundleName=xiaoyi，functionName=imageUnderStandStream，imageUrl=...；"
-        f"生视频：bundleName={video_bundle}，seedanceMiniTask 用 content"
-        "（默认自动轮询到 video_url；wait=false 则只返回 task_id），"
-        "seedanceMiniTaskQuery 用 id；"
-        f"生音乐：bundleName={catalog['musicGeneration']}，业务字段与 bundleName 平铺，不要包 content。"
-        "基础器乐只用 musicGeneration+is_instrumental=true；"
-        "基础人声 lyrics_optimizer=true；"
-        "高级人声先 lyricsGeneration（write_full_song，改词 edit+lyrics），"
-        "确认歌词后再 musicGeneration 带 lyrics。"
-        "成曲前向用户展示类型/语言/prompt/歌词并得到明确确认。"
-        "中文输入用中文 prompt 与歌词，英文同理，其它语言先问用户。"
-        "prompt 写成完整句子（情绪+流派+人声或乐器+叙事/场景），"
-        "不要逗号关键词列表。勿臆造其它 bundleName。"
+        "必含 bundleName（当前区表中的包名）以及该能力的业务字段，原样透传。"
+        "functionName 写在顶层，不要把业务参数包进 content，除非 SKILL.md 要求数组。"
+        "禁止臆造 bundleName。"
     )
 
 
 def invoke_function_name_description() -> str:
-    """ToolCard functionName.description for the current zone."""
-    catalog = active_plugin_skill_catalog()
-    lite = seedream_lite_function_name(catalog)
-    pro = seedream_pro_function_name(catalog)
+    """ToolCard functionName.description — flattened capability name."""
     return (
-        "云端 skill：固定 PluginSkillExecTool；"
+        "云端能力：填已加载 skill 中当前区表的真实 functionName；"
         "远程 Agent：agent_as_a_tool。"
-        "arguments.functionName 才是具体能力"
-        f"（{lite} / {pro} / "
-        "imageUnderStandStream / seedanceMiniTask / seedanceMiniTaskQuery / "
-        "lyricsGeneration / musicGeneration）。"
+        "禁止臆造名称。"
     )
 
 
 def invoke_tool_description() -> str:
-    """ToolCard description for PluginSkillExecTool cloud capabilities."""
-    catalog = active_plugin_skill_catalog()
-    lite = seedream_lite_function_name(catalog)
-    lite_bundle = catalog[lite]
+    """Short ToolCard: current zone + skill_tool then passthrough invoke."""
+    zone = plugin_runtime_zone_label()
+    other = "蓝绿" if zone == "现网" else "现网"
     return (
-        "调用云端 PluginSkillExec 能力，"
-        "或 functionName=agent_as_a_tool 调用远程 Agent。"
-        "调用形态：顶层 functionName 固定为 PluginSkillExecTool，"
-        "真实能力写在 arguments.functionName，并带对应 bundleName 与业务参数。"
-        "禁止臆造 image-generation / text-to-image / ai-draw / generate 等名称。\n"
-        f"{catalog_help(catalog)}\n"
-        "示例生图：{\"functionName\":\"PluginSkillExecTool\",\"arguments\":{"
-        f"\"functionName\":\"{lite}\","
-        f"\"bundleName\":\"{lite_bundle}\","
-        "\"prompt\":\"一只柯基在滑板上\"}}。\n"
-        "示例图像理解：{\"functionName\":\"PluginSkillExecTool\",\"arguments\":{"
-        "\"functionName\":\"imageUnderStandStream\","
-        f"\"bundleName\":\"{_XIAOYI_BUNDLE}\","
-        "\"imageUrl\":\"https://...\",\"text\":\"描述图片\"}}。\n"
-        "示例生视频：seedanceMiniTask（content）默认会轮询到 video_url；"
-        "只要 task_id 时传 arguments.wait=false，再用 seedanceMiniTaskQuery（id）。\n"
-        "示例生音乐：先可选 lyricsGeneration（prompt + mode），"
-        "再 musicGeneration（prompt；人声带 lyrics 或 lyrics_optimizer，"
-        "器乐 is_instrumental=true）。业务字段平铺，不要包 content。"
+        f"当前插件运行区：{zone}。"
+        f"functionName 与 bundleName 必须使用已加载 skill 中「{zone}」表；"
+        f"禁止混用{other}名字。"
+        "先 skill_tool 读取对应 skill 的 SKILL.md，再按该文档填写 invoke；"
+        "业务字段原样透传，禁止臆造 functionName/bundleName。"
+        "调用形态：顶层 functionName 为真实云端能力名，arguments 必含 bundleName。"
+        "远程 Agent：functionName=agent_as_a_tool。"
     )
 
 
@@ -584,6 +541,7 @@ __all__ = [
     "invoke_tool_description",
     "is_plugin_skill_function",
     "is_prod_plugin_runtime",
+    "plugin_runtime_zone_label",
     "normalize_plugin_skill_args",
     "parse_plugin_json_payload",
     "plugin_skill_bundle",
