@@ -854,6 +854,7 @@ def test_enrich_team_spec_for_swarm_has_no_deep_agent_param() -> None:
         "channel_id",
         "request_metadata",
         "agent_group_name",
+        "agent_group_package",
     }
 
 
@@ -1148,8 +1149,26 @@ def test_enriched_spec_serialization_round_trip() -> None:
     assert any(not name.startswith("swarm.") for name in rail_types)
 
 
-def test_enrich_applies_agent_group_as_hybrid_member_snapshots() -> None:
+def test_enrich_applies_preloaded_agent_group_without_reloading(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """AgentGroup prompts stay Team-owned while capabilities use snapshots."""
+    from jiuwenswarm.agents.swarm.agent_group import load_agent_group_package_bundle
+    from jiuwenswarm.server.runtime.extension_package_manager import (
+        resolve_agent_group_dir,
+    )
+
+    package = load_agent_group_package_bundle(
+        resolve_agent_group_dir("sample-expert-group")
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.extension_package_manager.resolve_agent_group_dir",
+        lambda _name: pytest.fail("preloaded AgentGroup must not resolve again"),
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.swarm.agent_group.load_agent_group_package_bundle",
+        lambda _path: pytest.fail("preloaded AgentGroup must not load again"),
+    )
     spec = _make_team_spec()
     spec.leader.prompt = "existing leader agreement"
 
@@ -1159,6 +1178,7 @@ def test_enrich_applies_agent_group_as_hybrid_member_snapshots() -> None:
         mode="team",
         channel_id="web",
         agent_group_name="sample-expert-group",
+        agent_group_package=package,
     )
 
     assert spec.team_mode == "hybrid"

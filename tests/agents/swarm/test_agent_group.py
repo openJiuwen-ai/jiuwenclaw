@@ -9,7 +9,10 @@ from pathlib import Path
 
 import pytest
 
-from jiuwenswarm.agents.swarm.agent_group import load_agent_group_package
+from jiuwenswarm.agents.swarm.agent_group import (
+    load_agent_group_package,
+    load_agent_group_package_bundle,
+)
 
 
 def _write_json(path: Path, payload: dict) -> None:
@@ -58,6 +61,27 @@ def test_load_agent_group_uses_directory_as_id_and_name_as_display_name(
     assert templates["leader"].agent_card.name == "leader display name"
     assert templates["member1"].agent_card.id == "member1"
     assert templates["member1"].agent_card.name == "member1 display name"
+
+
+def test_load_agent_group_bundle_reuses_manifest_and_templates(tmp_path: Path) -> None:
+    group = _minimal_group(tmp_path)
+    manifest_path = group / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest.update(
+        {
+            "instruction": "  analyze carefully  ",
+            "capabilities": ["analysis", "risk", "analysis", ""],
+        }
+    )
+    _write_json(manifest_path, manifest)
+
+    package = load_agent_group_package_bundle(group)
+
+    assert package.package_dir == group.resolve()
+    assert package.manifest["name"] == "group"
+    assert set(package.templates) == {"leader", "member1"}
+    assert package.instruction == "analyze carefully"
+    assert package.capabilities == ("analysis", "risk")
 
 
 def test_load_agent_group_rejects_member_agent_md(tmp_path: Path) -> None:
