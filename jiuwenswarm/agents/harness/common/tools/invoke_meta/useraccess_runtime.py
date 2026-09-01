@@ -99,12 +99,13 @@ def resolve_device_sandbox_system() -> str:
 
 
 def build_product_mcp_headers(*, plugin_session_id: str = "", extra: dict[str, str] | None = None) -> dict[str, str]:
-    """Handshake headers for mcp/run: businessCredential, trace, optional uid/device."""
+    """Handshake headers for mcp/run: businessCredential, openclaw request-from, trace, optional uid/device."""
     uid = resolve_runtime_uid()
     device_id = resolve_runtime_device_id()
     headers: dict[str, str] = {
         "Content-Type": "application/json",
         "businessCredential": resolve_business_credential(),
+        "x-request-from": "openclaw",
         "x-hag-trace-id": uuid.uuid4().hex,
     }
     if uid:
@@ -231,8 +232,8 @@ def missing_credential_error(*, plugin_id: str = "", tool_name: str = "") -> dic
     return {
         "success": False,
         "error": (
-            "缺少插件握手凭证：需 CLAW_BUSINESS_CREDENTIAL（桌面登录后 spawn 注入，"
-            "或实验室写入环境）"
+            "缺少插件握手凭证：密钥包缺少 businessCredential"
+            "（桌面登录后 spawn 下发，或实验室写入 CLAW_BUSINESS_CREDENTIAL）"
         ),
         "pluginId": plugin_id,
         "toolName": tool_name,

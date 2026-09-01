@@ -1,0 +1,29 @@
+{
+  "name": "doc-convert",
+  "version": "1.0.0",
+  "description": "文档格式转换技能，支持多种文档格式之间的转换",
+  "main": "index.js",
+  "bin": {
+    "doc-convert": "index.js"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [
+    "document",
+    "convert",
+    "pdf",
+    "docx",
+    "xlsx",
+    "pptx",
+    "acp2service"
+  ],
+  "author": "OpenClaw Skill Creator",
+  "license": "MIT",
+  "dependencies": {
+    "axios": "^1.13.6"
+  },
+  "engines": {
+    "node": ">=14.0.0"
+  }
+}

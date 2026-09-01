@@ -1,0 +1,208 @@
+# md2doc configuration
+
+# Filter chains (without HTTP-dependent filters)
+md2doc_content_filters_common:
+  - "local_path_filter"
+  - "zero_width_chars_filter"
+  - "thinking_block_filter"
+  - "script_mark_filter"
+  - "superlink_filter"
+  - "link_in_book_quote_filter"
+  - "baike_superlink_filter"
+  - "link_tag_filter"
+  - "anchor_tag_filter"
+  - "link_reference_filter"
+  - "image_link_filter"
+  - "double_space_filter"
+  - "horizontal_rule_filter"
+  - "win_line_break_filter"
+  - "line_break_filter"
+  - "underline_filter"
+  - "html_code_filter"
+  - "html_table_filter"
+  - "formula_protect_filter"
+  - "video_codes_filter"
+  - "image_code_filter"
+  - "rsup_filter"
+
+md2doc_content_filters_word: []
+
+md2doc_content_filters_pdf:
+  - "image_link2img_tag_filter"
+  - "img_base64_to_img_tag_filter"
+  - "pdf_formula_protect_filter"
+
+md2doc_content_filters_excel:
+  - "md2html_filter"
+
+# AIGC settings
+md2doc_support_ai_mark: true
+md2doc_ai_mark_content: "内容由AI生成"
+
+# Excel settings
+md2doc_excel_max_column_width_limit: 32
+md2doc_excel_max_display_char_limit: 160
+md2doc_excel_unit_row_height: 15
+md2doc_excel_adjust_row_height: true
+
+# Image settings
+md2doc_image_max_width: 600
+md2doc_image_scale_threshold: 360
+md2doc_pdf_image_max_width: 600
+md2doc_images_code_pattern: "```images\\n*({.*?})\\n*```"
+
+# Formula settings
+md2doc_formula_pattern: '(\\$[^\\$]{1,200}\\$)'
+md2doc_content_filters_formula: []
+md2doc_content_filters_pdf_formula: []
+
+# Path filtering settings
+md2doc_reference_link_pattern: '^\[[^\]]+\]:\s*(.*?)\s*$'
+md2doc_html_link_pattern: '<(?:source|a|img|link)[^>]*?(?:src|href)=\\?(["'']([^"''>\s]+)["'']|([^"''>\s]+))[^>]*>'
+md2doc_markdown_link_pattern: '\[[^\]]*\]\(([^)]*)\)'
+md2doc_allowed_web_protocols:
+  - "https"
+  - "superlink"
+md2doc_file_extensions:
+  - "certs"
+  - ".py"
+  - ".cpp"
+  - ".java"
+  - ".c"
+  - ".js"
+  - ".html"
+  - ".pdf"
+  - ".docx"
+  - ".xlsx"
+  - ".json"
+  - ".xml"
+  - ".yaml"
+  - ".yml"
+  - ".log"
+  - ".lua"
+  - ".css"
+  - ".ini"
+
+# Pandoc settings
+md2doc_enable_pandoc_sandbox: false
+md2doc_markdown_format: "markdown"
+
+# HTML Table filter pattern
+md2doc_html_table_pattern: '<table[^>]*>.*?</table>'
+
+# Pandoc templates configuration
+md2doc_templates:
+  default: "custom-template.docx"
+
+# Pandoc extra args (customizable)
+md2doc_pandoc_extra_args: ["--lua-filter=br-filter.lua", "--lua-filter=table-filter.lua", "--lua-filter=list-filter.lua", "--lua-filter=image-filter.lua", "--lua-filter=page-break-filter.lua"]
+
+md2doc_content_filters:
+  - pattern: "\u200B"
+    target: ""
+    name: "zero_width_chars_filter"
+    description: "删除零宽字符"
+  - pattern: "^(>[^\\n]*\\n?)+"
+    target: ""
+    name: "thinking_block_filter"
+    description: "删除思考过程,思考过程以>开头"
+  - pattern: "\\[(.*?)\\]\\(superlink[^\\)]*\\)"
+    target: "\\1"
+    name: "superlink_filter"
+    description: "替换superlink链接"
+  - pattern: "<link[^>]*>"
+    target: ""
+    name: "link_tag_filter"
+    description: "删除HTML链接标签"
+  - pattern: "</?a[^>]*>"
+    target: ""
+    name: "anchor_tag_filter"
+    description: "删除HTML锚点标签"
+  - pattern: "\\[[^\\]]*\\]:"
+    target: ""
+    name: "link_reference_filter"
+    description: "删除链接引用"
+  - pattern: "[ ]*[!]?\\[[^\\]\\n]*\\](?:\\(|\\[)(?!(https?:)|(data:image))[^\\)\\]]+(?:\\)|\\])[ ]*"
+    target: ""
+    name: "image_link_filter"
+    description: "删除非http或base64格式的图片链接,避免引用本地文件"
+  - pattern: "([^\\s|])[ ]{2,}(\\n)"
+    target: "\\1\\n\\2"
+    name: "double_space_filter"
+    description: "替换行末双空格为换行，markdown语法中双空格为换行"
+  - pattern: "(?:[\\- ]{2,})(\\n)"
+    target: "\\1"
+    name: "horizontal_rule_filter"
+    description: "删除水平线"
+  - pattern: "([^|\\n\\$])( *\\n *[^ !\\n\\\\$])"
+    target: "\\1\\n\\2"
+    name: "line_break_filter"
+    description: "单个换行符替换成两个换行符,markdown中两个换行符才会换行"
+  - pattern: "([ :：][^_]?)(_{3,}[^\\s]{0,60})"
+    target: "\\1`\\2`"
+    name: "underline_filter"
+    description: "添加反引号保护下划线，如试卷的填空题中的下划线"
+  - pattern: "<rsup[^<]+</r(?:su|us)p>"
+    target: ""
+    name: "rsup_filter"
+    description: "删除<rsup>引用标记, 兼容拼写标记</rusp>"
+  - pattern: "<rsup[^>]*>(\\d+)[^<]+</r(?:su|us)p>"
+    target: "[\\1]"
+    name: "rsup_dr_filter"
+    description: "<rsup>引用标记替换成[x]"
+  - pattern: "(\\n\\n)(## )"
+    target: "\\1\\\\newpage\\n\\n\\2"
+    name: "chapter_title_new_page_filter"
+    description: "章节标题插入新页站位符"
+  - pattern: "[!\\[\\]<>\\\\/]"
+    target: ""
+    name: "references_filter"
+    description: "参考来源的标题及站点名中删除感叹号、中括号、尖括号,路径分隔符"
+  - pattern: "\\$(\\$) *(\\n?[^\\$\\n=]{1,20}?\\n?) *(\\$)\\$"
+    target: "\\1\\2\\3"
+    name: "short_formula_filter"
+    description: "短公式块改成行内公式"
+  - pattern: " {2,}?(\\$\\$\\n) +([^\\$]+?\\n) +(\\$\\$)"
+    target: "\\1\\2\\3"
+    name: "formula_space_filter"
+    description: "删除公式中多余的空格"
+  - pattern: "([^\\\\])(_)"
+    target: "\\1\\\\\\2"
+    name: "formula_underline_filter"
+    description: "保护公式内的下划线（加反斜杠）"
+  - pattern: " \\\\neq "
+    target: " \\\\mathrel{\\\\char`≠} "
+    name: "not_equal_symbol_filter"
+    description: "不等号\\neq替换成\\mathrel{\\char`≠}"
+  - pattern: "</?script>"
+    target: ""
+    name: "script_mark_filter"
+    description: "删除js脚本标记"
+  - pattern: "(</body>\\s*</html>\\s*)$"
+    target: "\\n<p>内容由AI生成</p>\\n\\1"
+    name: "html_ai_mark_filter"
+    description: "html添加显示ai标识"
+  - pattern: "\\r\\n"
+    target: "\\n"
+    name: "win_line_break_filter"
+    description: "windows换行符替换成unix换行符"
+  - pattern: "~([^\\n`]+)~"
+    target: "`~`\\1`~`"
+    name: "wave_symbol_filter"
+    description: "避免波浪号包括文字识别为下角标"
+  - pattern: "```videos\\n*({[^`]+})\\n*```"
+    target: ""
+    name: "video_codes_filter"
+    description: "删除video代码块"
+  - pattern: "^<think>[^<]*</think>\\n*"
+    target: ""
+    name: "thinking_block_v2_filter"
+    description: "删除<think>标签思考过程"
+  - pattern: "\\n?<(!\\[.*?]\\(.*?\\))\\(superlink.*?\\)>\\n?"
+    target: "\\1"
+    name: "baike_superlink_filter"
+    description: "删除抖音百科superlink"
+  - pattern: "《!\\[.*?\\]\\(.*?\\)"
+    target: "《"
+    name: "link_in_book_quote_filter"
+    description: "删除书名号后的链接"

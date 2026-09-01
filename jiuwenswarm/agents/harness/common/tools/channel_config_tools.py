@@ -21,6 +21,24 @@ from jiuwenswarm.common.channel_config_registry import (
 )
 
 
+def _gateway_control_request(method: str, params: dict[str, Any]) -> dict[str, Any]:
+    request_id = f"channel-control-{uuid.uuid4().hex}"
+    request_params = dict(params)
+    requester_channel_id = CURRENT_CHANNEL_ID.get().strip()
+    requester_session_id = CURRENT_SESSION_ID.get().strip()
+    if requester_channel_id or requester_session_id:
+        request_params["requester"] = {
+            "channel_id": requester_channel_id,
+            "session_id": requester_session_id,
+        }
+    return {
+        "type": "req",
+        "id": request_id,
+        "method": method,
+        "params": request_params,
+    }
+
+
 def _gateway_control_url() -> str:
     configured = str(os.getenv("JIUWENSWARM_GATEWAY_CONTROL_URL") or "").strip()
     if configured:
@@ -40,37 +58,69 @@ def _gateway_control_url() -> str:
     return f"ws://{host}:{port}/channel-config"
 
 
-async def _request_gateway_control(method: str, params: dict[str, Any]) -> dict[str, Any]:
+def _gateway_control_pipe_credentials() -> tuple[str, str]:
+    from jiuwenswarm.common.secrets_bootstrap import get_secret
+
+    path = str(get_secret("pipes.cron", "") or "").strip()
+    token = str(get_secret("e2aToken", "") or "").strip()
+    if not path or not token:
+        raise RuntimeError("Gateway control named pipe is not configured")
+    return path, token
+
+
+def _gateway_control_payload(response: dict[str, Any], request_id: str) -> dict[str, Any] | None:
+    if response.get("type") != "res" or response.get("id") != request_id:
+        return None
+    if not response.get("ok"):
+        raise RuntimeError(str(response.get("error") or "channel configuration failed"))
+    payload = response.get("payload")
+    return payload if isinstance(payload, dict) else {}
+
+
+async def _request_gateway_control_pipe(
+    request: dict[str, Any], path: str, token: str,
+) -> dict[str, Any]:
+    from jiuwenswarm.common.np_transport import open_pipe
+
+    stream = await open_pipe(path, timeout=10)
+    try:
+        await stream.send_frame({"type": "auth", "token": token})
+        await stream.recv_frame(timeout=10)
+        await stream.send_frame(request)
+        while True:
+            response = await stream.recv_frame(timeout=30)
+            if not isinstance(response, dict):
+                continue
+            payload = _gateway_control_payload(response, str(request["id"]))
+            if payload is not None:
+                return payload
+    finally:
+        await stream.close()
+
+
+async def _request_gateway_control_websocket(request: dict[str, Any]) -> dict[str, Any]:
     import websockets
 
-    request_id = f"channel-control-{uuid.uuid4().hex}"
     async with websockets.connect(_gateway_control_url(), open_timeout=10, close_timeout=5) as ws:
-        # Gateway sends a connection acknowledgement before it accepts requests.
         await asyncio.wait_for(ws.recv(), timeout=10)
-        request_params = dict(params)
-        requester_channel_id = CURRENT_CHANNEL_ID.get().strip()
-        requester_session_id = CURRENT_SESSION_ID.get().strip()
-        if requester_channel_id or requester_session_id:
-            request_params["requester"] = {
-                "channel_id": requester_channel_id,
-                "session_id": requester_session_id,
-            }
-        await ws.send(json.dumps({
-            "type": "req",
-            "id": request_id,
-            "method": method,
-            "params": request_params,
-        }, ensure_ascii=False))
-
+        await ws.send(json.dumps(request, ensure_ascii=False))
         while True:
             raw = await asyncio.wait_for(ws.recv(), timeout=30)
             response = json.loads(raw)
-            if response.get("type") != "res" or response.get("id") != request_id:
+            if not isinstance(response, dict):
                 continue
-            if not response.get("ok"):
-                raise RuntimeError(str(response.get("error") or "channel configuration failed"))
-            payload = response.get("payload")
-            return payload if isinstance(payload, dict) else {}
+            payload = _gateway_control_payload(response, str(request["id"]))
+            if payload is not None:
+                return payload
+
+
+async def _request_gateway_control(method: str, params: dict[str, Any]) -> dict[str, Any]:
+    request = _gateway_control_request(method, params)
+    try:
+        credentials = _gateway_control_pipe_credentials()
+    except RuntimeError:
+        return await _request_gateway_control_websocket(request)
+    return await _request_gateway_control_pipe(request, *credentials)
 
 
 @tool(

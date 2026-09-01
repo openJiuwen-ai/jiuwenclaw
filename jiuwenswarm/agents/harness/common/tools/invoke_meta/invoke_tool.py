@@ -22,11 +22,14 @@ from jiuwenswarm.agents.harness.common.tools.invoke_meta.external_tool_registry 
     load_external_tools,
 )
 from jiuwenswarm.agents.harness.common.tools.invoke_meta.plugin_skill_catalog import (
-    PLUGIN_SKILL_CATALOG,
     extract_seedance_query_state,
     extract_seedance_task_id,
+    invoke_arguments_description,
+    invoke_function_name_description,
     invoke_tool_description,
+    is_plugin_skill_function,
     normalize_plugin_skill_args,
+    seedream_lite_function_name,
     validate_plugin_skill_args,
     want_seedance_wait,
 )
@@ -69,7 +72,7 @@ def _parse_invoke_inputs(inputs: dict[str, Any]) -> tuple[str, dict[str, Any]]:
     func_name = str(inputs.get("functionName") or inputs.get("funcName") or "").strip()
     if not func_name:
         nested = str(params.get("functionName") or params.get("funcName") or "").strip()
-        if nested in PLUGIN_SKILL_CATALOG:
+        if nested and is_plugin_skill_function(nested):
             func_name = _PLUGIN_SKILL_EXEC
         else:
             func_name = nested
@@ -89,7 +92,7 @@ def _normalize_plugin_skill_call(
     if not nested_name:
         raise ValueError(
             "functionName=PluginSkillExecTool 时，arguments.functionName 为必填"
-            "（如 seedreamLite4Skill / imageUnderStandStream / seedanceMiniTask / "
+            f"（如 {seedream_lite_function_name()} / imageUnderStandStream / seedanceMiniTask / "
             "lyricsGeneration / musicGeneration）"
         )
     return nested_name, dict(params), True
@@ -321,7 +324,7 @@ async def _dispatch_invoke(
         return {"success": False, "error": str(exc)}
 
     # PLUGIN_SKILL_CATALOG: coerce then validate (fail fast, skip waiting on WS).
-    if via_plugin_skill or func_name in PLUGIN_SKILL_CATALOG:
+    if via_plugin_skill or is_plugin_skill_function(func_name):
         params, norm_err = normalize_plugin_skill_args(func_name, params)
         if norm_err is not None:
             return {"success": False, "error": norm_err}
@@ -343,56 +346,34 @@ async def _dispatch_invoke(
     return result
 
 
-_INVOKE_TOOL_CARD = ToolCard(
-    id="jiuwenswarm_invoke_tool",
-    name="invoke",
-    description=invoke_tool_description(),
-    input_params={
-        "type": "object",
-        "properties": {
-            "functionName": {
-                "type": "string",
-                "description": (
-                    "云端 skill：固定 PluginSkillExecTool；"
-                    "远程 Agent：agent_as_a_tool。"
-                    "arguments.functionName 才是具体能力"
-                    "（seedreamLite4Skill / SeedreamPro4Skill / "
-                    "imageUnderStandStream / seedanceMiniTask / seedanceMiniTaskQuery / "
-                    "lyricsGeneration / musicGeneration）。"
-                ),
+def _build_invoke_tool_card() -> ToolCard:
+    """Build invoke ToolCard from the current-zone catalog (env may change per process)."""
+    return ToolCard(
+        id="jiuwenswarm_invoke_tool",
+        name="invoke",
+        description=invoke_tool_description(),
+        input_params={
+            "type": "object",
+            "properties": {
+                "functionName": {
+                    "type": "string",
+                    "description": invoke_function_name_description(),
+                },
+                "arguments": {
+                    "type": "object",
+                    "description": invoke_arguments_description(),
+                },
             },
-            "arguments": {
-                "type": "object",
-                "description": (
-                    "必含 bundleName + functionName（真实能力名）+ 业务字段。"
-                    "生图：bundleName=com.atomicservice.5765880207845681341，"
-                    "functionName=seedreamLite4Skill|SeedreamPro4Skill，prompt=...；"
-                    "图像理解：bundleName=xiaoyi，functionName=imageUnderStandStream，imageUrl=...；"
-                    "生视频：同原子服务 bundle，seedanceMiniTask 用 content"
-                    "（默认自动轮询到 video_url；wait=false 则只返回 task_id），"
-                    "seedanceMiniTaskQuery 用 id；"
-                    "生音乐：同原子服务 bundle，业务字段与 bundleName 平铺，不要包 content。"
-                    "基础器乐只用 musicGeneration+is_instrumental=true；"
-                    "基础人声 lyrics_optimizer=true；"
-                    "高级人声先 lyricsGeneration（write_full_song，改词 edit+lyrics），"
-                    "确认歌词后再 musicGeneration 带 lyrics。"
-                    "成曲前向用户展示类型/语言/prompt/歌词并得到明确确认。"
-                    "中文输入用中文 prompt 与歌词，英文同理，其它语言先问用户。"
-                    "prompt 写成完整句子（情绪+流派+人声或乐器+叙事/场景），"
-                    "不要逗号关键词列表。勿臆造其它 bundleName。"
-                ),
-            },
+            "required": ["functionName", "arguments"],
         },
-        "required": ["functionName", "arguments"],
-    },
-)
+    )
 
 
 class InvokeTool(Tool):
     """Routes invoke to cloud PluginSkillExec (mcp/run) or remote Agent."""
 
     def __init__(self, card: ToolCard | None = None) -> None:
-        super().__init__(card or _INVOKE_TOOL_CARD)
+        super().__init__(card or _build_invoke_tool_card())
 
     async def invoke(self, inputs: Dict[str, Any], **kwargs) -> Any:
         merged = {**inputs, **kwargs}

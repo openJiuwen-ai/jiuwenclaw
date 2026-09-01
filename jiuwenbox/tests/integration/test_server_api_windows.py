@@ -676,14 +676,19 @@ class TestWinAclAceConstruction:
         calls: list[tuple[str, int, object]] = []  # (method, mask, sid)
 
         class _FakeACL:  # noqa: E306 - 嵌套定义
-            def AddAccessDeniedAceEx(self, flags, mask, sid):  # noqa: N815 - pywin32 SDK 方法名
+            def AddAccessDeniedAceEx(self, *args):  # noqa: N815 - pywin32 SDK 方法名
+                mask, sid = args[-2], args[-1]
                 calls.append(("deny", mask, sid))
 
-            def AddAccessAllowedAceEx(self, flags, mask, sid):  # noqa: N815 - pywin32 SDK 方法名
+            def AddAccessAllowedAceEx(self, *args):  # noqa: N815 - pywin32 SDK 方法名
+                mask, sid = args[-2], args[-1]
                 calls.append(("allow", mask, sid))
 
         class _FakeDacl:  # noqa: E306 - 嵌套定义
             def GetAclSize(self):  # noqa: N815 - pywin32 SDK 方法名
+                return 3
+
+            def GetAceCount(self):  # noqa: N815 - pywin32 SDK 方法名
                 return 3
 
             def GetAce(self, i):  # noqa: N815 - pywin32 SDK 方法名
@@ -712,6 +717,302 @@ class TestWinAclAceConstruction:
         )
         # 新增的 deny ACE 应在其中.
         assert ("deny", 0x400, "new-deny") in calls
+
+    def test_rebuild_acl_skip_inherited(self, monkeypatch):
+        """SetFileSecurity 路径必须丢掉继承 ACE, 否则 Users 组读权限变显式."""
+        from jiuwenbox.supervisor import win_acl
+        calls: list[tuple[str, int, object]] = []
+
+        class _FakeACL:
+            def AddAccessDeniedAceEx(self, *args):  # noqa: N815
+                calls.append(("deny", args[-2], args[-1]))
+
+            def AddAccessAllowedAceEx(self, *args):  # noqa: N815
+                calls.append(("allow", args[-2], args[-1]))
+
+        class _FakeDacl:
+            def GetAceCount(self):  # noqa: N815
+                return 2
+
+            def GetAce(self, i):  # noqa: N815
+                if i == 0:
+                    return (0, const.INHERITED_ACE, 0x120089, "S-1-5-32-545")
+                return (0, 0x0, 0x1f01ff, "owner")
+
+        fake_sec = MagicMock()
+        fake_sec.ACL = _FakeACL
+        monkeypatch.setattr(
+            win_acl, "_ensure_pywin32",
+            lambda: (fake_sec, MagicMock(), MagicMock()),
+        )
+        win_acl._rebuild_acl_with_order(  # noqa: SLF001
+            _FakeDacl(), skip_inherited=True,
+        )
+        sids = [c[2] for c in calls]
+        assert "S-1-5-32-545" not in sids
+        assert "owner" in sids
+
+    def test_rebuild_acl_drop_world_sids(self, monkeypatch):
+        from jiuwenbox.supervisor import win_acl
+        calls: list[tuple[str, int, object]] = []
+
+        class _FakeACL:
+            def AddAccessDeniedAceEx(self, *args):  # noqa: N815
+                calls.append(("deny", args[-2], args[-1]))
+
+            def AddAccessAllowedAceEx(self, *args):  # noqa: N815
+                calls.append(("allow", args[-2], args[-1]))
+
+        class _FakeDacl:
+            def GetAceCount(self):  # noqa: N815
+                return 2
+
+            def GetAce(self, i):  # noqa: N815
+                if i == 0:
+                    return (0, 0x3, 0x120089, "S-1-5-32-545")
+                return (0, 0x0, 0x1f01ff, "owner")
+
+        fake_sec = MagicMock()
+        fake_sec.ACL = _FakeACL
+        monkeypatch.setattr(
+            win_acl, "_ensure_pywin32",
+            lambda: (fake_sec, MagicMock(), MagicMock()),
+        )
+        win_acl._rebuild_acl_with_order(  # noqa: SLF001
+            _FakeDacl(),
+            drop_sid_keys=const.WORLD_LIST_SID_SDDL,
+        )
+        sids = [c[2] for c in calls]
+        assert "S-1-5-32-545" not in sids
+        assert "owner" in sids
+
+    def test_rebuild_acl_drop_deny_sid_keeps_allow(self, monkeypatch):
+        """主目录旧 Deny List 必须清掉, 否则穿过 USERPROFILE 进 claw-desktop 仍 5."""
+        from jiuwenbox.supervisor import win_acl
+        calls: list[tuple[str, int, object]] = []
+        sandbox = "S-1-5-21-1-2-1001"
+        owner = "S-1-5-21-1-2-1000"
+
+        class _FakeACL:
+            def AddAccessDeniedAceEx(self, *args):  # noqa: N815
+                calls.append(("deny", args[-2], args[-1]))
+
+            def AddAccessAllowedAceEx(self, *args):  # noqa: N815
+                calls.append(("allow", args[-2], args[-1]))
+
+        class _FakeDacl:
+            def GetAceCount(self):  # noqa: N815
+                return 3
+
+            def GetAce(self, i):  # noqa: N815
+                if i == 0:
+                    return (
+                        const.ACCESS_DENIED_ACE_TYPE, 0,
+                        const.FILE_LIST_DIRECTORY, sandbox,
+                    )
+                if i == 1:
+                    return (
+                        const.ACCESS_ALLOWED_ACE_TYPE, 0,
+                        const.FILE_GENERIC_EXECUTE, sandbox,
+                    )
+                return (const.ACCESS_ALLOWED_ACE_TYPE, 0, 0x1F01FF, owner)
+
+        fake_sec = MagicMock()
+        fake_sec.ACL = _FakeACL
+        monkeypatch.setattr(
+            win_acl, "_ensure_pywin32",
+            lambda: (fake_sec, MagicMock(), MagicMock()),
+        )
+        win_acl._rebuild_acl_with_order(  # noqa: SLF001
+            _FakeDacl(),
+            drop_deny_sid_keys={sandbox},
+        )
+        assert ("deny", const.FILE_LIST_DIRECTORY, sandbox) not in calls
+        assert ("allow", const.FILE_GENERIC_EXECUTE, sandbox) in calls
+        assert ("allow", 0x1F01FF, owner) in calls
+
+    def test_rebuild_acl_keep_list_drops_sandbox_generic_read(self, monkeypatch):
+        """主目录残留 jbx-sandbox (OI)(CI)(R) 必须去掉, 只留宿主列目录."""
+        from jiuwenbox.supervisor import win_acl
+        calls: list[tuple[str, int, object]] = []
+        sandbox = "S-1-5-21-1-2-1001"
+        owner = "S-1-5-21-1-2-1000"
+
+        class _FakeACL:
+            def AddAccessDeniedAceEx(self, *args):  # noqa: N815
+                calls.append(("deny", args[-2], args[-1]))
+
+            def AddAccessAllowedAceEx(self, *args):  # noqa: N815
+                calls.append(("allow", args[-2], args[-1]))
+
+        class _FakeDacl:
+            def GetAceCount(self):  # noqa: N815
+                return 2
+
+            def GetAce(self, i):  # noqa: N815
+                if i == 0:
+                    return (
+                        const.ACCESS_ALLOWED_ACE_TYPE,
+                        const.OBJECT_INHERIT_ACE | const.CONTAINER_INHERIT_ACE,
+                        const.FILE_GENERIC_READ,
+                        sandbox,
+                    )
+                return (const.ACCESS_ALLOWED_ACE_TYPE, 0, 0x1F01FF, owner)
+
+        fake_sec = MagicMock()
+        fake_sec.ACL = _FakeACL
+        monkeypatch.setattr(
+            win_acl, "_ensure_pywin32",
+            lambda: (fake_sec, MagicMock(), MagicMock()),
+        )
+        win_acl._rebuild_acl_with_order(  # noqa: SLF001
+            _FakeDacl(),
+            [
+                (
+                    const.ACCESS_ALLOWED_ACE_TYPE, 0,
+                    const.FILE_GENERIC_EXECUTE, sandbox,
+                ),
+            ],
+            keep_list_sid_keys={owner, const.SID_LOCAL_SYSTEM,
+                                const.SID_BUILTIN_ADMINISTRATORS},
+        )
+        assert ("allow", const.FILE_GENERIC_READ, sandbox) not in calls
+        assert ("allow", const.FILE_GENERIC_EXECUTE, sandbox) in calls
+        assert ("allow", 0x1F01FF, owner) in calls
+
+    def test_keeper_sid_keys_includes_host(self):
+        from jiuwenbox.supervisor import win_acl
+        owner = "S-1-5-21-1-2-1000"
+        keys = win_acl._keeper_sid_keys(owner)  # noqa: SLF001
+        assert const.SID_LOCAL_SYSTEM in keys
+        assert const.SID_BUILTIN_ADMINISTRATORS in keys
+        assert owner in keys
+        assert const.SID_BUILTIN_USERS not in keys
+
+    def test_install_reconciles_host_acl(self):
+        import inspect
+        from jiuwenbox.supervisor import win_setup
+        src = inspect.getsource(win_setup.install)
+        assert "reconcile_install_acl" in src
+
+    def test_parent_traverse_plan_desktop_grants_list(self):
+        """claw-desktop 必须带 FILE_LIST_DIRECTORY, 且禁止继承, 不能只授 traverse."""
+        from jiuwenbox.supervisor import win_acl
+        plan = win_acl._parent_traverse_plan(False, True)  # noqa: SLF001
+        assert int(plan["rights"]) & const.FILE_LIST_DIRECTORY
+        assert int(plan["rights"]) & const.FILE_GENERIC_READ
+        assert plan["ace_flags"] == const.RECURSIVE_ACE_FLAGS
+        assert plan["protect"] is True
+        assert plan["skip_inherited"] is False
+        assert plan["drop_world"] is False
+        assert plan["deny_list"] is False
+
+    def test_parent_traverse_plan_profile_no_deny_list(self):
+        from jiuwenbox.supervisor import win_acl
+        plan = win_acl._parent_traverse_plan(True, False)  # noqa: SLF001
+        assert int(plan["rights"]) == const.FILE_GENERIC_EXECUTE
+        assert int(plan["rights"]) & const.FILE_LIST_DIRECTORY == 0
+        assert plan["ace_flags"] == 0
+        assert plan["protect"] is None
+        assert plan["drop_world"] is False
+        assert plan["skip_inherited"] is False
+        assert plan["deny_list"] is True
+
+    def test_parent_traverse_plan_mid_dir_traverse_only(self):
+        from jiuwenbox.supervisor import win_acl
+        plan = win_acl._parent_traverse_plan(False, False)  # noqa: SLF001
+        assert int(plan["rights"]) == const.FILE_GENERIC_EXECUTE
+        assert plan["protect"] is None
+        assert plan["skip_inherited"] is False
+        assert plan["drop_world"] is False
+        assert plan["deny_list"] is False
+
+    def test_host_dacl_frozen_volume_root_and_users(self):
+        from jiuwenbox.supervisor import win_acl
+        assert win_acl._is_volume_root(r"D:\\")  # noqa: SLF001
+        assert win_acl._is_volume_root("D:")  # noqa: SLF001
+        assert win_acl._is_volume_root("D:/")  # noqa: SLF001
+        assert win_acl._is_host_dacl_frozen(r"D:\\")  # noqa: SLF001
+        assert win_acl._is_host_dacl_frozen(r"C:\\")  # noqa: SLF001
+        assert win_acl._is_host_dacl_frozen(r"C:\\Users")  # noqa: SLF001
+        assert win_acl._is_host_dacl_frozen(r"D:\\Users")  # noqa: SLF001
+        assert not win_acl._is_host_dacl_frozen(r"D:\\CODE")  # noqa: SLF001
+        assert not win_acl._is_host_dacl_frozen(r"C:\\Users\\alice")  # noqa: SLF001
+        assert not win_acl._is_volume_root(r"D:\\n")  # noqa: SLF001
+
+    def test_grant_ace_skips_frozen_host_dacl(self, monkeypatch):
+        from jiuwenbox.supervisor import win_acl
+        monkeypatch.setattr(win_acl, "_require_windows", lambda: None)
+
+        def _boom():
+            raise AssertionError("must not open win32 on frozen path")
+
+        monkeypatch.setattr(win_acl, "_ensure_pywin32", _boom)
+        win_acl.grant_ace(r"D:\\", "S-1-5-21-1-2-1001", rights=1, mode="DENY")
+        win_acl.grant_ace(r"C:\\Users", "S-1-5-21-1-2-1001", rights=1, mode="ALLOW")
+        win_acl.grant_aces(r"D:\\", [("S-1-5-21-1-2-1001", 1, "DENY")])
+
+    def test_grant_parent_traverse_mid_dir_does_not_drop_users(
+        self, monkeypatch, tmp_path,
+    ):
+        """中间目录重建 DACL 时不得用 keep_list / drop_world 丢掉 Users."""
+        from jiuwenbox.supervisor import win_acl
+        monkeypatch.setattr(win_acl, "_require_windows", lambda: None)
+        profile = tmp_path / "host"
+        mid = profile / "AppData" / "Roaming" / "foo"
+        mid.mkdir(parents=True)
+        captured: list[dict] = []
+
+        def fake_rebuild(dacl, new_aces=None, **kwargs):
+            captured.append(kwargs)
+            return MagicMock()
+
+        fake_sec = MagicMock()
+        fake_sd = MagicMock()
+        fake_sd.GetSecurityDescriptorDacl.return_value = MagicMock()
+        fake_sec.GetFileSecurity.return_value = fake_sd
+        monkeypatch.setattr(
+            win_acl, "_ensure_pywin32",
+            lambda: (fake_sec, MagicMock(), MagicMock()),
+        )
+        monkeypatch.setattr(win_acl, "_rebuild_acl_with_order", fake_rebuild)
+        monkeypatch.setattr(win_acl, "_write_file_dacl", lambda *a, **k: None)
+        monkeypatch.setattr(win_acl, "_harden_profile_children", lambda *a, **k: None)
+        monkeypatch.setattr(
+            win_acl, "_user_profile_stop_keys",
+            lambda: {os.path.normcase(str(profile.resolve()))},
+        )
+        monkeypatch.setattr(win_acl, "_desktop_data_dir_keys", lambda: set())
+        monkeypatch.setattr(win_acl, "_resolve_sid", lambda s: s)
+        monkeypatch.setattr(win_acl, "_is_host_dacl_frozen", lambda p: False)
+        win_acl.grant_parent_traverse(str(mid), "S-1-5-21-1-2-3")
+        assert captured
+        for kw in captured:
+            assert kw.get("keep_list_sid_keys") is None
+            dropped = kw.get("drop_sid_keys") or set()
+            assert not (dropped & const.WORLD_LIST_SID_SDDL)
+
+    def test_resolve_desktop_data_dir_from_appdata(self, tmp_path, monkeypatch):
+        from jiuwenbox.supervisor import win_acl
+        desktop = tmp_path / "claw-desktop"
+        desktop.mkdir()
+        monkeypatch.delenv("JIUWENBOX_DESKTOP_DATA_DIR", raising=False)
+        monkeypatch.delenv("JIUWENSWARM_DATA_DIR", raising=False)
+        monkeypatch.setenv("APPDATA", str(tmp_path))
+        assert os.path.normcase(win_acl.resolve_desktop_data_dir()) == os.path.normcase(
+            str(desktop.resolve()),
+        )
+
+    def test_resolve_desktop_data_dir_from_swarm_parent(self, tmp_path, monkeypatch):
+        from jiuwenbox.supervisor import win_acl
+        desktop = tmp_path / "claw-desktop"
+        swarm = desktop / "jiuwenswarm"
+        swarm.mkdir(parents=True)
+        monkeypatch.delenv("JIUWENBOX_DESKTOP_DATA_DIR", raising=False)
+        monkeypatch.setenv("JIUWENSWARM_DATA_DIR", str(swarm))
+        assert os.path.normcase(win_acl.resolve_desktop_data_dir()) == os.path.normcase(
+            str(desktop.resolve()),
+        )
 
 
 # ---------------------------------------------------------------------------

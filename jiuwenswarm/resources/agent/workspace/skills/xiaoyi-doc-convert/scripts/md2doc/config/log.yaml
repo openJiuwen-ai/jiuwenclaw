@@ -1,0 +1,17 @@
+version: 1
+disable_existing_loggers: False
+formatters:
+  simple:
+    format: "%(asctime)s - %(name)s - %(levelname)s: %(message)s"
+  default:
+    format: "%(asctime)s - Loc %(filename)s - %(name)s - %(levelname)s: %(message)s"
+
+handlers:
+  console:
+    class: logging.StreamHandler
+    level: DEBUG
+    formatter: default
+
+root:
+  handlers: [console]
+  level: DEBUG
