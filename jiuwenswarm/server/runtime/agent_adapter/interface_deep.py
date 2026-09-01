@@ -384,7 +384,7 @@ from jiuwenswarm.server.runtime.agent_adapter.sysop_builder import (
 from jiuwenswarm.server.runtime.agent_adapter.user_turn import TEAM_USER_TURN_KEY, UserTurn
 from jiuwenswarm.agents.harness.common.auto_harness.service import _HARNESS_PACKAGES_FILE
 from jiuwenswarm.agents.harness.common.plugins.rail_manager import get_rail_manager
-from jiuwenswarm.gateway.cron import CronTargetChannel
+from jiuwenswarm.runtime.cron import CronTargetChannel
 from jiuwenswarm.common.schema.agent import AgentRequest, AgentResponse, AgentResponseChunk
 from jiuwenswarm.common.schema.message import ReqMethod
 from jiuwenswarm.common.utils import (
@@ -1312,6 +1312,52 @@ async def ensure_persistent_checkpointer() -> None:
     finally:
         if acquired:
             lock.release()
+
+
+async def close_persistent_checkpointer() -> None:
+    """Dispose the process-owned persistent checkpointer connection pool."""
+    global _PERSISTENT_CHECKPOINTER_READY
+
+    if not _PERSISTENT_CHECKPOINTER_READY:
+        return
+    lock = await _get_persistent_checkpointer_lock()
+    async with lock:
+        if not _PERSISTENT_CHECKPOINTER_READY:
+            return
+        checkpointer = CheckpointerFactory.get_checkpointer()
+        kv_store = getattr(checkpointer, "_kv_store", None)
+        engine = getattr(kv_store, "engine", None)
+        dispose = getattr(engine, "dispose", None)
+        dispose_error: BaseException | None = None
+        try:
+            if callable(dispose):
+                await dispose()
+        except BaseException as exc:
+            dispose_error = exc
+
+        reset_error: BaseException | None = None
+        try:
+            CheckpointerFactory.set_default_checkpointer(None)
+        except BaseException as exc:
+            reset_error = exc
+        finally:
+            # READY describes whether the currently installed factory value is
+            # safe to reuse.  Even a failed/partial dispose must force the next
+            # Runtime startup through initialization instead of reusing a
+            # potentially closed pool.
+            _PERSISTENT_CHECKPOINTER_READY = False
+
+        if dispose_error is not None:
+            if reset_error is not None:
+                logger.warning(
+                    "[JiuWenSwarmDeepAdapter] checkpointer factory reset failed "
+                    "while preserving dispose error: %s",
+                    reset_error,
+                )
+            raise dispose_error
+        if reset_error is not None:
+            raise reset_error
+        logger.info("[JiuWenSwarmDeepAdapter] persistent checkpointer closed")
 
 
 _MODE_DISPLAY_MAP: dict[str, dict[str, str]] = {
@@ -9852,7 +9898,7 @@ class JiuWenSwarmDeepAdapter:
             }
         ):
             return True
-        from jiuwenswarm.gateway.message_handler.evolution_approval import (
+        from jiuwenswarm.runtime.evolution import (
             is_interrupt_evolution_approval_answer_payload,
         )
 
@@ -10714,7 +10760,7 @@ class JiuWenSwarmDeepAdapter:
         """Close the frontend evolution status after a team skill approval is resolved."""
         if not session_id:
             return
-        from jiuwenswarm.server.gateway_push import WebSocketGatewayPushTransport
+        from jiuwenswarm.runtime.host_services import RuntimeHostPushTransport
 
         stage = "completed" if accepted else "hidden"
         message = (
@@ -10725,7 +10771,7 @@ class JiuWenSwarmDeepAdapter:
         try:
             await push_evolution_status(
                 EvolutionPushContext(
-                    transport=WebSocketGatewayPushTransport(),
+                    transport=RuntimeHostPushTransport(),
                     channel_id=channel_id,
                     session_id=session_id,
                 ),
@@ -14092,6 +14138,27 @@ class JiuWenSwarmDeepAdapter:
                     ))
         if tools and token_counter:
             tools_tokens = token_counter.count_tools(tools) or 0
+        elif tools:
+            # ContextEngine intentionally returns no token counter for models
+            # without a supported tokenizer.  Keep the /context breakdown
+            # useful in that mode instead of reporting registered tools as 0.
+            # Mirror TiktokenCounter.count_tools()'s wire shape, then apply the
+            # same character-based fallback used for the prompt and messages.
+            tools_tokens = 3
+            for index, tool in enumerate(tools):
+                function_obj = {
+                    "name": tool.name,
+                    "description": tool.description or "",
+                    "parameters": tool.parameters,
+                }
+                json_text = json.dumps(
+                    function_obj,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                    default=str,
+                )
+                piece = f"<|start|>functions.{tool.name}:{index}\n{json_text}<|end|>"
+                tools_tokens += max(len(piece) // 4, 1)
         else:
             tools_tokens = 0
 
@@ -14720,10 +14787,10 @@ class JiuWenSwarmDeepAdapter:
 
     async def _watch_evolution_and_push(self, rid: str, cid: str, session_id: str) -> None:
         """Poll passive evolution events and push progress, approval, and terminal status."""
-        from jiuwenswarm.server.gateway_push import WebSocketGatewayPushTransport
+        from jiuwenswarm.runtime.host_services import RuntimeHostPushTransport
 
         push_context = EvolutionPushContext(
-            transport=WebSocketGatewayPushTransport(),
+            transport=RuntimeHostPushTransport(),
             channel_id=cid,
             session_id=session_id,
         )

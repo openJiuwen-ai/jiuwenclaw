@@ -7,7 +7,12 @@ import pytest
 from jiuwenswarm.server import agent_ws_server as agent_ws_server_module
 from jiuwenswarm.common.schema.agent import AgentRequest, AgentResponse, AgentResponseChunk
 from jiuwenswarm.common.schema.message import ReqMethod
+from jiuwenswarm.runtime import AgentRuntime
 from jiuwenswarm.server.runtime.agent_adapter import interface_deep as interface_deep_module
+
+
+async def _initialize_test_runtime() -> None:
+    """Skip process-owned Runtime dependencies in direct handler unit tests."""
 
 
 class FakeWebSocket:
@@ -19,6 +24,14 @@ class FakeWebSocket:
 
 
 class AgentWebSocketServerHarness(agent_ws_server_module.AgentWebSocketServer):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._runtime = AgentRuntime(
+            agent_manager=self._agent_manager,
+            initializer=_initialize_test_runtime,
+            plan_controller=self._runtime.plan_controller,
+        )
+
     async def handle_stream_for_test(self, ws, request, send_lock):
         await self._handle_stream(ws, request, send_lock)
 

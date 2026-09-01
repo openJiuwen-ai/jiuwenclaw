@@ -76,12 +76,26 @@ class ExtensionManager:
                 seen.add(key)
                 self.loader.add_search_path(p)
 
-    async def load_all_extensions(self) -> None:
+    async def load_all_extensions(
+        self,
+        *,
+        include_transport_extensions: bool = True,
+    ) -> None:
         roots = self.loader.discover_extension_roots()
         logger.info("[ExtensionManager] 发现扩展路径: %s", roots)
         for path in roots:
             try:
-                loaded = await self.loader.load_extension(path)
+                manifest = self.loader.load_manifest(path)
+                if (
+                    not include_transport_extensions
+                    and manifest.get("requires_transport") is True
+                ):
+                    logger.info(
+                        "[ExtensionManager] Runtime 直连跳过 transport 扩展: %s",
+                        path,
+                    )
+                    continue
+                loaded = await self.loader.load_extension(path, manifest=manifest)
                 if loaded:
                     logger.info("[ExtensionManager] 加载 %s", loaded)
                     if isinstance(loaded, list):
