@@ -749,7 +749,18 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
 
     def _is_document_request(self) -> bool:
         path = urlparse(self.path).path
-        return path in ("/", "/index.html") and "text/html" in self.headers.get("Accept", "")
+        if "text/html" not in self.headers.get("Accept", ""):
+            return False
+        if path in ("/", "/index.html"):
+            return True
+        rel_path = unquote(path).lstrip("/")
+        if not rel_path:
+            return True
+        base_dir = Path(self.directory or os.getcwd()).resolve()
+        target = (base_dir / rel_path).resolve()
+        if os.path.commonpath([str(base_dir), str(target)]) != str(base_dir):
+            return False
+        return not target.exists()
 
     def send_head(self):
         parsed = urlparse(self.path)
