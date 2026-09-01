@@ -169,6 +169,7 @@ from jiuwenswarm.common.invocation_context.model_trace import TraceAwareModel
 from jiuwenswarm.common.invocation_context.billing_trace import (
     billing_marker_enabled,
     has_begun,
+    schedule_marker_call,
     terminal_trace_id,
 )
 from jiuwenswarm.server.xiaoyi_invocation import get_xiaoyi_trace_header_exporters
@@ -400,10 +401,8 @@ def get_runtime_tool_session_id() -> str | None:
 
 logger = logging.getLogger(__name__)
 
-# 临时计费标记（docs/billing-trace-marker-design.md）：终态虚拟模型调用的提示词与
-# fire-and-forget 任务集合（防 GC；任务自带 done_callback 移除）
-_BILLING_MARKER_PROMPT = "please only reply NO_REPLY"
-_BILLING_MARKER_TASKS: set[asyncio.Task] = set()
+# 临时计费标记（docs/billing-trace-marker-design.md）：终态虚拟模型调用经
+# billing_trace.schedule_marker_call 派发（begin 同机制，挂点在 TraceAwareModel）。
 
 _PERSISTENT_CHECKPOINTER_LOCK: asyncio.Lock | None = None
 _PERSISTENT_CHECKPOINTER_LOCK_LOOP: asyncio.AbstractEventLoop | None = None
@@ -1232,6 +1231,7 @@ class JiuWenSwarmDeepAdapter(ExpertCapabilityMixin):
         self._dreaming_mode: str = "agent"
         self._send_file_toolkit: SendFileToolkit | None = None
         self._runtime_state_write_task: asyncio.Task[None] | None = None
+        self._housekeeping_tasks: set[asyncio.Task[None]] = set()
         self._send_html_card_toolkit: SendHtmlCardToolkit | None = None
 
     def _schedule_runtime_state_write(
@@ -5717,10 +5717,10 @@ class JiuWenSwarmDeepAdapter(ExpertCapabilityMixin):
         initial_runtime_workspace = self._project_dir or str(
             get_default_project_session_workspace_dir()
         )
-        await asyncio.to_thread(
-            self._ensure_project_gitignore_agent_history,
-            initial_runtime_workspace,
-        )
+        # .gitignore housekeeping 挪后台：历史上这里同步 await 的 git 子进程
+        # 曾在 Windows 上悬挂，把 create_instance（乃至 warm pool 全局
+        # _initialization_lock）整体卡死；纯 housekeeping 不该阻塞会话创建。
+        self._schedule_project_gitignore_agent_history(initial_runtime_workspace)
         self._seed_runtime_cwd(initial_runtime_workspace, workspace=initial_runtime_workspace)
         setattr(self._instance, "_jiuwenswarm_project_dir", initial_runtime_workspace)
 
@@ -5747,26 +5747,65 @@ class JiuWenSwarmDeepAdapter(ExpertCapabilityMixin):
         # 动态加载用户自定义的 Rail 扩展
         await self.load_user_rails()
 
+    def _schedule_project_gitignore_agent_history(self, project_dir: str | None) -> None:
+        """后台执行 .gitignore housekeeping，绝不阻塞实例创建.
+
+        历史教训：该步骤曾在 create_instance 关键路径上 await 一个
+        ``git rev-parse`` 子进程；Windows 上 subprocess.run 超时 kill 后
+        会无超时 communicate 等管道 EOF，管道写端一旦被其他存活进程继承
+        便永久悬挂（stall-watchdog 多次抓到同一点位）。即使现已改为纯
+        文件系统实现，该逻辑仍是纯 housekeeping，不值得阻塞会话创建。
+        """
+        if not project_dir:
+            return
+
+        async def _run() -> None:
+            try:
+                await asyncio.to_thread(
+                    self._ensure_project_gitignore_agent_history, project_dir
+                )
+            except Exception as exc:  # housekeeping 失败绝不外抛
+                logger.warning(
+                    "[JiuWenSwarmDeepAdapter] background gitignore housekeeping failed: %s",
+                    exc,
+                )
+
+        task = asyncio.create_task(
+            _run(),
+            name=f"gitignore-agent-history-{str(project_dir)[-24:]}",
+        )
+        tasks = getattr(self, "_housekeeping_tasks", None)
+        if tasks is None:
+            tasks = self._housekeeping_tasks = set()
+        tasks.add(task)
+        task.add_done_callback(tasks.discard)
+
+    @staticmethod
+    def _find_git_worktree_root(project_dir: str) -> str | None:
+        """逐级向上找 .git，返回工作区根；找不到返回 None.
+
+        普通仓库 .git 是目录，worktree/submodule 里是文件，统一用 exists
+        判定。等价于 ``git rev-parse --show-toplevel`` 的桌面场景子集，
+        但不 spawn 任何子进程（根除管道悬挂类卡死）。
+        """
+        try:
+            start = Path(project_dir)
+        except (OSError, ValueError):
+            return None
+        for candidate in (start, *start.parents):
+            try:
+                if (candidate / ".git").exists():
+                    return str(candidate)
+            except OSError:
+                return None
+        return None
+
     @staticmethod
     def _ensure_project_gitignore_agent_history(project_dir: str | None) -> None:
         """Ensure JiuwenSwarm's file operation logs stay out of project git diffs."""
         if not project_dir:
             return
-        try:
-            repo_probe = subprocess.run(
-                ["git", "rev-parse", "--show-toplevel"],
-                cwd=project_dir,
-                capture_output=True,
-                text=True,
-                timeout=5,
-                check=False,
-            )
-        except (OSError, subprocess.SubprocessError):
-            return
-        if repo_probe.returncode != 0:
-            return
-
-        repo_root_text = repo_probe.stdout.strip()
+        repo_root_text = JiuWenSwarmDeepAdapter._find_git_worktree_root(project_dir)
         if not repo_root_text:
             return
         gitignore_path = Path(repo_root_text) / ".gitignore"
@@ -10636,42 +10675,11 @@ class JiuWenSwarmDeepAdapter(ExpertCapabilityMixin):
                 logger.warning("[billing-trace] 终态标记跳过：model 实例不可用")
                 return
             terminal = terminal_trace_id(core, ok=not failed)
-            task = asyncio.create_task(self._run_billing_marker_call(terminal))
-            _BILLING_MARKER_TASKS.add(task)
-            task.add_done_callback(_BILLING_MARKER_TASKS.discard)
+            if not schedule_marker_call(self._model, terminal):
+                logger.warning("[billing-trace] 终态标记派发失败: %s", terminal)
         except Exception:
             # 计费标记永不影响会话主路径
             logger.debug("[billing-trace] 终态标记派发失败", exc_info=True)
-
-    async def _run_billing_marker_call(self, terminal_trace: str) -> None:
-        """执行终态虚拟模型调用（显式 trace 头——TraceAwareModel 不覆盖不改写），失败重试 1 次。"""
-        from openjiuwen.core.foundation.llm.schema.message import (
-            SystemMessage,
-            UserMessage,
-        )
-
-        messages = [
-            SystemMessage(content=_BILLING_MARKER_PROMPT),
-            UserMessage(content=_BILLING_MARKER_PROMPT),
-        ]
-        for attempt in (1, 2):
-            try:
-                await self._model.invoke(
-                    messages,
-                    custom_headers={"x-hag-trace-id": terminal_trace},
-                )
-                logger.info("[billing-trace] 终态标记已上行: %s", terminal_trace)
-                return
-            except Exception as exc:
-                if attempt == 2:
-                    logger.warning(
-                        "[billing-trace] 终态标记上行失败（重试后仍失败）: %s trace=%s",
-                        exc,
-                        terminal_trace,
-                    )
-                else:
-                    logger.info("[billing-trace] 终态标记上行失败，重试一次: %s", exc)
-                    await asyncio.sleep(1)
 
     @staticmethod
     def _parse_stream_chunk(
