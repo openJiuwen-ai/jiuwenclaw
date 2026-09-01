@@ -33,21 +33,6 @@ def routing_context_from_request(request: AgentRequest | Any) -> RoutingContext:
     )
 
 
-def _normalize_service_config_row(row: dict[str, Any]) -> dict[str, Any]:
-    out = dict(row)
-    if "autoscale_interval" in out and out["autoscale_interval"] is not None:
-        try:
-            out["autoscale_interval"] = float(out["autoscale_interval"])
-        except (TypeError, ValueError):
-            pass
-    if "container_port" in out and out["container_port"] is not None:
-        try:
-            out["container_port"] = int(out["container_port"])
-        except (TypeError, ValueError):
-            pass
-    return out
-
-
 def _apply_slot_entities(
     result: EffectiveEnterpriseConfig,
     slot: str,
@@ -61,8 +46,6 @@ def _apply_slot_entities(
         result.skill_whitelist = entities
     elif slot == TemplateRefSlot.EXTENSION_CONFIG:
         result.extension_config = entities
-    elif slot == TemplateRefSlot.SERVICE_CONFIG:
-        result.service_config = entities
 
 
 def _any_requested_slot_loaded(
@@ -77,8 +60,6 @@ def _any_requested_slot_loaded(
         if slot == TemplateRefSlot.SKILL_WHITELIST and result.skill_whitelist:
             return True
         if slot == TemplateRefSlot.EXTENSION_CONFIG and result.extension_config:
-            return True
-        if slot == TemplateRefSlot.SERVICE_CONFIG and result.service_config:
             return True
     return False
 
@@ -97,8 +78,6 @@ async def _fetch_slot_entities(
                 template_id,
             )
             continue
-        if slot == TemplateRefSlot.SERVICE_CONFIG:
-            entity = _normalize_service_config_row(entity)
         entities.append(entity)
     return entities
 
