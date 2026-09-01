@@ -14,7 +14,6 @@ docs/named-pipe-migration-design.md §5.4（claw_desktop 仓）：
 from __future__ import annotations
 
 import asyncio
-import json
 import os
 import socket
 import sys
@@ -203,30 +202,21 @@ class TestPipeAuth:
         finally:
             await channel.stop()
 
-    @pytest.mark.asyncio
-    async def test_verify_client_rejects_non_desktop_image(
+    def test_image_verifier_rejects_unlisted_image(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """密钥包携带 desktopExe 时启用 PID→镜像白名单：非桌面进程连入即被断。"""
-        from jiuwenswarm.common.np_transport import PipeClosedError, open_pipe
+        """同用户但镜像路径不在白名单中的进程仍被拒绝。"""
+        from jiuwenswarm.common import np_transport
 
-        path = _pipe_path("verify-reject")
-        _feed_secrets(monkeypatch, path, desktop_exe=r"C:\nonexistent\fake-desktop.exe")
-        channel = _make_channel()
-        await channel._maybe_start_pipe_server()
-        assert channel._pipe_server is not None
-        try:
-            client = await open_pipe(path, timeout=5)
-            # accept 阶段校验失败：auth 帧尚未被消费即断管，读侧报关闭
-            try:
-                await client.send_frame({"type": "auth", "token": _TEST_TOKEN})
-            except PipeClosedError:
-                pass
-            with pytest.raises(PipeClosedError):
-                await client.recv_frame(timeout=3)
-            await client.close()
-        finally:
-            await channel.stop()
+        monkeypatch.setattr(
+            np_transport.win32process,
+            "GetModuleFileNameEx",
+            lambda _handle, _module: r"C:\untrusted\other.exe",
+        )
+
+        verify = np_transport.make_image_verifier([r"C:\trusted\desktop.exe"])
+
+        assert verify(os.getpid()) is False
 
     @pytest.mark.asyncio
     async def test_verify_client_accepts_self_image(
@@ -260,6 +250,31 @@ class TestPipeAuth:
             await client.send_frame({"type": "auth", "token": _TEST_TOKEN})
             ack = await client.recv_frame(timeout=5)
             assert ack["type"] == "event"
+            assert ack["event"] == "connection.ack"
+            await client.close()
+        finally:
+            await channel.stop()
+
+    @pytest.mark.asyncio
+    async def test_verify_client_accepts_backend_runtime_image_without_secret(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Gateway 应自行放行同运行时 AgentServer，不依赖前端传 backendExe。"""
+        from jiuwenswarm.common.np_transport import open_pipe
+
+        path = _pipe_path("verify-backend")
+        _feed_secrets(
+            monkeypatch,
+            path,
+            desktop_exe=r"C:\nonexistent\fake-desktop.exe",
+        )
+        channel = _make_channel()
+        await channel._maybe_start_pipe_server()
+        assert channel._pipe_server is not None
+        try:
+            client = await open_pipe(path, timeout=5)
+            await client.send_frame({"type": "auth", "token": _TEST_TOKEN})
+            ack = await client.recv_frame(timeout=5)
             assert ack["event"] == "connection.ack"
             await client.close()
         finally:

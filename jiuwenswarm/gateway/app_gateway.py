@@ -2024,9 +2024,7 @@ async def _run(
         ),
     ]
 
-    # 桌面形态（密钥包已下发）：Gateway 主 WS server（/acp、/tui 路由；桌面注入
-    # 18591）无桌面消费者，直接不监听（docs/named-pipe-migration-design.md §5.4）。
-    # cron WebChannel（18590）与 xiaoyi 渠道不受影响；非桌面形态行为零变化。
+    # 桌面形态的 Gateway RPC（cron/频道控制）走命名管道，不监听主 WS。
     gateway_ws_enabled = not is_desktop_runtime()
     gateway_server_config = GatewayServerConfig(
         enabled=gateway_ws_enabled,
@@ -2179,6 +2177,9 @@ async def _run(
                 ws, req_id, ok=False, error=str(exc), code="INTERNAL_ERROR"
             )
 
+    web_channel.register_method("channel.configure", _configure_channel_from_model)
+    web_channel.register_method("wechat.login_status", _wechat_login_status_from_model)
+    # 非桌面启动没有命名管道密钥，保留原 WebSocket 控制端点供工具调用。
     gateway_server.register_local_handler(
         "/channel-config", "channel.configure", _configure_channel_from_model
     )
