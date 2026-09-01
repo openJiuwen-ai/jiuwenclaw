@@ -125,7 +125,8 @@
       "searchModel": "Search and select a model",
       "noModelResults": "No matching models",
       "openModelList": "Open model list",
-      "modelIdPlaceholder": "Enter a model ID",
+      "modelIdPlaceholder": "Enter a model ID, e.g. glm-4.7",
+      "modelIdHint": "For example: glm-4.7. Model IDs vary by provider; refer to its model list or official documentation.",
       "fetchLatestModels": "Fetch latest",
       "presetModels": "Showing provider presets. Open the list to fetch the latest models",
       "noPresetModels": "No preset models. Open the list or refresh to fetch the latest models",
@@ -622,7 +623,23 @@
       "configured": "Configured Models",
       "free": "Free Models",
       "addModel": "Add Custom Model",
+      "empty": "No models available. Add a model in Settings first.",
       "placeholder": "Select Model"
+    },
+    "contextUsage": {
+      "title": "Context usage",
+      "ariaLabel": "Context usage {{rate}}",
+      "hoverMetric": "{{rate}} ({{used}}/{{limit}})",
+      "detailMetric": "{{rate}} ({{used}}/{{limit}})",
+      "kvCacheHitRate": "KV hit rate",
+      "detailTitle": "Context usage",
+      "systemPrompt": "System prompt",
+      "messages": "Conversation messages",
+      "tools": "Tools & MCP",
+      "skills": "Skills",
+      "notReported": "Not reported",
+      "close": "Close context details",
+      "noBreakdown": "No category details returned by the backend"
     },
     "configLockedHistory": "Session has messages — create a new session to change config",
     "modeSwitchDisabledProcessing": "This conversation is running. Start a new conversation to choose another mode",
@@ -1035,11 +1052,11 @@
       },
       "1": {
         "title": "Configure your first model",
-        "description": "Model settings are under More, in Configuration."
+        "description": "Model configuration is on the Models page in Settings."
       },
       "2": {
         "title": "Complete model configuration",
-        "description": "Enter the model name, API URL, API key, and model provider in Default model, then select Save."
+        "description": "Select Add model, choose a model provider, complete the required fields, then select Save."
       }
     },
     "quickSetup": {
@@ -1344,10 +1361,6 @@
       "wakeOffset": "Wake early",
       "wakeOffsetUnit": "minutes",
       "wakeOffsetHelp": "Start the agent this many minutes before the scheduled push time; 0 means run at the scheduled time"
-    },
-    "modelPicker": {
-      "configured": "Configured",
-      "empty": "No models available yet, add one in the config panel first"
     },
     "timePicker": {
       "hour": "Hr",

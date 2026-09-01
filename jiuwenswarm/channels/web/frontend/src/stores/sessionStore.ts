@@ -5,6 +5,7 @@
  */
 
 import { create } from 'zustand';
+import { parseContextUsageSnapshot } from '../features/contextUsage/contextUsageModel';
 import {
   Session,
   AgentMode,
@@ -12,6 +13,7 @@ import {
   Message,
   ContextCompressionRuntime,
   ContextCompressionSummary,
+  ContextUsageSnapshot,
   TeamMemberContextCompressionState,
 } from '../types';
 import {
@@ -254,12 +256,6 @@ interface MemoryUsage {
   usedPercent: number | null;
 }
 
-interface ContextCompressionStats {
-  rate: number;
-  beforeCompressed: number | null;
-  afterCompressed: number | null;
-}
-
 export interface TeamTaskEvent {
   id: string;
   type: string;
@@ -390,9 +386,7 @@ export interface SessionRuntime {
   projectDirectory: string | null;
   /** 新会话草稿值；真实 Session 创建后由后端 metadata 的权威值覆盖。 */
   persistSession: boolean;
-  contextCompressionRate: number;
-  contextCompressionBefore: number | null;
-  contextCompressionAfter: number | null;
+  contextUsageSnapshot: ContextUsageSnapshot | null;
   teamTaskEvents: TeamTaskEvent[];
   teamTasks: TeamTask[];
   teamTaskProgressBaseline: TaskProgressBaseline;
@@ -427,9 +421,7 @@ function createEmptyRuntime(sessionId?: string): SessionRuntime {
     })(),
     projectDirectory: null,
     persistSession: false,
-    contextCompressionRate: 0,
-    contextCompressionBefore: null,
-    contextCompressionAfter: null,
+    contextUsageSnapshot: null,
     teamTaskEvents: [],
     teamTasks: [],
     teamTaskProgressBaseline: createTaskProgressBaseline(),
@@ -477,7 +469,7 @@ interface SessionState {
   removeSession: (sessionId: string) => void;
   setConnected: (connected: boolean) => void;
   setAvailableTools: (tools: string[]) => void;
-  setContextCompressionStats: (sessionId: string, stats: Partial<ContextCompressionStats> | null) => void;
+  receiveContextUsage: (payload: unknown) => void;
   setMemoryUsage: (memoryUsage: Partial<MemoryUsage> | null) => void;
   setAvailableModels: (models: ModelEntry[], activeModel?: string) => void;
   setSelectedModelName: (sessionId: string, name: string) => void;
@@ -714,40 +706,19 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     set({ availableTools: tools });
   },
 
-  setContextCompressionStats: (sessionId, stats) => {
-    if (!stats) {
-      set((state) => {
-        const runtime = state.runtimes[sessionId];
-        if (!runtime) return state;
-        return { runtimes: { ...state.runtimes, [sessionId]: {
-          ...runtime, contextCompressionRate: 0, contextCompressionBefore: null, contextCompressionAfter: null,
-        } } };
-      });
-      return;
-    }
-
-    const normalizedRate =
-      typeof stats.rate === 'number' && Number.isFinite(stats.rate)
-        ? Number(Math.min(Math.max(stats.rate, 0), 100).toFixed(1))
-        : 0;
-    const normalizedBefore =
-      typeof stats.beforeCompressed === 'number' && Number.isFinite(stats.beforeCompressed)
-        ? Math.max(Math.round(stats.beforeCompressed), 0)
-        : null;
-    const normalizedAfter =
-      typeof stats.afterCompressed === 'number' && Number.isFinite(stats.afterCompressed)
-        ? Math.max(Math.round(stats.afterCompressed), 0)
-        : null;
-
+  receiveContextUsage: (payload) => {
+    const snapshot = parseContextUsageSnapshot(payload);
+    if (!snapshot || snapshot.depth !== 0 || snapshot.team_id !== null || snapshot.member_name !== null) return;
+    const sessionId = snapshot.product_session_id;
     set((state) => {
       const runtime = state.runtimes[sessionId];
-      if (!runtime) return state;
-      return { runtimes: { ...state.runtimes, [sessionId]: {
-        ...runtime,
-        contextCompressionRate: normalizedRate,
-        contextCompressionBefore: normalizedBefore,
-        contextCompressionAfter: normalizedAfter,
-      } } };
+      if (!runtime || runtime.mode !== 'agent') return state;
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: { ...runtime, contextUsageSnapshot: snapshot },
+        },
+      };
     });
   },
 

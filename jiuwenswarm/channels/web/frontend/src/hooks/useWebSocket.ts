@@ -963,12 +963,6 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     useRef<Map<string, PendingContextCompressionStart>>(new Map());
   const pendingTeamMemberContextCompressionStartRef =
     useRef<Map<string, PendingContextCompressionStart>>(new Map());
-  const heldContextUsageSessionsRef = useRef<Set<string>>(new Set());
-  const pendingContextUsageRef = useRef<Map<string, {
-    rate: number;
-    beforeCompressed: number | null;
-    afterCompressed: number | null;
-  }>>(new Map());
   const streamDeltaBatcherRef = useRef<ReturnType<typeof createStreamDeltaBatcher> | null>(null);
   if (streamDeltaBatcherRef.current === null) {
     streamDeltaBatcherRef.current = createStreamDeltaBatcher();
@@ -979,7 +973,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     setConnected,
     setAvailableTools,
     updateSession,
-    setContextCompressionStats,
+    receiveContextUsage,
     setTeamMemberContextCompressionStatus,
     clearTeamMemberContextCompressionStatus,
     clearAllTeamMemberContextCompressionStatus,
@@ -1493,20 +1487,6 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         return false;
       }
 
-      const isInitialUserMessage = !useChatStore
-        .getState()
-        .getRuntime(sessionId)
-        ?.messages.some((message) => message.role === 'user');
-      if (isInitialUserMessage) {
-        heldContextUsageSessionsRef.current.add(sessionId);
-        pendingContextUsageRef.current.delete(sessionId);
-        setContextCompressionStats(sessionId, {
-          rate: 0,
-          beforeCompressed: 0,
-          afterCompressed: 0,
-        });
-      }
-
       resetContextCompressionTurn(sessionId);
       userInputVersionRef.current += 1;
       stopAllTts();
@@ -1664,7 +1644,6 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
       persistMedia,
       request,
       resetContextCompressionTurn,
-      setContextCompressionStats,
       t,
     ]
   );
@@ -2084,20 +2063,6 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     [request]
   );
 
-  const revealPendingContextUsage = useCallback((sessionId: string) => {
-    heldContextUsageSessionsRef.current.delete(sessionId);
-    const pending = pendingContextUsageRef.current.get(sessionId);
-    pendingContextUsageRef.current.delete(sessionId);
-    if (pending) {
-      setContextCompressionStats(sessionId, pending);
-    }
-  }, [setContextCompressionStats]);
-
-  // 会话切换时不再重置上下文压缩信息，保持本地存储的状态
-  // useEffect(() => {
-  //   setContextCompressionStats(null);
-  // }, [activeSessionId, setContextCompressionStats]);
-
   useEffect(() => {
     onConnectRef.current = onConnect;
     onDisconnectRef.current = onDisconnect;
@@ -2382,9 +2347,6 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
             appendTeamMemberOutputDelta(sessionId, payload, memberId, content);
           }
           return;
-        }
-        if (content) {
-          revealPendingContextUsage(sessionId);
         }
         if (currentMode === 'team' && content) {
           if (!isProactiveRecommendationPayload(payload)) {
@@ -2724,9 +2686,6 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           } else {
             useChatStore.getState().setThinking(sessionId, false);
           }
-        }
-        if (content) {
-          revealPendingContextUsage(sessionId);
         }
         const finalAction = interpretChatFinalAction(payload);
         if (currentMode === 'team' && content) {
@@ -3461,37 +3420,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         }
       }),
       webClient.on('context.usage', ({ payload }) => {
-        const sessionId = resolveEventSessionId(payload);
-        if (!sessionId) return;
-        const currentMode = useSessionStore.getState().getRuntime(sessionId)?.mode;
-        if (isHiddenTeamTeammateMessagePayload(currentMode ?? 'agent', payload)) return;
-        const rate =
-          typeof payload.rate === 'number' ? payload.rate : 0;
-        const contextMax =
-          typeof payload.context_max === 'number' && Number.isFinite(payload.context_max)
-            ? payload.context_max
-            : null;
-        const tokensUsed =
-          typeof payload.tokens_used === 'number' && Number.isFinite(payload.tokens_used)
-            ? payload.tokens_used
-            : null;
-        const stats = { rate, beforeCompressed: contextMax, afterCompressed: tokensUsed };
-        if (heldContextUsageSessionsRef.current.has(sessionId)) {
-          pendingContextUsageRef.current.set(sessionId, stats);
-          setContextCompressionStats(sessionId, {
-            rate: 0,
-            beforeCompressed: 0,
-            afterCompressed: 0,
-          });
-        } else {
-          setContextCompressionStats(sessionId, stats);
-        }
-        console.debug('[ws] context.usage', {
-          session_id: payload.session_id,
-          rate,
-          context_max: contextMax,
-          tokens_used: tokensUsed,
-        });
+        receiveContextUsage(payload);
       }),
       webClient.on<ContextCompressionStatePayload>(
         'context.compression_state',
@@ -4454,8 +4383,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     handleContextCompressionState,
     handleTeamMemberContextCompressionState,
     handleTtsPlayback,
-    revealPendingContextUsage,
-    setContextCompressionStats,
+    receiveContextUsage,
     clearThinkingForVisibleOutput,
     findActiveTeamLeaderMessage,
     closeActiveTeamLeaderMessages,
@@ -4512,8 +4440,6 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
       clearPendingSubagentCorrelations();
       webClient.disconnect();
       setConnected(false);
-      // 不再重置上下文压缩信息，保持本地存储的状态
-      // setContextCompressionStats(null);
     };
   }, [
     setConnected,

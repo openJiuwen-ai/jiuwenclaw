@@ -125,7 +125,8 @@
       "searchModel": "搜索并选择模型",
       "noModelResults": "没有匹配的模型",
       "openModelList": "展开模型列表",
-      "modelIdPlaceholder": "请输入模型 ID",
+      "modelIdPlaceholder": "输入模型 ID，例如：glm-4.7",
+      "modelIdHint": "例如：glm-4.7。不同厂商的模型 ID 不同，请以其模型列表或官方文档为准。",
       "fetchLatestModels": "拉取最新",
       "presetModels": "当前展示提供商预设模型，展开列表后将拉取最新模型",
       "noPresetModels": "暂无预设模型，展开列表或点击刷新以拉取最新模型",
@@ -607,7 +608,23 @@
       "configured": "已配置模型",
       "free": "免费模型",
       "addModel": "添加自定义模型",
+      "empty": "暂无可用模型，请先在设置中添加模型",
       "placeholder": "选择模型"
+    },
+    "contextUsage": {
+      "title": "上下文用量",
+      "ariaLabel": "上下文用量 {{rate}}",
+      "hoverMetric": "{{rate}}（{{used}}/{{limit}}）",
+      "detailMetric": "{{rate}} ({{used}}/{{limit}})",
+      "kvCacheHitRate": "KV命中率",
+      "detailTitle": "上下文用量",
+      "systemPrompt": "系统提示词",
+      "messages": "对话消息",
+      "tools": "工具及MCP",
+      "skills": "技能",
+      "notReported": "未报告",
+      "close": "关闭上下文详情",
+      "noBreakdown": "后端未返回分类明细"
     },
     "modeSwitchDisabledProcessing": "当前对话运行中，请新建对话后选择模式",
     "configLockedHistory": "会话已有消息，请新建会话后更改配置",
@@ -1020,11 +1037,11 @@
       },
       "1": {
         "title": "配置你的首个模型",
-        "description": "模型配置位于「更多」中的「配置信息」。"
+        "description": "模型配置位于「设置」中的「模型」页面。"
       },
       "2": {
         "title": "完成模型配置",
-        "description": "在默认模型区域填写模型名称、API 地址、API Key 和模型提供商，然后点击保存。"
+        "description": "点击「添加模型」，选择模型提供商，按提示完成配置后保存。"
       }
     },
     "quickSetup": {
@@ -1329,10 +1346,6 @@
       "wakeOffset": "提前唤醒",
       "wakeOffsetUnit": "分钟",
       "wakeOffsetHelp": "在计划推送时间前启动 Agent 准备结果；0 表示到点执行"
-    },
-    "modelPicker": {
-      "configured": "已配置",
-      "empty": "暂无可用模型，请先在配置面板添加模型"
     },
     "timePicker": {
       "hour": "时",

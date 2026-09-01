@@ -3000,11 +3000,15 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
             return
 
         if action == "delete_model":
+            # 前端传 model（model_name/alias）+ index；两者均可选。
+            # 优先按 model 稳定标识（model_name 或 alias）匹配定位，index 仅作辅助与兜底。
+            # 早期实现只按 index pop，若确认页停留期间 defaults 被切换操作重排，
+            # 同一 index 会指向漂移后的另一条目，导致"删错模型"。
+            _del_target_name = str(model_name or "").strip()
             try:
-                _idx = int(model_index)
+                _idx = int(model_index) if model_index is not None else -1
             except (ValueError, TypeError):
-                await channel.send_response(ws, req_id, ok=False, error="index is required")
-                return
+                _idx = -1
             _removed_holder: dict = {}
             try:
                 def _delete_mutate(data):
@@ -3017,9 +3021,54 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                         raise _ModelOpError("model index not found")
                     if len(_raw_defs) <= 1:
                         raise _ModelOpError("Cannot delete the last model")
-                    if _idx < 0 or _idx >= len(_raw_defs) or not isinstance(_raw_defs[_idx], dict):
-                        raise _ModelOpError("model index not found")
-                    _removed_holder["entry"] = _raw_defs.pop(_idx)
+                    # 1) 按 model_name/alias 稳定匹配（同名时进一步用 provider+api_base 区分）
+                    _target_idx = None
+                    if _del_target_name:
+                        _candidates: list[tuple[int, dict]] = []
+                        for _i, _e in enumerate(_raw_defs):
+                            if not isinstance(_e, dict):
+                                continue
+                            _mcc = _e.get("model_client_config") or {}
+                            _mn = resolve_env_vars(str(_mcc.get("model_name", "")))
+                            _al = resolve_env_vars(str(_e.get("alias", ""))) if _e.get("alias") else ""
+                            if _mn == _del_target_name or _al == _del_target_name:
+                                _candidates.append((_i, _e))
+                        if len(_candidates) == 1:
+                            _target_idx = _candidates[0][0]
+                        elif len(_candidates) > 1:
+                            # 同名多条：用前端传入的 index 在候选中挑选；不在候选则报漂移
+                            if _idx >= 0:
+                                for _ci, _ce in _candidates:
+                                    if _ci == _idx:
+                                        _target_idx = _ci
+                                        break
+                            if _target_idx is None:
+                                raise _ModelOpError(
+                                    "Multiple models match '%s'; list may have changed, please refresh and retry"
+                                    % _del_target_name
+                                )
+                    # 2) 退化为纯 index：仅当前端未传 model 时使用，且仍校验越界
+                    if _target_idx is None and 0 <= _idx < len(_raw_defs) and isinstance(_raw_defs[_idx], dict):
+                        # 若前端传了 model 但与该 index 当前指向的条目不一致，说明列表已漂移，
+                        # 拒绝静默删错：要求刷新重试。
+                        if _del_target_name:
+                            _idx_mcc = _raw_defs[_idx].get("model_client_config") or {}
+                            _idx_mn = resolve_env_vars(str(_idx_mcc.get("model_name", "")))
+                            _idx_entry = _raw_defs[_idx]
+                            _idx_alias_raw = _idx_entry.get("alias", "")
+                            _idx_al = (
+                                resolve_env_vars(str(_idx_alias_raw))
+                                if _idx_alias_raw else ""
+                            )
+                            if _idx_mn != _del_target_name and _idx_al != _del_target_name:
+                                raise _ModelOpError(
+                                    "Model '%s' no longer at index %d; list may have changed, please refresh and retry"
+                                    % (_del_target_name, _idx)
+                                )
+                        _target_idx = _idx
+                    if _target_idx is None:
+                        raise _ModelOpError("model not found; list may have changed, please refresh and retry")
+                    _removed_holder["entry"] = _raw_defs.pop(_target_idx)
                     # 展示字段从锁内 data 直接取，避免事务后再开锁读取
                     _cur_mcc = (_raw_defs[0].get("model_client_config") or {}) if _raw_defs else {}
                     _removed_holder["current_name"] = resolve_env_vars(str(_cur_mcc.get("model_name", "")))

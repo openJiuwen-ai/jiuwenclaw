@@ -426,6 +426,7 @@ export function ModelDialog({
     label: t('settingsPanel.models.model'),
     component: 'custom',
     required: true,
+    helpTips: t('settingsPanel.models.modelIdHint'),
     onChange: (_modelName, nextValues) => {
       invalidateConnectionState();
       applyModelDraft(nextValues);
