@@ -1,8 +1,10 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026-2026. All rights reserved.
 """Gateway 本地库 facade（企业版）。
 
-经存储屏蔽层入口 ``ensure_db_handler`` 获取 foundation ``DBHandler``，CRUD 调
-``list_records / create / update``。每网关独立数据库，查询不加实例行级隔离。
+经 ``core.enterprise_config.gateway_db.ensure_gateway_db_handler`` 直连
+``GatewayDb`` 取 foundation ``DBHandler``，CRUD 调 ``list_records / create / update``。
+供 AgentServer 等无 PersistentStore 装配的进程使用；每网关独立数据库，
+查询不加实例行级隔离。
 """
 
 from __future__ import annotations
@@ -98,9 +100,9 @@ def sort_by_order(rows: list[dict[str, Any]], order_by: str) -> list[dict[str, A
 # 存储屏蔽层入口
 # --------------------------------------------------------------------------- #
 async def _handler() -> Any:
-    """经 ``ensure_db_handler`` 获取 foundation ``DBHandler``。"""
-    db_mod = import_manager_config_receiver_module("infrastructure.db")
-    return await db_mod.ensure_db_handler(log_prefix="gateway_db_reader")
+    """经 ``ensure_gateway_db_handler`` 直连 ``GatewayDb``。"""
+    db_mod = import_manager_config_receiver_module("core.enterprise_config.gateway_db")
+    return await db_mod.ensure_gateway_db_handler(log_prefix="gateway_db_reader")
 
 
 # --------------------------------------------------------------------------- #
