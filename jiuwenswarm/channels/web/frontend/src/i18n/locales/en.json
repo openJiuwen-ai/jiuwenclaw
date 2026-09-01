@@ -13,7 +13,12 @@
     "ok": "OK",
     "and": "and",
     "modify": "Modify",
-    "delete": "Delete"
+    "delete": "Delete",
+    "pagination": {
+      "total": "{{count}} total",
+      "prev": "Previous",
+      "next": "Next"
+    }
   },
   "a2ui": {
     "generating": "Generating A2UI interface...",
@@ -1529,6 +1534,8 @@
       "disabling": "Disabling..."
     },
     "builtIn": "Built-in",
+    "enterprisePrebuilt": "Enterprise prebuilt",
+    "enterpriseManagedHint": "This skill is managed by an administrator and cannot be removed or toggled",
     "status": {
       "installed": "Installed",
       "notInstalled": "Not installed",
@@ -1541,7 +1548,28 @@
       "clawhub": "ClawHub",
       "skillnet": "SkillNet",
       "teamskillshub": "TeamSkillsHub",
-      "unknown": "Unknown"
+      "unknown": "Unknown",
+      "author": "Author",
+      "rating": "Rating",
+      "downloads": "Downloads",
+      "localVersion": "Local version",
+      "updatedAt": "Updated",
+      "searchPlaceholder": "Search skills",
+      "noResults": "No matching skills",
+      "prev": "Previous",
+      "next": "Next",
+      "replaceConfirm": "Skill {{name}} is already installed. Overwrite?",
+      "replaceConfirmTitle": "Confirm overwrite",
+      "errors": {
+        "loadFailed": "Failed to load skill sources",
+        "searchFailed": "Search failed",
+        "installFailed": "Install failed",
+        "updateFailed": "Update failed"
+      },
+      "messages": {
+        "installed": "Installed: {{name}}",
+        "updated": "Updated: {{name}}"
+      }
     },
     "sourceLabel": "Source",
     "statusLabel": "Status",
@@ -1865,6 +1893,7 @@
       "install": "Install",
       "replaceConfirm": "A skill named \"{{name}}\" is already installed. Continuing will uninstall the current version and replace it with the selected one. Continue?",
       "installing": "Installing…",
+      "updating": "Updating…",
       "updatedAt": "Updated {{date}}",
       "configTitle": "Configure",
       "configDescription": "Enter the CLI Token from the ClawHub platform to access the ClawHub skill library.",
@@ -1894,11 +1923,13 @@
       "installing": "Installing…",
       "replaceConfirm": "A skill named \"{{name}}\" is already installed. Continuing will uninstall the current version and replace it with the selected one. Continue?",
       "messages": {
-        "installed": "Installed: {{name}}"
+        "installed": "Installed: {{name}}",
+        "updated": "Updated: {{name}}"
       },
       "errors": {
         "searchFailed": "Search failed",
         "installFailed": "Install failed",
+        "updateFailed": "Update failed",
         "skillAlreadyInstalled": "This skill is already installed."
       }
     },

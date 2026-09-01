@@ -13,7 +13,12 @@
     "ok": "确定",
     "and": "和",
     "modify": "修改",
-    "delete": "删除"
+    "delete": "删除",
+    "pagination": {
+      "total": "共 {{count}} 个",
+      "prev": "上一页",
+      "next": "下一页"
+    }
   },
   "a2ui": {
     "generating": "A2UI 界面生成中...",
@@ -1530,6 +1535,8 @@
       "disabling": "禁用中..."
     },
     "builtIn": "内置",
+    "enterprisePrebuilt": "企业预置",
+    "enterpriseManagedHint": "该技能由管理员统一管理，不允许卸载或启停",
     "status": {
       "installed": "已安装",
       "notInstalled": "未安装",
@@ -1542,7 +1549,28 @@
       "clawhub": "ClawHub",
       "skillnet": "SkillNet",
       "teamskillshub": "TeamSkillsHub",
-      "unknown": "未知"
+      "unknown": "未知",
+      "author": "作者",
+      "rating": "评分",
+      "downloads": "下载量",
+      "localVersion": "本地版本",
+      "updatedAt": "更新时间",
+      "searchPlaceholder": "搜索技能名称或描述",
+      "noResults": "暂无匹配的技能",
+      "prev": "上一页",
+      "next": "下一页",
+      "replaceConfirm": "技能 {{name}} 已安装，是否覆盖重装？",
+      "replaceConfirmTitle": "覆盖安装确认",
+      "errors": {
+        "loadFailed": "获取技能源失败",
+        "searchFailed": "搜索失败",
+        "installFailed": "安装失败",
+        "updateFailed": "更新失败"
+      },
+      "messages": {
+        "installed": "已安装：{{name}}",
+        "updated": "已更新：{{name}}"
+      }
     },
     "sourceLabel": "来源",
     "statusLabel": "状态",
@@ -1866,6 +1894,7 @@
       "install": "安装",
       "replaceConfirm": "已安装同名技能「{{name}}」，继续安装将卸载已安装的版本并替换为当前选择的版本。是否继续？",
       "installing": "安装中…",
+      "updating": "更新中…",
       "updatedAt": "更新于 {{date}}",
       "configTitle": "配置",
       "configDescription": "请输入从 ClawHub 平台获取的 CLI Token，用于访问 ClawHub 技能库。",
@@ -1895,11 +1924,13 @@
       "installing": "安装中…",
       "replaceConfirm": "已安装同名技能「{{name}}」，继续安装将卸载已安装的版本并替换为当前选择的版本。是否继续？",
       "messages": {
-        "installed": "已安装：{{name}}"
+        "installed": "已安装：{{name}}",
+        "updated": "已更新：{{name}}"
       },
       "errors": {
         "searchFailed": "搜索失败",
         "installFailed": "安装失败",
+        "updateFailed": "更新失败",
         "skillAlreadyInstalled": "该技能已安装。"
       }
     },

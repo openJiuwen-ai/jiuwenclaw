@@ -177,6 +177,23 @@ const ENTERPRISE_ASSEMBLE = [
   ['cron.job.toggle', 'POST', '/api/v1/cron/jobs/job-1/actions/toggle', { id: 'job-1', enabled: true }, 'unary'],
   ['cron.job.preview', 'POST', '/api/v1/cron/jobs/job-1/actions/preview', { id: 'job-1', count: 3 }, 'unary'],
   ['cron.job.run_now', 'POST', '/api/v1/cron/jobs/job-1/actions/run-now', { id: 'job-1' }, 'unary'],
+  ['skills.list', 'GET', '/api/v1/skills', { with_installed: true }, 'unary'],
+  ['skills.installed', 'GET', '/api/v1/skills/installed', {}, 'unary'],
+  ['skills.get', 'GET', '/api/v1/skills/demo-skill', { name: 'demo-skill' }, 'unary'],
+  ['skills.install', 'POST', '/api/v1/skills/actions/install', { spec: 'owner/repo' }, 'unary'],
+  ['skills.uninstall', 'POST', '/api/v1/skills/actions/uninstall', { name: 'demo-skill' }, 'unary'],
+  ['skills.toggle', 'POST', '/api/v1/skills/actions/toggle', { name: 'demo-skill', enabled: false }, 'unary'],
+  ['skills.import_local', 'POST', '/api/v1/skills/actions/import-local', { path: '/tmp/demo' }, 'unary'],
+  ['skills.source.providers', 'GET', '/api/v1/skills/sources', {}, 'unary'],
+  ['skills.source.search', 'POST', '/api/v1/skills/sources/actions/search', { source_id: 'swarmskillhub', q: 'demo' }, 'unary'],
+  ['skills.source.install', 'POST', '/api/v1/skills/sources/actions/install', { source_id: 'swarmskillhub', skill_id: 'skill-1', version_id: 'v1' }, 'unary'],
+  ['skills.updates.check', 'GET', '/api/v1/skills/updates', { source_id: 'swarmskillhub' }, 'unary'],
+  ['skills.update', 'POST', '/api/v1/skills/actions/update', { source_id: 'swarmskillhub', skill_id: 'skill-1' }, 'unary'],
+  ['skills.teamskillshub.info', 'GET', '/api/v1/skills/teamskillshub', {}, 'unary'],
+  ['skills.retrieval.status', 'GET', '/api/v1/skills/retrieval/status', {}, 'unary'],
+  ['skills.retrieval.tree', 'GET', '/api/v1/skills/retrieval/tree', {}, 'unary'],
+  ['skills.retrieval.index_build', 'POST', '/api/v1/skills/retrieval/actions/index-build', {}, 'unary'],
+  ['skills.retrieval.index_cancel', 'POST', '/api/v1/skills/retrieval/actions/index-cancel', {}, 'unary'],
   ['skills.enterprise.list', 'GET', '/api/v1/skills/enterprise', {}, 'unary'],
   ['skills.enterprise.install', 'POST', '/api/v1/skills/enterprise/actions/install', { url: 'http://x' }, 'unary'],
   ['skills.enterprise.uninstall', 'POST', '/api/v1/skills/enterprise/actions/uninstall', { name: 's' }, 'unary'],
@@ -197,7 +214,7 @@ const ENTERPRISE_ASSEMBLE = [
 ];
 
 test('every enterprise mapped method assembles verb+url+kind', () => {
-  assert.equal(ENTERPRISE_ASSEMBLE.length, 35);
+  assert.equal(ENTERPRISE_ASSEMBLE.length, 52);
   const seen = new Set();
   for (const [method, verb, url, params, kind] of ENTERPRISE_ASSEMBLE) {
     seen.add(method);
@@ -312,7 +329,6 @@ test('unmapped A2 and personal methods stay null', () => {
     'chat.resume',
     'permissions.tools.get',
     'harness.packages',
-    'skills.list',
   ];
   for (const method of unmapped) {
     assert.equal(assembleWebRest(method, { session_id: 's', id: '1', name: 'n' }, BASE), null, method);
@@ -388,4 +404,3 @@ test('interrupt unary maps only real interrupt_result, never forges success', ()
   });
   assert.equal(pause.payload.intent, 'pause');
 });
-
