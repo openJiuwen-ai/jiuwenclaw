@@ -1234,4 +1234,9 @@ def test_design_system_prompt_includes_video_workflow():
     assert "image-generation skill" not in prompt
     assert "分镜" in prompt
     assert "invoke" in prompt.lower() or "`invoke`" in prompt
+    # New-contract locks: image invoke uses real cloud functionNames, the
+    # redundant Doing-tasks chapter has been removed.
+    assert "seedreamLite4Skill" in prompt
+    assert "SeedreamPro4Skill" in prompt
+    assert "# Doing tasks" not in prompt
 

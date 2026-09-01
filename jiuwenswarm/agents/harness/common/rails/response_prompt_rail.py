@@ -14,8 +14,6 @@ from jiuwenswarm.common.context_keys import JIUWENSWARM_CHANNEL_CONTEXT_KEY
 from jiuwenswarm.agents.harness.common.prompt.prompt_builder import (
     LocalSectionName,
     PromptPriority,
-    _input_prompt,
-    _output_prompt,
 )
 from jiuwenswarm.server.runtime.a2ui.prompt_instructions import (
     is_a2ui_browser_workflow_request,
@@ -28,7 +26,13 @@ A2UI_BROWSER_WORKFLOW_CONTEXT_KEY = "a2ui_browser_workflow"
 
 
 class ResponsePromptRail(DeepAgentRail):
-    """Inject stable input and output instruction sections."""
+    """Sync the A2UI prompt section before each model call.
+
+    Input Instructions / Output Rules / Subagent Usage Rules used to be
+    injected here as separate ``input`` / ``output`` sections; they now live
+    as subsections of the ``env`` (Runtime Environment) section built by
+    :class:`RuntimePromptRail`, shared across all profiles.
+    """
 
     priority = 5
 
@@ -75,10 +79,7 @@ class ResponsePromptRail(DeepAgentRail):
         if self.system_prompt_builder is None:
             return
 
-        language = self.system_prompt_builder.language or "cn"
         self.system_prompt_builder.remove_section("response")
-        self.system_prompt_builder.add_section(_input_prompt(language))
-        self.system_prompt_builder.add_section(_output_prompt(language))
         self._sync_a2ui_prompt_section(
             self._resolve_channel(ctx),
             skip_a2ui=self._should_skip_a2ui(ctx),
