@@ -8,8 +8,6 @@ from jiuwenswarm.extensions.sdk.application_plugin import (
     FrontendContribution,
     ManifestApplicationPlugin,
     WebSocketRouteContribution,
-    application_plugin_secret_fields,
-    validate_application_plugin_settings,
 )
 
 __all__ = [
@@ -22,6 +20,4 @@ __all__ = [
     "FrontendContribution",
     "ManifestApplicationPlugin",
     "WebSocketRouteContribution",
-    "application_plugin_secret_fields",
-    "validate_application_plugin_settings",
 ]

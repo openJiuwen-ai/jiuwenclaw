@@ -142,7 +142,9 @@ export class RealtimeDuplexSession {
   async start(): Promise<void> {
     this.callbacks.onState('connecting');
     this.playbackContext = new AudioContext({ sampleRate: OUTPUT_RATE });
-    await this.playbackContext.audioWorklet.addModule(`/duplex-playback.js?v=${REALTIME_CLIENT_BUILD}`);
+    await this.playbackContext.audioWorklet.addModule(
+      new URL('./duplex-playback.js', import.meta.url),
+    );
     this.playbackNode = new AudioWorkletNode(this.playbackContext, 'jiuwen-duplex-playback');
     this.playbackNode.port.onmessage = ({ data }) => {
       if (data.type === 'cleared') {
@@ -166,7 +168,9 @@ export class RealtimeDuplexSession {
     });
     this.emitDiagnostic('realtime_microphone_ready', {});
     this.captureContext = new AudioContext({ sampleRate: INPUT_RATE });
-    await this.captureContext.audioWorklet.addModule('/duplex-capture.js');
+    await this.captureContext.audioWorklet.addModule(
+      new URL('./duplex-capture.js', import.meta.url),
+    );
     const source = this.captureContext.createMediaStreamSource(this.microphone);
     this.captureNode = new AudioWorkletNode(this.captureContext, 'jiuwen-duplex-capture');
     this.captureNode.port.onmessage = ({ data }) => {

@@ -113,8 +113,18 @@ class ExtensionRegistry:
     ) -> ApplicationPluginExtension | None:
         return self._application_plugins.get(plugin_id)
 
-    def bind_application_plugins(self, channel: Any, *, agent_client: Any = None) -> None:
-        services = ApplicationPluginServices(agent_client=agent_client)
+    def bind_application_plugins(
+        self,
+        channel: Any,
+        *,
+        agent_client: Any = None,
+        media_attachment_normalizer: Callable[[dict[str, Any], str | None], None]
+        | None = None,
+    ) -> None:
+        services = ApplicationPluginServices(
+            agent_client=agent_client,
+            media_attachment_normalizer=media_attachment_normalizer,
+        )
         for plugin in self.get_application_plugins():
             plugin.bind_web_channel(_ApplicationPluginChannel(channel, plugin), services)
         channel.application_plugin_registry = self

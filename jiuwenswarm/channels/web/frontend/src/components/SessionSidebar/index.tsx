@@ -18,11 +18,10 @@ import PluginIcon from '../../assets/agent-management/extension.svg?react';
 import type { SidebarNavKey } from '../../utils/frontendPlatform';
 import type {
   ApplicationPluginContribution,
-  ApplicationPluginManagerNavKey,
   ApplicationPluginNavKey,
 } from '../../applicationPlugins/types';
 
-type MainNavKey = SidebarNavKey | 'connectorMarket' | ApplicationPluginManagerNavKey | ApplicationPluginNavKey;
+type MainNavKey = SidebarNavKey | 'connectorMarket' | ApplicationPluginNavKey;
 
 interface SessionSidebarProps {
   activeNav: MainNavKey;
@@ -46,14 +45,6 @@ const teamNavIcon = (
   </svg>
 );
 
-const videoLiveNavIcon = (
-  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.5}>
-    <rect x="3.5" y="5.5" width="12.5" height="13" rx="2.5" />
-    <path strokeLinecap="round" strokeLinejoin="round" d="M16 10l4.5-2.5v9L16 14" />
-    <circle cx="8" cy="10" r="1.2" fill="currentColor" stroke="none" />
-  </svg>
-);
-
 // "扩展"（连接器市场：插件+MCP）导航图标——和 plugin.svg（Harness 插件管理，纯命名撞车、
 // 业务无关）故意区分开，用网格/市场的视觉隐喻而不是拼图块。
 const connectorMarketNavIcon = (
@@ -71,7 +62,6 @@ const mainNavItems: NavItem[] = [
   { key: 'agents', labelKey: 'nav.agent', icon: <AgentDesignIcon aria-hidden /> },
   { key: 'connectorMarket', labelKey: 'nav.connectorMarket', icon: connectorMarketNavIcon },
   { key: 'teams', labelKey: 'nav.teams', icon: teamNavIcon },
-  { key: 'applicationPlugins', labelKey: 'nav.applicationPlugins', icon: <PluginIcon aria-hidden /> },
   { key: 'settings', labelKey: 'nav.settings', icon: <SettingsIcon aria-hidden /> },
   { key: 'updatepanel', labelKey: 'nav.update', icon: <UpdateIcon aria-hidden /> },
 ];
@@ -106,7 +96,7 @@ export function SessionSidebar({
       key: plugin.nav_key as MainNavKey,
       labelKey: plugin.title_i18n_key,
       label: plugin.title,
-      icon: plugin.plugin_id === 'video-duplex' ? videoLiveNavIcon : <PluginIcon aria-hidden />,
+      icon: <PluginIcon aria-hidden />,
     }));
   const visibleMainNavItems = [...mainNavItems, ...applicationPluginItems]
     .filter((item) => !hiddenNavItems.includes(item.key));

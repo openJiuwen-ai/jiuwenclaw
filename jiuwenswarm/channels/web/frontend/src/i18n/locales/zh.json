@@ -38,21 +38,11 @@
     "sessions": "会话",
     "cron": "定时任务",
     "skills": "技能",
-    "applicationPlugins": "应用插件",
     "connectorMarket": "扩展",
     "more": "更多",
     "settings": "设置",
-    "videoLive": "全双工",
     "logs": "日志",
     "update": "更新"
-  },
-  "applicationPlugins": {
-    "title": "应用插件",
-    "description": "管理带有独立页面、模型和运行时能力的全栈应用插件。",
-    "refresh": "刷新",
-    "enabled": "已启用",
-    "disabled": "已禁用",
-    "empty": "尚未发现应用插件"
   },
   "settingsPanel": {
     "title": "设置",

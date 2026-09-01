@@ -3,7 +3,7 @@ import test from 'node:test';
 import {
   JoyAIFrameClock,
   JoyAIPromptLifecycle,
-} from '../node_modules/.cache/joyai-prompt-lifecycle/joyaiPromptLifecycle.js';
+} from '../../../../channels/web/frontend/node_modules/.cache/joyai-prompt-lifecycle/joyaiPromptLifecycle.js';
 
 test('the next frame consumes only the latest queued JoyAI prompt', async () => {
   const lifecycle = new JoyAIPromptLifecycle();

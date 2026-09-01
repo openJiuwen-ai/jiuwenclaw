@@ -38,21 +38,11 @@
     "sessions": "Sessions",
     "cron": "Scheduled Tasks",
     "skills": "Skills",
-    "applicationPlugins": "App Plugins",
     "connectorMarket": "Extensions",
     "more": "More",
     "settings": "Settings",
-    "videoLive": "Video Live",
     "logs": "Logs",
     "update": "Updates"
-  },
-  "applicationPlugins": {
-    "title": "Application Plugins",
-    "description": "Manage full-stack plugins with dedicated pages, models, and runtimes.",
-    "refresh": "Refresh",
-    "enabled": "Enabled",
-    "disabled": "Disabled",
-    "empty": "No application plugins discovered"
   },
   "settingsPanel": {
     "title": "Settings",

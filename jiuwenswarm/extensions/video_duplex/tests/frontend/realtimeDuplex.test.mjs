@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import { runInNewContext } from 'node:vm';
 
-import { RealtimeDuplexSession } from '../node_modules/.cache/realtime-duplex/realtimeDuplex.mjs';
+import { RealtimeDuplexSession } from '../../../../channels/web/frontend/node_modules/.cache/realtime-duplex/realtimeDuplex.mjs';
 
 function createSession(videoFrame = null) {
   const states = [];
@@ -47,7 +47,10 @@ function createSession(videoFrame = null) {
 }
 
 test('playback waits for the target 400ms startup buffer and drains short tails', () => {
-  const workletSource = readFileSync(new URL('../public/duplex-playback.js', import.meta.url), 'utf8');
+  const workletSource = readFileSync(
+    new URL('../../frontend/VideoLivePanel/duplex-playback.js', import.meta.url),
+    'utf8',
+  );
   const workletEvents = [];
   let PlaybackProcessor;
   class FakeAudioWorkletProcessor {

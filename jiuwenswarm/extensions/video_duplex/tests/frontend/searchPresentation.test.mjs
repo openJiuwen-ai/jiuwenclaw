@@ -3,7 +3,7 @@ import test from 'node:test';
 import {
   assistantSpeechText,
   searchAwareToolStatus,
-} from '../node_modules/.cache/search-presentation/searchPresentation.js';
+} from '../../../../channels/web/frontend/node_modules/.cache/search-presentation/searchPresentation.js';
 
 test('searchAwareToolStatus keeps concurrent background searches visible', () => {
   assert.equal(

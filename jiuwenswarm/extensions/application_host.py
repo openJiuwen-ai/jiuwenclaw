@@ -9,7 +9,6 @@ from jiuwenswarm.extensions.registry import ExtensionRegistry
 from jiuwenswarm.extensions.sdk.application_plugin import (
     ApplicationPluginExtension,
     WebSocketRouteContribution,
-    application_plugin_secret_fields,
 )
 
 
@@ -34,7 +33,6 @@ def application_plugin_manifest(registry: ExtensionRegistry | None) -> dict[str,
                 "plugin_version": metadata.version,
                 "description": metadata.description,
                 "permissions": list(metadata.permissions),
-                "config_schema": plugin.settings_schema(),
                 "enabled": plugin.is_enabled(),
                 "id": f"{plugin_id}:management",
                 "nav_key": f"app:{plugin_id}",
@@ -50,7 +48,6 @@ def application_plugin_manifest(registry: ExtensionRegistry | None) -> dict[str,
                 "plugin_version": metadata.version,
                 "description": metadata.description,
                 "permissions": list(metadata.permissions),
-                "config_schema": plugin.settings_schema(),
                 "enabled": plugin.is_enabled(),
                 "id": contribution.id,
                 "nav_key": contribution.nav_key,
@@ -80,36 +77,12 @@ def _plugin_or_404(
     return plugin
 
 
-def application_plugin_settings_payload(plugin: ApplicationPluginExtension) -> dict[str, Any]:
-    schema = plugin.settings_schema()
-    values = plugin.get_settings()
-    secret_fields = application_plugin_secret_fields(schema)
-    configured_secrets = sorted(
-        key for key in secret_fields if values.get(key) not in (None, "")
-    )
-    configured_secret_lengths = {
-        key: len(str(values[key])) for key in configured_secrets
-    }
-    public_values = dict(values)
-    for key in secret_fields:
-        if key in public_values:
-            public_values[key] = ""
-    return {
-        "plugin_id": plugin.plugin_id or plugin.metadata.id,
-        "enabled": plugin.is_enabled(),
-        "config_schema": schema,
-        "values": public_values,
-        "configured_secrets": configured_secrets,
-        "configured_secret_lengths": configured_secret_lengths,
-    }
-
-
 def iter_websocket_routes(
     registry: ExtensionRegistry | None,
 ) -> Iterable[tuple[str, WebSocketRouteContribution]]:
     for plugin in _plugins(registry):
         for route in plugin.websocket_routes():
-            yield plugin.metadata.id, route
+            yield plugin.plugin_id or plugin.metadata.id, route
 
 
 def mount_application_plugin_http_routes(
@@ -119,56 +92,6 @@ def mount_application_plugin_http_routes(
     @app.get(APPLICATION_PLUGIN_API_PREFIX)
     async def list_application_plugins() -> dict[str, Any]:
         return application_plugin_manifest(registry)
-
-    @app.get(f"{APPLICATION_PLUGIN_API_PREFIX}/{{plugin_id}}/settings")
-    async def get_application_plugin_settings(plugin_id: str) -> dict[str, Any]:
-        return application_plugin_settings_payload(_plugin_or_404(registry, plugin_id))
-
-    @app.put(f"{APPLICATION_PLUGIN_API_PREFIX}/{{plugin_id}}/settings")
-    async def update_application_plugin_settings(
-        plugin_id: str,
-        payload: dict[str, Any],
-    ) -> dict[str, Any]:
-        plugin = _plugin_or_404(registry, plugin_id)
-        updates = payload.get("values")
-        if not isinstance(updates, dict):
-            raise HTTPException(status_code=400, detail="values must be an object")
-        clear_secrets_raw = payload.get("clear_secrets", [])
-        if not isinstance(clear_secrets_raw, list):
-            raise HTTPException(status_code=400, detail="clear_secrets must be an array")
-        clear_secrets = {str(key) for key in clear_secrets_raw}
-        secret_fields = application_plugin_secret_fields(plugin.settings_schema())
-        unknown_clear = clear_secrets - secret_fields
-        if unknown_clear:
-            raise HTTPException(
-                status_code=400,
-                detail="cannot clear non-secret settings: " + ", ".join(sorted(unknown_clear)),
-            )
-        normalized = dict(updates)
-        for key in secret_fields:
-            if key in clear_secrets:
-                normalized[key] = ""
-            elif normalized.get(key) == "":
-                normalized.pop(key, None)
-        try:
-            await plugin.update_settings(normalized)
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-        return application_plugin_settings_payload(plugin)
-
-    @app.put(f"{APPLICATION_PLUGIN_API_PREFIX}/{{plugin_id}}/enabled")
-    async def update_application_plugin_enabled(
-        plugin_id: str,
-        payload: dict[str, Any],
-    ) -> dict[str, Any]:
-        if not isinstance(payload.get("enabled"), bool):
-            raise HTTPException(status_code=400, detail="enabled must be a boolean")
-        plugin = _plugin_or_404(registry, plugin_id)
-        try:
-            await plugin.set_enabled(bool(payload["enabled"]))
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-        return application_plugin_settings_payload(plugin)
 
     @app.get(f"{APPLICATION_PLUGIN_API_PREFIX}/{{plugin_id}}/assets/{{asset_path:path}}")
     async def application_plugin_asset(plugin_id: str, asset_path: str) -> FileResponse:

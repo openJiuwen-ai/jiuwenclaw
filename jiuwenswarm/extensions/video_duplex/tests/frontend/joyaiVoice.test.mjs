@@ -4,7 +4,7 @@ import {
   canPlayJoyAIResponse,
   JoyAITtsInterruptionState,
   JoyAIVoiceSession,
-} from '../node_modules/.cache/joyai-voice/joyaiVoice.js';
+} from '../../../../channels/web/frontend/node_modules/.cache/joyai-voice/joyaiVoice.js';
 
 class FakeAudio {
   static instances = [];

@@ -122,11 +122,9 @@ import {
 import { saveBlob } from './utils/desktopSave';
 import { generateUuidV4 } from './utils/uuid';
 import { ApplicationPluginOutlet } from './applicationPlugins/ApplicationPluginOutlet';
-import { ApplicationPluginsPanel } from './applicationPlugins/ApplicationPluginsPanel';
 import { enabledApplicationPlugins } from './applicationPlugins/manifest';
 import { useApplicationPlugins } from './applicationPlugins/useApplicationPlugins';
 import type {
-  ApplicationPluginManagerNavKey,
   ApplicationPluginNavKey,
 } from './applicationPlugins/types';
 import {
@@ -163,7 +161,7 @@ function normalizeConfigBoolean(value: unknown): boolean {
   );
 }
 
-type MainNavKey = SidebarNavKey | 'connectorMarket' | ApplicationPluginManagerNavKey | ApplicationPluginNavKey;
+type MainNavKey = SidebarNavKey | 'connectorMarket' | ApplicationPluginNavKey;
 
 type LoadedHistoryPage = {
   pageIdx: number;
@@ -867,8 +865,7 @@ function AppContent({
       }
     },
   });
-  const applicationPluginState = useApplicationPlugins(isConnected);
-  const applicationPlugins = applicationPluginState.plugins;
+  const applicationPlugins = useApplicationPlugins(isConnected);
   const visibleApplicationPlugins = enabledApplicationPlugins(applicationPlugins);
   const settingsRequest = useMemo(() => resolveSettingsRequest(request), [request, resolveSettingsRequest]);
 
@@ -3092,16 +3089,6 @@ function AppContent({
               )}
               onOpenExternalCliInstallDialog={() => setExternalCliInstallDialogOpen(true)}
               initialModuleId={requestedSettingsModuleId ?? undefined}
-            />
-          </div>
-        )}
-        {activeNav === 'applicationPlugins' && (
-          <div className="app-section">
-            <ApplicationPluginsPanel
-              plugins={applicationPlugins}
-              loading={applicationPluginState.loading}
-              error={applicationPluginState.error}
-              onRefresh={applicationPluginState.refresh}
             />
           </div>
         )}
