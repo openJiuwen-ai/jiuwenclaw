@@ -475,10 +475,10 @@ export function extractMediaItems(payload: Record<string, unknown>): MediaItem[]
   // Support new scoped structure: { items: [...], scope: "current_turn" }
   const rawMediaItems = payload.media_items;
   let mediaItems: unknown[] = [];
-  if (rawMediaItems && typeof rawMediaItems === "object" && Array.isArray((rawMediaItems as Record<string, unknown>).items)) {
-    mediaItems = (rawMediaItems as Record<string, unknown>).items as unknown[];
-  } else if (Array.isArray(rawMediaItems)) {
+  if (Array.isArray(rawMediaItems)) {
     mediaItems = rawMediaItems;
+  } else if (rawMediaItems && typeof rawMediaItems === "object" && "items" in rawMediaItems) {
+    mediaItems = (rawMediaItems as { items: unknown[] }).items;
   }
   const rawItems = [...mediaItems, ...files].filter((item): item is Record<string, unknown> =>
     Boolean(item && typeof item === "object"),
