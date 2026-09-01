@@ -175,10 +175,7 @@ class A2AOutboundDispatcher:
             card = agent.agent_card
             skills = self._public_skills(card)
             skill_tokens = _skill_search_tokens(skills)
-            if required and not all(
-                any(required_item in token for token in skill_tokens)
-                for required_item in required
-            ):
+            if required and not required.issubset(skill_tokens):
                 continue
             searchable = " ".join(
                 [agent.display_name, str(card.get("description") or "")]
@@ -337,6 +334,11 @@ class A2AOutboundDispatcher:
                 )
                 return self._public_dispatch(updated or current)
             except Exception:
+                logger.debug(
+                    "a2a.outbound query_dispatch failed: dispatch_id=%s",
+                    normalized_id,
+                    exc_info=True,
+                )
                 updated = await self._repository.transition_dispatch(
                     current.dispatch_id,
                     A2AOutboundDispatchStatus.UNKNOWN,
@@ -370,6 +372,11 @@ class A2AOutboundDispatcher:
                 updated = await self._apply_remote(current.dispatch_id, normalized)
                 return self._public_dispatch(updated or current)
             except Exception:
+                logger.debug(
+                    "a2a.outbound cancel_dispatch failed: dispatch_id=%s",
+                    dispatch_id,
+                    exc_info=True,
+                )
                 updated = await self._repository.transition_dispatch(
                     current.dispatch_id,
                     A2AOutboundDispatchStatus.UNKNOWN,

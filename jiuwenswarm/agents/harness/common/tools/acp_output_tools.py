@@ -161,9 +161,7 @@ class AcpOutputManager:
         jsonrpc_id = f"acp-{uuid.uuid4().hex}"
         request_id = f"acp_out_{uuid.uuid4().hex[:12]}"
 
-        future: asyncio.Future[dict[str, Any]] = (
-            asyncio.get_event_loop().create_future()
-        )
+        future: asyncio.Future[dict[str, Any]] = loop.create_future()
         acp_req = AcpOutputRequest(
             jsonrpc_id=jsonrpc_id,
             method=method,

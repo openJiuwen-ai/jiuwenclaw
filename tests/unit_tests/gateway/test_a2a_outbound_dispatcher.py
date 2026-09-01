@@ -225,6 +225,41 @@ async def test_find_agents_returns_only_callable_minimal_catalog() -> None:
 
 
 @pytest.mark.asyncio
+async def test_find_agents_required_skill_match_is_exact_not_substring() -> None:
+    """Regression test: 'ai' must not match a skill named 'brain' via substring."""
+    client = _FakeClient()
+    dispatcher, repository = await _dispatcher(client)
+    await repository.create_agent(
+        replace(
+            _agent("agent-ai"),
+            agent_card={
+                "name": "AI Agent",
+                "description": "Does AI things",
+                "skills": [{"id": "ai", "name": "AI", "tags": []}],
+                "defaultInputModes": ["text/plain"],
+                "defaultOutputModes": ["text/plain"],
+            },
+        )
+    )
+    await repository.create_agent(
+        replace(
+            _agent("agent-brain"),
+            agent_card={
+                "name": "Brainy Agent",
+                "description": "Not an AI agent",
+                "skills": [{"id": "brain", "name": "Brain", "tags": []}],
+                "defaultInputModes": ["text/plain"],
+                "defaultOutputModes": ["text/plain"],
+            },
+        )
+    )
+
+    result = await dispatcher.find_agents(required_skills=["ai"], limit=5)
+
+    assert [item["agent_id"] for item in result["items"]] == ["agent-ai"]
+
+
+@pytest.mark.asyncio
 async def test_sync_dispatch_returns_normalized_final_message() -> None:
     client = _FakeClient([_message_event("final answer")])
     dispatcher, repository = await _dispatcher(client)
