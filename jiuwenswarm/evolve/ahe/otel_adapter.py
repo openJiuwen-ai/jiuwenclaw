@@ -639,7 +639,7 @@ class OtelTraceAdapter:
 
                 # Extract tool result messages for this LLM span
                 tool_results = self._extract_tool_results_for_llm(
-                    output, tool_spans
+                    llm_span, tool_spans, llm_spans
                 )
                 if tool_results:
                     turns.extend(tool_results)
@@ -652,59 +652,137 @@ class OtelTraceAdapter:
         return turns
 
     def _extract_tool_results_for_llm(
-        self, llm_output: dict, all_tool_spans: list[dict]
+        self, llm_span: dict, all_tool_spans: list[dict],
+        all_llm_spans: list[dict] | None = None,
     ) -> list[dict]:
-        """Extract tool result messages for the tool_calls in *llm_output*.
+        """Extract tool result messages for a specific LLM span.
 
         Returns list of tool messages in OpenAI format:
         {"role": "tool", "tool_call_id": "...", "name": "...", "content": "..."}
 
-        Matching is by ``tool_call_id`` (the assistant tool_call ``id`` equals
-        the tool span's ``gen_ai.tool.call.id``), NOT by span parentage. In
-        jiuwenswarm traces tool spans are children of the agent span, not of
-        the LLM span, so parent-based matching would drop every tool result.
+        Matching strategy (robust to both nested and flat span trees):
+        1. **call.id match** (preferred): pair TOOL spans whose
+           ``gen_ai.tool.call.id`` equals one of the LLM output's
+           ``tool_calls[i].id``. Works for flat trees where TOOL spans
+           are siblings of (not children of) LLM spans.
+        2. **parent_span_id match** (fallback): pair TOOL spans whose
+           ``parent_span_id`` equals this LLM span's ``span_id``.
+           Works for nested trees only.
+        3. **time-window match** (last resort): pair TOOL spans that
+           start between this LLM span's end and the next LLM span's
+           start. Used when call.id is unavailable.
+
+        ``all_llm_spans`` is the full list of LLM spans in the trace and
+        bounds the time window; the caller passes only TOOL spans as
+        ``all_tool_spans``, so the LLM filter inside must not be fed that
+        TOOL-only list (which would make the window's upper bound ∞).
         """
-        issued_ids: list[str] = []
-        for tc in llm_output.get("tool_calls", []) or []:
-            tcid = tc.get("id", "")
-            if not tcid:
-                # Anthropic-ish fallback: id nested under function
-                tcid = (tc.get("function") or {}).get("id", "")
-            if tcid:
-                issued_ids.append(tcid)
-        if not issued_ids:
+        # Collect the call.ids this LLM span requested (preserving request order)
+        output = self._extract_llm_output(llm_span)
+        raw_tool_calls = output.get("tool_calls") or []
+        ordered_call_ids = [
+            str(tc.get("id") or "")
+            for tc in raw_tool_calls
+            if tc.get("id")
+        ]
+        requested_call_ids = set(ordered_call_ids)
+
+        tool_results: list[dict] = []
+        matched_tool_span_ids: set[str] = set()
+
+        # 1. call.id match (preferred — works for flat span trees)
+        if requested_call_ids:
+            for tool_span in all_tool_spans:
+                attrs = tool_span.get("attributes", {})
+                tool_call_id = str(attrs.get("gen_ai.tool.call.id", "") or "")
+                if tool_call_id and tool_call_id in requested_call_ids:
+                    tool_results.append(
+                        self._build_tool_result_message(attrs, tool_span)
+                    )
+                    matched_tool_span_ids.add(str(tool_span.get("span_id", "")))
+            if tool_results:
+                # Preserve the order the tool_calls were issued
+                id_to_msg = {m["tool_call_id"]: m for m in tool_results}
+                tool_results = [
+                    id_to_msg[cid]
+                    for cid in ordered_call_ids
+                    if cid in id_to_msg
+                ]
+                return tool_results
+
+        # An LLM turn that issued no tool_calls has no tool results to pair.
+        if not raw_tool_calls:
             return []
 
-        issued_set = set(issued_ids)
-        tool_results = []
-        for tool_span in all_tool_spans:
+        # 2. parent_span_id match (nested span trees)
+        llm_span_id = llm_span.get("span_id")
+        child_tool_spans = [
+            s for s in all_tool_spans
+            if s.get("parent_span_id") == llm_span_id
+            and str(s.get("span_id", "")) not in matched_tool_span_ids
+        ]
+        child_tool_spans.sort(key=lambda s: s.get("start_time_ns", 0) or 0)
+        for tool_span in child_tool_spans:
             attrs = tool_span.get("attributes", {})
-            tool_call_id = attrs.get("gen_ai.tool.call.id", "")
-            if not tool_call_id or tool_call_id not in issued_set:
-                continue
+            tool_results.append(self._build_tool_result_message(attrs, tool_span))
+        if tool_results:
+            return tool_results
 
-            tool_name = attrs.get("gen_ai.tool.name", "")
-            tool_result_raw = attrs.get("gen_ai.tool.result", "")
-            if isinstance(tool_result_raw, dict):
-                tool_result_str = json.dumps(tool_result_raw, ensure_ascii=False)
-            else:
-                tool_result_str = str(tool_result_raw)
-
-            tool_msg = {
-                "role": "tool",
-                "tool_call_id": tool_call_id,
-                "name": tool_name,
-                "content": tool_result_str[:5000],  # Truncate for safety
-            }
-
-            tool_results.append(tool_msg)
-
-        # Order results to match the order the tool_calls were issued.
-        order = {tid: i for i, tid in enumerate(issued_ids)}
-        tool_results.sort(key=lambda m: order.get(m["tool_call_id"], 0))
+        # 3. time-window match (last resort)
+        llm_end = llm_span.get("end_time_ns", 0) or 0
+        next_llm_start = self._next_llm_start_ns(all_llm_spans or [], llm_span)
+        window_tool_spans = [
+            s for s in all_tool_spans
+            if str(s.get("span_id", "")) not in matched_tool_span_ids
+            and llm_end <= (s.get("start_time_ns", 0) or 0) < next_llm_start
+        ]
+        window_tool_spans.sort(key=lambda s: s.get("start_time_ns", 0) or 0)
+        for tool_span in window_tool_spans:
+            attrs = tool_span.get("attributes", {})
+            tool_results.append(self._build_tool_result_message(attrs, tool_span))
         return tool_results
 
-        return tool_results
+    @staticmethod
+    def _next_llm_start_ns(
+        all_llm_spans: list[dict], llm_span: dict
+    ) -> int:
+        """Return the start_time_ns of the LLM span after *llm_span*,
+        or a very large value if *llm_span* is the last LLM span."""
+        llm_end = llm_span.get("end_time_ns", 0) or 0
+        later_llm_starts = [
+            (s.get("start_time_ns", 0) or 0)
+            for s in all_llm_spans
+            if (s.get("start_time_ns", 0) or 0) > llm_end
+        ]
+        return min(later_llm_starts) if later_llm_starts else (1 << 62)
+
+    @staticmethod
+    def _build_tool_result_message(
+        attrs: dict, tool_span: dict | None = None
+    ) -> dict:
+        """Build an OpenAI-format tool result message from TOOL span attrs."""
+        tool_call_id = str(attrs.get("gen_ai.tool.call.id", "") or "")
+        if not tool_call_id:
+            # No call.id on the span — synthesize a stable, span-unique id so
+            # multiple id-less tools of the same name don't collide.
+            name = attrs.get("gen_ai.tool.name", "unknown")
+            span_suffix = str((tool_span or {}).get("span_id", "") or "")
+            tool_call_id = (
+                f"call_tool_{name}_{span_suffix}" if span_suffix
+                else f"call_tool_{name}"
+            )
+        tool_name = str(attrs.get("gen_ai.tool.name", "") or "")
+        tool_result_raw = attrs.get("gen_ai.tool.result", "")
+        if isinstance(tool_result_raw, dict):
+            tool_result_str = json.dumps(tool_result_raw, ensure_ascii=False)
+        else:
+            tool_result_str = str(tool_result_raw)
+        return {
+            "role": "tool",
+            "tool_call_id": tool_call_id,
+            "name": tool_name,
+            "content": tool_result_str[:5000],  # Truncate for safety
+        }
 
     def _extract_subagents(self, spans: list[dict]) -> list[dict]:
         """Extract subagent traces."""

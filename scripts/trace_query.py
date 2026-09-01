@@ -5,6 +5,7 @@
 
 import argparse
 import json
+import os
 import sqlite3
 import sys
 from pathlib import Path
@@ -239,6 +240,10 @@ def main():
     export_parser.add_argument("--limit", type=int, default=1000, help="Limit (for all)")
 
     args = parser.parse_args()
+
+    # Expand ~ and environment variables in db_path so quoted paths like
+    # "~/.jiuwenswarm/traces.db" work on all platforms.
+    args.db_path = os.path.expanduser(os.path.expandvars(args.db_path))
 
     if args.command == "stats":
         cmd_stats(args)
