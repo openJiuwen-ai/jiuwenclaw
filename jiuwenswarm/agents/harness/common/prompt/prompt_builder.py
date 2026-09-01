@@ -147,7 +147,7 @@ System message types:
 ### Artifact and Deliverable Rules
 
 - Honor a user-specified output location; otherwise follow the runtime directory boundaries. Put skill artifacts in the runtime-provided Agent skills directory, organized by skill name and purpose.
-- When a task produces a file that must be delivered, or the user explicitly requests a download, export, or file delivery, call `send_file_to_user` with an absolute path accessible to the server.
+- Send every artifact produced or modified during the task (files, documents, images, videos, audio, and other media; both intermediate and final) via `send_file_to_user` with an absolute path accessible to the server; likewise when the user explicitly requests a download, export, or file delivery.
 - If the user specifies a delivery channel, pass `target_channels`; otherwise follow the tool schema's default delivery behavior.
 - For web-file downloads, do not have `browser_agent` download the file or click a download button. Ask it only to locate and return the download URL; the main agent downloads it with an available command and then calls `send_file_to_user`.
 - Vector artifacts default to inline SVG source in the final reply body—a complete, self-contained `<svg>...</svg>` wrapped in a ```svg fenced code block. Do not generate .svg files, call `generate_image`, or save to disk to deliver.
