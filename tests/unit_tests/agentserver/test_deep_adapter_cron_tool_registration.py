@@ -7,7 +7,7 @@ from __future__ import annotations
 import pytest
 
 from jiuwenswarm.server.runtime.agent_adapter.interface_deep import JiuWenSwarmDeepAdapter
-
+from jiuwenswarm.gateway import CRON_CHANNEL_ID, HEALTH_CHECK_CHANNEL_ID
 
 class _FakeCard:
     def __init__(self, name: str) -> None:
@@ -112,7 +112,7 @@ def test_agent_rebuild_reregisters_cron_tools() -> None:
     }
 
 
-@pytest.mark.parametrize("session_id", ["heartbeat_1", "cron_job_7"])
+@pytest.mark.parametrize("session_id", ["heartbeat_1", f"{CRON_CHANNEL_ID}_7", f"{HEALTH_CHECK_CHANNEL_ID}_4"])
 def test_scheduler_driven_sessions_get_no_cron_tools(session_id: str) -> None:
     """Heartbeat and cron sessions drive the scheduler; they must not carry the tools."""
     adapter, counters = _make_adapter()

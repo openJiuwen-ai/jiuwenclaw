@@ -4,6 +4,7 @@
 
 from jiuwenswarm.gateway.routing.agent_client import AgentServerClient, WebSocketAgentServerClient
 from jiuwenswarm.gateway.channel_manager import ChannelManager
+from jiuwenswarm.gateway.cron.scheduler import CRON_CHANNEL_ID
 from jiuwenswarm.gateway.health_check import (
     HEALTH_CHECK_CHANNEL_ID,
     GatewayHealthCheckService,
@@ -16,6 +17,7 @@ __all__ = [
     "AgentServerClient",
     "WebSocketAgentServerClient",
     "ChannelManager",
+    "CRON_CHANNEL_ID",
     # 旧探活由 gateway.health_check 提供。
     "GatewayHealthCheckService",
     "HEALTH_CHECK_CHANNEL_ID",

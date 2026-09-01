@@ -31,6 +31,8 @@ from jiuwenswarm.common.work_mode import DEFAULT_WEB_WORK_MODE
 
 logger = logging.getLogger(__name__)
 
+CRON_CHANNEL_ID = "__cron__"
+
 
 def _now_utc_ts() -> float:
     return time.time()
@@ -353,7 +355,7 @@ class CronSchedulerService:
         try:
             interrupt_env = e2a_from_agent_fields(
                 request_id=f"cron-cancel-{state.run_id}",
-                channel_id="__cron__",
+                channel_id=CRON_CHANNEL_ID,
                 session_id=target_session_id,
                 req_method=ReqMethod.CHAT_CANCEL,
                 params={"cron": {"job_id": state.job_id, "run_id": state.run_id}},
@@ -608,7 +610,7 @@ class CronSchedulerService:
                 ts=ts,
                 message_handler=self._message_handler,
             )
-        return "__cron__", f"cron_{ts}_{job.id}"
+        return CRON_CHANNEL_ID, f"cron_{ts}_{job.id}"
 
     async def _allocate_single_agent_session(
         self,
@@ -620,7 +622,7 @@ class CronSchedulerService:
         cron_user_id = str(job.user_id or "").strip()
         env = e2a_from_agent_fields(
             request_id=f"cron-session-create-{run_id}",
-            channel_id="__cron__",
+            channel_id=CRON_CHANNEL_ID,
             req_method=ReqMethod.SESSION_CREATE,
             params={
                 "create_token": f"cron:{run_id}",
@@ -780,7 +782,7 @@ class CronSchedulerService:
                 # Send proactive.tick request to AgentServer via WebSocket
                 envelope = e2a_from_agent_fields(
                     request_id=f"proactive-tick-{ev.run_id}",
-                    channel_id="__cron__",
+                    channel_id=CRON_CHANNEL_ID,
                     session_id=f"cron_{job.id}",
                     req_method=ReqMethod.PROACTIVE_TICK,
                     params={"target_channel": job.targets or None},
@@ -1014,7 +1016,7 @@ class CronSchedulerService:
                         mode=mode,
                         run_id=run_id,
                     )
-                    state.exec_channel_id = "__cron__"
+                    state.exec_channel_id = CRON_CHANNEL_ID
                     state.exec_session_id = exec_session_id
                 cron_meta = {
                     "job_id": job.id,
@@ -1150,7 +1152,7 @@ class CronSchedulerService:
         """Persist cron failure history in the routed user's AgentServer directory."""
         envelope = e2a_from_agent_fields(
             request_id=f"cron-history-{request_id or int(self._now_fn() * 1000)}",
-            channel_id="__cron__",
+            channel_id=CRON_CHANNEL_ID,
             session_id=session_id,
             req_method=ReqMethod.HISTORY_APPEND_RECORD,
             params={
