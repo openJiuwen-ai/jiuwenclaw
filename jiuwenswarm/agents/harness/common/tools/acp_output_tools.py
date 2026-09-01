@@ -239,14 +239,8 @@ class AcpOutputManager:
             self._pending.pop(jsonrpc_id, None)
             raise RuntimeError(f"Failed to send ACP output request: {exc}") from exc
 
-        # asyncio.wait_for() can race a cancellation against the completion
-        # of the awaited callback: if the callback finished just as this
-        # task was cancelled, wait_for() silently returns the callback's
-        # result instead of propagating CancelledError (see cpython
-        # gh-90833/bpo-42130). When that happens the task's cancellation
-        # request is still outstanding, so falling through here would wait
-        # on the full response timeout below instead of honoring the
-        # cancellation. Detect that swallowed cancellation explicitly.
+        # wait_for() on Python 3.11 can swallow a cancellation that races
+        # with the callback's completion; detect it explicitly.
         current_task = asyncio.current_task()
         if current_task is not None and current_task.cancelling():
             await self._handle_cancellation(

@@ -984,19 +984,9 @@ async def test_reverse_rpc_emits_cancel_notification_when_tool_is_canceled(
 async def test_reverse_rpc_cancel_racing_callback_completion_still_cancels(
     monkeypatch,
 ) -> None:
-    """Cancellation must be honored even if it races the push callback.
-
-    Regression test for a Python 3.11 ``asyncio.wait_for`` behavior: if the
-    task is cancelled at (almost) the exact moment the awaited callback
-    future completes, ``wait_for`` can silently return the callback's
-    result instead of propagating ``CancelledError`` (a known asyncio
-    "swallowed cancellation" race, fixed on 3.12+). When that happens,
-    ``send_jsonrpc_request`` must still detect the outstanding cancellation
-    request instead of falling through to the full response timeout.
-
-    The cancel() call is issued from *inside* the mocked push callback
-    itself so the race is deterministic regardless of Python version or
-    event loop scheduling.
+    """Regression test: cancellation must not be swallowed by wait_for's
+    Python 3.11 race with the push callback's completion. Cancel is called
+    from inside the mocked callback to make the race deterministic.
     """
     manager = get_acp_output_manager()
     manager.reset_state()
@@ -1062,12 +1052,8 @@ async def test_reverse_rpc_delivery_failure_fails_immediately(monkeypatch) -> No
 async def test_reverse_rpc_zero_delivered_subscribers_fails_immediately(
     monkeypatch,
 ) -> None:
-    """send_push() returning 0 (no subscriber received the push) must fail fast.
-
-    Regression test for a bug where ``callback_result is False`` did not
-    catch an ``int`` return value of ``0``, causing the caller to block
-    until the full response timeout instead of failing immediately.
-    """
+    """Regression test: send_push() returning int 0 must fail fast too,
+    not just ``False``."""
     manager = get_acp_output_manager()
     manager.reset_state()
 
