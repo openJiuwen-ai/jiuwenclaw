@@ -41,6 +41,7 @@ import clsx from 'clsx';
 import { MarkdownRenderer } from '../../components/MarkdownRenderer';
 import { isTeamP2PMessageToUser, parseTeamEventMessage } from './teamEventUtils';
 import { TeamMemberAvatar } from '../TeamMemberAvatar';
+import { AgentAvatar } from '../AgentAvatar';
 import { ProactiveRecommendationCard } from './ProactiveRecommendationCard';
 import { fileArtifactId } from '../ArtifactsPanel';
 import { openArtifactPanel } from '../../features/teamPanelState';
@@ -386,6 +387,7 @@ export const MessageItem = memo(function MessageItem({
     commandName,
     commandInput,
     commandOutput,
+    agentTemplateName,
   } = message;
   const [hasAutoSpoken, setHasAutoSpoken] = useState(false);
   const [isAudioPlaying, setIsAudioPlaying] = useState(false);
@@ -757,7 +759,11 @@ export const MessageItem = memo(function MessageItem({
     )}>
       {withAssistantAvatar && showAvatar ? (
         <div className="assistant-row__avatar" data-testid="chat-panel-assistant-row-avatar">
-          <TeamMemberAvatar member="team_leader" />
+          {role === 'assistant' && agentTemplateName ? (
+            <AgentAvatar agentId={agentTemplateName} alt="" />
+          ) : (
+            <TeamMemberAvatar member="team_leader" />
+          )}
         </div>
       ) : null}
       <div

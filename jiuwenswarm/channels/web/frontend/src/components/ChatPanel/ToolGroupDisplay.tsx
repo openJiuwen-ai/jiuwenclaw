@@ -8,6 +8,7 @@ import {
   isSymphonyCommandTool,
 } from '../../utils/symphonyCommandDisplay';
 import { TeamMemberAvatar } from '../TeamMemberAvatar';
+import { AgentAvatar } from '../AgentAvatar';
 import { SkillTreePath } from './SkillTreePath';
 import { BeamSearchTree } from './BeamSearchTree';
 import { classifyToolCall, describeToolCall, type ToolCategory } from './toolCategory';
@@ -17,6 +18,7 @@ interface ToolGroupDisplayProps {
   notices?: string[];
   showAvatar?: boolean;
   teamLayout?: boolean;
+  agentTemplateName?: string;
   collapseSkillTreeWhenContentStarts?: boolean;
   viewedSkillIds?: string[];
 }
@@ -361,6 +363,7 @@ export function ToolGroupDisplay({
   notices = [],
   showAvatar = true,
   teamLayout = false,
+  agentTemplateName,
   collapseSkillTreeWhenContentStarts = false,
   viewedSkillIds: turnViewedSkillIds = [],
 }: ToolGroupDisplayProps) {
@@ -403,7 +406,11 @@ export function ToolGroupDisplay({
     >
       {showAvatar ? (
         <div className="pt-0.5 tool-group-frame__avatar" data-testid="chat-panel-tool-group-avatar">
-          <TeamMemberAvatar member="team_leader" />
+          {!teamLayout && agentTemplateName ? (
+            <AgentAvatar agentId={agentTemplateName} alt="" />
+          ) : (
+            <TeamMemberAvatar member="team_leader" />
+          )}
         </div>
       ) : null}
       <div className="min-w-0">

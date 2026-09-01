@@ -87,6 +87,8 @@ export interface Message {
   // 主动推荐消息标记
   isProactiveRecommendation?: boolean;
   proactiveType?: 'skill_recommend' | 'task_reminder' | 'need_exploration';
+  /** Web 单 Agent 回复产生时显式选中的专家；历史恢复不能依赖当前选择状态。 */
+  agentTemplateName?: string;
   /**
    * 这条用户消息是否曾经用于设置/修改持续目标（"设为目标"徽章）。发送那一刻本地回显消息
    * 直接置 true；历史消息刷新后重新加载时，优先读后端 history 字段
@@ -148,6 +150,8 @@ export interface ToolExecution {
   timedOutAt?: string;
   resultArrivedAfterTimeout?: boolean;
   requestId?: string;
+  /** Web 单 Agent 工具调用所属的专家；Team 工具不设置。 */
+  agentTemplateName?: string;
 }
 
 export interface Conversation {

@@ -56,6 +56,7 @@ import {
   normalizeToolCallPayload,
   normalizeToolResultPayload,
 } from './features/tool-events/toolEventNormalizer';
+import { readAgentTemplateName } from './features/agentIdentity';
 import { useWebSocket, mergePersistedGoalCompletionMessages, stampGoalObjectiveMessages, useResponsiveLayout, useResponsivePanelResize } from './hooks';
 import { webRequest } from './services/webClient';
 import { processOAuthCallback } from './utils/gitcodeOAuth';
@@ -1133,7 +1134,10 @@ function AppContent({
             display_name: n.display_name,
             memberName: n.memberName,
           },
-          { startedAt: item.at }
+          {
+            startedAt: item.at,
+            agentTemplateName: readAgentTemplateName(item.payload),
+          }
         );
       } else {
         const n = normalizeToolResultPayload(item.payload);
@@ -1207,6 +1211,7 @@ function AppContent({
       const currentItems = current.map((segment) => ({
         at: new Date(segment.startedAt + 1).toISOString(),
         text: segment.text,
+        agentTemplateName: segment.agentTemplateName,
         // live 内存里的真实末帧时刻并入 replay，刷新重建后耗时终点不丢。
         updatedAt: segment.updatedAt,
       }));
@@ -1815,7 +1820,10 @@ function AppContent({
                 display_name: n.display_name,
                 memberName: n.memberName,
               },
-              { startedAt: item.at }
+              {
+                startedAt: item.at,
+                agentTemplateName: readAgentTemplateName(item.payload),
+              }
             );
           } else {
             const n = normalizeToolResultPayload(item.payload);
