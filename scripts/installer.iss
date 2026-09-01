@@ -65,7 +65,9 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 Source: "..\dist\{#BuildDistDirName}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 ; Keep the Microsoft-signed offline prerequisite inside Setup only. It is
 ; extracted to {tmp} solely when no usable Evergreen Runtime is registered.
-Source: "{#BuildWebView2InstallerPath}"; Flags: dontcopy
+; Keep it outside the main solid-compression stream so PrepareToInstall can
+; reach the already-compressed installer without decoding the app payload.
+Source: "{#BuildWebView2InstallerPath}"; Flags: dontcopy solidbreak nocompression
 
 [UninstallRun]
 Filename: "{app}\{#MyAppExeName}"; Parameters: "--desktop-reset-external-cli-config"; Flags: runhidden waituntilterminated; RunOnceId: "ResetExternalCliConfig"
@@ -92,6 +94,17 @@ Filename: "{win}\explorer.exe"; Parameters: """{app}\{#MyAppExeName}"""; Descrip
 [Code]
 const
   WebView2RuntimeId = '{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}';
+
+var
+  WebView2ProgressPage: TOutputMarqueeProgressWizardPage;
+
+procedure InitializeWizard;
+begin
+  WebView2ProgressPage := CreateOutputMarqueeProgressPage(
+    '正在准备 ' + '{#MyAppName}',
+    '首次安装 Microsoft Edge WebView2 Runtime 可能需要 1–3 分钟，请勿关闭安装程序。'
+  );
+end;
 
 function GetWebView2RuntimeVersion(var Version: String): Boolean;
 var
@@ -122,17 +135,33 @@ begin
   end;
 
   Log('Microsoft Edge WebView2 Runtime is missing; running bundled installer.');
-  ExtractTemporaryFile('{#BuildWebView2InstallerFileName}');
-  RuntimeInstaller := ExpandConstant('{tmp}\{#BuildWebView2InstallerFileName}');
-  ResultCode := -1;
-  Executed := Exec(
-    RuntimeInstaller,
-    '/silent /install',
-    '',
-    SW_HIDE,
-    ewWaitUntilTerminated,
-    ResultCode
-  );
+  WebView2ProgressPage.Show;
+  try
+    WebView2ProgressPage.SetText(
+      '正在准备 Microsoft Edge WebView2 Runtime…',
+      '即将开始安装运行环境。'
+    );
+    WebView2ProgressPage.Animate;
+    ExtractTemporaryFile('{#BuildWebView2InstallerFileName}');
+    RuntimeInstaller := ExpandConstant('{tmp}\{#BuildWebView2InstallerFileName}');
+
+    WebView2ProgressPage.SetText(
+      '正在安装 Microsoft Edge WebView2 Runtime…',
+      '首次安装可能需要 1–3 分钟，请勿关闭安装程序。'
+    );
+    WebView2ProgressPage.Animate;
+    ResultCode := -1;
+    Executed := Exec(
+      RuntimeInstaller,
+      '/silent /install',
+      '',
+      SW_HIDE,
+      ewWaitUntilTerminated,
+      ResultCode
+    );
+  finally
+    WebView2ProgressPage.Hide;
+  end;
 
   { The Evergreen installer can return a non-zero code even when registration
     succeeded. Verify Microsoft's documented pv value instead of trusting only

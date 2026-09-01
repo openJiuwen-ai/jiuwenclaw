@@ -112,8 +112,12 @@ def test_installer_embeds_and_verifies_webview2_prerequisite():
     )
 
     assert "BuildWebView2InstallerPath" in installer
-    assert "Flags: dontcopy" in installer
+    assert "Flags: dontcopy solidbreak nocompression" in installer
     assert "function PrepareToInstall" in installer
+    assert "CreateOutputMarqueeProgressPage" in installer
+    assert "WebView2ProgressPage.Show" in installer
+    assert "WebView2ProgressPage.Hide" in installer
+    assert "finally" in installer
     assert webview2_runtime.WEBVIEW2_RUNTIME_ID in installer
     assert "GetWebView2RuntimeVersion" in installer
     assert "RegQueryStringValue(HKLM32, Key, 'pv', Version)" in installer
