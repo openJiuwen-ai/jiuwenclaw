@@ -769,6 +769,7 @@ export const MessageItem = memo(function MessageItem({
       <div
         className={clsx(
           'chat-bubble-wrapper  min-w-0',
+          isUser && 'flex-1',
           !isUser && visibleFileItems && 'chat-bubble-wrapper--with-files'
         )}
         data-testid="chat-panel-bubble-wrapper"
