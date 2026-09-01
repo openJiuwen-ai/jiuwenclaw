@@ -881,7 +881,7 @@ class SkillManager:
         meta["has_evolutions"] = _has_effective_evolutions(
             skill_dir if version_requested is None else read_root
         )
-        self._apply_enabled_config(meta, name)
+        self._apply_enabled_config(meta, str(meta.get("name") or name))
         meta["version"] = response_version
         meta["skill_type"] = detect_skill_type(skill_dir if version_requested is None else read_root)
 
@@ -5104,6 +5104,7 @@ class SkillManager:
         if meta is None:
             return None
 
+        registered_name = self._resolve_skill_name(child, md, meta)
         # 工作区技能身份以目录名为准，避免 frontmatter name 与目录不一致时
         # （如 skill-creator-normal 仍写 name: skill-creator）产生重复列表项。
         meta["name"] = child.name
@@ -5119,7 +5120,7 @@ class SkillManager:
                 break
         # 检查是否通过 import_local / SkillNet 等写入 local_skills（含 origin 供前端对照 skill_url）
         for ls in self._state.get("local_skills", []):
-            if ls.get("name") == meta.get("name"):
+            if ls.get("name") in (meta.get("name"), registered_name):
                 source = ls.get("source", source_default) if isinstance(ls, dict) else source_default
                 if isinstance(ls, dict):
                     origin = ls.get("origin")
@@ -5132,7 +5133,7 @@ class SkillManager:
 
         meta["source"] = source
         if not str(meta.get("display_name") or "").strip():
-            meta["display_name"] = meta.get("name", "")
+            meta["display_name"] = registered_name
         meta["installed"] = True
         meta["enabled"] = self.get_skill_enabled(meta.get("name", ""))
         # 判断是否为内置技能（传入 child 路径，通过实际路径判断）
@@ -5594,25 +5595,21 @@ class SkillManager:
                 meta = self._parse_skill_md(md)
                 if meta is None:
                     continue
-                if meta.get("name") == md.stem:
-                    meta["name"] = child.name
-                if meta.get("name") != name:
+                registered_name = self._resolve_skill_name(child, md, meta)
+                if name not in (child.name, registered_name):
+                    continue
+                listed_meta = self._scan_one_skill_dir(child)
+                if listed_meta is None:
                     continue
                 base = {
-                    "name": meta.get("name", name),
-                    "source": self._resolve_skill_source(meta.get("name", "")),
-                    "display_name": self._resolve_skill_display_name(meta.get("name", "")),
-                    "is_builtin": self._is_builtin_skill(
-                        meta.get("name", ""), self._get_installed_plugins(), child
+                    "name": listed_meta.get("name", child.name),
+                    "source": listed_meta.get("source", "project"),
+                    "display_name": listed_meta.get("display_name", registered_name),
+                    "is_builtin": bool(listed_meta.get("is_builtin", False)),
+                    "is_builtin_source": bool(
+                        listed_meta.get("is_builtin_source", False)
                     ),
-                    "is_builtin_source": False,
                 }
-                builtin_dir = get_builtin_skills_dir()
-                if builtin_dir.exists():
-                    builtin_skill_path = builtin_dir / child.name
-                    base["is_builtin_source"] = (
-                        builtin_skill_path.exists() and builtin_skill_path.is_dir()
-                    )
                 return child, base
 
         # marketplace 未安装副本（只支持读 workspace 语义，无本地产品版本）

@@ -134,3 +134,7 @@
   box-shadow: var(--effect-shadow-xl);
   padding: 1.5rem;
 }
+
+input[type="password"]::-ms-reveal {
+  display: none;
+}

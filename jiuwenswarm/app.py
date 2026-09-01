@@ -23,13 +23,14 @@ from jiuwenswarm.common.media_capability_config import (
     migrate_media_capability_switches,
 )
 from jiuwenswarm.common.utils import (
+    apply_free_search_runtime_defaults,
+    cleanup_stale_openjiuwen_descs,
     cleanup_team_files,
     ensure_config_migrated_from_template,
     ensure_default_builtin_skills,
     get_env_file,
     get_user_workspace_dir,
     prepare_workspace,
-    reset_free_search_runtime_flags,
 )
 
 # Record the parsed dotenv path for subprocess spawning
@@ -43,6 +44,9 @@ _old_workspace = _workspace_dir / "agent" / "jiuwenclaw_workspace"
 
 # 始终清理 Team 旧版本遗留文件（幂等操作，在 prepare_workspace 之前执行）
 cleanup_team_files(_workspace_dir)
+
+# 清理 OpenJiuwen 描述文件目录迁移后遗留的平铺副本。
+cleanup_stale_openjiuwen_descs()
 
 # Initialize if config doesn't exist, or if legacy workspace exists but new doesn't (migration),
 # or if the preset MCP package dir isn't seated yet (e.g. an install predating
@@ -65,7 +69,7 @@ ensure_default_builtin_skills()
 _env_file = get_env_file()
 load_dotenv_runtime(dotenv_path=_env_file, override=True)
 migrate_media_capability_switches(_env_file)
-reset_free_search_runtime_flags()
+apply_free_search_runtime_defaults()
 
 
 def main() -> None:

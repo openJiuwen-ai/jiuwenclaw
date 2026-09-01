@@ -39,6 +39,9 @@ class ReqMethod(Enum):
     COMMAND_SESSION = "command.session"
     COMMAND_WORKFLOWS = "command.workflows"
     COMMAND_STATUS = "command.status"
+    SWARMFLOW_PAUSE = "swarmflow.pause"
+    SWARMFLOW_RESUME = "swarmflow.resume"
+    SWARMFLOW_STOP = "swarmflow.stop"
 
     CONFIG_GET = "config.get"
     CONFIG_SET = "config.set"

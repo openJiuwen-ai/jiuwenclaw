@@ -32,6 +32,9 @@ from jiuwenswarm.agents.harness.common.rails.avatar_rail import AvatarPromptRail
 from jiuwenswarm.agents.harness.common.rails.response_prompt_rail import ResponsePromptRail
 from jiuwenswarm.agents.harness.common.rails.runtime_prompt_rail import RuntimePromptRail
 from jiuwenswarm.agents.harness.common.rails.stream_event_rail import JiuSwarmStreamEventRail
+from jiuwenswarm.agents.harness.common.rails.symphony.retrieval_context_processor import (
+    symphony_retrieval_compact_processor_spec,
+)
 from jiuwenswarm.agents.harness.team.rails.team_workspace_report_path_rail import TeamWorkspaceReportPathRail
 from jiuwenswarm.common.config import (
     get_config,
@@ -592,7 +595,7 @@ def _build_context_processor_rail(config: dict[str, Any] | None) -> ContextProce
     try:
         from typing import List, Tuple
 
-        user_processors: List[Tuple[str, dict]] = []
+        user_processors: List[Tuple[str, Any]] = []
         ctx_cfg: dict[str, Any] = {}
         if isinstance(config, dict):
             raw = config.get("context_engine_config", {})
@@ -613,6 +616,8 @@ def _build_context_processor_rail(config: dict[str, Any] | None) -> ContextProce
         round_level_cfg = ctx_cfg.get("round_level_compressor_config", {})
         if isinstance(round_level_cfg, dict) and round_level_cfg:
             user_processors.append(("RoundLevelCompressor", round_level_cfg))
+
+        user_processors.append(symphony_retrieval_compact_processor_spec())
 
         rail = ContextProcessorRail(
             processors=user_processors if user_processors else None,

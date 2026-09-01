@@ -15,6 +15,37 @@ from jiuwenswarm.agents.harness.common.tools.symphony_toolkits import (
 from jiuwenswarm.symphony.service import SwarmSymphonyService
 
 
+def _minimal_planned_graph(status="ready"):
+    nodes = (
+        {}
+        if status == "no_plan"
+        else {
+            "writer": {"label": "Writer", "metadata": {"type": "skill"}},
+            "reviewer": {"label": "Reviewer", "metadata": {"type": "skill"}},
+        }
+    )
+    return {
+        "graph": {
+            "id": "plan-1",
+            "type": "planned_graph",
+            "directed": True,
+            "metadata": {"status": status},
+            "nodes": nodes,
+            "edges": (
+                []
+                if status == "no_plan"
+                else [
+                    {
+                        "source": "writer",
+                        "target": "reviewer",
+                        "relation": "can_feed",
+                    }
+                ]
+            ),
+        }
+    }
+
+
 @pytest.fixture(autouse=True)
 def enabled_symphony_config(monkeypatch):
     def fake_load_symphony_config(config=None):
@@ -34,7 +65,10 @@ async def test_plan_calls_process_service_once_without_language():
 
     async def handler(query, **kwargs):
         calls.append({"query": query, **kwargs})
-        return {"success": True, "content": "## Plan", "direct_display": True}
+        return {
+            "success": True,
+            "planned_graph": _minimal_planned_graph(),
+        }
 
     result = await SymphonyToolkit(SimpleNamespace(plan=handler)).plan(
         "use installed skills"
@@ -50,10 +84,7 @@ async def test_plan_calls_process_service_once_without_language():
     ]
     assert result == {
         "success": True,
-        "content": "## Plan",
-        "direct_display": True,
-        "continue_after_display": True,
-        "followup_action": "external_skill_discovery",
+        "planned_graph": _minimal_planned_graph(),
     }
 
 
@@ -63,7 +94,10 @@ async def test_plan_passes_mode_and_deduplicated_candidates():
 
     async def handler(query, **kwargs):
         seen.update({"query": query, **kwargs})
-        return {"success": True}
+        return {
+            "success": True,
+            "planned_graph": _minimal_planned_graph(),
+        }
 
     await SymphonyToolkit(SimpleNamespace(plan=handler)).plan(
         "compose",
@@ -136,7 +170,10 @@ async def test_plan_passes_current_progress_callback_directly_to_service():
         del query, kwargs
         callback = progress
         await callback({"event": "started", "graph": {"nodes": [], "edges": []}})
-        return {"success": True}
+        return {
+            "success": True,
+            "planned_graph": _minimal_planned_graph(),
+        }
 
     async def progress(event):
         events.append(event)
@@ -153,100 +190,56 @@ async def test_plan_passes_current_progress_callback_directly_to_service():
 
 
 @pytest.mark.asyncio
-async def test_plan_returns_compact_plan_and_beam_graph():
+async def test_plan_returns_planned_graph_without_legacy_plan_compression():
     async def handler(*args, **kwargs):
         del args, kwargs
+        planned_graph = _minimal_planned_graph()
         return {
             "success": True,
-            "content": "## Beam Plan",
-            "result": {
-                "beam_search": {
-                    "language": "cn",
-                    "round_index": 2,
-                    "graph": {
-                        "nodes": [
-                            {
-                                "id": "skill-a",
-                                "label": "Skill A",
-                                "status": "final",
-                                "seed": True,
-                                "unused": "drop",
-                            }
-                        ],
-                        "edges": [],
-                    },
-                },
-                "recommended_plans": [
-                    {
-                        "title": "Plan",
-                        "status": "ready",
-                        "steps": [{"skill_id": "skill-a", "name": "Skill A"}],
-                        "can_feed_edges": [],
-                        "missing_inputs": [],
-                    }
-                ],
-            },
+            "planned_graph": planned_graph,
         }
 
     result = await SymphonyToolkit(SimpleNamespace(plan=handler)).plan(
         "compose", mode="beam"
     )
 
-    assert result["beam_search"] == {
-        "language": "cn",
-        "round_index": 2,
-        "graph": {
-            "nodes": [
-                {
-                    "id": "skill-a",
-                    "label": "Skill A",
-                    "status": "final",
-                    "seed": True,
-                }
-            ],
-            "edges": [],
-        },
+    assert result == {
+        "success": True,
+        "planned_graph": _minimal_planned_graph(),
     }
-    assert result["plan"]["steps"] == [
-        {"step": 1, "skill_id": "skill-a", "name": "Skill A"}
-    ]
-    assert "result" not in result
 
 
 @pytest.mark.asyncio
-async def test_plan_preserves_dynamic_graph_metadata():
+async def test_plan_keeps_compact_graph_build_only_when_rebuilt():
     async def handler(*args, **kwargs):
         del args, kwargs
         return {
             "success": True,
-            "plan_id": "plan-session-1",
-            "dynamic_graph_enabled": True,
-            "result": {"recommended_plans": []},
+            "planned_graph": _minimal_planned_graph(),
+            "graph_build": {"success": True, "rebuilt": True, "edge_count": 3},
         }
 
     result = await SymphonyToolkit(SimpleNamespace(plan=handler)).plan("compose")
 
-    assert result["plan_id"] == "plan-session-1"
-    assert result["dynamic_graph_enabled"] is True
+    assert result["graph_build"] == {
+        "success": True,
+        "rebuilt": True,
+        "edge_count": 3,
+    }
 
 
-def test_toolkit_compacts_inferred_edge_provenance():
-    edge = SymphonyToolkit._compact_can_feed_edge(
-        {
-            "source_id": "skill-a",
-            "target_id": "skill-b",
-            "confidence": None,
-            "method": "fast_llm_inferred",
-            "reason": "LLM connected retrieved candidates.",
-            "port_mappings": [],
-        }
-    )
+@pytest.mark.asyncio
+@pytest.mark.parametrize("planned_graph", [None, [], "not-a-graph"])
+async def test_plan_rejects_success_payload_without_dict_planned_graph(planned_graph):
+    async def handler(*args, **kwargs):
+        del args, kwargs
+        return {"success": True, "planned_graph": planned_graph}
 
-    assert edge == {
-        "source_id": "skill-a",
-        "target_id": "skill-b",
-        "method": "fast_llm_inferred",
-        "reason": "LLM connected retrieved candidates.",
+    result = await SymphonyToolkit(SimpleNamespace(plan=handler)).plan("compose")
+
+    assert result == {
+        "success": False,
+        "detail": "Symphony orchestration returned no planned_graph",
     }
 
 
@@ -286,9 +279,45 @@ async def test_compose_timeout_is_compact_non_retryable_terminal_payload(monkeyp
         "operation": "plan",
         "timeout_s": 0.01,
         "detail": "symphony.plan: timeout after 0.01s",
-        "continue_after_display": False,
     }
-    assert result.get("followup_action") != "external_skill_discovery"
+
+
+@pytest.mark.asyncio
+async def test_plan_handler_timeout_is_an_ordinary_service_failure():
+    async def handler(*args, **kwargs):
+        del args, kwargs
+        raise asyncio.TimeoutError("upstream timeout")
+
+    result = await SymphonyToolkit(SimpleNamespace(plan=handler)).plan("compose")
+
+    assert result["success"] is False
+    assert result.get("reason") != "graph_build_timeout"
+    assert result["detail"] == "symphony.plan: upstream timeout"
+
+
+@pytest.mark.asyncio
+async def test_external_plan_task_cancellation_propagates():
+    handler_entered = asyncio.Event()
+    handler_cancelled = asyncio.Event()
+
+    async def handler(*args, **kwargs):
+        del args, kwargs
+        handler_entered.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            handler_cancelled.set()
+
+    task = asyncio.create_task(
+        SymphonyToolkit(SimpleNamespace(plan=handler)).plan("compose")
+    )
+    await handler_entered.wait()
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert handler_cancelled.is_set()
 
 
 @pytest.mark.asyncio
@@ -411,6 +440,70 @@ async def test_refresh_timeout_aborts_blocked_progress_without_leaking_worker(
     assert result["success"] is False
     assert "timeout" in result["detail"]
     assert callback_cancelled.is_set()
+    assert service._active_build_task is None
+    assert not [
+        task
+        for task in asyncio.all_tasks()
+        if task.get_name() == "symphony-build-progress"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_plan_timeout_classifies_cancelled_graph_build_as_terminal_timeout(
+    monkeypatch,
+    tmp_path,
+):
+    config = SimpleNamespace(
+        paths=SimpleNamespace(
+            skills_root=tmp_path / "skills",
+            graph_dir=tmp_path / "graph",
+        ),
+        orchestration=SimpleNamespace(
+            mode="fast",
+            top_k=3,
+            max_depth=4,
+            min_edge_confidence=0.5,
+        ),
+        evolution=SimpleNamespace(enabled=False),
+    )
+    build_entered = asyncio.Event()
+
+    async def blocking_build(*args, **kwargs):
+        del args, kwargs
+        build_entered.set()
+        await asyncio.Event().wait()
+
+    async def stale_graph_status():
+        return {"success": True, "exists": True, "stale": True}
+
+    monkeypatch.setattr(
+        "jiuwenswarm.symphony.service.load_symphony_config",
+        lambda: config,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.symphony.service.LLMConfig.from_default_model",
+        lambda: object(),
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.symphony.service.service_build_graph",
+        blocking_build,
+    )
+    monkeypatch.setattr(
+        SymphonyToolkit,
+        "_resolve_timeout_s",
+        staticmethod(lambda default_s=1800.0: 0.01),
+    )
+    service = SwarmSymphonyService()
+    service.graph_status = stale_graph_status
+
+    result = await SymphonyToolkit(service).plan("compose")
+
+    assert build_entered.is_set()
+    assert result["reason"] == "graph_build_timeout"
+    assert result["operation"] == "plan"
+    assert result["timed_out"] is True
+    assert result["retryable"] is False
+    assert result["timeout_s"] == 0.01
     assert service._active_build_task is None
     assert not [
         task

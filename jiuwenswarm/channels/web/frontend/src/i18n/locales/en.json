@@ -125,7 +125,8 @@
       "searchModel": "Search and select a model",
       "noModelResults": "No matching models",
       "openModelList": "Open model list",
-      "modelIdPlaceholder": "Enter a model ID",
+      "modelIdPlaceholder": "Enter a model ID, e.g. glm-4.7",
+      "modelIdHint": "For example: glm-4.7. Model IDs vary by provider; refer to its model list or official documentation.",
       "fetchLatestModels": "Fetch latest",
       "presetModels": "Showing provider presets. Open the list to fetch the latest models",
       "noPresetModels": "No preset models. Open the list or refresh to fetch the latest models",
@@ -211,7 +212,11 @@
       "vision": "Image processing",
       "audio": "Audio processing",
       "video": "Video understanding",
-      "team": "Agent team"
+      "videoDescription": "Enable video understanding; disabling it keeps the saved model configuration.",
+      "videoConfigTitle": "Configure video understanding model",
+      "toggleCapability": "Toggle {{name}} capability",
+      "saveAndEnable": "Save and enable",
+      "savedRestartRequired": "Saved; takes effect after restart."
     },
     "browser": {
       "runtime": "Browser runtime",
@@ -297,10 +302,6 @@
       "video_api_key": { "title": "API key" },
       "video_model": { "title": "Model name" },
       "video_provider": { "title": "Model provider" },
-      "swarmflow_enabled": {
-        "title": "Dynamic workflow",
-        "description": "Control whether the agent team enables dynamic workflow capabilities."
-      },
       "permissions_mode": {
         "title": "Global permission mode",
         "description": "Choose the shared guardrail mode for ordinary Agents and Teams."
@@ -367,6 +368,7 @@
     "elapsedTime": "Elapsed time: {{value}}",
     "duration": "Duration",
     "noTasks": "No tasks currently",
+    "moreTasks": "{{count}} more tasks",
     "noMemberData": "No member data",
     "selectMember": "Select a team member",
     "detailTabs": {
@@ -474,7 +476,9 @@
       "views": {
         "list": "List view",
         "structure": "Structure view",
-        "board": "Board view"
+        "board": "Board view",
+        "graph": "Graph view",
+        "workflow": "Workflow view"
       },
       "metrics": {
         "progress": "Progress"
@@ -622,7 +626,23 @@
       "configured": "Configured Models",
       "free": "Free Models",
       "addModel": "Add Custom Model",
+      "empty": "No models available. Add a model in Settings first.",
       "placeholder": "Select Model"
+    },
+    "contextUsage": {
+      "title": "Context usage",
+      "ariaLabel": "Context usage {{rate}}",
+      "hoverMetric": "{{rate}} ({{used}}/{{limit}})",
+      "detailMetric": "{{rate}} ({{used}}/{{limit}})",
+      "kvCacheHitRate": "KV hit rate",
+      "detailTitle": "Context usage",
+      "systemPrompt": "System prompt",
+      "messages": "Conversation messages",
+      "tools": "Tools & MCP",
+      "skills": "Skills",
+      "notReported": "Not reported",
+      "close": "Close context details",
+      "noBreakdown": "No category details returned by the backend"
     },
     "configLockedHistory": "Session has messages — create a new session to change config",
     "modeSwitchDisabledProcessing": "This conversation is running. Start a new conversation to choose another mode",
@@ -651,6 +671,7 @@
     "extensionConnect": "Connect",
     "extensionManagePlugins": "Manage My Plugins",
     "extensionManageMcps": "Manage My MCPs",
+    "extensionMore": "More",
     "recentTasks": "Progress",
     "contextCompressionCommandRunning": "Compressing context",
     "teamPause": "Pause",
@@ -1035,11 +1056,11 @@
       },
       "1": {
         "title": "Configure your first model",
-        "description": "Model settings are under More, in Configuration."
+        "description": "Model configuration is on the Models page in Settings."
       },
       "2": {
         "title": "Complete model configuration",
-        "description": "Enter the model name, API URL, API key, and model provider in Default model, then select Save."
+        "description": "Select Add model, choose a model provider, complete the required fields, then select Save."
       }
     },
     "quickSetup": {
@@ -1344,10 +1365,6 @@
       "wakeOffset": "Wake early",
       "wakeOffsetUnit": "minutes",
       "wakeOffsetHelp": "Start the agent this many minutes before the scheduled push time; 0 means run at the scheduled time"
-    },
-    "modelPicker": {
-      "configured": "Configured",
-      "empty": "No models available yet, add one in the config panel first"
     },
     "timePicker": {
       "hour": "Hr",
@@ -1844,6 +1861,7 @@
         "readFailed": "Unable to read the skill graph. Refresh the graph first.",
         "refreshFailed": "Failed to refresh the skill graph",
         "cancelFailed": "Failed to cancel the skill graph build",
+        "primaryModelProbeFailed": "Primary model connection test failed: {{detail}}",
         "buildFailedWithDetail": "Symphony graph build failed: {{detail}}"
       },
       "serverDetails": {
@@ -1857,6 +1875,8 @@
       "buildStages": {
         "idle": "No build logs",
         "updateStart": "Starting skill graph build",
+        "modelProbeStart": "Testing primary model connection",
+        "modelProbeDone": "Primary model connection test passed",
         "updateCancelRequested": "Cancelling skill graph build",
         "updateCancelled": "Skill graph build cancelled",
         "scanStart": "Scanning skill directories",
@@ -2141,6 +2161,8 @@
       "connecting": "Connecting…",
       "uninstall": "Uninstall",
       "uninstalling": "Uninstalling…",
+      "delete": "Delete",
+      "deleting": "Deleting…",
       "create": "Create",
       "createFirst": "Create manually",
       "createByChat": "Create via chat",
@@ -2362,6 +2384,8 @@
       "toolName": "Tool name",
       "arguments": "Arguments",
       "result": "Result",
+      "flowchart": "Flowchart",
+      "flowchartHint": "click to expand/collapse",
       "truncated": "result truncated"
     },
     "toolGroup": {
@@ -2799,6 +2823,7 @@
     "prev": "Previous",
     "next": "Next",
     "cancel": "Cancel",
+    "replyLater": "Reply Later",
     "skip": "Skip",
     "nextStep": "Next",
     "confirm": "Confirm",
@@ -2858,7 +2883,8 @@
       "addMcp": "Add MCP",
       "pickSkillTitle": "Select skills",
       "pickMcpTitle": "Select MCP",
-      "submitError": "Creation failed - this still awaits backend support",
+      "submitError": "Creation failed. Please check your input and try again.",
+      "fieldRequired": "This field is required",
       "withSkillNotWired": "This entry point isn't wired to the chat panel yet"
     },
     "chatPrompts": {
@@ -3133,5 +3159,42 @@
       "skipped": "Last run skipped",
       "cancelled": "Last run cancelled"
     }
+  },
+  "swarmflow": {
+    "statusPlanned": "Planned",
+    "statusPending": "Pending",
+    "statusRunning": "Running",
+    "statusPaused": "Paused",
+    "statusCompleted": "Completed",
+    "statusFailed": "Failed",
+    "statusStopped": "Stopped",
+    "statusWaitingForHuman": "Waiting for input",
+    "subWorkflow": "Sub-workflow",
+    "clickToReply": "Click to reply",
+    "waitingForHuman": "Waiting for {{count}}",
+    "noWorkflow": "No workflow",
+    "layoutIndented": "Indented Tree",
+    "layoutOrgChart": "Org Chart",
+    "layoutGraph": "Flow Graph",
+    "pauseResumeHint": "Pause / Resume",
+    "stopHint": "Stop",
+    "sessionBudget": "Session budget (team-wide, never resets)",
+    "runBudget": "Run budget (META.workflow_token_limit)",
+    "sessionBudgetShort": "Session",
+    "runBudgetShort": "Run",
+    "budgetUnlimited": "unbounded",
+    "budgetExhaustedSession": "Session budget exhausted",
+    "budgetExhaustedWorkflow": "Run budget exhausted",
+    "toggleLabel": "SwarmFlow",
+    "tagHint": "SwarmFlow is active for this session",
+    "closeTag": "Close SwarmFlow",
+    "closeTagDisabled": "Cannot close while processing",
+    "configTitle": "SwarmFlow Configuration",
+    "configReadonlyHint": "Session is active, config is read-only",
+    "budgetPanelTitle": "SwarmFlow Budget",
+    "budgetPanelHint": "Set the Token limit for this session.",
+    "budgetPlaceholder": "Enter number",
+    "budgetActualHint": "Configured limit: {{count}} tokens",
+    "workflowList": "Workflow List"
   }
 }

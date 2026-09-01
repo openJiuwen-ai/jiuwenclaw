@@ -48,6 +48,7 @@ from openjiuwen.extensions.external_provider.openai_auth.openai_account_models i
 from jiuwenswarm.common.config import (
     DEFAULT_SWARMFLOW_ENABLED,
     EXTERNAL_CLI_AGENTS_CONFIG_PATH,
+    SWARMFLOW_BUDGET_CONFIG_PATH,
     SWARMFLOW_ENABLED_CONFIG_PATH,
     get_config,
     get_config_raw,
@@ -73,6 +74,7 @@ from jiuwenswarm.common.config import (
     update_memory_forbidden_description_in_config,
     update_external_cli_agents_in_config,
     update_swarmflow_enabled_in_config,
+    update_swarmflow_budget_in_config,
     update_a2ui_in_config,
     update_updater_in_config,
     update_proactive_recommendation_in_config,
@@ -672,6 +674,11 @@ _FORWARD_REQ_METHODS = frozenset({
     "chat.interrupt",
     "chat.resume",
     "chat.user_answer",
+    "chat.swarmflow_reply",
+    "swarmflow.pause",
+    "swarmflow.resume",
+    "swarmflow.stop",
+    "command.workflows",
     "history.get",
     # "tts.synthesize",
     "skills.marketplace.list",
@@ -835,6 +842,10 @@ _FORWARD_NO_LOCAL_HANDLER_METHODS = frozenset({
     "team.snapshot",
     "team.history.get",
     "team.mq.publish",
+    "command.workflows",
+    "swarmflow.pause",
+    "swarmflow.resume",
+    "swarmflow.stop",
     "skills.marketplace.list",
     "skills.list",
     "skills.installed",
@@ -1046,6 +1057,7 @@ _CONFIG_YAML_KEYS = frozenset({
     "proactive_recommendation_max_recommend_per_day",
     "proactive_recommendation_max_rounds_per_tick",
     "swarmflow_enabled",
+    "swarmflow_budget",
     "external_cli_agent_claude_enabled",
     "external_cli_agent_claude_use_builtin",
     "external_cli_agent_claude_cli_path",
@@ -1233,7 +1245,11 @@ def _flatten_swarmflow_for_config_panel(raw: dict[str, Any]) -> dict[str, str]:
         SWARMFLOW_ENABLED_CONFIG_PATH,
         DEFAULT_SWARMFLOW_ENABLED,
     )
-    return {"swarmflow_enabled": "true" if enabled else "false"}
+    budget = _get_nested_config_value(raw, SWARMFLOW_BUDGET_CONFIG_PATH, None)
+    flat = {"swarmflow_enabled": "true" if enabled else "false"}
+    if budget is not None:
+        flat["swarmflow_budget"] = str(budget)
+    return flat
 
 
 def _flatten_external_cli_agents_for_config_panel(raw: dict[str, Any]) -> dict[str, str]:
@@ -3083,6 +3099,8 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                     update_memory_forbidden_description_in_config({preferred_lang: desc_val})
                 elif param_key == "swarmflow_enabled":
                     update_swarmflow_enabled_in_config(parsed)
+                elif param_key == "swarmflow_budget":
+                    update_swarmflow_budget_in_config(str(val).strip())
                 elif param_key in _EXTERNAL_CLI_AGENT_CONFIG_KEYS:
                     if not external_cli_agents_updated:
                         try:
@@ -5235,6 +5253,13 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             payload["request_id"] = request_id
         await channel.send_response(ws, req_id, ok=True, payload=payload)
 
+    async def _chat_swarmflow_reply(ws, req_id, params, session_id):
+        # Empty-ack shell — standard 3-layer routing forwards the reply to the
+        # agent adapter, which builds HumanAgentMessage and calls team_manager.
+        await channel.send_response(
+            ws, req_id, ok=True, payload={"accepted": True, "session_id": session_id}
+        )
+
     async def _history_get(ws, req_id, params, session_id):
         payload = {"accepted": True, "session_id": session_id}
         if isinstance(params, dict):
@@ -6544,6 +6569,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
     channel.register_method("chat.resume", _chat_resume)
     channel.register_method("chat.interrupt", _chat_interrupt)
     channel.register_method("chat.user_answer", _chat_user_answer)
+    channel.register_method("chat.swarmflow_reply", _chat_swarmflow_reply)
     channel.register_method("history.get", _history_get)
     channel.register_method("locale.get_conf", _locale_get_conf)
     channel.register_method("locale.set_conf", _locale_set_conf)

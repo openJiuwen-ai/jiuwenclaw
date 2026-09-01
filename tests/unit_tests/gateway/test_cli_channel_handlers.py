@@ -958,6 +958,172 @@ async def test_command_model_switch_sends_scoped_agent_reload(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_command_model_delete_matches_by_name_when_index_drifted(monkeypatch):
+    """回归测试：删除确认页停留期间 defaults 被切换重排，前端持有的 index 漂移，
+    后端 delete_model 必须按 model 字段（model_name/alias）稳态匹配删除，
+    而非按过期 index pop 删错条目。
+
+    复现：初始 [GLM-5@0, GLM-5.2@1]；前端选中 GLM-5（index=0）进入删除确认页；
+    另一窗口切换 GLM-5.2 为默认 → defaults 重排为 [GLM-5.2, GLM-5]；
+    前端确认删除时仍发 index=0 + model="GLM-5"。修复前：pop(0) 删了 GLM-5.2（错）；
+    修复后：按 model="GLM-5" 匹配，正确删除 GLM-5。
+    """
+    server = FakeGatewayServer()
+    sent_envs = []
+    # 重排后的当前 defaults：GLM-5.2 在前（被切换为默认），GLM-5 在后
+    current_defaults = [
+        {
+            "alias": "other",
+            "model_client_config": {
+                "api_key": "key",
+                "api_base": "https://example.test/v1",
+                "model_name": "GLM-5.2",
+                "client_provider": "openai",
+            },
+            "model_config_obj": {},
+        },
+        {
+            "alias": "glm",
+            "model_client_config": {
+                "api_key": "key",
+                "api_base": "https://example.test/v1",
+                "model_name": "GLM-5",
+                "client_provider": "openai",
+            },
+            "model_config_obj": {},
+        },
+    ]
+
+    async def fake_send_tui_agent_request(_client, env, *, label):
+        sent_envs.append((env, label))
+
+    def fake_update_config(mutator, **kwargs):
+        data = {"models": {"defaults": current_defaults}}
+        return mutator(data)
+
+    monkeypatch.setattr(tui_connect_module, "_send_tui_agent_request", fake_send_tui_agent_request)
+    monkeypatch.setattr(tui_connect_module, "update_config", fake_update_config)
+    monkeypatch.setattr(
+        tui_connect_module,
+        "get_config_raw",
+        lambda: {"models": {"defaults": current_defaults}},
+    )
+    monkeypatch.setattr(
+        tui_connect_module, "get_config", lambda: {"models": {"defaults": current_defaults}}
+    )
+
+    register_cli_handlers(
+        CliHandlersBindParams(
+            channel=server,
+            agent_client=_offline_local_client(),
+            message_handler=None,
+            on_config_saved=None,
+            path="/tui",
+        )
+    )
+
+    # 前端持有过期 index=0（原本指向 GLM-5），但当前 index=0 是 GLM-5.2；
+    # model="GLM-5" 是稳态标识。期望删除 GLM-5（即 index=1 的条目）。
+    await server.local_handlers["/tui"]["command.model"](
+        object(),
+        "req-delete",
+        {"action": "delete_model", "index": 0, "model": "GLM-5"},
+        "tui_session_1",
+    )
+    await asyncio.sleep(0)
+
+    assert server.responses[-1]["ok"] is True
+    # 后端回包 name 必须是真实删除的 GLM-5（而非 index=0 漂移后的 GLM-5.2）
+    assert server.responses[-1]["payload"]["name"] == "GLM-5"
+    assert server.responses[-1]["payload"]["type"] == "model_deleted"
+    # 当前 defaults 仅剩 GLM-5.2
+    assert len(current_defaults) == 1
+    assert current_defaults[0]["model_client_config"]["model_name"] == "GLM-5.2"
+
+
+@pytest.mark.asyncio
+async def test_command_model_delete_rejects_when_index_and_name_mismatch(monkeypatch):
+    """回归测试：同名多条目 + index 漂移到非候选条目时，后端必须拒绝并报"列表已变"，
+    不得静默删除 index 当前指向的错条目。
+    """
+    server = FakeGatewayServer()
+    sent_envs = []
+    # 两个同名 GLM，provider/api_base 不同（不构成 _mk 冲突）
+    current_defaults = [
+        {
+            "model_client_config": {
+                "api_key": "key1",
+                "api_base": "https://a.test/v1",
+                "model_name": "GLM",
+                "client_provider": "openai",
+            },
+            "model_config_obj": {},
+        },
+        {
+            "model_client_config": {
+                "api_key": "key2",
+                "api_base": "https://b.test/v1",
+                "model_name": "GLM",
+                "client_provider": "openai",
+            },
+            "model_config_obj": {},
+        },
+        {
+            "model_client_config": {
+                "api_key": "key3",
+                "api_base": "https://c.test/v1",
+                "model_name": "OTHER",
+                "client_provider": "openai",
+            },
+            "model_config_obj": {},
+        },
+    ]
+
+    async def fake_send_tui_agent_request(_client, env, *, label):
+        sent_envs.append((env, label))
+
+    def fake_update_config(mutator, **kwargs):
+        data = {"models": {"defaults": current_defaults}}
+        return mutator(data)
+
+    monkeypatch.setattr(tui_connect_module, "_send_tui_agent_request", fake_send_tui_agent_request)
+    monkeypatch.setattr(tui_connect_module, "update_config", fake_update_config)
+    monkeypatch.setattr(
+        tui_connect_module,
+        "get_config_raw",
+        lambda: {"models": {"defaults": current_defaults}},
+    )
+    monkeypatch.setattr(
+        tui_connect_module, "get_config", lambda: {"models": {"defaults": current_defaults}}
+    )
+
+    register_cli_handlers(
+        CliHandlersBindParams(
+            channel=server,
+            agent_client=_offline_local_client(),
+            message_handler=None,
+            on_config_saved=None,
+            path="/tui",
+        )
+    )
+
+    # 前端发 model="GLM"（匹配两条）+ index=2（漂移到 OTHER，不在候选 [0,1] 内）。
+    # 期望：拒绝删除，报错而非静默删 OTHER。
+    await server.local_handlers["/tui"]["command.model"](
+        object(),
+        "req-delete",
+        {"action": "delete_model", "index": 2, "model": "GLM"},
+        "tui_session_1",
+    )
+    await asyncio.sleep(0)
+
+    assert server.responses[-1]["ok"] is False
+    assert "refresh" in server.responses[-1]["error"].lower() or "changed" in server.responses[-1]["error"].lower()
+    # 列表未被修改
+    assert len(current_defaults) == 3
+
+
+@pytest.mark.asyncio
 async def test_command_model_lists_agentos_models_without_defaults(monkeypatch):
     """AgentOS backup models remain selectable when defaults is empty."""
     server = FakeGatewayServer()
@@ -1010,7 +1176,6 @@ async def test_command_model_lists_agentos_models_without_defaults(monkeypatch):
             "is_agentos": True,
         }
     ]
-
 
 @pytest.mark.asyncio
 async def test_session_list_returns_agent_timeout_before_tui_request_timeout(monkeypatch):

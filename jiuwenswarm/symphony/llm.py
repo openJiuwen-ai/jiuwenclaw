@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 from collections import defaultdict
@@ -16,6 +17,8 @@ from typing import Any, Dict, Iterator, List, Optional
 from jiuwenswarm.common.reasoning_injector import inject_reasoning_params
 
 LLM_IDENTITY_SCHEMA_VERSION = "JiuwenSwarm-llm-identity-v1"
+_MODEL_CONNECTION_PROBE_TIMEOUT_SECONDS = 25
+_MODEL_CONNECTION_PROBE_MAX_TOKENS = 16
 
 
 @dataclass(frozen=True)
@@ -138,7 +141,9 @@ class LLMConfig:
         # build_model_from_entry 同源规则）。symphony 强制关闭思考，
         # 方言错了会发官方 thinking.type 而被 vLLM 类网关忽略。
         if not client_config.get("endpoint_profile"):
-            from jiuwenswarm.common.reasoning_config import resolve_endpoint_profile_override
+            from jiuwenswarm.common.reasoning_config import (
+                resolve_endpoint_profile_override,
+            )
 
             inferred_profile = resolve_endpoint_profile_override(
                 client_config.get("api_base") or client_config.get("base_url")
@@ -303,6 +308,41 @@ def create_llm_client(config: LLMConfig) -> "JiuwenSwarmChatClient":
     if config is None:
         raise ValueError("create_llm_client requires LLMConfig.")
     return JiuwenSwarmChatClient(config)
+
+
+async def probe_model_connection(config: LLMConfig) -> None:
+    """Verify the configured model with one bounded, low-cost request."""
+
+    from openjiuwen.core.common.exception.codes import StatusCode
+    from openjiuwen.core.common.exception.errors import BaseError, build_error
+
+    try:
+        await asyncio.wait_for(
+            config.create_model().invoke(
+                messages=[{"role": "user", "content": "Hi"}],
+                max_tokens=_MODEL_CONNECTION_PROBE_MAX_TOKENS,
+                timeout=_MODEL_CONNECTION_PROBE_TIMEOUT_SECONDS,
+            ),
+            timeout=_MODEL_CONNECTION_PROBE_TIMEOUT_SECONDS,
+        )
+    except BaseError:
+        raise
+    except TimeoutError as exc:
+        raise build_error(
+            StatusCode.MODEL_CALL_FAILED,
+            error_msg=(
+                "model connection test timed out after "
+                f"{_MODEL_CONNECTION_PROBE_TIMEOUT_SECONDS}s"
+            ),
+            cause=exc,
+        ) from exc
+    except Exception as exc:
+        reason = str(exc).strip() or type(exc).__name__
+        raise build_error(
+            StatusCode.MODEL_CALL_FAILED,
+            error_msg=reason,
+            cause=exc,
+        ) from exc
 
 
 def create_model_response_observer(config: LLMConfig):
