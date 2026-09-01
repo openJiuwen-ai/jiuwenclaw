@@ -629,6 +629,7 @@ export function AgentManagementPanel({ onUseAgent, onUsePrompt, onCreateViaChat 
             <input
               type="search"
               name="agent-management-search"
+              aria-label={t('agentManagement.searchLabel')}
               autoComplete="off"
               disabled={connectorFlowId !== null}
               value={isMine ? mineQuery : query}

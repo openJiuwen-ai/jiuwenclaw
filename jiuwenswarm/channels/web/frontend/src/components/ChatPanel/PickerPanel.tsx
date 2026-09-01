@@ -58,6 +58,7 @@ export function PickerPanel({
   testId,
   ariaLabel,
   onMouseEnter,
+  direction,
   tabs,
   search,
   rowHeight,
@@ -75,7 +76,7 @@ export function PickerPanel({
   return (
     <div
       ref={panelRef}
-      className={clsx('chat-picker-panel', className)}
+      className={clsx('chat-picker-panel', className, direction === 'up' && 'chat-picker-panel--up')}
       style={style}
       role="menu"
       aria-label={ariaLabel}

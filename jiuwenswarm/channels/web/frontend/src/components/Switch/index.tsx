@@ -32,7 +32,7 @@ export function Switch({ checked, onChange, disabled = false, title }: SwitchPro
         className={`
           pointer-events-none inline-block h-3 w-3 transform rounded-full bg-[var(--color-control-thumb)] shadow
 
-          ${checked ? 'translate-x-4' : 'translate-x-0.5'}
+          ${checked ? 'translate-x-[18px]' : 'translate-x-0.5'}
         `}
       />
     </button>

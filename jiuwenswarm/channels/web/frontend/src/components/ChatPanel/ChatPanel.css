@@ -2331,7 +2331,7 @@ overflow: hidden;
   outline: 0;
 }
 
-/* 计划标签的 × 在对话进行中禁用（原 chat-goal-tag__close:disabled 规则并入共享类） */
+/* 计划标签的 × 在对话进行中禁用（swarmflow 标签沿用独立的 .chat-goal-tag__close 规则，见下方） */
 .chat-agent-tag__close:disabled {
   cursor: not-allowed;
   color: var(--color-text-disabled, var(--color-text-secondary));
@@ -2340,6 +2340,63 @@ overflow: hidden;
 .chat-agent-tag__close:disabled:hover {
   background: transparent;
   color: var(--color-text-disabled, var(--color-text-secondary));
+}
+
+/* 工具栏"编排"标签（swarmflow，结构与原目标标签同款）：标签存续期间常驻，× 只在 hover 时出现，
+   不占布局空间；hover 时标签本体腾出右侧内边距，让 × 紧跟在文字后面居中出现，而不是悬浮在右上角。
+   goal/plan 标签已迁移到 .chat-agent-tag，本组规则仅为上游 swarmflow 标签保留。 */
+.chat-goal-tag {
+  position: relative;
+  display: inline-flex;
+}
+
+.chat-goal-tag .chat-mode-select__trigger {
+  transition: padding-right 0.15s;
+}
+
+.chat-goal-tag:hover .chat-mode-select__trigger {
+  padding-right: 28px;
+}
+
+.chat-goal-tag--locked:hover .chat-mode-select__trigger {
+  padding-right: 12px;
+}
+
+.chat-goal-tag__close {
+  position: absolute;
+  right: 8px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 16px;
+  height: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--color-text-secondary);
+  opacity: 0;
+  transition: opacity 0.15s;
+  cursor: pointer;
+}
+
+.chat-goal-tag:hover .chat-goal-tag__close {
+  opacity: 1;
+}
+
+.chat-goal-tag__close:hover {
+  color: var(--color-text-primary);
+  background: var(--color-surface-hover);
+}
+
+.chat-goal-tag__close:disabled {
+  cursor: not-allowed;
+  color: var(--color-text-disabled, var(--color-text-secondary));
+}
+
+.chat-goal-tag__close:disabled:hover {
+  background: transparent;
 }
 
 .chat-work-context-wrapper {
