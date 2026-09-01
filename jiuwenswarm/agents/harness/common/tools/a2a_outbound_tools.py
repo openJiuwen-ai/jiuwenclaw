@@ -26,7 +26,9 @@ _RPC_QUERY_TIMEOUT_SECONDS = 15.0
 
 class A2AOutboundToolBackend(Protocol):
     @property
-    def ready(self) -> bool: ...
+    def ready(self) -> bool:
+        raise NotImplementedError
+
     async def call(
         self,
         method: str,
@@ -34,7 +36,8 @@ class A2AOutboundToolBackend(Protocol):
         *,
         session_id: str,
         channel_id: str,
-    ) -> dict[str, Any]: ...
+    ) -> dict[str, Any]:
+        raise NotImplementedError
 
 
 class GatewayA2AOutboundToolBackend:

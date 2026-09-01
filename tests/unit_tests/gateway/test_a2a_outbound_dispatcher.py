@@ -1003,6 +1003,36 @@ async def test_reverse_rpc_delivery_failure_fails_immediately(monkeypatch) -> No
 
 
 @pytest.mark.asyncio
+async def test_reverse_rpc_zero_delivered_subscribers_fails_immediately(
+    monkeypatch,
+) -> None:
+    """send_push() returning 0 (no subscriber received the push) must fail fast.
+
+    Regression test for a bug where ``callback_result is False`` did not
+    catch an ``int`` return value of ``0``, causing the caller to block
+    until the full response timeout instead of failing immediately.
+    """
+    manager = get_acp_output_manager()
+    manager.reset_state()
+
+    async def deliver_to_zero_subscribers(_wire):
+        return 0
+
+    monkeypatch.setattr(manager, "_send_push_callback", deliver_to_zero_subscribers)
+    try:
+        with pytest.raises(RuntimeError, match="not delivered"):
+            await manager.send_jsonrpc_request(
+                A2A_TOOL_FIND_AGENTS,
+                {"query": "weather"},
+                session_id="s1",
+                timeout=30,
+                log_params=False,
+            )
+    finally:
+        manager.reset_state()
+
+
+@pytest.mark.asyncio
 async def test_reverse_rpc_ids_remain_unique_across_manager_state_reset(
     monkeypatch,
 ) -> None:

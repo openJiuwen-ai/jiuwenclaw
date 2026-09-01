@@ -52,10 +52,36 @@ DEFAULT_QUERY_INTERVAL_SECONDS = 1.0
 
 
 class _ClientLike(Protocol):
-    async def send_message(self, request, *, context=None): ...
-    async def get_task(self, request, *, context=None): ...
-    async def cancel_task(self, request, *, context=None): ...
-    async def close(self) -> None: ...
+    async def send_message(self, request, *, context=None):
+        raise NotImplementedError
+
+    async def get_task(self, request, *, context=None):
+        raise NotImplementedError
+
+    async def cancel_task(self, request, *, context=None):
+        raise NotImplementedError
+
+    async def close(self) -> None:
+        raise NotImplementedError
+
+
+def _is_selected_interface(item: Any, selected: Any) -> bool:
+    """Match a parsed Agent Card interface against the agent's pinned selection."""
+    same_url = item.url == selected.url
+    same_binding = item.protocol_binding.upper() == selected.protocol_binding.upper()
+    return same_url and same_binding
+
+
+def _skill_search_tokens(skills: Any) -> set[str]:
+    """Collect lowercase id/name/tag tokens for one agent's public skills."""
+    tokens: set[str] = set()
+    for skill in skills:
+        tokens.add(str(skill.get("id") or "").lower())
+        tokens.add(str(skill.get("name") or "").lower())
+        for tag in skill.get("tags") or ():
+            tokens.add(str(tag).lower())
+    tokens.discard("")
+    return tokens
 
 
 ClientBuilder = Callable[[A2AOutboundAgent, str], Awaitable[_ClientLike]]
@@ -148,16 +174,7 @@ class A2AOutboundDispatcher:
                 continue
             card = agent.agent_card
             skills = self._public_skills(card)
-            skill_tokens = {
-                token
-                for skill in skills
-                for token in (
-                    str(skill.get("id") or "").lower(),
-                    str(skill.get("name") or "").lower(),
-                    *(str(tag).lower() for tag in skill.get("tags") or []),
-                )
-                if token
-            }
+            skill_tokens = _skill_search_tokens(skills)
             if required and not all(
                 any(required_item in token for token in skill_tokens)
                 for required_item in required
@@ -257,7 +274,10 @@ class A2AOutboundDispatcher:
                 try:
                     await asyncio.shield(create_task)
                 except Exception:
-                    pass
+                    logger.debug(
+                        "a2a.outbound create_dispatch failed during cancellation",
+                        exc_info=True,
+                    )
             await asyncio.shield(
                 self._repository.transition_dispatch(
                     dispatch.dispatch_id,
@@ -316,8 +336,6 @@ class A2AOutboundDispatcher:
                     current.dispatch_id, normalized, polled=True
                 )
                 return self._public_dispatch(updated or current)
-            except asyncio.CancelledError:
-                raise
             except Exception:
                 updated = await self._repository.transition_dispatch(
                     current.dispatch_id,
@@ -351,8 +369,6 @@ class A2AOutboundDispatcher:
                 normalized = self._normalize_task(task)
                 updated = await self._apply_remote(current.dispatch_id, normalized)
                 return self._public_dispatch(updated or current)
-            except asyncio.CancelledError:
-                raise
             except Exception:
                 updated = await self._repository.transition_dispatch(
                     current.dispatch_id,
@@ -562,8 +578,7 @@ class A2AOutboundDispatcher:
             matching = [
                 item
                 for item in parsed.supported_interfaces
-                if item.url == selected.url
-                and item.protocol_binding.upper() == selected.protocol_binding.upper()
+                if _is_selected_interface(item, selected)
             ]
             if not matching:
                 raise A2AOutboundError(A2AOutboundErrorCode.AGENT_UNAVAILABLE)
@@ -651,7 +666,11 @@ class A2AOutboundDispatcher:
                 await self._apply_remote(dispatch_id, self._normalize_task(task))
                 return
             except Exception:
-                pass
+                logger.debug(
+                    "a2a.outbound remote cancel_task failed dispatch_id=%s",
+                    dispatch_id,
+                    exc_info=True,
+                )
         await self._repository.transition_dispatch(
             dispatch_id,
             A2AOutboundDispatchStatus.UNKNOWN,
@@ -738,7 +757,8 @@ class A2AOutboundDispatcher:
             TaskState.TASK_STATE_AUTH_REQUIRED: A2AOutboundDispatchStatus.AUTH_REQUIRED,
         }.get(state, A2AOutboundDispatchStatus.UNKNOWN)
 
-    def _result_from_message(self, message: Message) -> dict[str, Any]:
+    @staticmethod
+    def _result_from_message(message: Message) -> dict[str, Any]:
         text = "\n".join(part.text for part in message.parts if part.HasField("text"))
         truncated = len(text) > MAX_RESULT_TEXT_LENGTH
         return {

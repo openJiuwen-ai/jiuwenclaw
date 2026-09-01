@@ -207,7 +207,8 @@ class A2AOutboundSettingsRepository:
             env_path = get_env_file()
         self._env_path = Path(env_path)
 
-    def load(self, env: Mapping[str, str] | None = None) -> dict[str, bool]:
+    @staticmethod
+    def load(env: Mapping[str, str] | None = None) -> dict[str, bool]:
         source = os.environ if env is None else env
         return {
             "allow_loopback_http": _bool(

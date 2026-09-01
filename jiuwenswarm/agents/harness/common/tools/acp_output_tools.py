@@ -222,7 +222,9 @@ class AcpOutputManager:
                     callback_result,
                     timeout=max(0.0, deadline - loop.time()),
                 )
-            if callback_result is False:
+            if callback_result is False or (
+                isinstance(callback_result, int) and callback_result <= 0
+            ):
                 raise RuntimeError("ACP output request was not delivered")
         except asyncio.CancelledError:
             self._pending.pop(jsonrpc_id, None)
