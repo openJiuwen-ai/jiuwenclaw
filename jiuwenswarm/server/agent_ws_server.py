@@ -1039,6 +1039,8 @@ class AgentWebSocketServer:
         self._acp_client_capabilities_by_ws: dict[int, dict[str, Any]] = {}
         # AgentManager 实例
         self._agent_manager = AgentManager()
+        # RSI 服务域分发句柄（懒加载，见 _get_rsi_handlers）
+        self._rsi_handlers = None
         self._heartbeat_runtime = HeartbeatRailRuntime(self)
         self._agent_manager.set_heartbeat_service(self._heartbeat_runtime)
         # Gateway user-business RPCs execute in the current AgentServer's
@@ -2157,6 +2159,10 @@ class AgentWebSocketServer:
                 return
             if request.req_method == ReqMethod.HARNESS_PACKAGES_DELETE:
                 await self._handle_harness_packages_delete(ws, request, send_lock)
+                return
+            # RSI 优化平台：13 个 rsi.* web method 统一分发（B2）
+            if (request.req_method.value or "").startswith("rsi."):
+                await self._handle_rsi_request(ws, request, send_lock)
                 return
             # Schedule task management
             if request.req_method == ReqMethod.SCHEDULE_CHECK_CONFIG:
@@ -10502,6 +10508,100 @@ class AgentWebSocketServer:
     ) -> None:
         """Public test helper that delegates to ACP tool-response handling."""
         await self._handle_acp_tool_response(ws, request, send_lock)
+
+    # ------------------------------------------------------------------
+    # RSI 优化平台分发（B2）：统一走 RsiAgentServerHandlers（服务域/推送见 rsi 包）
+    # ------------------------------------------------------------------
+
+    async def _handle_rsi_request(
+        self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock
+    ) -> None:
+        """Handle any rsi.* unary method (13 branches in one dispatch).
+
+        Builds the RSI service context lazily (one per server process) and
+        wires:
+        - harness_refs 快照提供方 = 当前激活 harness 包的 runtime path（AutoHarnessService）;
+        - send_push 包装 = ``self.send_push``（E2A server_push，零改动）。
+        """
+        try:
+            handlers = self._get_rsi_handlers()
+            result = handlers.handle(request)
+            if result.get("ok"):
+                resp = AgentResponse(
+                    request_id=request.request_id,
+                    channel_id=request.channel_id,
+                    ok=True,
+                    payload=result.get("payload"),
+                )
+            else:
+                resp = AgentResponse(
+                    request_id=request.request_id,
+                    channel_id=request.channel_id,
+                    ok=False,
+                    payload={
+                        "error": str(result.get("error") or "rsi request failed"),
+                        "code": str(result.get("code") or "INTERNAL_ERROR"),
+                    },
+                )
+        except Exception as exc:
+            logger.exception("[AgentServer] rsi request failed: %s", exc)
+            resp = AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=False,
+                payload={"error": str(exc), "code": "INTERNAL_ERROR"},
+            )
+
+        wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
+        async with send_lock:
+            await send_wire_payload(ws, wire)
+
+    def _get_rsi_handlers(self):
+        """Lazily construct the RSI service context + AgentServer handlers once."""
+        if self._rsi_handlers is not None:
+            return self._rsi_handlers
+        from jiuwenswarm.agents.harness.common.rsi import build_rsi_service_context
+        from jiuwenswarm.server.rsi import RsiAgentServerHandlers
+
+        context = build_rsi_service_context(None)
+        handlers = RsiAgentServerHandlers(
+            context,
+            send_push=self.send_push,
+            harness_refs_provider=self._rsi_harness_refs_provider,
+            default_channel_id="web",
+        )
+        self._rsi_handlers = handlers
+        return handlers
+
+    @staticmethod
+    def _rsi_harness_refs_provider() -> str | None:
+        """当前激活 harness 包定位（内部 v3 §7 复用 AutoHarnessService 基建）。"""
+        import json
+        from jiuwenswarm.agents.harness.common.auto_harness.service import (
+            _HARNESS_PACKAGES_FILE,
+        )
+        try:
+            if not _HARNESS_PACKAGES_FILE.is_file():
+                return None
+            with _HARNESS_PACKAGES_FILE.open("r", encoding="utf-8") as fh:
+                data = json.load(fh)
+            active_ids = data.get("active_package_ids") or []
+            packages = data.get("packages") or []
+            by_id = {str(p.get("id")): p for p in packages if isinstance(p, dict)}
+            for package_id in active_ids:
+                package = by_id.get(str(package_id))
+                if not package:
+                    continue
+                config_path = str(package.get("config_path") or "")
+                if config_path:
+                    return config_path
+                runtime_path = str(package.get("runtime_path") or "")
+                if runtime_path:
+                    return str(Path(runtime_path) / "harness_config.yaml")
+        except Exception as exc:
+            logger.warning("[RSI] harness refs 定位失败: %s", exc)
+        return None
+
 
     async def _handle_harness_packages_get(
         self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock
