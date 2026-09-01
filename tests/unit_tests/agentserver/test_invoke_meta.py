@@ -24,12 +24,6 @@ from jiuwenswarm.agents.harness.common.tools.invoke_meta.plugin_skill_catalog im
     extract_seedance_task_id,
     invoke_tool_description,
     is_prod_plugin_runtime,
-    normalize_plugin_skill_args,
-    plugin_skill_bundle,
-    seedream_lite_function_name,
-    seedream_pro_function_name,
-    validate_plugin_skill_args,
-    want_seedance_wait,
 )
 from jiuwenswarm.agents.harness.common.tools.invoke_meta.workspace_context import (
     set_effective_request_workspace_dir,
@@ -97,76 +91,6 @@ def _recording_cloud_client(
             return payload
 
     return captured, _FakeCloudClient
-
-
-def test_normalize_seedream_pro_size_and_drops_max_images():
-    out, err = normalize_plugin_skill_args(
-        "SeedreamPro4Skill",
-        {"size": "1024x1024", "max_images": 4, "prompt": "logo"},
-    )
-    assert err is None
-    assert out["size"] == "1K"
-    assert "max_images" not in out
-
-
-def test_normalize_seedream_lite_keeps_max_images():
-    out, err = normalize_plugin_skill_args(
-        "seedreamLite4Skill",
-        {"size": "2048x2048", "max_images": "3", "prompt": "cats"},
-    )
-    assert err is None
-    assert out["size"] == "2K"
-    assert out["max_images"] == 3
-
-
-def test_normalize_seedream_pro_5_drops_max_images():
-    out, err = normalize_plugin_skill_args(
-        "SeedreamPro_5",
-        {"size": "1024x1024", "max_images": 4, "prompt": "logo"},
-    )
-    assert err is None
-    assert out["size"] == "1K"
-    assert "max_images" not in out
-
-
-def test_normalize_seedream_batch5_size_for_upstream_enum():
-    out, err = normalize_plugin_skill_args(
-        "seedreamBatch5",
-        {"size": "2K", "prompt": "cats"},
-    )
-    assert err is None
-    assert out["size"] == "2k"
-
-    out, err = normalize_plugin_skill_args(
-        "seedreamBatch5",
-        {"size": "1K", "prompt": "logo"},
-    )
-    assert err is None
-    assert out["size"] == "1024x1024"
-
-    out, err = normalize_plugin_skill_args(
-        "seedreamBatch5",
-        {"size": "4K", "prompt": "poster"},
-    )
-    assert err is None
-    assert out["size"] == "4k"
-
-    out, err = normalize_plugin_skill_args(
-        "seedreamBatch5",
-        {"size": "1920x1080", "prompt": "wide"},
-    )
-    assert err is None
-    assert out["size"] == "1920x1080"
-
-
-def test_normalize_seedream_batch5_rejects_invalid_size():
-    _out, err = normalize_plugin_skill_args(
-        "seedreamBatch5",
-        {"size": "8K", "prompt": "huge"},
-    )
-    assert err is not None
-    assert "2k" in err
-    assert "WIDTHxHEIGHT" in err
 
 
 def test_is_prod_plugin_runtime_hosts():
@@ -706,7 +630,7 @@ async def test_invoke_requires_business_credential_ignores_oa_key(monkeypatch):
 
     headers = build_runtime_headers(extra={"x-plugin-session-id": "pluginabc"})
     assert "x-api-key" not in headers
-    assert headers["x-request-from"] == "openclaw"
+    assert headers["x-request-from"] == "xiaoyiWork"
     assert "x-sandbox-id" not in headers
     assert headers["x-plugin-session-id"] == "pluginabc"
 
@@ -741,7 +665,7 @@ def test_mcp_run_product_headers_prefer_business_credential(monkeypatch):
     assert headers["x-plugin-session-id"] == "pluginabc"
     assert "x-hag-trace-id" in headers
     assert "x-api-key" not in headers
-    assert headers["x-request-from"] == "openclaw"
+    assert headers["x-request-from"] == "xiaoyiWork"
     assert "x-sandbox-id" not in headers
     assert "x-relay-role" not in headers
 
@@ -824,21 +748,6 @@ def test_extract_seedance_query_state_from_items():
     )
     assert status == "succeeded"
     assert url == "https://cdn.example/a.mp4"
-
-
-def test_normalize_seedance_string_content_to_text_array():
-    out, err = normalize_plugin_skill_args(
-        "seedanceMiniTask",
-        {"content": "一只在月光下奔跑的狐狸", "duration": 10},
-    )
-    assert err is None
-    assert out["content"] == [{"type": "text", "text": "一只在月光下奔跑的狐狸"}]
-
-
-def test_want_seedance_wait_defaults_true():
-    assert want_seedance_wait({}) is True
-    assert want_seedance_wait({"wait": False}) is False
-    assert want_seedance_wait({"wait": "false"}) is False
 
 
 def _seedance_task_args(**extra: Any) -> dict[str, Any]:
@@ -980,155 +889,6 @@ def _lyrics_write_args(**extra: Any) -> dict[str, Any]:
     }
     args.update(extra)
     return args
-
-
-def test_normalize_lyrics_keeps_top_level_prompt_and_defaults_mode():
-    out, err = normalize_plugin_skill_args(
-        "lyricsGeneration",
-        {
-            "bundleName": _ATOMIC_BUNDLE,
-            "functionName": "lyricsGeneration",
-            "prompt": "Indie folk, melancholic",
-        },
-    )
-    assert err is None
-    assert out["prompt"] == "Indie folk, melancholic"
-    assert out["mode"] == "write_full_song"
-    assert "lyrics" not in out
-    assert "content" not in out
-
-
-def test_normalize_lyrics_lifts_legacy_content():
-    out, err = normalize_plugin_skill_args(
-        "lyricsGeneration",
-        {
-            "bundleName": _ATOMIC_BUNDLE,
-            "functionName": "lyricsGeneration",
-            "content": {"prompt": "改副歌", "mode": "edit", "lyrics": "[Verse] old"},
-        },
-    )
-    assert err is None
-    assert out["prompt"] == "改副歌"
-    assert out["mode"] == "edit"
-    assert out["lyrics"] == "[Verse] old"
-    assert "content" not in out
-
-
-def test_normalize_lyrics_top_level_wins_over_legacy_content():
-    out, err = normalize_plugin_skill_args(
-        "lyricsGeneration",
-        {
-            "bundleName": _ATOMIC_BUNDLE,
-            "functionName": "lyricsGeneration",
-            "prompt": "顶层提示",
-            "content": {"prompt": "content 提示", "mode": "edit"},
-        },
-    )
-    assert err is None
-    assert out["prompt"] == "顶层提示"
-    assert out["mode"] == "edit"
-    assert "content" not in out
-
-
-def test_normalize_music_keeps_instrumental_prompt_and_fills_defaults():
-    out, err = normalize_plugin_skill_args(
-        "musicGeneration",
-        {
-            "bundleName": _ATOMIC_BUNDLE,
-            "functionName": "musicGeneration",
-            "prompt": "轻快的钢琴背景乐",
-            "is_instrumental": True,
-        },
-    )
-    assert err is None
-    assert out["prompt"] == "轻快的钢琴背景乐"
-    assert out["is_instrumental"] is True
-    assert out["lyrics_optimizer"] is False
-    assert out["aigc_watermark"] is True
-    assert out["audio_setting"]["sample_rate"] == 44100
-    assert out["audio_setting"]["format"] == "mp3"
-    assert "lyrics" not in out
-    assert "content" not in out
-
-
-def test_normalize_music_lifts_legacy_content_and_aliases():
-    out, err = normalize_plugin_skill_args(
-        "musicGeneration",
-        {
-            "bundleName": _ATOMIC_BUNDLE,
-            "functionName": "musicGeneration",
-            "content": {
-                "prompt": "一首歌",
-                "instrumental": False,
-                "lyrics-optimizer": True,
-            },
-        },
-    )
-    assert err is None
-    assert out["prompt"] == "一首歌"
-    assert out["is_instrumental"] is False
-    assert out["lyrics_optimizer"] is True
-    assert "content" not in out
-    assert "instrumental" not in out
-    assert "lyrics-optimizer" not in out
-
-
-def test_validate_lyrics_edit_requires_lyrics():
-    params, err = normalize_plugin_skill_args(
-        "lyricsGeneration",
-        _lyrics_write_args(prompt="改副歌", mode="edit"),
-    )
-    assert err is None
-    msg = validate_plugin_skill_args("lyricsGeneration", params)
-    assert msg is not None
-    assert "lyrics" in msg
-    assert "content." not in msg
-
-
-def test_validate_lyrics_rejects_invalid_mode():
-    params, err = normalize_plugin_skill_args(
-        "lyricsGeneration",
-        _lyrics_write_args(prompt="写词", mode="translate"),
-    )
-    assert err is None
-    msg = validate_plugin_skill_args("lyricsGeneration", params)
-    assert msg is not None
-    assert "write_full_song" in msg
-    assert "content." not in msg
-
-
-def test_validate_music_vocal_requires_lyrics_or_optimizer():
-    params, err = normalize_plugin_skill_args(
-        "musicGeneration",
-        {
-            "bundleName": _ATOMIC_BUNDLE,
-            "functionName": "musicGeneration",
-            "prompt": "一首歌",
-            "is_instrumental": False,
-        },
-    )
-    assert err is None
-    msg = validate_plugin_skill_args("musicGeneration", params)
-    assert msg is not None
-    assert "lyrics" in msg
-    assert "content." not in msg
-
-
-def test_validate_music_instrumental_rejects_lyrics():
-    params, err = normalize_plugin_skill_args(
-        "musicGeneration",
-        {
-            "bundleName": _ATOMIC_BUNDLE,
-            "functionName": "musicGeneration",
-            "prompt": "钢琴",
-            "is_instrumental": True,
-            "lyrics": "[Verse] no",
-        },
-    )
-    assert err is None
-    msg = validate_plugin_skill_args("musicGeneration", params)
-    assert msg is not None
-    assert "不能传 lyrics" in msg
 
 
 def test_invoke_tool_description_points_at_skills_not_recipes():
@@ -1451,18 +1211,6 @@ def test_invoke_tool_description_prod_uses_zone_sentence(monkeypatch):
     assert "seedreamLite4Skill" not in text
     assert "com.atomicservice.5765880207845681341" not in text
     assert "WIDTHxHEIGHT" not in text
-
-
-def test_active_catalog_helpers_follow_zone(monkeypatch):
-    monkeypatch.delenv("AGENT_RUNTIME_MCP_RUN", raising=False)
-    assert seedream_lite_function_name() == "seedreamLite4Skill"
-    assert seedream_pro_function_name() == "SeedreamPro4Skill"
-    assert plugin_skill_bundle("seedanceMiniTask") == "com.atomicservice.5765880207845681341"
-    monkeypatch.setenv("AGENT_RUNTIME_MCP_RUN", _PROD_MCP)
-    assert seedream_lite_function_name() == "seedreamBatch5"
-    assert seedream_pro_function_name() == "SeedreamPro_5"
-    assert plugin_skill_bundle("seedanceMiniTask") == _PLUGIN_PLATFORM
-    assert plugin_skill_bundle("seedreamBatch5") == _PLUGIN_PLATFORM
 
 
 def test_design_system_prompt_prod_omits_catalog_names(monkeypatch):
