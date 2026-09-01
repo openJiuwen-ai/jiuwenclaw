@@ -281,7 +281,9 @@ export function RegisterMcpPage({ onBack, onRegistered, editName }: RegisterMcpP
             }}
             readOnly={!!editName}
             disabled={!!editName}
-            className="h-9 w-full rounded-lg border border-border bg-card px-3 text-[13px] text-text outline-none placeholder:text-[color:var(--color-text-placeholder)] focus:border-border-hover disabled:cursor-not-allowed disabled:bg-bg-muted disabled:text-text-muted"
+            className={`h-9 w-full rounded-lg border bg-card px-3 text-[13px] text-text outline-none placeholder:text-[color:var(--color-text-placeholder)] focus:border-border-hover disabled:cursor-not-allowed disabled:bg-bg-muted disabled:text-text-muted ${
+              fieldErrors.name ? 'border-danger' : 'border-border'
+            }`}
             data-testid="connector-market-register-mcp-name"
           />
         </Field>
