@@ -2485,10 +2485,14 @@ def env_url(name: str, default: str) -> str:
     return os.environ.get(name, "").strip() or default
 
 
-def reset_free_search_runtime_flags() -> None:
-    """Start each process with free-search engines disabled unless reopened via config UI."""
-    os.environ["FREE_SEARCH_DDG_ENABLED"] = "false"
-    os.environ["FREE_SEARCH_BING_ENABLED"] = "false"
+def apply_free_search_runtime_defaults() -> None:
+    """Disable free-search engines for this process unless the flags are already set.
+
+    A value from ``.env``, the config UI, or the shell environment wins, so an
+    explicit opt-in survives process start.
+    """
+    os.environ.setdefault("FREE_SEARCH_DDG_ENABLED", "false")
+    os.environ.setdefault("FREE_SEARCH_BING_ENABLED", "false")
 
 
 def get_config_file() -> Path:

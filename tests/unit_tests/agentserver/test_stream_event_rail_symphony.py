@@ -81,7 +81,14 @@ def _model_ctx(messages):
 
 
 @pytest.mark.asyncio
-async def test_stream_event_rail_strips_image_blocks_when_read_image_multimodal_disabled():
+async def test_stream_event_rail_strips_image_blocks_when_read_image_multimodal_disabled(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.harness.common.rails.stream_event_rail."
+        "should_enable_read_image_multimodal",
+        lambda _agent: True,
+    )
     rail = JiuSwarmStreamEventRail()
     message = UserMessage(
         content=[
