@@ -173,24 +173,6 @@ def test_manual_skill_auto_registered_as_local(monkeypatch, tmp_path):
     assert "manual-skill" in manager.list_execution_disabled_skills()
 
 
-def test_local_skill_source_matches_registered_frontmatter_name(monkeypatch, tmp_path):
-    skills_dir = tmp_path / "skills"
-    builtin_dir = tmp_path / "builtin"
-    builtin_dir.mkdir(parents=True, exist_ok=True)
-    _make_skill_dir(
-        skills_dir,
-        "software-engineer",
-        "---\nname: 工程师\ndescription: test\n---\n",
-    )
-
-    manager = _init_manager_with_skills_dir(monkeypatch, skills_dir, builtin_dir)
-
-    listed = manager._scan_local_skills()
-    skill = next(s for s in listed if s.get("name") == "software-engineer")
-    assert skill["source"] == "local"
-    assert skill["display_name"] == "工程师"
-
-
 @pytest.mark.asyncio
 async def test_local_skill_get_accepts_directory_id_and_frontmatter_name(
     monkeypatch, tmp_path
@@ -206,6 +188,10 @@ async def test_local_skill_get_accepts_directory_id_and_frontmatter_name(
 
     manager = _init_manager_with_skills_dir(monkeypatch, skills_dir, builtin_dir)
     manager.set_skill_enabled("software-engineer", False)
+
+    listed = manager._scan_local_skills()
+    skill = next(s for s in listed if s.get("name") == "software-engineer")
+    assert (skill["source"], skill["display_name"]) == ("local", "工程师")
 
     by_id = await manager.handle_skills_get({"name": "software-engineer"})
     by_display_name = await manager.handle_skills_get({"name": "工程师"})

@@ -199,7 +199,7 @@ class SymphonyRetrievalCompactProcessor(ContextProcessor):
         for parser in (json.loads, ast.literal_eval):
             try:
                 payload = parser(text)
-            except (ValueError, SyntaxError, TypeError, json.JSONDecodeError):
+            except (ValueError, SyntaxError, TypeError):
                 continue
             if isinstance(payload, dict):
                 return payload

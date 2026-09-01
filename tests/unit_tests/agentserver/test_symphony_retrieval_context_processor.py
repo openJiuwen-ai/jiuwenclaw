@@ -28,7 +28,12 @@ def _tool_result(call_id: str, payload: object, *, as_json: bool = False) -> Too
     return ToolMessage(content=content, tool_call_id=call_id)
 
 
-def _ready_plan(*skill_ids: str, edges: list[dict] | None = None) -> dict:
+def _plan(
+    *node_ids: str,
+    status: str = "ready",
+    node_type: str = "skill",
+    edges: list[dict] | None = None,
+) -> dict:
     return {
         "success": True,
         "planned_graph": {
@@ -36,13 +41,13 @@ def _ready_plan(*skill_ids: str, edges: list[dict] | None = None) -> dict:
                 "id": "plan-1",
                 "type": "planned_graph",
                 "directed": True,
-                "metadata": {"status": "ready"},
+                "metadata": {"status": status},
                 "nodes": {
-                    skill_id: {
-                        "label": skill_id,
-                        "metadata": {"type": "skill"},
+                    node_id: {
+                        "label": node_id,
+                        "metadata": {"type": node_type},
                     }
-                    for skill_id in skill_ids
+                    for node_id in node_ids
                 },
                 "edges": edges or [],
             }
@@ -60,6 +65,16 @@ def _large_explore_result(*worker_ids: str) -> dict:
     }
 
 
+def _compose_round(explore_payload: object, compose_payload: object, *, as_json=False) -> list:
+    return [
+        UserMessage(content="compose a workflow"),
+        _assistant_tool_call("explore", "skill_branch_explore"),
+        _tool_result("explore", explore_payload),
+        _assistant_tool_call("compose", "symphony_compose_graph"),
+        _tool_result("compose", compose_payload, as_json=as_json),
+    ]
+
+
 async def _project(messages: list) -> tuple[object, ContextWindow]:
     processor = SymphonyRetrievalCompactProcessor(
         SymphonyRetrievalCompactProcessorConfig()
@@ -72,13 +87,11 @@ async def _project(messages: list) -> tuple[object, ContextWindow]:
 @pytest.mark.asyncio
 @pytest.mark.parametrize("as_json", [False, True])
 async def test_compacts_python_dict_and_json_compose_results(as_json: bool) -> None:
-    messages = [
-        UserMessage(content="compose a workflow"),
-        _assistant_tool_call("explore", "skill_branch_explore"),
-        _tool_result("explore", _large_explore_result("skill-a")),
-        _assistant_tool_call("compose", "symphony_compose_graph"),
-        _tool_result("compose", _ready_plan("skill-a"), as_json=as_json),
-    ]
+    messages = _compose_round(
+        _large_explore_result("skill-a"),
+        _plan("skill-a"),
+        as_json=as_json,
+    )
 
     event, projected = await _project(messages)
 
@@ -106,29 +119,13 @@ async def test_compacts_multiple_retrievals_but_not_results_after_non_ready_comp
         _assistant_tool_call("peek", "skill_branch_peek"),
         _tool_result("peek", _large_explore_result("skill-a", "skill-b")),
         _assistant_tool_call("compose-ready", "symphony_compose_graph"),
-        _tool_result("compose-ready", _ready_plan("skill-a")),
+        _tool_result("compose-ready", _plan("skill-a")),
         _assistant_tool_call("other", "read_file"),
         _tool_result("other", {"content": "keep this result"}),
         _assistant_tool_call("explore-later", "skill_branch_explore"),
         _tool_result("explore-later", _large_explore_result("skill-b")),
         _assistant_tool_call("compose-needs-input", "symphony_compose_graph"),
-        _tool_result(
-            "compose-needs-input",
-            {
-                "success": True,
-                "planned_graph": {
-                    "graph": {
-                        "type": "planned_graph",
-                        "metadata": {
-                            "status": "needs_input",
-                            "missing_inputs": ["data"],
-                        },
-                        "nodes": {},
-                        "edges": [],
-                    }
-                },
-            },
-        ),
+        _tool_result("compose-needs-input", _plan(status="needs_input")),
     ]
 
     event, projected = await _project(messages)
@@ -148,7 +145,7 @@ async def test_keeps_consumed_retrieval_compacted_in_later_user_rounds() -> None
         _assistant_tool_call("explore", "skill_branch_explore"),
         _tool_result("explore", _large_explore_result("skill-a")),
         _assistant_tool_call("compose", "symphony_compose_graph"),
-        _tool_result("compose", _ready_plan("skill-a")),
+        _tool_result("compose", _plan("skill-a")),
         UserMessage(content="follow-up"),
         AssistantMessage(content="continue"),
     ]
@@ -165,50 +162,10 @@ async def test_keeps_consumed_retrieval_compacted_in_later_user_rounds() -> None
     "compose_payload",
     [
         {"success": False},
-        {
-            "success": True,
-            "planned_graph": {
-                "graph": {
-                    "type": "planned_graph",
-                    "metadata": {"status": "needs_input", "missing_inputs": ["x"]},
-                    "nodes": {},
-                    "edges": [],
-                }
-            },
-        },
-        {
-            "success": True,
-            "planned_graph": {
-                "graph": {
-                    "type": "planned_graph",
-                    "metadata": {"status": "ready"},
-                    "nodes": {},
-                    "edges": [],
-                }
-            },
-        },
-        {
-            "success": True,
-            "planned_graph": {
-                "graph": {
-                    "type": "planned_graph",
-                    "metadata": {"status": "ready"},
-                    "nodes": {"tool-a": {"metadata": {"type": "tool"}}},
-                    "edges": [],
-                }
-            },
-        },
-        {
-            "success": True,
-            "planned_graph": {
-                "graph": {
-                    "type": "planned_graph",
-                    "metadata": {"status": "ready"},
-                    "nodes": {"skill-a": {"metadata": {"type": "skill"}}},
-                    "edges": [{"source": "skill-a", "target": "missing"}],
-                }
-            },
-        },
+        _plan(status="needs_input"),
+        _plan(),
+        _plan("tool-a", node_type="tool"),
+        _plan("skill-a", edges=[{"source": "skill-a", "target": "missing"}]),
         {"success": True, "planned_graph": "malformed"},
     ],
 )
@@ -216,13 +173,7 @@ async def test_keeps_retrieval_for_non_executable_or_malformed_plans(
     compose_payload: dict,
 ) -> None:
     explore = _tool_result("explore", _large_explore_result("skill-a"))
-    messages = [
-        UserMessage(content="compose a workflow"),
-        _assistant_tool_call("explore", "skill_branch_explore"),
-        explore,
-        _assistant_tool_call("compose", "symphony_compose_graph"),
-        _tool_result("compose", compose_payload),
-    ]
+    messages = _compose_round(_large_explore_result("skill-a"), compose_payload)
 
     event, projected = await _project(messages)
 
@@ -250,13 +201,7 @@ async def test_does_not_compact_retrieval_from_previous_round_without_compose() 
 @pytest.mark.asyncio
 async def test_does_not_replace_result_when_summary_is_not_shorter() -> None:
     compact_candidate = {"success": True, "skill_tree": {"candidates": []}}
-    messages = [
-        UserMessage(content="compose a workflow"),
-        _assistant_tool_call("explore", "skill_branch_explore"),
-        _tool_result("explore", compact_candidate),
-        _assistant_tool_call("compose", "symphony_compose_graph"),
-        _tool_result("compose", _ready_plan("skill-a")),
-    ]
+    messages = _compose_round(compact_candidate, _plan("skill-a"))
 
     event, projected = await _project(messages)
 
