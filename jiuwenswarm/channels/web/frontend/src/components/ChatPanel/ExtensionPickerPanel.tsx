@@ -91,14 +91,23 @@ export function ExtensionPickerPanel({ anchorRect, onClose, panelRef }: Extensio
   // 插件"首次安装"（§1.6.3）：install() 半途失败会把 pending_connectors 记进
   // installPendingMap（见 pluginPackageStore.ts），下面的 effect 侦测到就自动起串行连接续跑；
   // 全部连完幂等重试 install。
-  const pluginInstallFlow = usePendingConnectorFlow(() => {
-    const id = connectingPluginIdRef.current;
-    connectingPluginIdRef.current = null;
-    if (id) {
-      clearInstallPending(id);
-      void installPlugin(id);
-    }
-  });
+  const pluginInstallFlow = usePendingConnectorFlow(
+    () => {
+      const id = connectingPluginIdRef.current;
+      connectingPluginIdRef.current = null;
+      if (id) {
+        clearInstallPending(id);
+        void installPlugin(id);
+      }
+    },
+    () => {
+      // 依赖 connector 自动连接失败/被取消：清 ref + 清 pending 名单，否则下面这个 effect 会
+      // 反复重启连接续跑。安装到此终止（2026-08-31 修死循环，见 usePendingConnectorFlow 头注释）。
+      const id = connectingPluginIdRef.current;
+      connectingPluginIdRef.current = null;
+      if (id) clearInstallPending(id);
+    },
+  );
   useEffect(() => {
     const id = connectingPluginIdRef.current;
     const pending = id ? installPendingMap[id] : undefined;

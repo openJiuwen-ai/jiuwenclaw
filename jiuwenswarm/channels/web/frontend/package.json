@@ -67,6 +67,7 @@
     "test:search-progress-history": "tsc ../../../extensions/video_duplex/frontend/VideoLivePanel/searchPresentation.ts --target ES2022 --module ES2022 --moduleResolution Bundler --rootDir ../../../extensions/video_duplex/frontend/VideoLivePanel --outDir node_modules/.cache/search-progress-history --skipLibCheck --noEmitOnError && node --test tests/searchProgressHistory.test.mjs",
     "test:share-image": "esbuild src/features/shareImageRaster.ts src/features/streamingPng.ts --bundle --platform=node --format=esm --outdir=node_modules/.cache/share-image && node --test tests/shareImageExport.test.mjs",
     "test:build-turn-timeline": "esbuild src/features/chatTimeline/buildTurnTimeline.ts --bundle --packages=external --platform=node --format=esm --loader:.svg=file --loader:.png=file --define:import.meta.env.DEV=false --outdir=node_modules/.cache/build-turn-timeline && node --test tests/buildTurnTimeline.test.mjs",
+    "test:pending-connector-flow": "node --test tests/pendingConnectorFlow.test.mjs",
     "lint": "eslint . --ext ts,tsx --report-unused-disable-directives --max-warnings 0",
     "preview": "vite preview"
   },

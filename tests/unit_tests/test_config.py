@@ -500,14 +500,24 @@ react:
             encoding="utf-8",
         )
 
-        # The user's canonical values are already complete, so migration is a no-op.
-        assert migrate_config_from_template(template_path, user_config_path) is False
+        # The user's canonical evolution values are already complete, so the
+        # merge itself is a no-op. Migration still returns True because
+        # migrate_config_from_template writes back the program config_version
+        # stamp (added before the diff check) whenever the file lacks it.
+        assert migrate_config_from_template(template_path, user_config_path) is True
 
         migrated = yaml.safe_load(user_config_path.read_text(encoding="utf-8"))
         assert migrated["react"]["evolution"] == {
             "skill_evolution": True,
             "auto_save": True,
         }
+        # config_version is always stamped on a write-back path.
+        from jiuwenswarm.common._build_config import VERSION
+
+        assert migrated.get("config_version") == VERSION
+        # A second migration now that the version stamp is present is a true
+        # no-op: no structural changes, no version to write -> returns False.
+        assert migrate_config_from_template(template_path, user_config_path) is False
         assert get_skill_evolution_enabled(migrated) is True
         assert get_evolution_auto_save_enabled(migrated) is True
 

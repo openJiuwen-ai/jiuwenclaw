@@ -579,11 +579,11 @@
     }
   },
   "chat": {
-    "placeholder": "Enter 发送，Shift+Enter 换行",
+    "placeholder": "需要帮你做些什么？输入“/”快速引用技能及指令",
     "placeholderCompacting": "压缩进行中，暂时无法发送消息",
     "placeholderProcessing": "处理中，输入新指令可中断...",
     "placeholderProcessingQueue": "处理中，输入新指令将加入等待队列...",
-    "placeholderTeamMode": "集群模式，输入新指令会并行执行...",
+    "placeholderTeamMode": "需要帮你做些什么？输入“/”快速引用技能及指令",
     "placeholderTeamModeProcessing": "集群模式处理中，输入新指令会并行执行...",
     "placeholderVoice": "正在听取语音...",
     "welcomeLogoAlt": "WorkSwarm 标志",
@@ -641,7 +641,7 @@
     "noInstalledSwarmSkills": "暂无已安装团队技能",
     "noInstalledSkills": "暂无已安装技能",
     "skillsSearchPlaceholder": "搜索技能名称或描述",
-    "skillsManage": "技能管理",
+    "skillsManage": "更多",
     "skillsAdd": "添加到输入栏",
     "skillsRemove": "移除",
     "agent": "智能体",
@@ -1785,7 +1785,7 @@
     },
     "graph": {
       "orchestration": {
-        "description": "开启后，JiuwenSwarm 会为已安装的技能构建技能图谱（消耗Token），并在执行任务时基于图谱自动选择、组合和编排技能，提高任务执行效率；关闭后将不再进行技能编排，已构建的技能图谱不会删除。",
+        "description": "开启后，会为已安装的技能构建技能图谱（消耗Token），并在执行任务时基于图谱自动选择、组合和编排技能，提高任务执行效率；关闭后将不再进行技能编排，已构建的技能图谱不会删除。",
         "graphDefinition": "技能图谱就像一张技能关系地图：每个点代表一个技能，点之间的线表示它们可以配合使用。",
         "saving": "正在保存…",
         "saveFailed": "技能编排开关保存失败，请稍后重试。",
@@ -1819,7 +1819,7 @@
       "tasks": "任务",
       "relatedEdges": "关联技能",
       "noRelatedEdges": "暂无关联技能。",
-      "selectSkillHint": "从技能列表或画布中选择一个技能，查看说明和关联。",
+      "selectSkillHint": "从技能列表或画布中选择一个技能，查看详情",
       "detailDrawerLabel": "技能详情",
       "closeDetail": "关闭详情",
       "zoomIn": "放大",
