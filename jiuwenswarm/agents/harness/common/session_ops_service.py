@@ -1060,8 +1060,16 @@ async def rewind_session_context(
     deep_agent: "DeepAgent",
     session_id: str,
     turn_index: int,
+    append_continuation: bool = True,
 ) -> bool:
     """Rebuild context_engine from truncated history.json and persist to checkpointer.
+
+    ``append_continuation`` controls whether a synthetic continuation user message
+    is appended when the rebuilt history ends with an AssistantMessage (see the
+    comment at the injection site).  Explicit "rewind" operations keep the
+    synthetic prompt so the next LLM call resumes the conversation; the
+    restart-recovery path passes ``False`` to avoid injecting a message the user
+    never sent into a live conversation.
 
     The context_engine buffer only holds a sliding window (older messages are
     compressed by ``round_level_compressor`` / ``dialogue_compressor``), so we
@@ -1118,7 +1126,13 @@ async def rewind_session_context(
     # If conversation ends with an AssistantMessage, append a synthetic
     # continuation user message so the next API call has proper role
     # alternation.  Analogous to claude-code's NO_RESPONSE_REQUESTED sentinel.
-    if context_messages and isinstance(context_messages[-1], AssistantMessage):
+    # Skipped when append_continuation=False: the restart-recovery path must
+    # not inject a message the user never sent into a live conversation.
+    if (
+        append_continuation
+        and context_messages
+        and isinstance(context_messages[-1], AssistantMessage)
+    ):
         context_messages.append(UserMessage(
             content="[Continue from where the conversation was rewound.]"
         ))

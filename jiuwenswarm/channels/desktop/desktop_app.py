@@ -8,6 +8,7 @@ import json
 import logging
 import mimetypes
 import os
+import secrets
 import shlex
 import shutil
 import signal
@@ -361,6 +362,10 @@ def _build_child_command(name: str, extra_args: list[str] | None = None) -> list
 
 
 def _build_child_env(name: str, ports: dict[str, int]) -> dict[str, str]:
+    # 在 os.environ.copy() 之前注入文件下载 HMAC 密钥，确保 app（Agent）和 web
+    #（文件服务）两个子进程拿到同一个密钥，token 签名/验证一致。
+    if "JIUWENSWARM_FILE_DOWNLOAD_SECRET" not in os.environ:
+        os.environ["JIUWENSWARM_FILE_DOWNLOAD_SECRET"] = secrets.token_hex(32)
     env = os.environ.copy()
     env[DESKTOP_ENV_FLAG] = "1"
     # Inject the full session port group so app → agent/gateway and web agree.
@@ -1625,6 +1630,25 @@ class DesktopRuntime:
                         stdout=subprocess.DEVNULL,
                         stderr=subprocess.DEVNULL,
                     )
+            else:
+                # Linux: 系统通知 + 打开文件夹
+                notify_cmd = [
+                    "/usr/bin/notify-send", "--app-name=JiuwenSwarm",
+                    "下载完成",
+                    f"文件已保存到: {file_path}",
+                    "--icon=document-save",
+                ]
+                subprocess.Popen(
+                    notify_cmd,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+                # 打开文件所在文件夹（选中文件）
+                subprocess.Popen(
+                    ["/usr/bin/xdg-open", str(Path(file_path).parent)],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
         except Exception as exc:  # noqa: BLE001
             logger.error("[desktop] failed to show download complete: %s", exc)
 
