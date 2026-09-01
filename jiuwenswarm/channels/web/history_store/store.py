@@ -29,7 +29,8 @@ logger = logging.getLogger("jiuwenswarm.web.history")
 
 _TITLE_LEN = 30
 _PREVIEW_LEN = 100
-_MAX_LIST_LIMIT = 100
+# list 的单页上限：project.sessions 一次拉 500 条做项目内过滤，需与之对齐
+_MAX_LIST_LIMIT = 500
 
 HistoryBackend = Literal["memory", "mysql", "postgresql"]
 
@@ -263,6 +264,35 @@ class ChatHistoryStore:
             logger.exception("[history] %s 读取会话列表失败", self.backend.upper())
             return []
 
+    def count_sessions_blocking(self, *, user: str | None) -> int:
+        """全量会话计数。
+
+        与 list 不同：store/DB 不可用时抛异常，供调用方区分
+        确实为空与库故障（list 失败返回 [] 的语义保持不变）。
+        """
+        if not user:
+            user = "guest"
+        if self._memory:
+            with self._mem_lock:
+                return sum(
+                    1 for s in self._mem_sessions.values() if s.get("user") == user
+                )
+        return self._get_actor().count_sessions_sync(user=user)
+
+    def get_session_detail_strict_blocking(
+        self, session_id: str, *, user: str | None,
+    ) -> dict[str, Any] | None:
+        """读会话详情，严格版：DB 故障抛异常；None 仅表示会话不存在。
+
+        网关 history.get 回退需要区分库挂了（透传原始错误，不合成空页）
+        与会话确实没有历史（合成空页）。memory 后端无库故障态，直接复用。
+        """
+        if not user:
+            user = "guest"
+        if self._memory:
+            return self.get_session_detail_blocking(session_id, user=user)
+        return self._get_actor().get_session_detail_sync(session_id=session_id, user=user)
+
     def get_session_detail_blocking(
         self, session_id: str, *, user: str | None,
     ) -> dict[str, Any] | None:
@@ -287,7 +317,7 @@ class ChatHistoryStore:
             msgs.sort(key=lambda m: float(m.get("timestamp") or 0))
             return {**s, "messages": msgs}
         try:
-            return self._get_actor().get_session_detail_sync(session_id, user=user)
+            return self._get_actor().get_session_detail_sync(session_id=session_id, user=user)
         except Exception:
             logger.exception("[history] %s 读取会话详情失败", self.backend.upper())
             return None
@@ -306,7 +336,40 @@ class ChatHistoryStore:
             return await asyncio.to_thread(
                 self.get_session_detail_blocking, session_id, user=None,
             )
-        return await self._get_actor().get_session_detail(session_id, user=None)
+        return await self._get_actor().get_session_detail(session_id=session_id, user=None)
+
+    def delete_session_blocking(
+        self, session_id: str, *, user: str | None,
+    ) -> bool:
+        """删除会话（sessions 行 + messages 行）。库不可用返回 False。"""
+        if not session_id:
+            return False
+        if self._memory:
+            with self._mem_lock:
+                s = self._mem_sessions.get(session_id)
+                if s is None:
+                    return False
+                if user and s.get("user") != user:
+                    return False
+                del self._mem_sessions[session_id]
+                self._mem_messages = [
+                    m for m in self._mem_messages if m.get("session_id") != session_id
+                ]
+            return True
+        try:
+            return self._get_actor().delete_session_sync(str(session_id), user=user)
+        except Exception:
+            logger.exception("[history] %s 删除会话失败", self.backend.upper())
+            return False
+
+    async def delete_session(
+        self, session_id: str, *, user: str | None = None,
+    ) -> bool:
+        if self._memory:
+            return await asyncio.to_thread(
+                self.delete_session_blocking, session_id, user=user,
+            )
+        return await self._get_actor().delete_session(str(session_id), user=user)
 
     async def close(self) -> None:
         if self._actor is not None:

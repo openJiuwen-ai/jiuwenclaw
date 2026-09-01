@@ -32,6 +32,8 @@ export interface WsEvent {
   payload: Record<string, unknown>;
   seq?: number;
   stream_id?: string;
+  /** 后端在 chat.* 事件 payload 内注入的请求关联 id（chat.delta/final 不携带）。 */
+  request_id?: string;
 }
 
 export type WebMessage = WsRequest | WsResponse | WsEvent;
@@ -41,6 +43,8 @@ export interface WebRequestOptions {
   signal?: AbortSignal;
   /** 对应协议里请求消息的顶层 is_stream 字段（如 command.goal 的 set/resume） */
   isStream?: boolean;
+  /** 调用方指定请求 id，用于 chat.send/chat.interrupt 的流式事件关联与取消过滤。 */
+  requestId?: string;
 }
 
 export interface WebConnectOptions {

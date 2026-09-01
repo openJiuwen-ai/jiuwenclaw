@@ -741,6 +741,9 @@ task_memory:
 # ========== Redis（主备 Gateway：状态存储 / Pub/Sub / Leader；standalone 下不连接）==========
 # 通过 gateway.deployment_mode 控制：standalone（不连接）/ active-standby（连接 Redis）
 redis:
+  # standalone | cluster；cluster 时下方 host 解析为逗号分隔的多节点列表
+  mode: ${REDIS_MODE:-standalone}
+  # 单机：host / host:port；cluster：逗号列表(如 10.0.0.11:6379,10.0.0.12:6379)；不带端口时用 port
   host: ${REDIS_HOST:-localhost}
   port: ${REDIS_PORT:-6379}
   password: ${REDIS_PASSWORD:-}
@@ -768,6 +771,10 @@ gateway:
   deployment_mode: ${DEPLOYMENT_MODE:-standalone}
   # 分布式下用于实例标识；空则启动时自动生成
   instance_id: ${GATEWAY_INSTANCE_ID:-}
+
+  # Web 会话存储位置：local（默认，会话文件在网关本地磁盘）| remote（会话在 Web Pod / 远程存储）
+  # remote 时前端 SessionsPanel 不再浏览网关本地会话文件，仅支持恢复会话历史。
+  web_session_storage: ${GATEWAY_WEB_SESSION_STORAGE:-local}
 
   # 企业版 Gateway 多副本：从共享库轮询 Gateway 自身配置（channel/logging/log_masking）
   config_poll:

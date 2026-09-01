@@ -59,6 +59,9 @@ def row_to_dict(row: Any) -> dict[str, Any]:
                 items = {k: row[k] for k in keys_fn(row)}
             elif hasattr(row, "__table__"):
                 items = {k: v for k, v in vars(row).items() if not k.startswith("_sa_")}
+            elif hasattr(row, "__dict__"):
+                # SimpleNamespace（manager_config_receiver 适配层返回的行）等普通对象
+                items = {k: v for k, v in vars(row).items() if not k.startswith("_sa_")}
             else:
                 items = dict(row)
     out: dict[str, Any] = {}
@@ -129,7 +132,7 @@ async def list_records(
         )
         return [row_to_dict(r) for r in rows]
     except Exception as exc:  # noqa: BLE001
-        logger.error("[gateway_db_reader] list %s failed: %s", table, exc)
+        logger.error("[gateway_db_reader] list %s failed: %s", table, exc, exc_info=exc)
         raise
 
 
