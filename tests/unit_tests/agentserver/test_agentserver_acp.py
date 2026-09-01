@@ -3613,7 +3613,6 @@ def test_build_context_processor_rail_uses_summary_offloader_config(monkeypatch)
         "ContextProcessorRail",
         FakeContextProcessorRail,
     )
-    monkeypatch.setattr(interface_deep_module, "_processor_exists", lambda name: True)
     adapter = DeepAdapterHarness()
 
     rail = adapter.build_context_processor_rail_for_test(
@@ -3639,19 +3638,6 @@ def test_build_context_processor_rail_uses_summary_offloader_config(monkeypatch)
             },
         ),
         ("DialogueCompressor", {"tokens_threshold": 100000}),
-        (
-            "ReasoningToolLoopCompactProcessor",
-            {
-                "enabled": True,
-                "consecutive_threshold": 3,
-                "tool_args_consecutive_threshold": 5,
-                "reasoning_min_chars": 4,
-                "reasoning_preview_max_chars": 512,
-                "bailout_threshold": 3,
-                "tool_args_bailout_threshold": 2,
-                "language": "cn",
-            },
-        ),
     ]
 
 
@@ -3661,7 +3647,6 @@ def test_build_context_processor_rail_prefers_summary_offloader_config(monkeypat
         "ContextProcessorRail",
         FakeContextProcessorRail,
     )
-    monkeypatch.setattr(interface_deep_module, "_processor_exists", lambda name: True)
     adapter = DeepAdapterHarness()
 
     rail = adapter.build_context_processor_rail_for_test(
@@ -3680,50 +3665,6 @@ def test_build_context_processor_rail_prefers_summary_offloader_config(monkeypat
     assert isinstance(rail, FakeContextProcessorRail)
     assert rail.processors == [
         ("MessageSummaryOffloader", {"tokens_threshold": 6000}),
-        (
-            "ReasoningToolLoopCompactProcessor",
-            {
-                "enabled": True,
-                "consecutive_threshold": 3,
-                "tool_args_consecutive_threshold": 5,
-                "reasoning_min_chars": 4,
-                "reasoning_preview_max_chars": 512,
-                "bailout_threshold": 3,
-                "tool_args_bailout_threshold": 2,
-                "language": "cn",
-            },
-        ),
-    ]
-
-
-def test_build_context_processor_rail_merges_reasoning_loop_defaults(monkeypatch):
-    monkeypatch.setattr(
-        interface_deep_module,
-        "ContextProcessorRail",
-        FakeContextProcessorRail,
-    )
-    monkeypatch.setattr(interface_deep_module, "_processor_exists", lambda name: True)
-    adapter = DeepAdapterHarness()
-
-    rail = adapter.build_context_processor_rail_for_test(
-        {"context_engine_config": {"enabled": True}}
-    )
-
-    assert isinstance(rail, FakeContextProcessorRail)
-    assert rail.processors == [
-        (
-            "ReasoningToolLoopCompactProcessor",
-            {
-                "enabled": True,
-                "consecutive_threshold": 3,
-                "tool_args_consecutive_threshold": 5,
-                "reasoning_min_chars": 4,
-                "reasoning_preview_max_chars": 512,
-                "bailout_threshold": 3,
-                "tool_args_bailout_threshold": 2,
-                "language": "cn",
-            },
-        ),
     ]
 
 
@@ -3778,7 +3719,6 @@ def test_build_context_processor_rail_passes_session_memory_config(monkeypatch):
         "ContextProcessorRail",
         FakeContextProcessorRail,
     )
-    monkeypatch.setattr(interface_deep_module, "_processor_exists", lambda name: True)
     adapter = DeepAdapterHarness()
 
     rail = adapter.build_context_processor_rail_for_test(
@@ -3794,21 +3734,7 @@ def test_build_context_processor_rail_passes_session_memory_config(monkeypatch):
 
     assert isinstance(rail, FakeContextProcessorRail)
     assert rail.preset is True
-    assert rail.processors == [
-        (
-            "ReasoningToolLoopCompactProcessor",
-            {
-                "enabled": True,
-                "consecutive_threshold": 3,
-                "tool_args_consecutive_threshold": 5,
-                "reasoning_min_chars": 4,
-                "reasoning_preview_max_chars": 512,
-                "bailout_threshold": 3,
-                "tool_args_bailout_threshold": 2,
-                "language": "cn",
-            },
-        ),
-    ]
+    assert rail.processors is None
     assert rail.session_memory == {
         "trigger_tokens": 12000,
         "update_mode": "direct_replace",
