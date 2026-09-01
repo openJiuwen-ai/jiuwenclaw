@@ -87,13 +87,33 @@ class LLMConfig:
             model_client_config=client_config,
             model_config_obj=request_config,
         )
-        request_config.pop("reasoning_effort", None)
+        for key in (
+            "reasoning_effort",
+            "thinking",
+            "enable_thinking",
+            "thinking_budget",
+            "thinking_strategy",
+            "chat_template_kwargs",
+        ):
+            request_config.pop(key, None)
         extra_body = request_config.get("extra_body")
-        if not isinstance(extra_body, dict):
-            extra_body = {}
-        extra_body = deepcopy(extra_body)
-        extra_body.update(thinking_disabled_request_overrides()["extra_body"])
-        request_config["extra_body"] = extra_body
+        if isinstance(extra_body, dict):
+            extra_body = deepcopy(extra_body)
+            for key in (
+                "reasoning",
+                "reasoning_effort",
+                "thinking",
+                "enable_thinking",
+                "thinking_budget",
+                "thinking_strategy",
+                "chat_template_kwargs",
+            ):
+                extra_body.pop(key, None)
+            if extra_body:
+                request_config["extra_body"] = extra_body
+            else:
+                request_config.pop("extra_body", None)
+        request_config.update(thinking_disabled_request_overrides())
         request_config["model"] = model
         return cls(
             model=model,
@@ -114,6 +134,17 @@ class LLMConfig:
         client_config = deepcopy(self.model_client_config or {})
         if self.base_url:
             client_config["api_base"] = self.base_url
+        # 已知自建网关按 host 补全 endpoint_profile（与主路径
+        # build_model_from_entry 同源规则）。symphony 强制关闭思考，
+        # 方言错了会发官方 thinking.type 而被 vLLM 类网关忽略。
+        if not client_config.get("endpoint_profile"):
+            from jiuwenswarm.common.reasoning_config import resolve_endpoint_profile_override
+
+            inferred_profile = resolve_endpoint_profile_override(
+                client_config.get("api_base") or client_config.get("base_url")
+            )
+            if inferred_profile:
+                client_config["endpoint_profile"] = inferred_profile
         return client_config
 
     def model_request_kwargs(self) -> Dict[str, Any]:
@@ -289,14 +320,8 @@ def create_model_response_observer(config: LLMConfig):
 
 
 def thinking_disabled_request_overrides() -> Dict[str, Any]:
-    """Return isolated provider-compatible controls that disable thinking."""
-    return {
-        "extra_body": {
-            "thinking": {"type": "disabled"},
-            "enable_thinking": False,
-            "chat_template_kwargs": {"enable_thinking": False},
-        }
-    }
+    """Return an isolated provider-neutral control that disables thinking."""
+    return {"reasoning": {"mode": "disabled"}}
 
 
 class JiuwenSwarmChatClient:

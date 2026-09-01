@@ -167,11 +167,7 @@
         "anthropicUnavailable": "当前提供商套餐不支持 Anthropic 协议"
       },
       "reasoning": {
-        "auto": "使用默认值",
-        "off": "关闭",
-        "low": "低",
-        "medium": "中",
-        "high": "高"
+        "auto": "使用默认值"
       },
       "openaiAccount": "OpenAI 账号",
       "agentOsReadonly": "AgentOS 只读",
@@ -180,8 +176,8 @@
       "reloadAfterFailure": "重新加载核对",
       "modelsResponseInvalid": "模型列表响应格式不正确，请重试。",
       "catalogResponseInvalid": "模型提供商目录响应格式不正确，请重试。",
-      "catalogLoadingCustomAvailable": "正在加载内置模型提供商；仍可选择“自定义”继续配置。",
-      "catalogLoadFailedCustomAvailable": "内置模型提供商加载失败；仍可选择“自定义”继续配置。",
+      "catalogLoading": "正在加载模型提供商和推理选项，请稍候。",
+      "catalogLoadFailed": "模型提供商和推理选项加载失败，请重试后保存。",
       "saveResponseInvalid": "模型保存响应格式不正确，请重新加载核对。",
       "savedApplied": "已保存并生效",
       "savedRestartRequired": "已保存，重启后生效",
@@ -200,7 +196,8 @@
         "vendorSelectionRequired": "请选择模型提供商；历史配置缺少套餐信息时需要重新选择提供商套餐",
         "vendorSelectionInvalid": "当前提供商套餐不在服务端目录中，请重新选择",
         "anthropicUnavailable": "当前提供商套餐不支持 Anthropic 协议，请切换为 OpenAI 协议或重新选择提供商",
-        "reasoningUnsupported": "当前推理强度“{{value}}”不受支持，请重新选择",
+        "reasoningUnsupported": "当前推理选项“{{value}}”不受支持，请重新选择或使用默认值",
+        "reasoningUnavailable": "推理选项尚未加载，请重试后保存",
         "aliasConflict": "自定义名称必须全局唯一，且不能与其他模型 ID 相同",
         "modelNameConflict": "模型 ID 不能与其他配置的自定义名称相同"
       },
@@ -212,17 +209,8 @@
       "webSearch": "网页搜索",
       "mediaTools": "工具",
       "vision": "图片处理",
-      "visionDescription": "启用后可处理图片内容；关闭后保留已有模型配置。",
-      "visionConfigTitle": "配置图片处理模型",
       "audio": "音频处理",
-      "audioDescription": "启用后可处理音频内容；关闭后保留已有模型配置。",
-      "audioConfigTitle": "配置音频处理模型",
       "video": "视频理解",
-      "videoDescription": "启用后可理解视频内容；关闭后保留已有模型配置。",
-      "videoConfigTitle": "配置视频理解模型",
-      "toggleCapability": "切换{{name}}能力",
-      "saveAndEnable": "保存并启用",
-      "savedRestartRequired": "配置已保存，重启后生效。",
       "team": "智能体团队"
     },
     "browser": {
@@ -271,7 +259,7 @@
       "api_base": { "title": "API 地址", "placeholder": "例如：https://api.openai.com/v1" },
       "api_key": { "title": "API 密钥", "placeholder": "例如：sk-..." },
       "model_provider": { "title": "模型提供商" },
-      "reasoning_level": { "title": "推理强度" },
+      "reasoning_level": { "title": "推理" },
       "embed_api_base": { "title": "API 地址" },
       "embed_api_key": { "title": "API 密钥" },
       "embed_model": { "title": "模型名称" },
