@@ -1,6 +1,10 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-"""拦截沙箱 execute_cmd：白名单 CLI 改在宿主执行。"""
+"""拦截沙箱 execute_cmd：仅白名单连接器 CLI 改在宿主执行.
+
+普通 powershell / cmd / bash（如 Get-ChildItem）必须留在沙箱内, 否则会以
+宿主用户跑, 绕过 list_files 已经拦住的 NTFS 隔离.
+"""
 
 from __future__ import annotations
 
@@ -21,6 +25,11 @@ from jiuwenswarm.common.host_shell import (
 logger = logging.getLogger(__name__)
 
 _installed = False
+
+
+def command_should_host_exec(command: str) -> bool:
+    """只有连接器 CLI 才出沙箱; Get-ChildItem 等普通命令走沙箱."""
+    return command_uses_connector_cli(command)
 
 
 def _host_workdir(cwd: Optional[str]) -> Optional[str]:
@@ -67,15 +76,13 @@ def install_connector_host_exec_hooks() -> None:
         environment: Optional[dict[str, str]] = None,
         **kwargs: Any,
     ) -> Any:
-        argv = host_shell_argv(command, shell_type=kwargs.get("shell_type"))
-        if command_uses_connector_cli(command):
+        if command_should_host_exec(command):
+            argv = host_shell_argv(command, shell_type=kwargs.get("shell_type"))
             if not argv:
                 argv = host_shell_wrap(
                     command.strip(),
                     posix=connector_wrap_posix(command, kwargs.get("shell_type")),
                 )
-            return await _run_host(self, command, argv, cwd, timeout)
-        if argv:
             return await _run_host(self, command, argv, cwd, timeout)
         return await original(
             self, command, cwd=cwd, timeout=timeout, environment=environment, **kwargs
