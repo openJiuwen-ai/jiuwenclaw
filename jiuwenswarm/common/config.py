@@ -2361,6 +2361,12 @@ def migrate_config_from_template(
     if merged_data is None or not merged_data:
         return False
 
+    # 写回程序版本号，与合并内容原子落盘；放在 diff 判断之前，
+    # 使旧 config（无版本号或版本号旧）必走写盘分支把版本号写回，
+    # 已写回的最新 config 下次启动被 ensure_config_migrated_from_template 短路。
+    from jiuwenswarm.common._build_config import VERSION
+    merged_data["config_version"] = VERSION
+
     # Only write if there are actual changes
     if merged_data != user_data:
         dump_yaml_round_trip(user_config_path, merged_data)

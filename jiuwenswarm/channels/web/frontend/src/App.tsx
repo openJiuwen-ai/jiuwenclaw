@@ -482,9 +482,11 @@ function AppContent({
     singleAgentPanelExpanded,
     singleAgentPanelActiveTab,
     singleAgentPanelSelectedArtifactId,
+    singleAgentPanelSelectedSubagentId,
     setSingleAgentPanelExpanded,
     setSingleAgentPanelActiveTab,
     setSingleAgentPanelSelectedArtifactId,
+    setSingleAgentPanelSelectedSubagentId,
   } = useSingleAgentPanelState();
 
   useEffect(() => {
@@ -2961,6 +2963,7 @@ function AppContent({
                     singleAgentPanelExpanded={singleAgentPanelExpanded}
                     singleAgentPanelActiveTab={singleAgentPanelActiveTab}
                     singleAgentPanelSelectedArtifactId={singleAgentPanelSelectedArtifactId}
+                    singleAgentPanelSelectedSubagentId={singleAgentPanelSelectedSubagentId}
                     setTeamAreaExpanded={setTeamAreaExpanded}
                     setTeamAreaActiveTab={setTeamAreaActiveTab}
                     setTeamAreaActiveDetailTab={setTeamAreaActiveDetailTab}
@@ -2970,6 +2973,7 @@ function AppContent({
                     setSingleAgentPanelExpanded={setSingleAgentPanelExpanded}
                     setSingleAgentPanelActiveTab={setSingleAgentPanelActiveTab}
                     setSingleAgentPanelSelectedArtifactId={setSingleAgentPanelSelectedArtifactId}
+                    setSingleAgentPanelSelectedSubagentId={setSingleAgentPanelSelectedSubagentId}
                     shouldFullscreen={shouldFullscreen}
                     onCloseFloating={() => setToolPanelHidden(true)}
                   />

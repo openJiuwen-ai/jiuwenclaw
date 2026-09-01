@@ -406,6 +406,21 @@
   color: var(--color-feedback-danger);
 }
 
+/* 卡片头部统计徽标（code-mode-changes-card-lines-added / -removed） */
+.code-changes-card__heading .code-stat-added {
+  background: var(--color-code-stat-added-surface);
+  padding: 0 4px;
+  line-height: 18px;
+  border-radius: 2px;
+}
+
+.code-changes-card__heading .code-stat-removed {
+  background: var(--color-code-stat-removed-surface);
+  padding: 0 4px;
+  line-height: 18px;
+  border-radius: 2px;
+}
+
 .code-changes-card {
   container-type: inline-size;
   width: min(720px, calc(100% - 24px));
@@ -426,14 +441,11 @@
 
 .code-changes-card__icon {
   display: inline-flex;
-  width: 38px;
-  height: 38px;
+  width: 24px;
+  height: 24px;
   flex: none;
   align-items: center;
   justify-content: center;
-  border-radius: 10px;
-  background: var(--color-action-primary-subtle);
-  color: var(--color-action-primary);
 }
 
 .code-changes-card__heading {
@@ -769,8 +781,25 @@ button.code-environment__row:disabled {
   border: 0;
   border-radius: 7px;
   background: transparent;
-  color: var(--color-text-secondary);
+  color: var(--color-code-toolbar-icon);
   cursor: pointer;
+}
+
+/* data-tooltip 自适应提示：useAdaptiveTooltip 以 portal 渲染到 body，
+   水平位置由 JS 计算（默认居中，空间不足贴边/收进视口），这里只管外观 */
+.adaptive-tooltip {
+  box-sizing: border-box;
+  max-width: 240px;
+  padding: 7px 16px;
+  border: 1px solid var(--color-border-default);
+  border-radius: 6px;
+  background: var(--color-surface-popover);
+  box-shadow: var(--effect-shadow-lg);
+  color: var(--color-text-primary);
+  font-size: 12px;
+  line-height: 18px;
+  white-space: nowrap;
+  pointer-events: none;
 }
 
 .code-review__icon-button:hover {
@@ -886,7 +915,7 @@ button.code-environment__row:disabled {
   border: 1px solid var(--color-border-default);
   border-radius: 7px;
   background: var(--color-surface-panel);
-  color: var(--color-text-primary);
+  color: var(--color-code-toolbar-icon);
   font-size: 12px;
   cursor: pointer;
 }
