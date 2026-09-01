@@ -14,6 +14,7 @@
     "and": "和",
     "modify": "修改",
     "delete": "删除",
+    "update": "更新",
     "pagination": {
       "total": "共 {{count}} 个",
       "prev": "上一页",
@@ -1894,7 +1895,6 @@
       "install": "安装",
       "replaceConfirm": "已安装同名技能「{{name}}」，继续安装将卸载已安装的版本并替换为当前选择的版本。是否继续？",
       "installing": "安装中…",
-      "updating": "更新中…",
       "updatedAt": "更新于 {{date}}",
       "configTitle": "配置",
       "configDescription": "请输入从 ClawHub 平台获取的 CLI Token，用于访问 ClawHub 技能库。",
@@ -1922,6 +1922,7 @@
       "searchPlaceholder": "输入关键词搜索 TeamSkills",
       "noResults": "未找到相关技能，可换个关键词再试。",
       "installing": "安装中…",
+      "updating": "更新中…",
       "replaceConfirm": "已安装同名技能「{{name}}」，继续安装将卸载已安装的版本并替换为当前选择的版本。是否继续？",
       "messages": {
         "installed": "已安装：{{name}}",

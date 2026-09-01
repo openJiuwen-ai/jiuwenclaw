@@ -39,6 +39,10 @@ type SkillSourceDescriptor = {
   capabilities?: string[];
 };
 
+function skillSourceIdentity(item: TeamSkillsHubSkillItem, fallbackSourceId: string): string {
+  return `${item.source_id || fallbackSourceId}:${item.skill_id || item.name}`;
+}
+
 interface TeamSkillsHubModalProps {
   open: boolean;
   embedded?: boolean;
@@ -68,9 +72,9 @@ export function TeamSkillsHubModal({
   const [results, setResults] = useState<TeamSkillsHubSkillItem[]>([]);
   const [loadState, setLoadState] = useState<LoadState>('idle');
   const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
-  const [installingSkillName, setInstallingSkillName] = useState<string | null>(null);
-  // 公共 Skill Source 安装身份以 SKILL.md.name 为准；skill_id 仅保留为来源追溯字段。
-  const [installedSkillNames, setInstalledSkillNames] = useState<Set<string>>(new Set());
+  const [installingSkillKey, setInstallingSkillKey] = useState<string | null>(null);
+  // 与原 asset_id 语义一致：按来源和来源内 skill_id 唯一标识，避免同名跨源误判。
+  const [installedSkillKeys, setInstalledSkillKeys] = useState<Set<string>>(new Set());
   const [updateStatuses, setUpdateStatuses] = useState<Map<string, SkillUpdateStatus>>(new Map());
   const [sourceId, setSourceId] = useState('');
   const [hubBaseUrl, setHubBaseUrl] = useState(DEFAULT_TEAMSKILLS_HUB_BASE_URL);
@@ -108,7 +112,7 @@ export function TeamSkillsHubModal({
 
   useEffect(() => {
     if (!open) return;
-    setInstalledSkillNames(new Set());
+    setInstalledSkillKeys(new Set());
     setUpdateStatuses(new Map());
     setSourceId('');
     setHubBaseUrl(DEFAULT_TEAMSKILLS_HUB_BASE_URL);
@@ -271,8 +275,9 @@ export function TeamSkillsHubModal({
 
   const handleInstall = useCallback(
     async (item: TeamSkillsHubSkillItem) => {
-      if (installingSkillName) return;
-      setInstallingSkillName(item.name);
+      if (installingSkillKey) return;
+      const itemKey = skillSourceIdentity(item, sourceId);
+      setInstallingSkillKey(itemKey);
       setMessage(null);
       let force = false;
       try {
@@ -305,7 +310,7 @@ export function TeamSkillsHubModal({
           }
           // 安装成功
           const skillName = data.skill?.name || item.name;
-          setInstalledSkillNames(prev => new Set([...prev, item.name]));
+          setInstalledSkillKeys(prev => new Set([...prev, itemKey]));
           showMessage('success', t('skills.teamskillshub.messages.installed', { name: skillName }));
           await onInstalled?.(skillName);
           break;
@@ -314,17 +319,17 @@ export function TeamSkillsHubModal({
         console.error(error);
         showMessage('error', error instanceof Error ? error.message : t('skills.teamskillshub.errors.installFailed'));
       } finally {
-        setInstallingSkillName(null);
+        setInstallingSkillKey(null);
       }
     },
-    [installingSkillName, onInstalled, showMessage, sourceId, t, withSession],
+    [installingSkillKey, onInstalled, showMessage, sourceId, t, withSession],
   );
 
   const handleUpdate = useCallback(
     async (item: TeamSkillsHubSkillItem, status: SkillUpdateStatus) => {
-      if (installingSkillName) return;
+      if (installingSkillKey) return;
       const targetVersionId = status.latest_version_id || item.version_id;
-      setInstallingSkillName(item.name);
+      setInstallingSkillKey(skillSourceIdentity(item, sourceId));
       setMessage(null);
       try {
         const data = await webRequest<{
@@ -359,10 +364,10 @@ export function TeamSkillsHubModal({
         console.error(error);
         showMessage('error', error instanceof Error ? error.message : t('skills.teamskillshub.errors.updateFailed'));
       } finally {
-        setInstallingSkillName(null);
+        setInstallingSkillKey(null);
       }
     },
-    [installingSkillName, onInstalled, showMessage, sourceId, t, withSession],
+    [installingSkillKey, onInstalled, showMessage, sourceId, t, withSession],
   );
 
   if (!open) return null;
@@ -408,12 +413,12 @@ export function TeamSkillsHubModal({
                   const updateStatus = updateStatuses.get(`${item.source_id}:${item.name}`);
                   const isInstalled =
                     Boolean(updateStatus) ||
-                    installedSkillNames.has(item.name) ||
+                    installedSkillKeys.has(skillSourceIdentity(item, sourceId)) ||
                     (installedSkillOrigins?.has(`${item.source_id || sourceId}:${item.name}`) ?? false) ||
                     (item.skill_id != null &&
                       ((installedSkillOrigins?.has(`${item.source_id || sourceId}:${item.skill_id}`) ?? false) ||
                         (installedSkillOrigins?.has(`teamskillshub:${item.skill_id}`) ?? false)));
-                  const isInstalling = installingSkillName === item.name;
+                  const isInstalling = installingSkillKey === skillSourceIdentity(item, sourceId);
                   const avatar = getSkillAvatar(item.name);
                   return (
                     <div
@@ -608,12 +613,12 @@ export function TeamSkillsHubModal({
                     const updateStatus = updateStatuses.get(`${item.source_id}:${item.name}`);
                     const isInstalled =
                       Boolean(updateStatus) ||
-                      installedSkillNames.has(item.name) ||
+                      installedSkillKeys.has(skillSourceIdentity(item, sourceId)) ||
                       (installedSkillOrigins?.has(`${item.source_id || sourceId}:${item.name}`) ?? false) ||
                       (item.skill_id != null &&
                         ((installedSkillOrigins?.has(`${item.source_id || sourceId}:${item.skill_id}`) ?? false) ||
                           (installedSkillOrigins?.has(`teamskillshub:${item.skill_id}`) ?? false)));
-                    const isInstalling = installingSkillName === item.name;
+                    const isInstalling = installingSkillKey === skillSourceIdentity(item, sourceId);
                     const avatar = getSkillAvatar(item.name);
                     return (
                       <div

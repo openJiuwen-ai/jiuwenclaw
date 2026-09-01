@@ -14,6 +14,7 @@
     "and": "and",
     "modify": "Modify",
     "delete": "Delete",
+    "update": "Update",
     "pagination": {
       "total": "{{count}} total",
       "prev": "Previous",
@@ -1893,7 +1894,6 @@
       "install": "Install",
       "replaceConfirm": "A skill named \"{{name}}\" is already installed. Continuing will uninstall the current version and replace it with the selected one. Continue?",
       "installing": "Installing…",
-      "updating": "Updating…",
       "updatedAt": "Updated {{date}}",
       "configTitle": "Configure",
       "configDescription": "Enter the CLI Token from the ClawHub platform to access the ClawHub skill library.",
@@ -1921,6 +1921,7 @@
       "searchPlaceholder": "Search TeamSkills by keyword",
       "noResults": "No matching skills. Try different keywords.",
       "installing": "Installing…",
+      "updating": "Updating…",
       "replaceConfirm": "A skill named \"{{name}}\" is already installed. Continuing will uninstall the current version and replace it with the selected one. Continue?",
       "messages": {
         "installed": "Installed: {{name}}",
