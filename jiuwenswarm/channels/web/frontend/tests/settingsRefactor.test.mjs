@@ -1152,6 +1152,18 @@ test('every visible Settings control maps to an exact persistence field or RPC',
   }
 });
 
+test('saving the free-model switch refreshes the shared model catalog after persistence', () => {
+  const settingsConfig = source('src/features/settings/services/useSettingsConfig.ts');
+  const settingsPage = source('src/features/settings/SettingsPage.tsx');
+  const settingsServices = source('src/features/settings/services/SettingsServicesProvider.tsx');
+  const app = source('src/App.tsx');
+  assert.match(settingsServices, /onConfigSaved\?: \(updatedKeys: readonly string\[\]\) => Promise<void> \| void/);
+  assert.match(settingsConfig, /setConfig\([\s\S]{0,120}await onConfigSaved\?\.\(Object\.keys\(updates\)\)/);
+  assert.match(settingsPage, /onConfigSaved=\{onConfigSaved\}/);
+  assert.match(app, /updatedKeys\.includes\('enable_free_models'\)\) await handleModelsRefresh\(\)/);
+  assert.match(app, /onConfigSaved=\{handleSettingsConfigSaved\}/);
+});
+
 test('Settings form dialogs share the same dirty-close contract without disabling save', () => {
   const closeHook = source('src/features/settings/services/useSettingsFormDialogClose.ts');
   assert.match(closeHook, /const \{ hasUnsavedChanges \} = useFormState\(form\)/);
