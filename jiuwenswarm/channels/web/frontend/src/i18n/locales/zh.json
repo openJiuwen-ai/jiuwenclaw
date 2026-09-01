@@ -212,7 +212,11 @@
       "vision": "图片处理",
       "audio": "音频处理",
       "video": "视频理解",
-      "team": "智能体团队"
+      "videoDescription": "启用后可理解视频内容；关闭后保留已有模型配置。",
+      "videoConfigTitle": "配置视频理解模型",
+      "toggleCapability": "切换{{name}}能力",
+      "saveAndEnable": "保存并启用",
+      "savedRestartRequired": "配置已保存，重启后生效。"
     },
     "browser": {
       "runtime": "浏览器运行配置",
@@ -289,7 +293,6 @@
       "video_api_key": { "title": "API 密钥" },
       "video_model": { "title": "模型名称" },
       "video_provider": { "title": "模型提供商" },
-      "swarmflow_enabled": { "title": "动态工作流", "description": "控制智能体团队是否启用动态工作流能力" },
       "permissions_mode": { "title": "全局权限模式", "description": "为普通 Agent 与 Team 选择统一的安全护栏模式。" },
       "a2ui_enabled": { "title": "启用 A2UI", "description": "允许将支持的结果渲染成交互式界面。" },
       "external_cli_agent_claude_enabled": {
@@ -353,6 +356,7 @@
     "elapsedTime": "已花费时间: {{value}}",
     "duration": "耗时",
     "noTasks": "当前暂无任务",
+    "moreTasks": "还有 {{count}} 个任务",
     "noMemberData": "暂无成员数据",
     "selectMember": "请选择 Team 成员",
     "detailTabs": {
@@ -460,7 +464,9 @@
       "views": {
         "list": "列表视图",
         "structure": "结构视图",
-        "board": "任务板视图"
+        "board": "任务板视图",
+        "graph": "流程图",
+        "workflow": "工作流视图"
       },
       "metrics": {
         "progress": "进度"
@@ -2790,6 +2796,7 @@
     "prev": "上一题",
     "next": "下一题",
     "cancel": "取消",
+    "replyLater": "稍后回复",
     "skip": "跳过",
     "nextStep": "下一步",
     "confirm": "确定",
@@ -3124,5 +3131,42 @@
       "skipped": "上次运行已跳过",
       "cancelled": "上次运行已取消"
     }
+  },
+  "swarmflow": {
+    "statusPlanned": "已规划",
+    "statusPending": "等待中",
+    "statusRunning": "运行中",
+    "statusPaused": "已暂停",
+    "statusCompleted": "已完成",
+    "statusFailed": "失败",
+    "statusStopped": "已停止",
+    "statusWaitingForHuman": "等待人工输入",
+    "subWorkflow": "子工作流",
+    "clickToReply": "点击回复",
+    "waitingForHuman": "等待回复 {{count}}",
+    "noWorkflow": "暂无工作流",
+    "layoutIndented": "缩进树",
+    "layoutOrgChart": "架构图",
+    "layoutGraph": "流程图",
+    "pauseResumeHint": "暂停/恢复",
+    "stopHint": "停止",
+    "sessionBudget": "会话预算（团队共享，不随运行重置）",
+    "runBudget": "本次运行预算（META.workflow_token_limit）",
+    "sessionBudgetShort": "会话累计",
+    "runBudgetShort": "本次运行",
+    "budgetUnlimited": "无限制",
+    "budgetExhaustedSession": "会话预算耗尽",
+    "budgetExhaustedWorkflow": "运行预算耗尽",
+    "toggleLabel": "动态工作流",
+    "tagHint": "本次会话已启用动态工作流",
+    "closeTag": "关闭动态工作流",
+    "closeTagDisabled": "会话进行中，无法关闭",
+    "configTitle": "动态工作流配置",
+    "configReadonlyHint": "会话已开启，配置不可修改",
+    "budgetPanelTitle": "SwarmFlow 预算",
+    "budgetPanelHint": "设置本次会话的 Token 上限。",
+    "budgetPlaceholder": "输入数字",
+    "budgetActualHint": "本次配置上限：{{count}} tokens",
+    "workflowList": "工作流列表"
   }
 }

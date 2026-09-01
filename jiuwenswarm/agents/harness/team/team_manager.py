@@ -1001,6 +1001,7 @@ class TeamManager:
         request_metadata: dict[str, Any] | None = None,
         requested_model_name: str | None = None,
         agent_group_name: str | None = None,
+        swarmflow_config: dict | None = None,
     ) -> TeamAgentSpec:
         """Build a team spec via provider-based assembly (no parent DeepAgent).
 
@@ -1046,6 +1047,13 @@ class TeamManager:
             request_metadata=request_metadata,
             agent_group_name=agent_group_name,
         )
+        if swarmflow_config is not None:
+            spec.enable_swarmflow = bool(swarmflow_config.get("enable_swarmflow", False))
+            budget = swarmflow_config.get("swarmflow_budget")
+            if isinstance(budget, int) and budget > 0:
+                spec.swarmflow_budget = budget
+            else:
+                spec.swarmflow_budget = None
         return spec
 
     @staticmethod

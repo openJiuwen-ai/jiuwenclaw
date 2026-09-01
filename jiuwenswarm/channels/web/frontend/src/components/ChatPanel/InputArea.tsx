@@ -12,12 +12,13 @@
   useImperativeHandle,
   FormEvent,
   Fragment,
+  type CSSProperties,
   type RefObject,
 } from 'react';
 import { createPortal } from 'react-dom';
 import { useTranslation } from 'react-i18next';
 import type { TFunction } from 'i18next';
-import { AtSign, ChevronRight, CircleX, Loader2, Plus, Square, X } from 'lucide-react';
+import { AtSign, ChevronRight, CircleX, Loader2, Plus, Settings, Square, Workflow, X } from 'lucide-react';
 import { useSpeechRecognition } from '../../hooks';
 
 // import { stopAllTts } from '../../utils';
@@ -56,6 +57,8 @@ import { withUploadDocumentBlock } from '../../utils/documentMessage';
 import { ExtensionPickerPanel } from './ExtensionPickerPanel';
 import { SkillPickerPanel } from './SkillPickerPanel';
 import { Switch } from '../Switch';
+import { Input } from '../ui';
+import { Select } from '../ui/Select/Select';
 import { ExtensionIcon } from '../ConnectorMarket/icons';
 import {
   isLikelyAbsolutePath,
@@ -639,6 +642,8 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
   const [extensionAnchor, setExtensionAnchor] = useState<DOMRect | null>(null);
   const [skillPanelOpen, setSkillPanelOpen] = useState(false);
   const [skillAnchor, setSkillAnchor] = useState<DOMRect | null>(null);
+  const [swarmflowConfigPanelOpen, setSwarmflowConfigPanelOpen] = useState(false);
+  const [swarmflowConfigAnchor, setSwarmflowConfigAnchor] = useState<DOMRect | null>(null);
   const inputRef = useRef<HTMLDivElement>(null);
   const insertSkillChipRef = useRef<(skillName: string) => void>(() => undefined);
   /** 保存技能插入前的光标位置，用于在光标处插入 chip */
@@ -655,6 +660,8 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
   const compactingSessionIdsRef = useRef<Set<string>>(new Set());
   const skillMenuItemRef = useRef<HTMLButtonElement>(null);
   const skillPanelRef = useRef<HTMLDivElement>(null);
+  const swarmflowConfigBtnRef = useRef<HTMLButtonElement>(null);
+  const swarmflowConfigPanelRef = useRef<HTMLDivElement>(null);
   const autoSendTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const attachmentMenuTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const attachmentMenuOpenedByLongPressRef = useRef(false);
@@ -773,6 +780,17 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
   const planPendingExplicitEntry = usePlanStore(
     (s) => s.runtimes[activeSessionId ?? '']?.pendingExplicitEntry ?? false,
   );
+  // Reactive selectors for swarmflow state. Using getState() inside render IIFEs
+  // does not subscribe the component to store changes, leaving the Switch/UI stale
+  // when swarmflow is toggled off.
+  const swarmflowActive = useSessionStore(
+    (s) => s.runtimes[activeSessionId ?? '']?.enableSwarmflow ?? false,
+  );
+  const swarmflowBudget = useSessionStore(
+    (s) => s.runtimes[activeSessionId ?? '']?.swarmflowBudget ?? null,
+  );
+  // 进入真实会话后开关只读：仅新建对话页可修改，真实会话可查看不可改
+  const swarmflowToggleDisabled = isProcessing || (activeSessionId !== NEW_CONVERSATION_ID && hasHistory);
   // Plan 已经真正生效：开关打开且至少发出过一条 Plan 消息（pendingExplicitEntry 已被消费）。
   // 区别于"刚打开开关但还没发消息"的未提交态——后者和 Goal 的 armed 一样可以被对方随手顶替。
   const planCommitted = planActive && !planPendingExplicitEntry;
@@ -1424,11 +1442,14 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
         !attachMenuRef.current?.contains(event.target as Node) &&
         !attachMenuPortalRef.current?.contains(event.target as Node) &&
         !extensionPanelRef.current?.contains(event.target as Node) &&
-        !skillPanelRef.current?.contains(event.target as Node)
+        !skillPanelRef.current?.contains(event.target as Node) &&
+        !swarmflowConfigPanelRef.current?.contains(event.target as Node) &&
+        !swarmflowConfigBtnRef.current?.contains(event.target as Node)
       ) {
         setAttachMenuOpen(false);
         setExtensionPanelOpen(false);
         setSkillPanelOpen(false);
+        setSwarmflowConfigPanelOpen(false);
       }
     };
 
@@ -3079,6 +3100,11 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                     if (!activeSessionId) return;
                     if (next) {
                       if (planDisabledOn) return;
+                      // Plan 与 Swarmflow 互斥：开启 Plan 前先关掉 Swarmflow。
+                      if (useSessionStore.getState().getRuntime(activeSessionId)?.enableSwarmflow) {
+                        useSessionStore.getState().setSwarmflowActive(activeSessionId, false);
+                        setSwarmflowConfigPanelOpen(false);
+                      }
                       // 走到这里 hasUnfinishedGoal 一定是 false，goalArmed 为 true 时只可能是
                       // "刚选了目标、还没发消息"的未提交态，顶掉换成 Plan。
                       useGoalStore.getState().setArmed(activeSessionId, false);
@@ -3109,6 +3135,59 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                         <span className="chat-mode-select__label">{t('plan.toggleLabel')}</span>
                       </span>
                       <Switch checked={planActive} disabled={planDisabled} onChange={togglePlan} />
+                    </div>
+                  );
+                })()}
+                {isTeamMode && (() => {
+                  const toggleSwarmflow = (next: boolean) => {
+                    if (!activeSessionId || swarmflowToggleDisabled) return;
+                    // Swarmflow 与 Plan 互斥：开启 Swarmflow 前先关掉 Plan。
+                    if (next && planActive) {
+                      usePlanStore.getState().setActive(activeSessionId, false);
+                    }
+                    useSessionStore.getState().setSwarmflowActive(activeSessionId, next);
+                  };
+                  return (
+                    <div
+                      className={cx('chat-mode-select__option', swarmflowToggleDisabled && 'chat-mode-select__option--disabled')}
+                      role="menuitem"
+                      data-testid="chat-panel-input-attach-menu-swarmflow"
+                    >
+                      <span
+                        className="chat-mode-select__option-main"
+                        onClick={() => {
+                          if (swarmflowToggleDisabled) return;
+                          toggleSwarmflow(!swarmflowActive);
+                        }}
+                      >
+                        <span className="chat-mode-select__icon" aria-hidden="true">
+                          <Workflow className="w-4 h-4" />
+                        </span>
+                        <span className="chat-mode-select__label">{t('swarmflow.toggleLabel')}</span>
+                      </span>
+                      <div className="chat-mode-select__option-actions">
+                        <button
+                          ref={swarmflowConfigBtnRef}
+                          type="button"
+                          className={cx('chat-mode-select__config-btn', !swarmflowActive && 'chat-mode-select__config-btn--disabled')}
+                          aria-haspopup="menu"
+                          aria-expanded={swarmflowConfigPanelOpen}
+                          data-testid="chat-panel-input-attach-menu-swarmflow-config"
+                          title={t('swarmflow.configTitle')}
+                          disabled={!swarmflowActive}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            if (!swarmflowActive) return;
+                            if (!swarmflowConfigPanelOpen && swarmflowConfigBtnRef.current) {
+                              setSwarmflowConfigAnchor(swarmflowConfigBtnRef.current.getBoundingClientRect());
+                            }
+                            setSwarmflowConfigPanelOpen((open) => !open);
+                          }}
+                        >
+                          <Settings className="w-3.5 h-3.5" aria-hidden="true" />
+                        </button>
+                        <Switch checked={swarmflowActive} disabled={swarmflowToggleDisabled} onChange={toggleSwarmflow} />
+                      </div>
                     </div>
                   );
                 })()}
@@ -3354,6 +3433,39 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                   if (isProcessing) return;
                   if (!activeSessionId) return;
                   usePlanStore.getState().setActive(activeSessionId, false);
+                }}
+              >
+                <X size={11} strokeWidth={2.5} />
+              </button>
+            </div>
+          )}
+
+          {swarmflowActive && (
+            <div className="chat-goal-tag" data-testid="chat-panel-swarmflow-tag">
+              <button
+                type="button"
+                className="chat-mode-select__trigger"
+                data-testid="chat-panel-swarmflow-tag-label"
+                title={t('swarmflow.tagHint')}
+              >
+                <span className="chat-mode-select__value">
+                  <span className="chat-mode-select__icon" aria-hidden="true">
+                    <Workflow className="w-3.5 h-3.5" />
+                  </span>
+                  <span className="chat-mode-select__label">{t('swarmflow.toggleLabel')}</span>
+                </span>
+              </button>
+              <button
+                type="button"
+                className="chat-goal-tag__close"
+                data-testid="chat-panel-swarmflow-tag-close"
+                disabled={swarmflowToggleDisabled}
+                title={swarmflowToggleDisabled ? t('swarmflow.closeTagDisabled') : t('swarmflow.closeTag')}
+                onClick={() => {
+                  if (swarmflowToggleDisabled) return;
+                  if (!activeSessionId) return;
+                  useSessionStore.getState().setSwarmflowActive(activeSessionId, false);
+                  setSwarmflowConfigPanelOpen(false);
                 }}
               >
                 <X size={11} strokeWidth={2.5} />
@@ -3631,6 +3743,147 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
           </form>
         </div>
       ) : null}
+      {swarmflowConfigPanelOpen && swarmflowConfigAnchor && activeSessionId && swarmflowActive && (() => {
+        // 方向自适应：齿轮下方空间不足时向上展开，避免卡片被视口底部截断
+        const panelHeight = 180;
+        const spaceBelow = window.innerHeight - swarmflowConfigAnchor.bottom;
+        const openUpward = spaceBelow < panelHeight + 16;
+        const panelStyle: CSSProperties = {
+          position: 'fixed',
+          ...(openUpward
+            ? { bottom: window.innerHeight - swarmflowConfigAnchor.top + 8 }
+            : { top: swarmflowConfigAnchor.top }),
+          left: swarmflowConfigAnchor.right + 8,
+          zIndex: 9999,
+        };
+        return createPortal(
+        <div
+          ref={swarmflowConfigPanelRef}
+          className="chat-swarmflow-config-panel"
+          data-testid="chat-panel-swarmflow-config-panel"
+          style={panelStyle}
+          onClick={(e) => e.stopPropagation()}
+        >
+          <div className="chat-swarmflow-config-panel__header">
+            <span className="chat-swarmflow-config-panel__title">{t('swarmflow.configTitle')}</span>
+            <button
+              type="button"
+              onClick={() => setSwarmflowConfigPanelOpen(false)}
+              className="chat-swarmflow-config-panel__close"
+              aria-label={t('common.close')}
+              data-testid="chat-panel-swarmflow-config-close"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          </div>
+          <div className="chat-swarmflow-config-panel__field">
+            <label className="chat-swarmflow-config-panel__label">{t('swarmflow.budgetPanelHint')}</label>
+              {(() => {
+                // 从 store 的 swarmflowBudget（实际 token 数）反推输入框值 + 单位
+                const budgetVal = swarmflowBudget;
+                const isUnlimited = budgetVal == null;
+                let inputValue = '';
+                let inputUnit: 'token' | 'K' | 'M' = 'K';
+                if (!isUnlimited && budgetVal > 0) {
+                  if (budgetVal >= 1_000_000 && budgetVal % 1_000_000 === 0) {
+                    inputValue = String(budgetVal / 1_000_000);
+                    inputUnit = 'M';
+                  } else if (budgetVal >= 1000 && budgetVal % 1000 === 0) {
+                    inputValue = String(budgetVal / 1000);
+                    inputUnit = 'K';
+                  } else {
+                    inputValue = String(budgetVal);
+                    inputUnit = 'token';
+                  }
+                }
+                const computeBudget = (val: string, unit: 'token' | 'K' | 'M') => {
+                  if (!val.trim()) return null;
+                  const n = Number(val.trim());
+                  // token 是最小计费单位,后端 int() 截断浮点会丢精度,
+                  // 故前端只接受正整数;浮点 / 非数字 / ≤0 一律视作无效。
+                  if (!Number.isInteger(n) || n <= 0) return null;
+                  const multiplier = unit === 'M' ? 1_000_000 : unit === 'K' ? 1000 : 1;
+                  return n * multiplier;
+                };
+                return (
+                  <>
+                    <div className="chat-swarmflow-config-panel__budget-row">
+                      <Input
+                        type="number"
+                        step={1}
+                        min={1}
+                        value={inputValue}
+                        placeholder={isUnlimited ? '' : t('swarmflow.budgetPlaceholder')}
+                        readOnly={swarmflowToggleDisabled}
+                        onChange={(v) => {
+                          if (swarmflowToggleDisabled) return;
+                          const unit = inputUnit;
+                          const actual = computeBudget(v, unit);
+                          // 输入有效数字→设置上限（自动取消"无限制"）；
+                          // 输入空/非数字→回退无限制。
+                          useSessionStore.getState().setSwarmflowActive(
+                            activeSessionId, true, actual,
+                          );
+                        }}
+                      />
+                      <Select
+                        value={inputUnit}
+                        disabled={swarmflowToggleDisabled}
+                        options={[
+                          { value: 'token', label: 'token' },
+                          { value: 'K', label: 'K (×1,000)' },
+                          { value: 'M', label: 'M (×1,000,000)' },
+                        ]}
+                        onChange={(val) => {
+                          if (swarmflowToggleDisabled) return;
+                          const unit = val as 'token' | 'K' | 'M';
+                          const actual = computeBudget(inputValue || '500', unit);
+                          useSessionStore.getState().setSwarmflowActive(
+                            activeSessionId, true, actual,
+                          );
+                        }}
+                      />
+                    </div>
+                    <label className="chat-swarmflow-config-panel__unlimited-row">
+                      <input
+                        type="checkbox"
+                        checked={isUnlimited}
+                        disabled={swarmflowToggleDisabled}
+                        onChange={(e) => {
+                          if (swarmflowToggleDisabled) return;
+                          if (e.target.checked) {
+                            // 勾选"无限制"→ budget=null，数字自动清空（反推时 inputValue=''）
+                            useSessionStore.getState().setSwarmflowActive(
+                              activeSessionId, true, null,
+                            );
+                          } else {
+                            // 取消勾选→给默认值 500K
+                            useSessionStore.getState().setSwarmflowActive(
+                              activeSessionId, true, 500000,
+                            );
+                          }
+                        }}
+                      />
+                      <span className="text-xs text-text-muted">{t('swarmflow.budgetUnlimited')}</span>
+                    </label>
+                    {!isUnlimited && (() => {
+                      const actual = computeBudget(inputValue, inputUnit);
+                      return actual != null ? (
+                        <div className="chat-swarmflow-config-panel__actual-hint">
+                          {t('swarmflow.budgetActualHint', { count: actual.toLocaleString() })}
+                        </div>
+                      ) : null;
+                    })()}
+                  </>
+                );
+              })()}
+              {swarmflowToggleDisabled && (
+                <span className="chat-swarmflow-config-panel__readonly-hint">{t('swarmflow.configReadonlyHint')}</span>
+              )}
+            </div>
+        </div>,
+        document.body,
+      );})()}
         </div>
       </div>
     </>
