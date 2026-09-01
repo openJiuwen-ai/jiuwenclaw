@@ -3,6 +3,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from openjiuwen.core.common.exception.errors import ValidationError
+
 from jiuwenswarm.agents.harness.common.tool_progress_context import (
     bind_tool_progress,
     reset_tool_progress,
@@ -75,6 +77,55 @@ async def test_plan_passes_mode_and_deduplicated_candidates():
         "candidate_skill_ids": ["skill-a", "Skill B"],
         "progress": None,
     }
+
+
+@pytest.mark.asyncio
+async def test_compose_tool_accepts_json_encoded_candidate_skill_ids():
+    calls = []
+
+    async def handler(query, **kwargs):
+        calls.append({"query": query, **kwargs})
+        return {"success": True}
+
+    compose_tool = SymphonyToolkit(SimpleNamespace(plan=handler)).get_tools()[-1]
+
+    await compose_tool.invoke(
+        {
+            "query": "plan a trip",
+            "mode": "fast",
+            "candidate_skill_ids": '["openJiuwen-DeepSearch"]',
+        }
+    )
+
+    assert calls == [
+        {
+            "query": "plan a trip",
+            "mode": "fast",
+            "candidate_skill_ids": ["openJiuwen-DeepSearch"],
+            "progress": None,
+        }
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "candidate_skill_ids",
+    ["not-json", '{"skill": "openJiuwen-DeepSearch"}'],
+)
+async def test_compose_tool_rejects_non_array_candidate_strings(candidate_skill_ids):
+    async def handler(query, **kwargs):
+        del query, kwargs
+        raise AssertionError("service must not be called for invalid inputs")
+
+    compose_tool = SymphonyToolkit(SimpleNamespace(plan=handler)).get_tools()[-1]
+
+    with pytest.raises(ValidationError, match="candidate_skill_ids"):
+        await compose_tool.invoke(
+            {
+                "query": "plan a trip",
+                "candidate_skill_ids": candidate_skill_ids,
+            }
+        )
 
 
 @pytest.mark.asyncio
@@ -382,6 +433,8 @@ def test_get_tools_exposes_only_graph_named_contracts():
 
     assert properties["mode"]["enum"] == ["fast", "beam"]
     assert "language" not in properties
+    assert properties["candidate_skill_ids"]["type"] == "array"
+    assert properties["candidate_skill_ids"]["items"] == {"type": "string"}
     assert "shortlisted" in properties["candidate_skill_ids"]["description"]
     assert "fast is the default" in properties["mode"]["description"]
     assert "requires multiple installed skills" in compose_tool.card.description

@@ -167,11 +167,7 @@
         "anthropicUnavailable": "当前提供商套餐不支持 Anthropic 协议"
       },
       "reasoning": {
-        "auto": "使用默认值",
-        "off": "关闭",
-        "low": "低",
-        "medium": "中",
-        "high": "高"
+        "auto": "使用默认值"
       },
       "openaiAccount": "OpenAI 账号",
       "agentOsReadonly": "AgentOS 只读",
@@ -180,8 +176,8 @@
       "reloadAfterFailure": "重新加载核对",
       "modelsResponseInvalid": "模型列表响应格式不正确，请重试。",
       "catalogResponseInvalid": "模型提供商目录响应格式不正确，请重试。",
-      "catalogLoadingCustomAvailable": "正在加载内置模型提供商；仍可选择“自定义”继续配置。",
-      "catalogLoadFailedCustomAvailable": "内置模型提供商加载失败；仍可选择“自定义”继续配置。",
+      "catalogLoading": "正在加载模型提供商和推理选项，请稍候。",
+      "catalogLoadFailed": "模型提供商和推理选项加载失败，请重试后保存。",
       "saveResponseInvalid": "模型保存响应格式不正确，请重新加载核对。",
       "savedApplied": "已保存并生效",
       "savedRestartRequired": "已保存，重启后生效",
@@ -200,7 +196,8 @@
         "vendorSelectionRequired": "请选择模型提供商；历史配置缺少套餐信息时需要重新选择提供商套餐",
         "vendorSelectionInvalid": "当前提供商套餐不在服务端目录中，请重新选择",
         "anthropicUnavailable": "当前提供商套餐不支持 Anthropic 协议，请切换为 OpenAI 协议或重新选择提供商",
-        "reasoningUnsupported": "当前推理强度“{{value}}”不受支持，请重新选择",
+        "reasoningUnsupported": "当前推理选项“{{value}}”不受支持，请重新选择或使用默认值",
+        "reasoningUnavailable": "推理选项尚未加载，请重试后保存",
         "aliasConflict": "自定义名称必须全局唯一，且不能与其他模型 ID 相同",
         "modelNameConflict": "模型 ID 不能与其他配置的自定义名称相同"
       },
@@ -232,6 +229,7 @@
     },
     "experimental": {
       "externalCliAgents": "三方 Agent",
+      "externalCliAgentsDescription": "仅用于集群模式。",
       "a2ui": "A2UI 界面生成",
       "proactive": "主动推荐",
       "proactiveLimits": "推荐频率限制",
@@ -261,7 +259,7 @@
       "api_base": { "title": "API 地址", "placeholder": "例如：https://api.openai.com/v1" },
       "api_key": { "title": "API 密钥", "placeholder": "例如：sk-..." },
       "model_provider": { "title": "模型提供商" },
-      "reasoning_level": { "title": "推理强度" },
+      "reasoning_level": { "title": "推理" },
       "embed_api_base": { "title": "API 地址" },
       "embed_api_key": { "title": "API 密钥" },
       "embed_model": { "title": "模型名称" },
@@ -298,7 +296,7 @@
         "description": "允许 Team Leader 拉起 Claude Agent。"
       },
       "external_cli_agent_claude_use_builtin": {
-        "title": "Claude 使用内置方式",
+        "title": "Claude 使用内置 CLI",
         "description": "不指定本机 CLI 路径，由 SDK 使用默认查找方式。"
       },
       "external_cli_agent_claude_cli_path": { "title": "Claude CLI 路径" },
@@ -307,7 +305,7 @@
         "description": "允许 Team Leader 拉起 Codex Agent；首次启用可能需要安装依赖。"
       },
       "external_cli_agent_codex_use_builtin": {
-        "title": "Codex 使用内置方式",
+        "title": "Codex 使用内置 CLI",
         "description": "不指定本机 CLI 路径，由 SDK 使用默认查找方式。"
       },
       "external_cli_agent_codex_cli_path": { "title": "Codex CLI 路径" },
@@ -559,11 +557,11 @@
     }
   },
   "chat": {
-    "placeholder": "Enter 发送，Shift+Enter 换行",
+    "placeholder": "需要帮你做些什么？输入“/”快速引用技能及指令",
     "placeholderCompacting": "压缩进行中，暂时无法发送消息",
     "placeholderProcessing": "处理中，输入新指令可中断...",
     "placeholderProcessingQueue": "处理中，输入新指令将加入等待队列...",
-    "placeholderTeamMode": "集群模式，输入新指令会并行执行...",
+    "placeholderTeamMode": "需要帮你做些什么？输入“/”快速引用技能及指令",
     "placeholderTeamModeProcessing": "集群模式处理中，输入新指令会并行执行...",
     "placeholderVoice": "正在听取语音...",
     "welcomeLogoAlt": "WorkSwarm 标志",
@@ -621,7 +619,7 @@
     "noInstalledSwarmSkills": "暂无已安装团队技能",
     "noInstalledSkills": "暂无已安装技能",
     "skillsSearchPlaceholder": "搜索技能名称或描述",
-    "skillsManage": "技能管理",
+    "skillsManage": "更多",
     "skillsAdd": "添加到输入栏",
     "skillsRemove": "移除",
     "agent": "智能体",
@@ -758,9 +756,6 @@
     "approvalInputPlaceholder": "填写修改意见后点击「下一步」；留空点击「跳过」"
   },
   "persistSession": {
-    "toolbarTag": "永续会话",
-    "closeTag": "取消永续会话",
-    "lockedHint": "永续会话已在创建时锁定，当前会话中不可更改",
     "textRequired": "请在 /persist 后输入任务内容"
   },
   "goal": {
@@ -928,6 +923,11 @@
     "disable": "禁用",
     "enableSuccess": "已启用“{{name}}”",
     "disableSuccess": "已禁用“{{name}}”",
+    "xiaoyiEnableConfirmation": {
+      "title": "提示",
+      "continueEnable": "仍然启用",
+      "editConfiguration": "去编辑"
+    },
     "unbind": "解绑",
     "unbindConfigurationTitle": "解绑频道配置",
     "unbindConfigurationMessage": "确定解绑“{{name}}”的频道配置吗？解绑后将清除已保存的配置。",
@@ -1100,9 +1100,9 @@
     "externalCli": {
       "claude": "Claude",
       "codex": "Codex",
-      "claudeHint": "可使用系统 PATH 中的 Claude，也可指定可执行文件路径。",
-      "codexHint": "可使用系统 PATH 中的 Codex，也可指定可执行文件路径。",
-      "useBuiltin": "使用内置",
+      "claudeHint": "SDK 未安装时将自动安装；CLI 可使用内置版本、系统 PATH 或指定路径。",
+      "codexHint": "SDK 未安装时将自动安装；CLI 可使用内置版本、系统 PATH 或指定路径。",
+      "useBuiltin": "使用内置 CLI",
       "detect": "检测",
       "selectFile": "选择文件",
       "selectFileTitle": "选择 {{agent}} 命令",
@@ -1115,16 +1115,37 @@
       "statusUnsupported": "路径不可用",
       "statusUnavailable": "不可用",
       "version": "版本 {{version}}",
-      "compatibilityWarning": "检测到的版本可能不兼容。可以更换可执行文件路径、升级版本，或勾选“使用内置”，改用默认启动方式。",
-      "compatibilityWarningWithVersion": "检测到的版本可能不兼容。可以更换可执行文件路径、升级到 {{version}} 或更高版本，或勾选“使用内置”，改用默认启动方式。",
-      "windowsScriptPath": "当前选择的是 Windows 脚本文件。请改选真实的可执行文件，或勾选“使用内置”。",
-      "dependencyInstalling": "正在后台安装 {{agents}} 依赖。安装期间暂未启用；安装完成后，请再次启用并保存配置。",
-      "dependencyInstalled": "请再次启用 {{agent}} 并保存配置。",
+      "compatibilityWarning": "检测到的版本可能不兼容。可以更换可执行文件路径、升级版本，或勾选“使用内置 CLI”，改用默认启动方式。",
+      "compatibilityWarningWithVersion": "检测到的版本可能不兼容。可以更换可执行文件路径、升级到 {{version}} 或更高版本，或勾选“使用内置 CLI”，改用默认启动方式。",
+      "windowsScriptPath": "当前选择的是 Windows 脚本文件。请改选真实的可执行文件，或勾选“使用内置 CLI”。",
+      "dependencyInstalling": "正在后台安装 {{agents}} 可选组件。安装期间不会启用；安装完成后，请重新启用并保存配置。",
+      "dependencyInstalled": "{{agent}} 可选组件已安装，请重新启用并保存配置。",
       "dependencyInstallPhasePreparing": "准备安装 {{agent}} 依赖",
       "dependencyInstallPhaseInstalling": "正在安装 {{agent}} 依赖",
       "dependencyInstallPhaseVerifying": "正在校验 {{agent}} 依赖",
-      "dependencyInstallPhaseSucceeded": "{{agent}} 依赖已安装",
-      "dependencyInstallPhaseFailed": "{{agent}} 依赖安装失败"
+      "dependencyInstallPhaseSucceeded": "{{agent}} 依赖已安装，请重新启用 {{agent}} 并保存配置",
+      "dependencyInstallPhaseFailed": "{{agent}} 依赖安装失败",
+      "installDialogTitle": "安装可选组件",
+      "installDialogDescription": "关闭此弹窗不会中断安装。安装完成后，请返回三方 Agent 配置，重新启用相应组件并保存配置。",
+      "installArtifact": "正在下载第 {{current}} 个文件，共 {{total}} 个：{{package}} {{version}}",
+      "installProgress": "下载进度",
+      "installEta": "预计剩余 {{eta}}",
+      "installRetry": "下载异常，正在重试（{{current}}/{{total}}）",
+      "installSwitchingSource": "正在使用备用下载源",
+      "installRunInBackground": "后台运行",
+      "installInProgress": "{{agents}} 正在安装，可随时查看进度。",
+      "installViewProgress": "查看进度",
+      "claudeCodex": "Claude / Codex",
+      "installPhase": {
+        "idle": "等待安装",
+        "preparing": "正在准备",
+        "downloading": "正在下载",
+        "installing": "正在安装",
+        "verifying": "正在校验",
+        "succeeded": "安装完成，请重新启用",
+        "failed": "安装失败",
+        "running": "正在安装"
+      }
     },
     "proactive": {
       "typeLabel": {
@@ -1742,7 +1763,7 @@
     },
     "graph": {
       "orchestration": {
-        "description": "开启后，JiuwenSwarm 会为已安装的技能构建技能图谱（消耗Token），并在执行任务时基于图谱自动选择、组合和编排技能，提高任务执行效率；关闭后将不再进行技能编排，已构建的技能图谱不会删除。",
+        "description": "开启后，会为已安装的技能构建技能图谱（消耗Token），并在执行任务时基于图谱自动选择、组合和编排技能，提高任务执行效率；关闭后将不再进行技能编排，已构建的技能图谱不会删除。",
         "graphDefinition": "技能图谱就像一张技能关系地图：每个点代表一个技能，点之间的线表示它们可以配合使用。",
         "saving": "正在保存…",
         "saveFailed": "技能编排开关保存失败，请稍后重试。",
@@ -1776,7 +1797,7 @@
       "tasks": "任务",
       "relatedEdges": "关联技能",
       "noRelatedEdges": "暂无关联技能。",
-      "selectSkillHint": "从技能列表或画布中选择一个技能，查看说明和关联。",
+      "selectSkillHint": "从技能列表或画布中选择一个技能，查看详情",
       "detailDrawerLabel": "技能详情",
       "closeDetail": "关闭详情",
       "zoomIn": "放大",
@@ -2108,6 +2129,8 @@
       "create": "创建",
       "createFirst": "手动创建",
       "createByChat": "通过聊天创建",
+      "createByUpload": "上传文件创建",
+      "uploading": "上传中…",
       "createViaChatPrompt": "帮我创建一个xxx专家，擅长xxx",
       "back": "返回"
     },
@@ -2128,6 +2151,8 @@
       "authRequired": "该智能体需要完成认证后才能安装",
       "connectionUnavailable": "依赖的 MCP 尚未连接，请先连接后再使用",
       "connectorUnavailableNamed": "该智能体依赖的 MCP「{{connector}}」尚未连接，请先完成连接后再重试安装。",
+      "uploadSuccess": "智能体包 {{id}} 已导入，请在我的智能体中查看",
+      "uploadError": "上传并导入智能体失败，请检查文件后重试",
       "newVersion": "该智能体有新版本，可更新",
       "teamUnavailable": "团队智能体管理暂未开放",
       "featureUnavailable": "该功能暂不在本期范围",
@@ -2210,6 +2235,12 @@
       "personaLabel": "专家人设",
       "personaPlaceholder": "输入保留 Markdown 和换行的人设内容",
       "personaPreview": "专家人设 Markdown 预览",
+      "uploadHint": "支持.zip和.tar文件，解压后的文件夹需要至少包含 manifest.json 文件、persona目录文件和 README.md，.json 文件需包含 package_type 声明包类型",
+      "uploadPlaceholder": "点击或拖动文件到此处",
+      "uploadInvalidType": "仅支持 .zip 和 .tar 文件",
+      "uploadPickerUnsupported": "当前环境暂不支持选择本地文件",
+      "uploadPickerFailed": "打开文件选择器失败，请重试",
+      "removeUpload": "移除已选文件",
       "skillsLabel": "技能配置（可选）",
       "skillsToggle": "收起或展开技能配置",
       "addSkill": "添加技能",

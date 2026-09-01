@@ -33,7 +33,6 @@ import { AgentTeamActivityCard } from './TeamEventGroupDisplay';
 import { isTeamActivityMessage, parseTeamEventMessage } from './teamEventUtils';
 import { isTeamLeaderMember, type TeamMemberIdentity } from '../../utils/teamMemberAvatar';
 import { TeamMemberAvatar } from '../TeamMemberAvatar';
-import beeBanner from '../../assets/蜜蜂.svg';
 import './ChatPanel.css';
 import { CodeChangesCard } from '../../features/code-mode/CodeChangesCard';
 import { useCodeTurnDiffHistory } from '../../features/code-mode/useCodeTurnDiffHistory';
@@ -738,6 +737,40 @@ function scrollToBottom(el: HTMLDivElement): void {
   el.scrollTop = Math.max(0, el.scrollHeight - el.clientHeight);
 }
 
+function BeeBanner({ className, altText, onTrigger }: { className: string; altText: string; onTrigger: () => void }) {
+  const [isPlaying, setIsPlaying] = useState(false);
+  const playingRef = useRef(false);
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const handleMouseEnter = useCallback(() => {
+    if (playingRef.current) return;
+    playingRef.current = true;
+    setIsPlaying(true);
+    onTrigger();
+    if (timerRef.current) clearTimeout(timerRef.current);
+    timerRef.current = setTimeout(() => {
+      playingRef.current = false;
+      setIsPlaying(false);
+    }, 3000);
+  }, [onTrigger]);
+
+  useEffect(() => {
+    return () => {
+      if (timerRef.current) clearTimeout(timerRef.current);
+    };
+  }, []);
+
+  return (
+    <img
+      className={className}
+      src={isPlaying ? `${import.meta.env.BASE_URL}bee-flying.png` : `${import.meta.env.BASE_URL}bee-static.png`}
+      alt={altText}
+      data-testid="chat-panel-welcome-banner"
+      onMouseEnter={handleMouseEnter}
+    />
+  );
+}
+
 export function ChatPanel({
   onSendMessage,
   onInputIntent,
@@ -837,6 +870,7 @@ export function ChatPanel({
   const shouldShowShareExport = Boolean(onExportShare);
   const shouldShowHumanShare = mode === 'team' && teamHumanShareCommands.length > 0;
   const [humanShareOpen, setHumanShareOpen] = React.useState(false);
+  const [bubbleVisible, setBubbleVisible] = useState(false);
   // 新会话占位符 'new' 还没有真实 session_id，隐藏心跳入口，见接口规格说明 §16.2
   const heartbeatAvailable = Boolean(activeSessionId && activeSessionId !== NEW_CONVERSATION_ID);
   const {
@@ -1277,7 +1311,7 @@ export function ChatPanel({
             {shouldShowShareExport && (
               <button
                 type="button"
-                className={`icon-btn share-export-btn ${isExportingShare ? 'share-export-btn--loading' : ''}`}
+                className={`chat-header-icon-btn icon-btn share-export-btn ${isExportingShare ? 'share-export-btn--loading' : ''}`}
                 data-testid="chat-panel-share-export"
                 data-variant={isExportingShare ? 'exporting' : 'ready'}
                 title={shareExportTitle}
@@ -1324,6 +1358,7 @@ export function ChatPanel({
               className={`chat-header-icon-btn ${teamAreaExpanded === false && !heartbeatPanelOpen ? 'chat-header-icon-btn--active' : ''}`}
               data-testid="chat-panel-header-chat-toggle"
               data-variant="collapse"
+              data-team-area-toggle="true"
               onClick={() => onToggleTeamArea?.(teamAreaExpanded === false ? null : false)}
             >
               <ChatOverviewIcon className="h-[32px] w-[32px]" aria-hidden />
@@ -1334,6 +1369,7 @@ export function ChatPanel({
                 className={`chat-header-icon-btn ${teamAreaExpanded === true && !heartbeatPanelOpen ? 'chat-header-icon-btn--active' : ''}`}
                 data-testid="chat-panel-header-expand-toggle"
                 data-variant="expand"
+                data-team-area-toggle="true"
                 onClick={() => onToggleTeamArea?.(teamAreaExpanded === true ? null : true)}
               >
                 <PanelCollapseIcon className="h-[32px] w-[32px]" aria-hidden />
@@ -1395,10 +1431,16 @@ export function ChatPanel({
             </>
           ) : (
             <div className="chat-welcome" data-testid="chat-panel-welcome">
-              <div ref={bubbleRef} className="chat-welcome__banner chat-welcome__banner--bubble" data-testid="chat-panel-welcome-banner-bubble">{t('chat.welcomeBubbleText')}</div>
+              <div
+                ref={bubbleRef}
+                className={`chat-welcome__banner chat-welcome__banner--bubble${bubbleVisible ? ' chat-welcome__banner--bubble--visible' : ''}`}
+                data-testid="chat-panel-welcome-banner-bubble"
+              >
+                {t('chat.welcomeBubbleText')}
+              </div>
               <h2 className="chat-welcome__heading" data-testid="chat-panel-welcome-heading"><WelcomeHeading /></h2>
               <div className="chat-welcome__composer" data-testid="chat-panel-welcome-composer">
-                <img className="chat-welcome__banner chat-welcome__banner--bee" src={beeBanner} alt={t('chat.welcomeLogoAlt')} data-testid="chat-panel-welcome-banner" />
+                <BeeBanner className="chat-welcome__banner chat-welcome__banner--bee" altText={t('chat.welcomeLogoAlt')} onTrigger={() => setBubbleVisible(true)} />
                 <ActiveTeamGroupEntry isProcessing={isProcessing} teamAreaExpanded={teamAreaExpanded} />
                 <AgentActivityCard isProcessing={isProcessing} onSendTask={handleSendMessage} />
                 <InterruptResultBubble />

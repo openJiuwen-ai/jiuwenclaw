@@ -63,6 +63,26 @@ export type Permission = 'default' | 'full_access';
 
 export type ModelPlan = 'token_plan' | 'coding_plan' | 'custom_api';
 
+export type ModelReasoningCapability = {
+  options: string[];
+  recommended: string | null;
+};
+
+export type ModelReasoningProtocols = {
+  openai: ModelReasoningCapability;
+  anthropic?: ModelReasoningCapability;
+};
+
+export type ModelReasoningRule = {
+  patterns: string[];
+  capabilities: Required<ModelReasoningProtocols>;
+};
+
+export type ModelReasoningCatalog = {
+  protocol_defaults: Required<ModelReasoningProtocols>;
+  model_fallbacks: ModelReasoningRule[];
+};
+
 export interface ModelEntry {
   model_name: string;
   api_base: string;
@@ -111,9 +131,14 @@ export interface VendorPreset {
   supports_anthropic: boolean;
   anthropic_base: string | null;
   anthropic_client_provider: string | null;
+  reasoning_capabilities: Record<string, ModelReasoningProtocols>;
+  reasoning_rules: ModelReasoningRule[];
 }
 
-export type VendorPresetMap = Record<ModelPlan, VendorPreset[]>;
+export type VendorPresetMap = Record<ModelPlan, VendorPreset[]> & {
+  /** Null only while the server catalog has not loaded successfully. */
+  reasoning: ModelReasoningCatalog | null;
+};
 
 export interface VendorFetchModelsResult {
   models: string[];

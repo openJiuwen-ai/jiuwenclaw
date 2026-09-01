@@ -63,6 +63,7 @@ from jiuwenswarm.agents.harness.common.rails.permissions.permissions_persist imp
 from jiuwenswarm.extensions.hooks_context import AgentServerChatHookContext
 from jiuwenswarm.server.runtime.agent_manager import AgentManager, ACP_DEFAULT_CAPABILITIES
 from jiuwenswarm.server.runtime.agent_warm_pool import WarmClaim
+from jiuwenswarm.server.runtime.tokenizer_service import TokenizerService
 from jiuwenswarm.server.runtime.session.session_metadata import get_all_sessions_metadata, remove_session_metadata_cache
 from jiuwenswarm.server.runtime.session.session_history import (
     append_compact_history_records,
@@ -1053,6 +1054,12 @@ class AgentWebSocketServer:
             ConfigAdapter(),
         ):
             self._adapter_registry.register(adapter)
+        # AgentServer-side tokenizer cache/download service. The Gateway only
+        # persists model profiles and notifies this process to refresh them.
+        self._tokenizer_service = TokenizerService()
+        # Tokenizer downloads are best-effort background work. Context creation
+        # is local-only and falls back to string length while these tasks run.
+        self._tokenizer_warmup_tasks: set[asyncio.Task] = set()
         # skills.* 等无状态 RPC：AgentManager 未缓存 agent 时复用的轻量 JiuWenSwarm，
         # 避免每次 cache miss 都 new 导致 SkillNet 异步安装等实例态断裂。
         self._stateless_fallback_agents: dict[str, Any] = {}
@@ -1146,6 +1153,49 @@ class AgentWebSocketServer:
 
     # ---------- 生命周期 ----------
 
+    def _schedule_tokenizer_warmup(
+        self,
+        config: dict[str, Any] | None,
+        *,
+        reason: str,
+    ) -> None:
+        """Schedule a non-blocking tokenizer warm-up task.
+
+        The service-level lock deduplicates overlapping resolutions. Keeping
+        each task until completion lets a reload submit its newest config
+        without cancelling an in-flight worker-thread download.
+        """
+
+        async def _run() -> None:
+            try:
+                result = await self._tokenizer_service.warm(config, reason=reason)
+                logger.info(
+                    "[AgentWebSocketServer] tokenizer warm-up finished: "
+                    "reason=%s warmed=%d degraded=%d failed=%d",
+                    reason,
+                    result.get("warmed", 0),
+                    result.get("degraded", 0),
+                    result.get("failed", 0),
+                )
+            except (
+                AttributeError,
+                ImportError,
+                KeyError,
+                OSError,
+                RuntimeError,
+                TypeError,
+                ValueError,
+            ) as exc:
+                logger.warning(
+                    "[AgentWebSocketServer] tokenizer warm-up failed: reason=%s error=%s",
+                    reason,
+                    exc,
+                )
+
+        task = asyncio.create_task(_run(), name=f"tokenizer-warmup:{reason}")
+        self._tokenizer_warmup_tasks.add(task)
+        task.add_done_callback(self._tokenizer_warmup_tasks.discard)
+
     async def start(self) -> None:
         """启动 WebSocket 服务端，开始监听连接。优先使用 legacy.server.serve 以与 Gateway 的 legacy client 握手兼容.
 
@@ -1187,6 +1237,11 @@ class AgentWebSocketServer:
         logger.info(
             "[AgentWebSocketServer] 已启动: ws://%s:%s", self._host, self._port
         )
+
+        # The port is already listening. Remote tokenizer downloads must not
+        # delay startup; ContextEngine is local-only and uses string fallback
+        # if this task has not completed when the first context is created.
+        self._schedule_tokenizer_warmup(get_config(), reason="startup")
 
         # 端口已 listen, 后台预热 checkpointer, 不阻塞启动与握手.
         # _checkpointer_warmup_task 供 shutdown 时 cancel, 避免任务悬挂.
@@ -1235,6 +1290,36 @@ class AgentWebSocketServer:
         # startup_mode 决定要不要自动把 jiuwenbox 子进程也拉起来。失败不阻塞
         # 启动 (用户依然可以在 TUI 里跑 /sandbox enable 重试)。
         await self._bootstrap_internal_jiuwenbox()
+
+    def schedule_image_modality_warmup(
+        self, *, reason: str, reset_cache: bool = False
+    ) -> None:
+        """把图像模态探针任务放进统一槽位调度。
+
+        启动预热与模型配置变更重探共用 ``_image_modality_refresh_task`` 这一个
+        任务槽位：新任务启动前取消上一轮未完成的任务，避免启动预热在配置变化
+        后继续跑完并写回过期结论（新配置先 reset 缓存、旧任务随后覆盖）。
+        任务由 ``_stop_main_services`` 在 shutdown 时统一 cancel 回收。
+
+        Args:
+            reason: 传给 warm/refresh 的日志标签（"startup" / "model config change"）。
+            reset_cache: True 时先清空旧结论再探（配置变更场景），False 仅补探。
+        """
+        from jiuwenswarm.server.runtime.image_modality_warmup import (
+            refresh_image_modality_cache,
+            warm_image_modality_cache,
+        )
+
+        previous_task = self._image_modality_refresh_task
+        if previous_task is not None and not previous_task.done():
+            previous_task.cancel()
+        if reset_cache:
+            coro = refresh_image_modality_cache(get_config(), reason=reason)
+        else:
+            coro = warm_image_modality_cache(get_config(), reason=reason)
+        self._image_modality_refresh_task = asyncio.create_task(
+            coro, name=f"image-modality-warmup-{reason}"
+        )
 
     async def _start_personal_context_best_effort(self) -> None:
         """Start optional PersonalContext without changing AgentServer readiness."""
@@ -1533,6 +1618,13 @@ class AgentWebSocketServer:
 
     async def _stop_main_services(self) -> None:
         """Run the unchanged AgentServer shutdown before optional PersonalContext cleanup."""
+        tokenizer_tasks = tuple(self._tokenizer_warmup_tasks)
+        self._tokenizer_warmup_tasks.clear()
+        for task in tokenizer_tasks:
+            if not task.done():
+                task.cancel()
+        if tokenizer_tasks:
+            await asyncio.gather(*tokenizer_tasks, return_exceptions=True)
         # 先取消 checkpointer 预热任务, 避免在 server 关闭后仍在后台跑.
         warmup = self._checkpointer_warmup_task
         self._checkpointer_warmup_task = None
@@ -9344,27 +9436,37 @@ class AgentWebSocketServer:
                 reload_kwargs["target_session_id"] = target_session_id
             if reload_scopes:
                 reload_kwargs["reload_scopes"] = reload_scopes
-            agent_reload_scopes = {"model", "team", "permissions", "agent_runtime"}
+            agent_reload_scopes = {
+                "model",
+                "multimodal",
+                "team",
+                "permissions",
+                "agent_runtime",
+            }
             should_reload_agents = not reload_scopes or bool(reload_scopes & agent_reload_scopes)
+
+            # Model profiles are persisted by Gateway, but tokenizer artifacts
+            # are owned by this AgentServer process. Submit the warm-up in the
+            # background; context creation itself never downloads or waits.
+            should_warm_tokenizers = True
+            if reload_scopes:
+                should_warm_tokenizers = "model" in reload_scopes
+            if should_warm_tokenizers:
+                self._schedule_tokenizer_warmup(
+                    config_payload if isinstance(config_payload, dict) else get_config(),
+                    reason="model config change",
+                )
 
             # 模型配置变了就重探图像模态：同一个 (api_base, model_name) 背后可能已换
             # 端点 / 密钥 / 后端，旧结论不能留。跑在后台任务里——探针每个最多 5s，不该
             # 把 reload 响应拖在这里；这个 loop 活到进程结束，结论一定能落进缓存。
-            should_refresh_image_modality = not reload_scopes or "model" in reload_scopes
+            should_refresh_image_modality = should_warm_tokenizers
             if should_refresh_image_modality:
-                from jiuwenswarm.server.runtime.image_modality_warmup import (
-                    refresh_image_modality_cache,
-                )
-
-                # 上一轮还没探完就又改了配置：旧结论已经作废，直接取消。
-                previous_task = self._image_modality_refresh_task
-                if previous_task is not None and not previous_task.done():
-                    previous_task.cancel()
-                self._image_modality_refresh_task = asyncio.create_task(
-                    refresh_image_modality_cache(
-                        get_config(),
-                        reason="model config change",
-                    )
+                # 上一轮还没探完就又改了配置：旧结论已经作废，由统一调度入口
+                # 取消旧任务（含启动预热轮）后再 reset 缓存并重探。
+                self.schedule_image_modality_warmup(
+                    reason="model config change",
+                    reset_cache=True,
                 )
             # 模型配置变更时同步刷新本进程（AgentServer）的 Zen 免费模型缓存
             # （与上方 image modality 刷新同一 model scope）。Gateway 进程在
@@ -10687,6 +10789,17 @@ class AgentWebSocketServer:
         if model_name and model_name in self._model_cache:
             return self._model_cache[model_name]
         return self._default_model
+
+    def reset_model_cache(self) -> None:
+        """清空模型缓存,下次 _resolve_model 触发懒重建。
+
+        供 Zen 免费模型就绪回调使用:预热异步化后首个请求可能早于 Zen 拉取
+        完成构建不含 Zen 条目的缓存(一次性、不自动重建),就绪后清空即可让
+        重建带上 Zen 免费模型及占位符默认模型的 Zen 兜底。
+        """
+        if self._model_cache:
+            self._model_cache.clear()
+        self._default_model = None
 
     def _build_model_cache(self) -> None:
         """Build model cache from jiuwenswarm config.yaml (reuse interface_deep logic)."""

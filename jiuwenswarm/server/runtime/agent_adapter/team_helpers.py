@@ -1972,30 +1972,68 @@ async def process_team_message_stream(
     )
     request_queue: asyncio.Queue | None = None
     is_heartbeat_request = _is_heartbeat_request(request)
-    is_bounded_round = is_heartbeat_request or _is_cron_request_id(rid)
+    is_cron_request = _is_cron_request_id(rid)
+    is_bounded_round = is_heartbeat_request or is_cron_request
     admission = getattr(heartbeat_service, "admission", None)
     user_admitted = False
+    cron_user_admitted = False
     round_submitted = False
     event_stream_cancelled = False
 
-    async def _release_user_admission() -> None:
+    async def _complete_user_submission(*, accepted: bool) -> None:
         nonlocal user_admitted
         if user_admitted:
-            await admission.end_user(session_id)
+            await admission.complete_team_user_submission(
+                session_id,
+                accepted=accepted,
+            )
             user_admitted = False
 
+    async def _release_cron_admission() -> None:
+        nonlocal cron_user_admitted
+        if cron_user_admitted:
+            await admission.end_user(session_id)
+            cron_user_admitted = False
+
+    async def _release_interactive_activity() -> None:
+        await admission.end_team_user(session_id)
+
+    def _ensure_interactive_round(*, terminal_armed: bool) -> None:
+        if team_manager.is_round_active(session_id):
+            return
+        team_manager.begin_round(
+            session_id,
+            rid,
+            release_admission=_release_interactive_activity,
+            terminal_armed=terminal_armed,
+        )
+
     async def _begin_team_round() -> None:
-        nonlocal user_admitted
-        if not is_heartbeat_request and admission is not None:
-            begin_team_user = getattr(admission, "begin_team_user", admission.begin_user)
-            await begin_team_user(session_id)
-            user_admitted = True
+        nonlocal cron_user_admitted, user_admitted
+        if not is_bounded_round:
+            if admission is not None:
+                begin_team_user = getattr(
+                    admission,
+                    "begin_team_user",
+                    admission.begin_user,
+                )
+                await begin_team_user(session_id)
+                user_admitted = True
+            # Interactive Team input keeps its original direct delivery path.
+            # Heartbeat admission tracks only the active-iteration fact; it
+            # must not use TeamManager round ownership as a steer admission gate.
+            if is_first_request and admission is not None:
+                _ensure_interactive_round(terminal_armed=True)
+            return
+        if is_cron_request and admission is not None:
+            await admission.begin_bounded_team_user(session_id)
+            cron_user_admitted = True
         try:
             team_manager.begin_round(
                 session_id,
                 rid,
                 release_admission=(
-                    _release_user_admission if user_admitted else None
+                    _release_cron_admission if cron_user_admitted else None
                 ),
                 # Bounded callers keep ownership through their completion
                 # observer/grace window.  This prevents late events from the
@@ -2008,14 +2046,34 @@ async def process_team_message_stream(
                 terminal_armed=is_first_request,
             )
         except BaseException:
-            await _release_user_admission()
+            await _complete_user_submission(accepted=False)
+            await _release_cron_admission()
             raise
 
     async def _finish_round_submission(*, accepted: bool) -> None:
         nonlocal round_submitted
         round_submitted = accepted
+        if is_heartbeat_request:
+            if not accepted:
+                await team_manager.release_round(session_id, rid)
+            return
+        if is_cron_request:
+            if not accepted:
+                await team_manager.release_round(session_id, rid)
+            return
+        if admission is None:
+            return
         if not accepted:
-            await team_manager.release_round(session_id, rid)
+            await _complete_user_submission(accepted=False)
+            if is_first_request:
+                await team_manager.release_round(session_id, rid)
+            return
+        if is_first_request:
+            round_is_live = team_manager.is_round_owner(session_id, rid)
+            await _complete_user_submission(accepted=round_is_live)
+            return
+        await _complete_user_submission(accepted=True)
+        _ensure_interactive_round(terminal_armed=False)
 
     hide_dm = False
     debug = False
@@ -2614,8 +2672,12 @@ async def process_team_message_stream(
             await asyncio.shield(abort_task)
         elif is_bounded_round or not round_submitted:
             await team_manager.release_round(session_id, rid)
-        if user_admitted and not team_manager.is_round_owner(session_id, rid):
-            await _release_user_admission()
+        if (
+            user_admitted
+            and not round_submitted
+            and not team_manager.is_round_owner(session_id, rid)
+        ):
+            await _complete_user_submission(accepted=False)
 
 
 async def _consume_stream_with_query(

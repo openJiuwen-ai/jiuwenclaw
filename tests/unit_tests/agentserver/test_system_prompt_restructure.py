@@ -25,6 +25,9 @@ from openjiuwen.symphony.discovery import SkillPromptBranch, SkillPromptSnapshot
 from jiuwenswarm.agents.harness.common.browser_defaults import (
     DEFAULT_BROWSER_AGENT_MAX_ITERATIONS,
 )
+from jiuwenswarm.agents.harness.common.rails.browser_task_prompt_rail import (
+    BrowserTaskPromptRail,
+)
 from jiuwenswarm.common import utils as _utils_mod
 from jiuwenswarm.server.runtime.agent_adapter import interface_deep as interface_module
 from jiuwenswarm.server.runtime.agent_adapter.interface_deep import JiuWenSwarmDeepAdapter
@@ -817,7 +820,7 @@ async def test_runtime_dynamic_sections_go_to_prompt_attachment_when_manager_ava
 
 @pytest.mark.asyncio
 async def test_browser_policy_is_injected_only_when_browser_agent_is_loaded():
-    rail = JiuWenSwarmDeepAdapter._build_subagent_rail()
+    rail = BrowserTaskPromptRail()
     assert rail is not None
     rail.tools = [object()]
     rail.system_prompt_builder = SystemPromptBuilder(language="en")

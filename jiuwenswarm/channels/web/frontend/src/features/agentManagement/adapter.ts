@@ -32,7 +32,7 @@ export function normalizeAgentConnectionState(state: string | undefined): AgentC
 
 export function isPreviewableFile(relativePath: string): boolean {
   const lowerPath = relativePath.toLowerCase();
-  return lowerPath.endsWith('.md') || lowerPath.endsWith('.mdx') || lowerPath.endsWith('.json');
+  return lowerPath.endsWith('.md') || lowerPath.endsWith('.mdx') || lowerPath.endsWith('.json') || lowerPath.endsWith('.py');
 }
 
 function normalizeCapability(raw: RawAgentCapability, locale: SupportedLocale): AgentCapability {
