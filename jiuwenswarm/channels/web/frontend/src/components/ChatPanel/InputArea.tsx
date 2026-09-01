@@ -3219,7 +3219,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
             {isModeMenuOpen && modeMenuAnchor && createPortal(
               <div
                 ref={modeMenuPortalRef}
-                className="chat-mode-select__menu"
+                className="chat-mode-select__menu chat-mode-select__menu--agent-modes"
                 role="menu"
                 data-testid="chat-panel-mode-select-menu"
                 style={menuDirection === 'up'
@@ -3418,24 +3418,24 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
       </div>
       </div>
 
-      {showSlashSuggestionBelow && composerSuggestion && (
-        <ComposerSuggestionMenu
-          suggestion={composerSuggestion}
-          items={composerSuggestionItems}
-          highlightedIndex={composerSuggestionIndex}
-          navigationMode={composerSuggestionNavigationMode}
-          containerRef={composerSuggestionMenuRef}
-          onPointerHighlight={(index) => {
-            setComposerSuggestionNavigationMode('pointer');
-            setComposerSuggestionIndex(index);
-          }}
-          onPick={insertComposerToken}
-          loading={slashCatalogLoading}
-          placement="below"
-        />
-      )}
-
       {showWorkContextRow ? (
+        <div className="chat-work-context-wrapper" data-testid="chat-panel-work-context-wrapper">
+          {showSlashSuggestionBelow && composerSuggestion && (
+            <ComposerSuggestionMenu
+              suggestion={composerSuggestion}
+              items={composerSuggestionItems}
+              highlightedIndex={composerSuggestionIndex}
+              navigationMode={composerSuggestionNavigationMode}
+              containerRef={composerSuggestionMenuRef}
+              onPointerHighlight={(index) => {
+                setComposerSuggestionNavigationMode('pointer');
+                setComposerSuggestionIndex(index);
+              }}
+              onPick={insertComposerToken}
+              loading={slashCatalogLoading}
+              placement="below"
+            />
+          )}
         <div ref={workMenuRef} className="chat-work-context-row" data-testid="chat-panel-work-context-row">
           <div className={clsx('chat-work-select', workMenuOpen === 'project' && 'chat-work-select--open')} data-testid="chat-panel-work-select">
             <button
@@ -3545,6 +3545,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
               </div>
             </div>
           ) : null}
+        </div>
         </div>
       ) : null}
 

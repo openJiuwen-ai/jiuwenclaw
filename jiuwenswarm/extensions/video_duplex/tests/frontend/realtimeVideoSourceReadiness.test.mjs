@@ -4,7 +4,7 @@ import test from 'node:test';
 import {
   isVideoSourceReady,
   waitForFirstVideoFrame,
-} from '../node_modules/.cache/realtime-video-source-readiness/videoSource.js';
+} from '../../../../channels/web/frontend/node_modules/.cache/video-source/videoSource.js';
 
 const stream = (readyState) => ({
   getVideoTracks: () => [{ readyState }],

@@ -123,10 +123,16 @@ def video_duplex_enabled() -> bool:
     }
 
 
-def register_video_live_handler(channel: Any, *, agent_client: Any = None) -> None:
+def register_video_live_handler(
+    channel: Any,
+    *,
+    agent_client: Any = None,
+    normalize_media_attachments: Any = None,
+) -> None:
     search_manager = video_search.VideoSearchManager(
         channel,
         agent_client,
+        normalize_media_attachments=normalize_media_attachments,
         # Resolve the logger at execution time so runtime/test overrides remain effective.
         log_event=lambda event: _append_video_event_log(event),
         qwen_active=lambda: _video_live_mode() == "realtime",

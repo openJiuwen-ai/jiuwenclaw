@@ -9,13 +9,10 @@ import time
 from typing import Any, Awaitable, Callable
 import uuid
 
-from jiuwenswarm.common.video_tool_profile import VIDEO_TOOL_CHANNEL_ID
 from jiuwenswarm.extensions.video_duplex.backend.qwen_omni_tools import (
     parse_qwen_omni_tool_call,
 )
-from jiuwenswarm.server.runtime.attachments.media_attachments import (
-    normalize_chat_media_attachments,
-)
+VIDEO_TOOL_CHANNEL_ID = "video_tool"
 
 
 _IMAGE_FILENAME_SUFFIXES = {
@@ -141,6 +138,8 @@ async def execute_core_agent(
     visual_context: str,
     search_session_id: str,
     frame_data_url: str = "",
+    normalize_media_attachments: Callable[[dict[str, Any], str | None], None]
+    | None = None,
     on_progress: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
 ) -> dict[str, Any]:
     """Run one video research job through the standard, full Core Agent API."""
@@ -177,7 +176,9 @@ async def execute_core_agent(
     media_item = _frame_media_item(frame_data_url)
     if media_item is not None:
         params["media_items"] = [media_item]
-        normalize_chat_media_attachments(params, core_session_id)
+        if normalize_media_attachments is None:
+            raise RuntimeError("Core media attachment service is unavailable")
+        normalize_media_attachments(params, core_session_id)
     env = e2a_from_agent_fields(
         request_id=request_id,
         channel_id=VIDEO_TOOL_CHANNEL_ID,
@@ -248,6 +249,10 @@ class VideoSearchManager:
         channel: Any,
         agent_client: Any,
         *,
+        normalize_media_attachments: Callable[
+            [dict[str, Any], str | None], None
+        ]
+        | None = None,
         log_event: Callable[[dict[str, Any]], None],
         qwen_active: Callable[[], bool],
         max_concurrency: int = 2,
@@ -255,6 +260,7 @@ class VideoSearchManager:
     ) -> None:
         self._channel = channel
         self._agent_client = agent_client
+        self._normalize_media_attachments = normalize_media_attachments
         self._log_event = log_event
         self._qwen_active = qwen_active
         self._jobs: dict[str, dict[str, Any]] = {}
@@ -342,6 +348,7 @@ class VideoSearchManager:
                     visual_context=visual_context,
                     search_session_id=search_session_id,
                     frame_data_url=frame_data_url,
+                    normalize_media_attachments=self._normalize_media_attachments,
                     on_progress=emit_progress,
                 )
                 answer = core_result["answer"]

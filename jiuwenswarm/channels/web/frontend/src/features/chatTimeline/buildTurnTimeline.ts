@@ -89,6 +89,8 @@ export type RenderItem =
       workEndMs: number;
       isLastTurn: boolean;
       hasWork: boolean;
+      /** 时间行插在本轮内容顶部，接管了本轮顶部头像时为 true */
+      showAvatar: boolean;
     };
 
 /**
@@ -442,6 +444,8 @@ function insertTurnSummaries(items: RenderItem[], isProcessing: boolean): Render
   let hasWork = false;
   let turnId = 0;
   let seq = 0;
+  // 时间行插入点：本轮首条 assistant 内容之前（视觉上位于头像下第一行）。
+  let turnContentStart = 0;
 
   const acc = (value: number, asWork = false) => {
     if (!Number.isFinite(value) || value <= 0) return;
@@ -459,7 +463,7 @@ function insertTurnSummaries(items: RenderItem[], isProcessing: boolean): Render
     // 从首次思考才开始算，耗时显示成 0s。
     const carryTimestamps = !hasActivity;
     if (shouldShow && Number.isFinite(startMs) && Number.isFinite(endMs)) {
-      out.push({
+      const summary: Extract<RenderItem, { type: 'turnSummary' }> = {
         type: 'turnSummary',
         key: `turn-summary-${seq}`,
         turnId,
@@ -469,8 +473,23 @@ function insertTurnSummaries(items: RenderItem[], isProcessing: boolean): Render
         workEndMs: Number.isFinite(workEndMs) ? workEndMs : endMs,
         isLastTurn,
         hasWork,
-      });
+        showAvatar: false,
+      };
       seq += 1;
+      // 时间行统一挂到本轮内容顶部：接管首条 leader/助手内容的顶部头像（与折叠条同规则）；
+      // 成员自己的头像不动，时间行不带头像直接排在成员消息上方。
+      const firstContent = out[turnContentStart];
+      if (
+        firstContent &&
+        (firstContent.type === 'reasoning' ||
+          firstContent.type === 'toolGroup' ||
+          (firstContent.type === 'message' && firstContent.message.role === 'assistant')) &&
+        firstContent.showAvatar
+      ) {
+        summary.showAvatar = true;
+        firstContent.showAvatar = false;
+      }
+      out.splice(turnContentStart, 0, summary);
     }
     if (!carryTimestamps) {
       startMs = Number.POSITIVE_INFINITY;
@@ -488,6 +507,7 @@ function insertTurnSummaries(items: RenderItem[], isProcessing: boolean): Render
       turnId += 1;
       acc(toTimestampMs(item.message.timestamp), false);
       out.push(item);
+      turnContentStart = out.length;
       continue;
     }
     // slash 命令结果不属于上一轮 assistant 工作，也不应产生自己的「任务用时」。
@@ -495,11 +515,13 @@ function insertTurnSummaries(items: RenderItem[], isProcessing: boolean): Render
     if (item.type === 'message' && item.message.isCommandOutput) {
       flush(false);
       out.push(item);
+      turnContentStart = out.length;
       continue;
     }
     // 主动推荐消息自成一块（与 buildRenderItems 里推进 currentTurnId 对齐）：
     // 先 flush 掉上一轮，再 +1 进入新 turn，避免推荐消息并入上一轮导致
     // buildTurnWorkMeta 的 proactive 补丁误把上一轮 hasWork 置 false。
+    let startsOwnBlock = false;
     if (
       item.type === 'message' &&
       item.message.role !== 'user' &&
@@ -507,6 +529,7 @@ function insertTurnSummaries(items: RenderItem[], isProcessing: boolean): Render
     ) {
       flush(false);
       turnId += 1;
+      startsOwnBlock = true;
     }
     if (item.type === 'toolGroup') {
       hasActivity = true;
@@ -542,6 +565,10 @@ function insertTurnSummaries(items: RenderItem[], isProcessing: boolean): Render
       }
     }
     out.push(item);
+    if (startsOwnBlock) {
+      // 主动推荐卡自成一块：时间行插在卡片之后、后续内容之前。
+      turnContentStart = out.length;
+    }
   }
   flush(true);
   return out;

@@ -56,11 +56,6 @@
       <td width="50%">新手快速启动配置、基础对话流程与常用操作。</td>
     </tr>
     <tr>
-      <td width="22%"><strong>视频直播</strong></td>
-      <td width="28%"><a href="zh/全双工.md">JoyAI 配置与使用</a></td>
-      <td width="50%">配置 JoyAI 官方视觉 API、SiliconFlow ASR/TTS、打断与异步搜索。</td>
-    </tr>
-    <tr>
       <td width="22%"><strong>页面概览</strong></td>
       <td width="28%"><a href="zh/页面概览.md">页面概览</a></td>
       <td width="50%">Web 端界面布局、核心区域与功能入口。</td>

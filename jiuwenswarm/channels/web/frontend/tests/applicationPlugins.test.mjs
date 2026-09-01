@@ -2,12 +2,6 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { enabledApplicationPlugins, normalizeApplicationPluginManifest } from '../node_modules/.cache/application-plugins/manifest.js';
-import {
-  APPLICATION_PLUGIN_SECRET_MASK,
-  applicationPluginSettingsToDraft,
-  isApplicationPluginSettingVisible,
-  serializeApplicationPluginDraft,
-} from '../node_modules/.cache/application-plugins/configuration.js';
 
 test('normalizes and orders application plugin contributions', () => {
   const plugins = normalizeApplicationPluginManifest({
@@ -24,12 +18,12 @@ test('normalizes and orders application plugin contributions', () => {
         position: 200,
       },
       {
-        plugin_id: 'video-duplex',
+        plugin_id: 'earlier',
         plugin_version: '1.0.0',
         enabled: true,
-        id: 'video-live',
-        nav_key: 'app:video-duplex',
-        title: 'Full-duplex',
+        id: 'earlier-page',
+        nav_key: 'app:earlier',
+        title: 'Earlier',
         render_mode: 'bundled',
         position: 75,
       },
@@ -38,7 +32,7 @@ test('normalizes and orders application plugin contributions', () => {
 
   assert.deepEqual(
     plugins.map(plugin => plugin.plugin_id),
-    ['video-duplex', 'later'],
+    ['earlier', 'later'],
   );
   assert.equal(plugins[0].enabled, true);
 });
@@ -54,17 +48,17 @@ test('rejects unsupported and malformed manifests', () => {
   );
 });
 
-test('keeps disabled plugins manageable while hiding their workspace navigation', () => {
+test('hides disabled plugins from workspace navigation', () => {
   const plugins = normalizeApplicationPluginManifest({
     api_version: 1,
     plugins: [
       {
-        plugin_id: 'video-duplex',
+        plugin_id: 'disabled',
         plugin_version: '1.0.0',
         enabled: false,
-        id: 'video-live',
-        nav_key: 'app:video-duplex',
-        title: 'Full-duplex',
+        id: 'disabled-page',
+        nav_key: 'app:disabled',
+        title: 'Disabled',
         render_mode: 'bundled',
         position: 75,
       },
@@ -75,7 +69,7 @@ test('keeps disabled plugins manageable while hiding their workspace navigation'
   assert.deepEqual(enabledApplicationPlugins(plugins), []);
 });
 
-test('keeps backend-only plugins manageable without adding navigation', () => {
+test('does not add backend-only plugins to navigation', () => {
   const plugins = normalizeApplicationPluginManifest({
     api_version: 1,
     plugins: [
@@ -94,58 +88,4 @@ test('keeps backend-only plugins manageable without adding navigation', () => {
 
   assert.equal(plugins.length, 1);
   assert.deepEqual(enabledApplicationPlugins(plugins), []);
-});
-
-test('serializes schema-driven settings and honors conditional visibility', () => {
-  const properties = {
-    provider: { type: 'string', default: 'local' },
-    endpoint: { type: 'string', 'x-visible-when': { provider: 'remote' } },
-    retries: { type: 'integer', default: 2 },
-    enabled: { type: 'boolean', default: true },
-  };
-  const draft = applicationPluginSettingsToDraft({}, properties);
-
-  assert.deepEqual(draft, {
-    provider: 'local',
-    endpoint: '',
-    retries: '2',
-    enabled: true,
-  });
-  assert.equal(isApplicationPluginSettingVisible(properties.endpoint, draft), false);
-  assert.deepEqual(serializeApplicationPluginDraft(draft, properties), {
-    provider: 'local',
-    endpoint: '',
-    retries: 2,
-    enabled: true,
-  });
-});
-
-test('rejects empty numeric and malformed JSON settings before saving', () => {
-  assert.throws(() => serializeApplicationPluginDraft({ timeout: '' }, { timeout: { type: 'number' } }), /不能为空/);
-  assert.throws(() => serializeApplicationPluginDraft({ headers: '{' }, { headers: { type: 'object' } }), /有效的 JSON/);
-});
-
-test('shows configured secrets with their original length and preserves them on save', () => {
-  const properties = {
-    api_key: { type: 'string', secret: true },
-    endpoint: { type: 'string' },
-  };
-  const secretLengths = { api_key: 17 };
-  const draft = applicationPluginSettingsToDraft(
-    { api_key: '', endpoint: 'https://example.test' },
-    properties,
-    ['api_key'],
-    secretLengths,
-  );
-
-  assert.equal(draft.api_key, '*'.repeat(17));
-  assert.deepEqual(serializeApplicationPluginDraft(draft, properties, ['api_key'], secretLengths), { api_key: '', endpoint: 'https://example.test' });
-  assert.deepEqual(serializeApplicationPluginDraft({ ...draft, api_key: 'replacement' }, properties, ['api_key'], secretLengths), {
-    api_key: 'replacement',
-    endpoint: 'https://example.test',
-  });
-  assert.equal(
-    applicationPluginSettingsToDraft({ api_key: '' }, properties, ['api_key']).api_key,
-    APPLICATION_PLUGIN_SECRET_MASK,
-  );
 });

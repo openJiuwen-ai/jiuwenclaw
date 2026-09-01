@@ -143,7 +143,9 @@ export class JoyAIVoiceSession {
       return;
     }
     this.captureContext = new AudioContext({ sampleRate: TARGET_RATE });
-    await this.captureContext.audioWorklet.addModule('/duplex-capture.js');
+    await this.captureContext.audioWorklet.addModule(
+      new URL('./duplex-capture.js', import.meta.url),
+    );
     const source = this.captureContext.createMediaStreamSource(this.microphone);
     this.captureNode = new AudioWorkletNode(this.captureContext, 'jiuwen-duplex-capture');
     this.captureNode.port.onmessage = ({ data }) => {

@@ -18,6 +18,7 @@ import {
 } from './shared';
 import { CompactTaskList } from './CompactTaskList';
 import { getTotalTaskVisualProgressPercent } from './taskProgress';
+import { useAdaptiveTooltip } from '../../hooks/useAdaptiveTooltip';
 
 type TaskPlanningPanelProps = {
   variant: 'compact' | 'expanded';
@@ -216,6 +217,7 @@ export function ViewSwitcher({
   onViewChange: (view: 'board' | 'list') => void;
 }) {
   const { t } = useTranslation();
+  const { tooltip, handlers: tooltipHandlers } = useAdaptiveTooltip();
   return (
     <div
       className="flex items-center gap-1 rounded-[4px] bg-secondary p-1"
@@ -229,8 +231,9 @@ export function ViewSwitcher({
         data-testid="team-area-task-planning-view-list-button"
         className={`flex h-6 w-6 items-center justify-center rounded-[4px] transition-colors ${view === 'list' ? 'bg-card text-text shadow-sm' : 'text-text-muted hover:text-text'}`}
         aria-label={t('team.planning.views.list')}
-        title={t('team.planning.views.list')}
+        data-tooltip={t('team.planning.views.list')}
         aria-pressed={view === 'list'}
+        {...tooltipHandlers}
       >
         <ListViewIcon className="h-4 w-4 shrink-0" aria-hidden="true" />
       </button>
@@ -240,11 +243,13 @@ export function ViewSwitcher({
         data-testid="team-area-task-planning-view-board-button"
         className={`flex h-6 w-6 items-center justify-center rounded-[4px] transition-colors ${view === 'board' ? 'bg-card text-text shadow-sm' : 'text-text-muted hover:text-text'}`}
         aria-label={t('team.planning.views.board')}
-        title={t('team.planning.views.board')}
+        data-tooltip={t('team.planning.views.board')}
         aria-pressed={view === 'board'}
+        {...tooltipHandlers}
       >
         <BoardViewIcon className="h-4 w-4 shrink-0" aria-hidden="true" />
       </button>
+      {tooltip}
     </div>
   );
 }

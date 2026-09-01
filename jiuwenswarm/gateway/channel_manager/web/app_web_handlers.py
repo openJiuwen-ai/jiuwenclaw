@@ -1010,7 +1010,7 @@ _CONFIG_SET_ENV_MAP = {
     "prompt_hint": "PROMPT_HINT",
 }
 # 配置项键名列表，用于日志等说明
-CONFIG_KEYS = tuple(_CONFIG_SET_ENV_MAP)
+CONFIG_KEYS = tuple(_CONFIG_SET_ENV_MAP.keys())
 
 # 来自 config.yaml 的配置项（前端 param 名 -> config.yaml 路径）
 _CONFIG_YAML_KEYS = frozenset({
@@ -2636,7 +2636,6 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
     message_handler = bind.message_handler
     channel_manager = bind.channel_manager
     on_config_saved = bind.on_config_saved
-
     heartbeat_service = bind.heartbeat_service
     cron_controller = bind.cron_controller
     heartbeat_controller = bind.heartbeat_controller
@@ -3007,11 +3006,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             if param_key not in params:
                 continue
             val = params[param_key]
-            if (
-                param_key.endswith("_provider")
-                and val
-                and val not in available_model_providers
-            ):
+            if param_key.endswith("_provider") and val and val not in available_model_providers:
                 raise _ConfigBadRequest(f"Model provider must in: {available_model_providers} ")
             if val is None:
                 env_updates[env_key] = ""
@@ -3334,8 +3329,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             except Exception as exc:  # noqa: BLE001
                 logger.warning("[config.set] warm_zen_free_models failed: %s", exc)
 
-        updated_param_keys = [k for k, e in _CONFIG_SET_ENV_MAP.items() if e in env_updates]
-        updated_param_keys += yaml_updated
+        updated_param_keys = [k for k, e in _CONFIG_SET_ENV_MAP.items() if e in env_updates] + yaml_updated
         payload = {"updated": updated_param_keys, "applied_without_restart": applied_without_restart}
         if apply_result.codex_dependency_install is not None:
             payload["codex_dependency_install"] = apply_result.codex_dependency_install
@@ -3714,10 +3708,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                     logger.warning("[config.save_all] warm_zen_free_models failed: %s", exc)
 
             payload = {
-                "updated": (
-                    [k for k, e in _CONFIG_SET_ENV_MAP.items() if e in env_updates]
-                    + yaml_updated
-                ),
+                "updated": [k for k, e in _CONFIG_SET_ENV_MAP.items() if e in env_updates] + yaml_updated,
                 "applied_without_restart": applied_without_restart,
                 "models_count": models_count,
             }

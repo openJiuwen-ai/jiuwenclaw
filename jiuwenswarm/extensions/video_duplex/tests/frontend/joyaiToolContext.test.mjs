@@ -4,7 +4,7 @@ import {
   buildJoyAIToolContextBatch,
   rememberJoyAIToolContext,
   removeSentJoyAIToolContext,
-} from '../node_modules/.cache/joyai-tool-context/joyaiToolContext.js';
+} from '../../../../channels/web/frontend/node_modules/.cache/joyai-tool-context/joyaiToolContext.js';
 
 function entry(jobId, result = `${jobId} result`) {
   return {

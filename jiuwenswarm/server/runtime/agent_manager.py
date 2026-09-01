@@ -49,7 +49,7 @@ def _normalize_project_dir(project_dir: str | None) -> str:
     if not raw:
         return ""
     try:
-        return os.path.normcase(os.path.abspath(os.path.expanduser(raw)))
+        return os.path.normcase(os.path.abspath(os.path.expanduser(raw))).casefold()
     except Exception:
         return raw
 

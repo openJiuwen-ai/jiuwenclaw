@@ -62,6 +62,9 @@ from jiuwenswarm.common.utils import (
 )
 from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
 from jiuwenswarm.common.schema.message import ReqMethod, Message, Mode
+from jiuwenswarm.server.runtime.attachments.media_attachments import (
+    normalize_chat_media_attachments,
+)
 
 # Ensure workspace initialized
 _workspace_dir = get_user_workspace_dir()
@@ -2038,7 +2041,11 @@ async def _run(
             updater_service=updater_service,
         )
     )
-    extension_registry.bind_application_plugins(web_channel, agent_client=client)
+    extension_registry.bind_application_plugins(
+        web_channel,
+        agent_client=client,
+        media_attachment_normalizer=normalize_chat_media_attachments,
+    )
 
     def _make_norm_and_forward(
             forward_methods: set[str] | frozenset[str],

@@ -19,7 +19,7 @@
   <a href="https://openjiuwen.com/en/">Website</a>
   ·
   <a href="https://swarmskills.openjiuwen.com/">Swarm Skills Hub</a>
-  ·
+  · 
   <a href="https://gitcode.com/openJiuwen/jiuwenswarm">GitCode</a>
 </p>
 
@@ -65,7 +65,7 @@ One-click install, no environment setup — the quickest way to try JiuwenSwarm.
 
 Download and follow the installer prompts to get started.
 
-On Linux, install via [Command Line](#pip) or [from source](#from-source) below.
+On Linux, install via [Command Line](#pip) or [from source](#from-source) below. 
 
 ### Command Line
 
