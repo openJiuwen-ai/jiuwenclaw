@@ -19,6 +19,7 @@ from typing import Any, Callable, Optional
 
 from ruamel.yaml import YAML
 from ruamel.yaml.scalarstring import DoubleQuotedScalarString, PlainScalarString
+from ruamel.yaml.error import MarkedYAMLError
 
 # 模块级 ruamel 实例（写路径，保注释），用于 _fingerprint_yaml 和合并引擎
 _RT_YAML = YAML()
@@ -26,6 +27,9 @@ _RT_YAML.preserve_quotes = True
 _RT_YAML.default_flow_style = False
 _RT_YAML.indent(mapping=2, sequence=4, offset=2)
 _RT_YAML.width = 4096
+
+# 模块级 ruamel safe 实例（读路径，YAML 1.2 语义，与写路径类型一致）
+_SAFE_YAML = YAML(typ="safe")
 import yaml
 import portalocker
 
@@ -64,6 +68,16 @@ elif get_config_dir().exists():
 # Ensure config directory is in sys.path
 if str(_CONFIG_MODULE_DIR) not in sys.path:
     sys.path.insert(0, str(_CONFIG_MODULE_DIR))
+
+
+def _load_yaml_safe(filepath: Path) -> dict[str, Any]:
+    """读路径解析器。与写路径同为 ruamel/YAML 1.2，消除类型分叉。
+
+    替代 yaml.safe_load（PyYAML/YAML 1.1），避免六进制时间、
+    yes/no/on/off 布尔等语义差异导致的跨解析器不一致。
+    """
+    with open(filepath, "r", encoding="utf-8") as f:
+        return _SAFE_YAML.load(f) or {}
 
 
 def resolve_env_vars(value: Any) -> Any:
@@ -230,13 +244,12 @@ def _read_with_retry(filepath: Path, max_attempts: int = 3) -> dict[str, Any]:
 
     for attempt in range(max_attempts):
         try:
-            with open(filepath, "r", encoding="utf-8") as f:
-                parsed = yaml.safe_load(f) or {}
+            parsed = _load_yaml_safe(filepath)
             if stamp is not None:
                 with _YAML_PARSE_CACHE_LOCK:
                     _YAML_PARSE_CACHE[cache_key] = (stamp, deepcopy(parsed))
             return parsed
-        except yaml.YAMLError:
+        except (yaml.YAMLError, MarkedYAMLError, OSError, ValueError):
             if attempt < max_attempts - 1:
                 time.sleep(0.05 * (attempt + 1))
                 continue
@@ -503,16 +516,21 @@ _dump_yaml_round_trip = dump_yaml_round_trip
 
 # --- 列表合并策略 ---
 # 按 key 增量下发：模板条目中 user 缺少的条目追加到 user 列表尾部。
+# 仅安全语义列表登记为增量下发（§5.2）：内置防护规则/路径需要能推送到存量用户。
 LIST_MERGE_BY_KEY: dict[str, str] = {
     "permissions.rules": "id",
     "permissions.file_guard.paths": "path",
-    "models.defaults": "alias",
-    "channels.feishu.apps": "app_id",
-    "channels.xiaoyi.apps": "app_id",
 }
 
 # 整体 user 优先（不增量）的列表路径。
-LIST_USER_WINS: frozenset[str] = frozenset()
+# 用户凭据/模型配置等不应被模板覆盖，显式登记（§5.2）。
+# 未登记的含 dict 列表路径也默认 user-wins（_merge_list 的 key is None 分支）。
+LIST_USER_WINS: frozenset[str] = frozenset({
+    "models.defaults",
+    "channels.feishu.apps",
+    "channels.xiaoyi.apps",
+    "tools",
+})
 
 
 @dataclass
@@ -3408,6 +3426,9 @@ def update_sandbox_runtime(patch: dict[str, Any]) -> dict[str, Any]:
 # 环境变量校验（feature 门控降噪）
 # ============================================================
 
+# 与 resolve_env_vars 中的 pattern 保持同源，避免两处正则漂移（§8.2）
+_ENV_REF = re.compile(r'\$\{([^:}]+)(?::-([^}]*))?\}')
+
 # feature → 必须定义的环境变量（仅无 ${VAR:-default} 默认值的才校验）
 _FEATURE_REQUIRED_ENV: dict[str, list[str]] = {
     "task_memory": [
@@ -3417,6 +3438,19 @@ _FEATURE_REQUIRED_ENV: dict[str, list[str]] = {
         "TASK_MEMORY_API_BASE",
     ],
 }
+
+
+def scan_env_refs(text: str) -> tuple[set[str], set[str]]:
+    """扫描文本中的环境变量引用。
+
+    Returns:
+        (无默认值的引用, 有默认值的引用)。同一变量可同时出现在两个集合。
+    """
+    bare, defaulted = set(), set()
+    for m in _ENV_REF.finditer(text):
+        var = m.group(1).strip()
+        (defaulted if m.group(2) is not None else bare).add(var)
+    return bare, defaulted
 
 
 def _is_feature_enabled(config: Mapping, feature: str) -> bool:
@@ -3431,15 +3465,19 @@ def validate_env_vars(
     config_path: Path | None = None,
     env_path: Path | None = None,
 ) -> list[str]:
-    """校验 config.yaml 中无默认值的环境变量是否有 .env 定义。
+    """校验 config.yaml 中无默认值的环境变量是否已定义。
 
     只校验：
-    1. 无 :- 默认值的 ${VAR} 引用
+    1. 无 :- 默认值的 ${VAR} 引用（bare refs）
     2. 且对应 feature 在 config 中已启用
 
     跳过：
     - 有 ${VAR:-default} 的变量（已自带兜底）
     - feature 未启用的变量
+
+    "已定义"的判定范围（§8.2 修正）：
+    - .env 文件中定义的变量
+    - 进程环境变量（launcher/容器注入的也算，避免误报）
 
     Returns:
         缺失变量名的排序列表（空列表 = 全部匹配）。仅告警，不阻塞启动。
@@ -3453,27 +3491,15 @@ def validate_env_vars(
         return []
 
     config_text = config_path.read_text(encoding="utf-8")
+    bare, _ = scan_env_refs(config_text)
 
-    # 所有无默认值的 ${VAR} 引用（不匹配 ${VAR:-...}）
-    no_default = set(re.findall(r"\$\{([A-Z_][A-Z0-9_]*)\}", config_text))
-    # 排除有默认值的（${VAR:-...} 中的 VAR 也会被上面的正则匹配到，
-    # 但 ${VAR:-...} 中的 VAR 在带 :- 的模式里，我们用排除法）
-    with_default = set(re.findall(r"\$\{([A-Z_][A-Z0-9_]*)[:-]", config_text))
-    truly_bare = no_default - with_default
-
-    # .env 已定义的变量
-    env_vars: set[str] = set()
+    # .env 已定义的变量 + 进程环境变量
+    defined: set[str] = set(os.environ)
     if env_path.exists():
         for line in env_path.read_text(encoding="utf-8").splitlines():
             line = line.strip()
             if line and not line.startswith("#") and "=" in line:
-                var_name = line.split("=", 1)[0].strip()
-                env_vars.add(var_name)
-
-    # 进程环境变量也计入（如 OPENAI_API_KEY 由父进程注入）
-    env_vars.update(
-        k for k in truly_bare if os.getenv(k)
-    )
+                defined.add(line.split("=", 1)[0].strip())
 
     # 按 feature 门控过滤
     try:
@@ -3486,7 +3512,7 @@ def validate_env_vars(
         if not _is_feature_enabled(config, feature):
             continue
         for var in required_vars:
-            if var in truly_bare and var not in env_vars:
+            if var in bare and var not in defined:
                 missing.append(var)
 
     return sorted(missing)
@@ -3498,10 +3524,9 @@ def check_env_vars_on_startup() -> None:
         missing = validate_env_vars()
         if missing:
             logger.warning(
-                "config.yaml 引用了 %d 个未在 .env 中定义的环境变量"
-                "（feature 已启用）: %s",
-                len(missing),
-                missing,
+                "以下环境变量被 config.yaml 引用（无默认值）且对应功能已启用，"
+                "但未定义，将解析为空串: %s",
+                ", ".join(missing),
             )
     except Exception:
         logger.debug("环境变量校验失败", exc_info=True)

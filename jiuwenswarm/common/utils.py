@@ -903,6 +903,15 @@ def ensure_config_migrated_from_template(
         return False
 
     logger.info(f"已从模板合并新增配置项: {config_path} (config_version -> {VERSION})")
+
+    # 环境变量一致性校验（仅告警，不阻塞启动）
+    try:
+        from jiuwenswarm.common.config import check_env_vars_on_startup
+
+        check_env_vars_on_startup()
+    except Exception:
+        logger.debug("环境变量校验调用失败", exc_info=True)
+
     return True
 
 

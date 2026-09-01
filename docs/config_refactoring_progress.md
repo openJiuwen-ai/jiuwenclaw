@@ -129,6 +129,102 @@
 
 ---
 
+### Commit 1.1: 阶段一收尾 — 解析器统一 + 列表策略修正 + 环境校验重写 + 验收测试
+
+| 项 | 值 |
+|---|---|
+| commit message | `fix(config_refactoring): step 1.1 unify YAML parser, fix list strategy, rewrite env validation, add acceptance tests` |
+| 改动文件数 | 4 |
+| 行数变化 | +398 / -30 |
+
+**改动文件清单**
+
+| 文件 | 改动类型 | 行数变化 | 说明 |
+|------|----------|----------|------|
+| `jiuwenswarm/common/config.py` | 修正 | +85/-30 | 解析器统一、列表策略修正、环境校验重写 |
+| `jiuwenswarm/common/utils.py` | 修改 | +9/-0 | `check_env_vars_on_startup` 接入启动路径 |
+| `tests/unit_tests/test_config.py` | 新增 | +334/-0 | §12.2 验收测试 13 条 |
+| `docs/config_refactoring_progress.md` | 更新 | — | 本进度记录 |
+
+**改动详情**
+
+#### 1. 统一 YAML 解析器（解决 D5，§7）
+
+| 改动 | 说明 |
+|------|------|
+| 新增 `_SAFE_YAML = YAML(typ="safe")` | 模块级 ruamel safe 实例（YAML 1.2 读路径） |
+| 新增 `_load_yaml_safe(filepath)` | 读路径统一入口，替代 `yaml.safe_load` |
+| `_read_with_retry` 改用 `_load_yaml_safe` | 消除 PyYAML 1.1 / ruamel 1.2 类型分叉 |
+| 异常处理扩展 | 捕获 `MarkedYAMLError`（ruamel 的解析错误） |
+
+**验收 #8**：时间字面量 `"22:00"` 在两个解析器下均为 str，0 差异。
+
+#### 2. 列表合并策略修正（对齐 §5.2）
+
+| 改动 | 说明 |
+|------|------|
+| `LIST_MERGE_BY_KEY` 缩减为 2 条 | 仅 `permissions.rules` / `file_guard.paths` 增量下发 |
+| `LIST_USER_WINS` 从空集改为 4 条 | `models.defaults` / `channels.feishu.apps` / `channels.xiaoyi.apps` / `tools` 显式 user-wins |
+
+**修正前**：`LIST_MERGE_BY_KEY` 含 5 条（含凭据/模型配置），`LIST_USER_WINS` 为空——与 v3 §5.2 规格不符。
+**修正后**：仅安全语义列表增量下发，凭据/模型配置显式 user-wins。
+
+#### 3. 环境变量校验重写（解决 D16/D17，§8.2）
+
+| 改动 | 说明 |
+|------|------|
+| 新增 `_ENV_REF` 正则 | 与 `resolve_env_vars` 中的 pattern 同源 `r'\$\{([^:}]+)(?::-([^}]*))?\}'` |
+| 新增 `scan_env_refs(text)` | 返回 (bare, defaulted) 二元组，单一正则，无集合减法 |
+| `validate_env_vars` 重写 | 用 `scan_env_refs` 替代双正则 + 冗余减法 |
+| 进程环境纳入已定义 | `defined = set(os.environ)` 优先，避免对 launcher 注入变量误报 |
+| 告警消息对齐 §8.3 | `"以下环境变量被 config.yaml 引用（无默认值）且对应功能已启用，但未定义，将解析为空串: %s"` |
+
+**修正前缺陷**：
+- `[:-]` 是字符类，匹配单个 `:` 或 `-`，不是 `:-` 序列
+- `no_default` 正则要求 `}` 紧跟变量名，本就匹配不到 `${VAR:-x}`，减法冗余
+- 某变量若在别处出现过 `${VAR:-x}`，此处的裸 `${VAR}` 会被错误豁免
+
+#### 4. `check_env_vars_on_startup` 接入启动路径
+
+| 改动 | 说明 |
+|------|------|
+| `utils.py: ensure_config_migrated_from_template()` | 模板合并后调用 `check_env_vars_on_startup()` |
+
+三个启动入口（`app.py` / `app_agentserver.py` / `app_gateway.py`）均通过 `ensure_config_migrated_from_template` 间接触发，无需各处单独调用。
+
+#### 5. 验收测试（§12.2，13 条）
+
+| # | 测试 | 验收点 | 对应缺陷 |
+|---|------|--------|----------|
+| 1 | `test_deep_dict_template_field_backfilled` | depth 6 dict 节点下模板新增字段补齐 | D1 |
+| 3 | `test_permissions_rules_incremental_dispatch` | 模板新增 permissions.rules 条目下发 | D3 |
+| 4 | `test_user_custom_rule_preserved_no_duplicate` | 用户自定义规则保留 + 内置规则不重复 | D3 |
+| 5 | `test_orphan_field_preserved_and_reported` | 用户独有字段保留 + 告警 | D4 |
+| 6 | `test_structural_migration_set_if_absent` | set-if-absent，新值不被旧值覆盖 | D4 |
+| 7 | `test_structural_migration_correct_path` | 迁移写入 health_check.every 正确路径 | D4 |
+| 8 | `test_parser_consistency` | 读写解析器类型一致 | D5 |
+| 9a | `test_fresh_install_no_migration` | fresh install 不触发迁移 | D6 |
+| 9c | `test_idempotent_migration` | 重复迁移幂等不写盘 | D6 |
+| 10 | `test_backup_single_snapshot` | 备份产生快照 | D6 |
+| 11a | `test_env_var_validation_feature_gated` | feature 启用 + bare + 未定义 → 告警 | D16 D17 |
+| 11b | `test_env_var_validation_not_enabled_no_warn` | feature 未启用 → 不告警 | D16 D17 |
+| 11c | `test_env_var_validation_process_env_counts` | 进程环境变量计入已定义 | D16 D17 |
+
+（验收 #2 注释逐字节比对由集成测试覆盖，见下方实测结果。）
+
+---
+
+**验证结果**
+
+| # | 测试项 | 结果 |
+|---|--------|------|
+| 1 | 全量 `test_config.py`（76 条）| ✅ 全通过 |
+| 2 | 真实模板合并集成测试（注释 590→636、规则恢复 21、幂等） | ✅ |
+| 3 | 双解析器差异扫描（4 个 YAML 文件） | ✅ 0 差异 |
+| 4 | 预存失败测试 `test_build_config.py::test_desktop_release_wrappers...` | ⚠️ 与本次改动无关（PyInstaller `claude_agent_sdk` 预存问题） |
+
+---
+
 ## 待办（阶段二及后续）
 
 | 阶段 | 内容 | 状态 |

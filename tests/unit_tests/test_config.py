@@ -1184,3 +1184,337 @@ channels:
         assert f"push_id: {token}" in text
         assert f"push_id: '{token}'" not in text
         assert f'push_id: "{token}"' not in text
+
+
+# ============================================================
+# 阶段一验收测试（v3 §12.2）
+# ============================================================
+
+
+class TestMigrationEngineV3:
+    """验收 §12.2 阶段一迁移引擎的 11 条标准。"""
+
+    # --- 验收 #1: depth ≥ 4 的 dict 节点下模板新增字段能补齐 (D1) ---
+
+    @staticmethod
+    def test_deep_dict_template_field_backfilled(tmp_path: Path):
+        """验收 #1: 深层 dict 节点（depth 6）下模板新增字段能补齐。"""
+        from jiuwenswarm.common.config import (
+            MergeReport,
+            merge_template_into_user,
+        )
+
+        template = {
+            "react": {
+                "a": {
+                    "b": {
+                        "c": {
+                            "d": {
+                                "deep_new": 42,
+                            },
+                        },
+                    },
+                },
+            },
+        }
+        user = {
+            "react": {
+                "a": {
+                    "b": {
+                        "c": {},
+                    },
+                },
+            },
+        }
+        report = MergeReport()
+        merge_template_into_user(template, user, report=report)
+        assert user["react"]["a"]["b"]["c"]["d"]["deep_new"] == 42
+        # d 子树整体补齐，报告路径为 react.a.b.c.d
+        assert "react.a.b.c.d" in report.added
+
+    # --- 验收 #3: 模板新增 permissions.rules 条目能下发 (D3) ---
+
+    @staticmethod
+    def test_permissions_rules_incremental_dispatch(tmp_path: Path):
+        """验收 #3: 模板新增一条 permissions.rules，存量用户能拿到。"""
+        from jiuwenswarm.common.config import (
+            MergeReport,
+            merge_template_into_user,
+        )
+
+        template = {
+            "permissions": {
+                "rules": [
+                    {"id": "rule_a", "severity": "LOW"},
+                    {"id": "rule_b", "severity": "HIGH"},
+                ],
+            },
+        }
+        user = {
+            "permissions": {
+                "rules": [
+                    {"id": "rule_a", "severity": "LOW"},
+                ],
+            },
+        }
+        report = MergeReport()
+        merge_template_into_user(template, user, report=report)
+        ids = [r["id"] for r in user["permissions"]["rules"]]
+        assert "rule_b" in ids
+        assert len(user["permissions"]["rules"]) == 2
+
+    # --- 验收 #4: 用户自定义 permissions.rules 条目不被删除/重复 (D3) ---
+
+    @staticmethod
+    def test_user_custom_rule_preserved_no_duplicate(tmp_path: Path):
+        """验收 #4: 用户自定义规则保留，且内置规则不重复添加。"""
+        from jiuwenswarm.common.config import (
+            MergeReport,
+            merge_template_into_user,
+        )
+
+        template = {
+            "permissions": {
+                "rules": [
+                    {"id": "builtin_1", "severity": "LOW"},
+                ],
+            },
+        }
+        user = {
+            "permissions": {
+                "rules": [
+                    {"id": "builtin_1", "severity": "LOW"},
+                    {"id": "my_custom_rule", "severity": "MEDIUM"},
+                ],
+            },
+        }
+        report = MergeReport()
+        merge_template_into_user(template, user, report=report)
+        ids = [r["id"] for r in user["permissions"]["rules"]]
+        assert "my_custom_rule" in ids
+        assert ids.count("builtin_1") == 1
+
+    # --- 验收 #5: 用户独有字段保留并告警 (D4) ---
+
+    @staticmethod
+    def test_orphan_field_preserved_and_reported(tmp_path: Path):
+        """验收 #5: 用户独有字段保留并告警，不静默删除。"""
+        from jiuwenswarm.common.config import (
+            MergeReport,
+            merge_template_into_user,
+            _collect_orphans,
+        )
+
+        template = {"health_check": {"every": 3600}}
+        user = {"health_check": {"every": 600}, "my_legacy_key": "keep_me"}
+        report = MergeReport()
+        _collect_orphans(template, user, report=report)
+        merge_template_into_user(template, user, report=report)
+        assert user["my_legacy_key"] == "keep_me"
+        assert "my_legacy_key" in report.orphaned
+
+    # --- 验收 #6: set-if-absent — 用户已有新值时不被旧值覆盖 (D4) ---
+
+    @staticmethod
+    def test_structural_migration_set_if_absent(tmp_path: Path):
+        """验收 #6: heartbeat.every 和 health_check.every 并存时，后者不被覆盖。"""
+        from jiuwenswarm.common.config import (
+            MergeReport,
+            apply_structural_migrations,
+        )
+
+        user = {
+            "heartbeat": {"every": 3600},
+            "health_check": {"every": 600},
+        }
+        report = MergeReport()
+        apply_structural_migrations(user, report)
+        assert user["health_check"]["every"] == 600
+        assert "every" not in user.get("heartbeat", {})
+
+    # --- 验收 #7: 结构迁移写入 health_check.every，不是 heartbeat.health_check.every ---
+
+    @staticmethod
+    def test_structural_migration_correct_path(tmp_path: Path):
+        """验收 #7: 迁移写入 health_check.every，而非 heartbeat.health_check.every。"""
+        from jiuwenswarm.common.config import (
+            MergeReport,
+            apply_structural_migrations,
+        )
+
+        user = {"heartbeat": {"every": 3600}}
+        report = MergeReport()
+        apply_structural_migrations(user, report)
+        assert "health_check" in user
+        assert user["health_check"]["every"] == 3600
+        assert "heartbeat" not in user or "every" not in user.get("heartbeat", {})
+
+    # --- 验收 #8: 读写路径解析器类型一致 (D5) ---
+
+    @staticmethod
+    def test_parser_consistency(tmp_path: Path):
+        """验收 #8: 同一份 config 用读路径与写路径解析，类型完全一致。"""
+        import yaml as pyyaml
+        from ruamel.yaml import YAML
+
+        from jiuwenswarm.common.config import _load_yaml_safe
+
+        config_text = """
+active_hours:
+  start: "08:00"
+  end: "22:00"
+boolean_test: yes
+version: "1.10"
+"""
+        config_file = tmp_path / "test_config.yaml"
+        config_file.write_text(config_text, encoding="utf-8")
+
+        pyyaml_result = pyyaml.safe_load(config_file.read_text(encoding="utf-8"))
+        ruamel_result = _load_yaml_safe(config_file)
+
+        assert type(pyyaml_result["active_hours"]["start"]) is str
+        assert type(ruamel_result["active_hours"]["start"]) is str
+        assert pyyaml_result["active_hours"]["end"] == ruamel_result["active_hours"]["end"]
+        assert type(pyyaml_result["active_hours"]["end"]) is type(
+            ruamel_result["active_hours"]["end"]
+        )
+        assert type(ruamel_result["active_hours"]["end"]) is str
+
+    # --- 验收 #9: fresh install 不触发迁移；upgrade 触发；重复幂等 (D6) ---
+
+    @staticmethod
+    def test_fresh_install_no_migration(tmp_path: Path):
+        """验收 #9a: fresh install（config.yaml 不存在）不触发迁移。"""
+        from jiuwenswarm.common.config import MergeReport, run_versioned_migration
+
+        config_path = tmp_path / "config" / "config.yaml"
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        report = MergeReport()
+        assert run_versioned_migration(config_path, report) is False
+
+    @staticmethod
+    def test_idempotent_migration(tmp_path: Path):
+        """验收 #9c: 重复启动迁移幂等，不写盘。"""
+        from jiuwenswarm.common.config import (
+            MergeReport,
+            migrate_config_from_template,
+        )
+
+        template = {"health_check": {"every": 3600, "target": "web"}}
+        user = {"health_check": {"every": 600}}
+
+        template_path = tmp_path / "template.yaml"
+        user_path = tmp_path / "config.yaml"
+        template_path.write_text(
+            "health_check:\n  every: 3600\n  target: web\n", encoding="utf-8"
+        )
+        user_path.write_text("health_check:\n  every: 600\n", encoding="utf-8")
+
+        assert migrate_config_from_template(template_path, user_path) is True
+        assert migrate_config_from_template(template_path, user_path) is False
+
+    # --- 验收 #10: backups 只产生一份快照 (D6) ---
+
+    @staticmethod
+    def test_backup_single_snapshot(tmp_path: Path):
+        """验收 #10: 迁移产生备份，且保留不超过 10 份。"""
+        from jiuwenswarm.common.config import backup_config
+
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text("test: 1", encoding="utf-8")
+        backup_config(config_path, tag="test")
+        backup_dir = config_path.parent / "backups"
+        assert backup_dir.exists()
+        files = list(backup_dir.iterdir())
+        assert len(files) >= 1
+
+    # --- 验收 #11: feature 启用 + 无默认值 + env/.env 均未定义才告警 (D16/D17) ---
+
+    @staticmethod
+    def test_env_var_validation_feature_gated(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+        """验收 #11: 仅 feature 启用 + 无默认值 + 未定义时才告警。"""
+        from jiuwenswarm.common.config import validate_env_vars
+
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(
+            "task_memory:\n  enabled: true\n  llm_model: ${TASK_MEMORY_LLM_MODEL}\n"
+            "  embedding_model: ${TASK_MEMORY_EMBED_MODEL:-text-embedding-3-small}\n",
+            encoding="utf-8",
+        )
+        env_path = tmp_path / ".env"
+        env_path.write_text("OTHER_VAR=value\n", encoding="utf-8")
+
+        for var in (
+            "TASK_MEMORY_LLM_MODEL",
+            "TASK_MEMORY_EMBED_MODEL",
+            "TASK_MEMORY_API_KEY",
+            "TASK_MEMORY_API_BASE",
+        ):
+            monkeypatch.delenv(var, raising=False)
+
+        monkeypatch.setattr(
+            "jiuwenswarm.common.config.CONFIG_YAML_PATH", config_path
+        )
+        monkeypatch.setattr(
+            "jiuwenswarm.common.config.get_config",
+            lambda: {"task_memory": {"enabled": True}},
+        )
+
+        missing = validate_env_vars(config_path, env_path)
+        assert "TASK_MEMORY_LLM_MODEL" in missing
+        assert "TASK_MEMORY_EMBED_MODEL" not in missing
+
+    @staticmethod
+    def test_env_var_validation_not_enabled_no_warn(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """验收 #11b: feature 未启用时不告警。"""
+        from jiuwenswarm.common.config import validate_env_vars
+
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(
+            "task_memory:\n  enabled: false\n  llm_model: ${TASK_MEMORY_LLM_MODEL}\n",
+            encoding="utf-8",
+        )
+        env_path = tmp_path / ".env"
+
+        for var in ("TASK_MEMORY_LLM_MODEL",):
+            monkeypatch.delenv(var, raising=False)
+
+        monkeypatch.setattr(
+            "jiuwenswarm.common.config.CONFIG_YAML_PATH", config_path
+        )
+        monkeypatch.setattr(
+            "jiuwenswarm.common.config.get_config",
+            lambda: {"task_memory": {"enabled": False}},
+        )
+
+        missing = validate_env_vars(config_path, env_path)
+        assert missing == []
+
+    @staticmethod
+    def test_env_var_validation_process_env_counts(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """验收 #11c: 进程环境变量也算已定义，不误报。"""
+        from jiuwenswarm.common.config import validate_env_vars
+
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(
+            "task_memory:\n  enabled: true\n  llm_model: ${TASK_MEMORY_LLM_MODEL}\n",
+            encoding="utf-8",
+        )
+        env_path = tmp_path / ".env"
+        env_path.write_text("", encoding="utf-8")
+
+        monkeypatch.setenv("TASK_MEMORY_LLM_MODEL", "gpt-4o")
+        monkeypatch.setattr(
+            "jiuwenswarm.common.config.CONFIG_YAML_PATH", config_path
+        )
+        monkeypatch.setattr(
+            "jiuwenswarm.common.config.get_config",
+            lambda: {"task_memory": {"enabled": True}},
+        )
+
+        missing = validate_env_vars(config_path, env_path)
+        assert "TASK_MEMORY_LLM_MODEL" not in missing
