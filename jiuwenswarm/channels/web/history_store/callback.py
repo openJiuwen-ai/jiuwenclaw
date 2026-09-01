@@ -23,6 +23,11 @@ logger = logging.getLogger("jiuwenswarm.web.history")
 _REQUEST_METHODS = frozenset({"chat.send", "chat.resume", "chat.user_answer"})
 _FINAL_EVENTS = frozenset({"chat.final", "chat.error"})
 
+# history.get 流式路径在 AgentServer 本地无历史文件时的固定报错。它不是 assistant
+# 回复，不能落库——此前 chat.error 分支会把它当成 assistant 消息写进 PG，
+# 会话列表的 last_preview 因此出现这行错误文本。
+_HISTORY_NOT_FOUND_SNIPPET = "invalid page_idx or session history not found"
+
 FrameCallback = Callable[[str, str, "str | None"], Awaitable[None]]
 
 
@@ -80,6 +85,10 @@ def make_history_callback(store: "ChatHistoryStore") -> FrameCallback:
             return
 
         if event not in _FINAL_EVENTS:
+            return
+        if event == "chat.error" and _HISTORY_NOT_FOUND_SNIPPET in str(payload.get("error") or ""):
+            # history.get 的"本地无历史"报错不落库
+            logger.debug("[history] history.get 未命中报错不落库: rid=%s", request_id)
             return
         session_id = payload.get("session_id")
         if not isinstance(session_id, str) or not session_id:

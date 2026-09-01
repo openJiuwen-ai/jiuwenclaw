@@ -2017,6 +2017,10 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 proactive_cfg.get("max_recommend_per_day", 10))
             payload["proactive_recommendation_max_rounds_per_tick"] = str(
                 proactive_cfg.get("max_rounds_per_tick", 20))
+            gateway_cfg = raw.get("gateway") or {}
+            payload["gateway_web_session_storage"] = str(
+                gateway_cfg.get("web_session_storage") or "local"
+            ).strip().lower()
         except Exception:  # noqa: BLE001
             payload.setdefault("context_engine_enabled", "false")
             payload.setdefault("kv_cache_release_enabled", "false")
@@ -2046,6 +2050,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             payload.setdefault("proactive_recommendation_enabled", "false")
             payload.setdefault("proactive_recommendation_max_recommend_per_day", "10")
             payload.setdefault("proactive_recommendation_max_rounds_per_tick", "20")
+            payload.setdefault("gateway_web_session_storage", "local")
         await channel.send_response(ws, req_id, ok=True, payload=payload)
 
     def _persist_env_updates(updates: dict[str, str]) -> None:
@@ -3177,7 +3182,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         service = updater_service or UpdaterService()
         await channel.send_response(ws, req_id, ok=True, payload=service.get_runtime_config())
 
-    async def _session_list(ws, req_id, params, session_id):
+    async def _session_list(ws, req_id, params, session_id, user_id=None):
         """返回会话列表,包含完整的会话管理信息。"""
         limit = 20
         offset = 0
@@ -3202,6 +3207,77 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         limit = max(1, min(limit, 200))
         offset = max(0, offset)
 
+        from jiuwenswarm.gateway.routing.session_index import is_remote_storage
+
+        if is_remote_storage():
+            # 多用户隔离：remote 模式必须按用户过滤，否则会返回所有用户的会话。
+            # user_id 缺失（未认证/匿名连接）时回退 "guest"（与 history_store 一致），
+            # 避免空串导致 list_sessions_page 不过滤而泄露跨用户数据；同时告警便于排查。
+            _raw_uid = str(user_id or "").strip()
+            if not _raw_uid:
+                logger.warning(
+                    "[session.list] remote 模式缺少 user_id，按 guest 过滤（可能是匿名连接）",
+                )
+                _raw_uid = "guest"
+
+            # 优先从 PG 会话历史库读取（持久、跨重启不丢、与 HistoryPanel 同源）。
+            # session_index.json 存在 pod 本地临时文件，pod 重启后清空，
+            # 仅作为 PG 不可用时的兜底。
+            db_sessions: list[dict[str, Any]] | None = None
+            try:
+                from jiuwenswarm.channels.web.history_store.api import list_sessions_sync
+
+                db_sessions = await asyncio.to_thread(
+                    list_sessions_sync,
+                    None,
+                    limit=limit,
+                    offset=offset,
+                    user=_raw_uid,
+                )
+            except Exception:  # noqa: BLE001
+                logger.debug(
+                    "[session.list] PG 会话历史库不可用，回退 session_index",
+                    exc_info=True,
+                )
+                db_sessions = None
+
+            if db_sessions is not None:
+                # PG 行字段 → SessionInfo 投影（缺失字段走 _to_session_info 默认值）
+                def _db_row_to_session_info(row: dict[str, Any]) -> dict[str, Any]:
+                    return _to_session_info({
+                        "session_id": row.get("session_id", ""),
+                        "title": row.get("title", ""),
+                        "created_at": row.get("created_at", 0),
+                        "last_message_at": row.get("updated_at", 0),
+                        "message_count": row.get("message_count", 0),
+                        "mode": "web",
+                    })
+
+                await channel.send_response(ws, req_id, ok=True, payload={
+                    "sessions": [_db_row_to_session_info(s) for s in db_sessions],
+                    "total": len(db_sessions),
+                    "limit": limit,
+                    "offset": offset,
+                })
+                return
+
+            # 兜底：PG 不可用时读本地 session_index.json（易失，重启后可能为空）
+            logger.warning(
+                "[session.list] remote 模式回退 session_index（PG 不可用）；"
+                "索引可能因 pod 重启而丢失。",
+            )
+            from jiuwenswarm.gateway.routing.session_index import list_sessions_page_async
+
+            _params = {**(params if isinstance(params, dict) else {}), "user": _raw_uid}
+            sessions, total, limit_ret, offset_ret = await list_sessions_page_async(_params)
+            await channel.send_response(ws, req_id, ok=True, payload={
+                "sessions": [_to_session_info(s) for s in sessions],
+                "total": total,
+                "limit": limit_ret,
+                "offset": offset_ret,
+            })
+            return
+
         from jiuwenswarm.server.runtime.session.session_metadata import get_all_sessions_metadata
 
         sessions, total = get_all_sessions_metadata(limit=limit, offset=offset)
@@ -3216,7 +3292,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             "offset": offset,
         })
 
-    async def _session_get_metadata(ws, req_id, params, session_id):
+    async def _session_get_metadata(ws, req_id, params, session_id, user_id=None):
         """返回单个会话的元数据（mode / model / project_dir / last_user_message_at 等）。
 
         按单个 session_id 读取，O(1) 不扫描目录，会话再多也不卡；相互隔离。
@@ -3238,6 +3314,51 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         from jiuwenswarm.server.runtime.session.session_metadata import get_session_metadata
         # cache_bust=True 强制读盘，跨进程（Gateway 读 / AgentServer 写）拿最新
         meta = get_session_metadata(sid, cache_bust=True)
+        if not meta:
+            from jiuwenswarm.gateway.routing.session_index import is_remote_storage
+
+            if is_remote_storage():
+                # 企业 remote(PG) 模式下 Gateway 本地没有会话目录（历史文件在按会话
+                # 拉起的 AgentServer pod 上），本地读必然 NOT_FOUND，导致点击侧边栏
+                # 会话直接落"会话不存在"页。回退读 PG sessions 行并投影为会话元数据；
+                # mode/model 等 PG 没有的字段给缺省值（前端按缺省处理）。
+                _uid = (
+                    str(user_id).strip()
+                    if isinstance(user_id, str) and user_id.strip()
+                    else None
+                ) or "guest"
+                detail = None
+                try:
+                    from jiuwenswarm.channels.web.history_store.api import (
+                        get_session_detail_sync,
+                    )
+
+                    detail = await asyncio.to_thread(
+                        get_session_detail_sync, sid, None, user=_uid,
+                    )
+                except Exception:  # noqa: BLE001
+                    logger.debug(
+                        "[session.get_metadata] PG 回退读取失败: session_id=%s", sid,
+                        exc_info=True,
+                    )
+                if isinstance(detail, dict):
+                    meta = {
+                        "session_id": sid,
+                        "title": detail.get("title") or "",
+                        "created_at": detail.get("created_at") or 0,
+                        "last_message_at": detail.get("updated_at") or 0,
+                        "message_count": int(detail.get("message_count") or 0),
+                        "mode": "unknown",
+                        "team_name": "",
+                        "pinned": False,
+                        "pin_order": 0,
+                        "project_dir": "",
+                        "project_id": "",
+                        "cron_id": "",
+                        "channel_id": "web",
+                        "last_user_message_at": detail.get("updated_at") or 0,
+                        "model": "",
+                    }
         if not meta:
             await channel.send_response(
                 ws, req_id, ok=False, error="session not found", code="NOT_FOUND",
@@ -3263,6 +3384,19 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         if not isinstance(params, dict):
             await channel.send_response(
                 ws, req_id, ok=False, error="params must be object", code="BAD_REQUEST",
+            )
+            return
+        from jiuwenswarm.gateway.routing.session_index import is_remote_storage
+
+        if is_remote_storage():
+            logger.error(
+                "[session.create] remote 模式但执行了本地 handler（转发未生效？）session_id=%s",
+                session_id,
+            )
+            await channel.send_response(
+                ws, req_id, ok=False,
+                error="remote session storage is enabled but request was not forwarded to agent",
+                code="REMOTE_STORAGE_FORWARD_FAILED",
             )
             return
         resolved_agent_client = _resolve(agent_client)
@@ -3383,6 +3517,68 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             )
             return
         session_id_to_delete = session_id_to_delete.strip()
+
+        from jiuwenswarm.gateway.routing.session_index import is_remote_storage
+
+        if is_remote_storage():
+            # 企业 remote(PG) 模式：会话元数据在 PG、历史文件在按会话拉起的
+            # AgentServer pod 本地盘。删除 = ① 尽力转发给会话所属 AgentServer 删
+            # 本地目录（pod 可能已被回收或重新拉起为空目录，转发失败仅告警不阻塞）；
+            # ② 删 PG sessions/messages 行；③ 返回成功。此前这里直接报
+            # REMOTE_STORAGE_FORWARD_FAILED，导致企业版会话无法删除。
+            ac = _resolve(agent_client)
+            if ac is not None and getattr(ac, "server_ready", False):
+                from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
+                from jiuwenswarm.common.schema.message import ReqMethod
+
+                try:
+                    env = e2a_from_agent_fields(
+                        request_id=str(req_id) if req_id else "",
+                        channel_id="",
+                        session_id=session_id,
+                        req_method=ReqMethod.SESSION_DELETE,
+                        params=params,
+                        user_id=user_id,
+                    )
+                    resp = await ac.send_request(env)
+                    if not resp.ok:
+                        pl = resp.payload if isinstance(resp.payload, dict) else {}
+                        logger.info(
+                            "[session.delete] agent 侧未命中(目录可能已随 pod 回收): "
+                            "session_id=%s error=%s",
+                            session_id_to_delete, pl.get("error"),
+                        )
+                except Exception as e:  # noqa: BLE001
+                    logger.warning(
+                        "[session.delete] 转发 agent 失败(忽略,继续删 PG): %s", e,
+                    )
+            else:
+                logger.info(
+                    "[session.delete] agent client 不可用,仅删 PG: session_id=%s",
+                    session_id_to_delete,
+                )
+            history_store_deleted = False
+            try:
+                from jiuwenswarm.channels.web.history_store.api import delete_session_sync
+
+                history_store_deleted = await asyncio.to_thread(
+                    delete_session_sync,
+                    session_id_to_delete,
+                    None,
+                    user=(str(user_id).strip() if isinstance(user_id, str) and user_id.strip() else None),
+                )
+            except Exception:  # noqa: BLE001
+                logger.exception(
+                    "[session.delete] PG 删除失败: session_id=%s", session_id_to_delete,
+                )
+            await channel.send_response(
+                ws, req_id, ok=True,
+                payload={
+                    "session_id": session_id_to_delete,
+                    "history_store_deleted": bool(history_store_deleted),
+                },
+            )
+            return
 
         from jiuwenswarm.server.runtime.session.session_metadata import get_session_metadata
         from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
@@ -3614,7 +3810,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             "work_mode": str(meta.get("work_mode") or DEFAULT_WEB_WORK_MODE),
         }
 
-    async def _project_get_sessions(ws, req_id, params, session_id):
+    async def _project_get_sessions(ws, req_id, params, session_id, user_id=None):
         """获取项目下的非置顶普通会话列表,按 last_user_message_at 倒序。
 
         会话仅按 ``project_id`` 匹配可见项目。``project_id`` 传 ``"default"`` 时,
@@ -3655,6 +3851,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             limit = max(1, limit)
 
         from jiuwenswarm.server.runtime.session.session_metadata import collect_all_sessions_metadata
+        from jiuwenswarm.gateway.routing.session_index import is_remote_storage
 
         # 可见(非隐藏)项目的 project_id 集合(与 project.list 统计口径一致)
         all_projects = project_store.list_projects(include_hidden=True, cache_bust=True)
@@ -3674,6 +3871,30 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             return _attribute_session_project(meta, visible_by_id) == project_id
 
         sessions = collect_all_sessions_metadata()
+        # remote(PG)模式：PG sessions 表没有 pinned/cron_id/channel_id/project_id 等字段，
+        # 企业版会话历史存在 PG，session_metadata 本地文件不含这些会话。
+        # 从 PG 读全量会话并补默认字段，让下面的过滤逻辑统一处理。
+        if is_remote_storage():
+            _raw_uid = str(user_id or "").strip() or "guest"
+            try:
+                from jiuwenswarm.channels.web.history_store.api import list_sessions_sync
+
+                db_sessions = await asyncio.to_thread(
+                    list_sessions_sync,
+                    None,
+                    limit=500,
+                    offset=0,
+                    user=_raw_uid,
+                )
+            except Exception:  # noqa: BLE001
+                db_sessions = []
+            for s in db_sessions:
+                s.setdefault("pinned", False)
+                s.setdefault("cron_id", "")
+                s.setdefault("channel_id", "web")
+                s.setdefault("project_id", "")
+                s.setdefault("last_user_message_at", s.get("updated_at", 0))
+            sessions = db_sessions + sessions
         # 仅非置顶普通会话(cron_id 为空) + 归属匹配 + web 渠道
         # cron 会话由 get_cron_sessions 返回
         matched = [
@@ -5334,7 +5555,28 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                                     payload={"rss_mb": rss_mb, "total_mb": total_mb,
                                              "available_mb": available_mb})
 
-    async def _chat_send(ws, req_id, params, session_id):
+    async def _chat_send(ws, req_id, params, session_id, user_id=None):
+        # remote 模式下维护会话索引：chat.send 时写入最近一条用户消息预览
+        if session_id:
+            try:
+                from jiuwenswarm.gateway.routing.session_index import is_remote_storage, upsert_async
+                if is_remote_storage():
+                    content = ""
+                    if isinstance(params, dict):
+                        content = str(params.get("content") or params.get("query") or "")
+                    # user_id 缺失时回退 "guest"（与 history_store 一致），避免写空串
+                    # 到索引 user 字段、后续按用户过滤匹配不到而破坏多用户隔离。
+                    _raw_uid = str(user_id or "").strip()
+                    if not _raw_uid:
+                        logger.warning(
+                            "[chat.send] remote 模式缺少 user_id，索引 user 回退为 guest",
+                        )
+                        _raw_uid = "guest"
+                    await upsert_async(
+                        session_id, "user", content, time.time(), user=_raw_uid,
+                    )
+            except Exception:
+                logger.debug("[chat.send] session_index upsert skipped", exc_info=True)
         await channel.send_response(
             ws,
             req_id,

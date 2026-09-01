@@ -28,6 +28,7 @@
     "agent": "智能体",
     "teams": "团队",
     "sessions": "会话",
+    "history": "会话历史",
     "cron": "定时任务",
     "skills": "技能",
     "channels": "频道",
@@ -503,6 +504,7 @@
     "folder": "文件夹",
     "notPreviewable": "不可预览",
     "selectFile": "请选择一个文件查看",
+    "remoteFilesUnavailable": "分布式模式下当前仅支持恢复会话历史，暂不支持浏览网关本地会话文件",
     "noneSelected": "未选择会话",
     "unknownSession": "未知会话-未知时间",
     "unknownTime": "未知时间",
@@ -536,6 +538,17 @@
     "version": "版本",
     "language": "语言",
     "moreSettings": "更多设置"
+  },
+  "history": {
+    "title": "会话历史",
+    "subtitle": "浏览 Web Pod 落库的会话历史",
+    "refresh": "刷新",
+    "loading": "加载中...",
+    "empty": "暂无会话历史",
+    "emptyMessages": "该会话没有消息记录",
+    "notFound": "未找到该会话",
+    "back": "返回列表",
+    "messageCount": "{{count}} 条消息"
   },
   "a2aIngress": {
     "title": "A2A 调度中心",

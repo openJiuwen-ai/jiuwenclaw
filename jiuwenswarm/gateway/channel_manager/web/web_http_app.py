@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import logging
@@ -55,6 +56,115 @@ def _request_client_host(request: Request) -> str | None:
     return host or None
 
 _STREAM_RPC_METHODS = frozenset({"chat.send", "history.get"})
+
+# AgentServer 本地历史缺失（mnt pod 回收后按需重新拉起为空目录）时其 history.get
+# 流式路径会发出该报错；remote(PG) 模式下网关按此签名拦截并从 PG 合成历史页。
+_HISTORY_NOT_FOUND_SNIPPET = "invalid page_idx or session history not found"
+# 与 server/wire_truncate.py 的 _HISTORY_PAGE_SIZE 保持一致（避免为分页常量引入 server 依赖）
+_HISTORY_PG_PAGE_SIZE = 50
+# history.get 等待 Agent 首帧的预算：pod 存活时首帧（accepted）亚秒级到达；
+# 会话 pod 已回收时网关会走拉起/就绪等待（AGENT_SERVER_READY_TIMEOUT，最长数百秒）
+# ——期间客户端表现为"历史数据加载中…"永久挂起。超过预算即回退 PG，不再干等。
+_HISTORY_FIRST_FRAME_TIMEOUT = 20.0
+
+
+async def _race_history_first_frame(
+    frame_iter: AsyncIterator[dict[str, Any]],
+    timeout: float,
+) -> tuple[str, dict[str, Any] | None]:
+    """竞速等待 SSE 帧流的第一个帧。
+
+    返回 ``("frame", frame)`` / ``("end", None)``（流结束）/ ``("timeout", None)``。
+    超时不取消底层等待（让拉起流程继续），由调用方决定回退或继续等。
+    """
+    first_task = asyncio.ensure_future(frame_iter.__anext__())  # type: ignore[arg-type]
+    done, _pending = await asyncio.wait({first_task}, timeout=timeout)
+    if first_task not in done:
+        return ("timeout", None)
+    if first_task.exception() is not None or first_task.cancelled():
+        return ("end", None)
+    try:
+        return ("frame", first_task.result())
+    except StopAsyncIteration:
+        return ("end", None)
+
+
+async def _history_page_from_pg(
+    request: Request, params: dict[str, Any],
+) -> dict[str, Any] | None:
+    """remote(PG) 模式下从 ChatHistoryStore 合成 ``history.get`` 分页。
+
+    会话历史文件在按会话拉起的 AgentServer pod 本地盘，pod 回收后重拉的空目录
+    必然报 "invalid page_idx or session history not found"。此时网关回退读 PG
+    （chat 上行时 ``record_user``/``record_assistant`` 落库的消息）合成同形分页；
+    PG 也没有则合成空页——语义是"该会话没有历史"，前端按空会话渲染而非报错。
+    仅 remote 存储模式生效；返回 None 表示不回退（保持原错误透传）。
+    """
+    from jiuwenswarm.gateway.routing.session_index import is_remote_storage
+
+    if not is_remote_storage():
+        return None
+    sid = str(params.get("session_id") or "").strip()
+    if not sid:
+        return None
+    try:
+        page_idx = int(params.get("page_idx") or 1)
+    except (TypeError, ValueError):
+        page_idx = 1
+    page_idx = max(1, page_idx)
+    uid = (request.headers.get("x-user-id") or "").strip() or "guest"
+    try:
+        from jiuwenswarm.channels.web.history_store.api import get_session_detail_sync
+
+        detail = await asyncio.to_thread(get_session_detail_sync, sid, None, user=uid)
+    except Exception:  # noqa: BLE001
+        logger.exception("[WebHTTP] history.get PG 回退读取失败: session_id=%s", sid)
+        detail = None
+    records: list[dict[str, Any]] = []
+    if isinstance(detail, dict):
+        records = [m for m in (detail.get("messages") or []) if isinstance(m, dict)]
+    total = len(records)
+    total_pages = max(1, (total + _HISTORY_PG_PAGE_SIZE - 1) // _HISTORY_PG_PAGE_SIZE)
+    ordered = list(reversed(records))  # 与 server get_conversation_history 一致：新→旧
+    start = (page_idx - 1) * _HISTORY_PG_PAGE_SIZE
+    page_messages = [
+        {
+            "role": m.get("role"),
+            "content": m.get("content"),
+            "timestamp": m.get("timestamp"),
+            "session_id": sid,
+            "request_id": m.get("request_id"),
+        }
+        for m in ordered[start:start + _HISTORY_PG_PAGE_SIZE]
+    ]
+    return {
+        "session_id": sid,
+        "messages": page_messages,
+        "total_pages": total_pages,
+        "page_idx": page_idx,
+    }
+
+
+def _history_page_sse_frames(rid: str, page: dict[str, Any]) -> list[str]:
+    """把 PG 合成页打包为与 AgentServer 同形的 ``history.message`` SSE 帧序列。"""
+    sid = str(page.get("session_id") or "")
+    frames: list[str] = []
+    for item in page.get("messages") or []:
+        frames.append(_sse_pack(rid, "history.message", {
+            "event_type": "history.message",
+            "message": item,
+            "session_id": sid,
+            "total_pages": page.get("total_pages"),
+            "page_idx": page.get("page_idx"),
+        }))
+    frames.append(_sse_pack(rid, "history.message", {
+        "event_type": "history.message",
+        "status": "done",
+        "session_id": sid,
+        "total_pages": page.get("total_pages"),
+        "page_idx": page.get("page_idx"),
+    }))
+    return frames
 
 _OPENAPI_TAGS = [
     {"name": "health", "description": "探活与 Agent 连接状态"},
@@ -449,7 +559,7 @@ async def _history_json(
     outbound = None
     req_id = request.headers.get("x-request-id") or uuid.uuid4().hex
     try:
-        outbound, rid, _sid = await dispatch_http_request(
+        dispatch_task = asyncio.ensure_future(dispatch_http_request(
             channel,
             method="history.get",
             params=params,
@@ -458,17 +568,60 @@ async def _history_json(
             is_stream=True,
             use_sse=True,
             client_host=_request_client_host(request),
+        ))
+        done, _ = await asyncio.wait(
+            {dispatch_task}, timeout=_HISTORY_FIRST_FRAME_TIMEOUT,
         )
+        if dispatch_task not in done:
+            page = await _history_page_from_pg(request, params)
+            if page is not None:
+                return JSONResponse(
+                    {
+                        "request_id": req_id,
+                        "ok": True,
+                        "data": page,
+                        "metadata": _web_http_metadata("history.get"),
+                    },
+                    headers=_response_headers(req_id, "history.get"),
+                )
+        outbound, rid, _sid = await dispatch_task
         messages: list[Any] = []
         total_pages: Any = None
         page_idx: Any = params.get("page_idx", 1)
         error_payload: dict[str, Any] | None = None
-        async for frame in outbound.iter_sse_frames(
+        saw_history = False
+        frame_iter = outbound.iter_sse_frames(
             rid,
             timeout=resolve_web_http_history_timeout(),
             idle_timeout=resolve_web_http_sse_idle_timeout(),
             keepalive=resolve_web_http_sse_keepalive(),
-        ):
+        )
+        pending_first: dict[str, Any] | None = None
+        state, first = await _race_history_first_frame(
+            frame_iter, _HISTORY_FIRST_FRAME_TIMEOUT,
+        )
+        if state == "timeout":
+            page = await _history_page_from_pg(request, params)
+            if page is not None:
+                return JSONResponse(
+                    {
+                        "request_id": rid,
+                        "ok": True,
+                        "data": page,
+                        "metadata": _web_http_metadata("history.get"),
+                    },
+                    headers=_response_headers(rid, "history.get"),
+                )
+        elif state == "frame":
+            pending_first = first
+        while True:
+            if pending_first is not None:
+                frame, pending_first = pending_first, None
+            else:
+                try:
+                    frame = await frame_iter.__anext__()
+                except StopAsyncIteration:
+                    break
             ftype = frame.get("type")
             if ftype == "res":
                 if not frame.get("ok", True):
@@ -489,6 +642,7 @@ async def _history_json(
                 error_payload = payload
                 break
             if ev == "history.message":
+                saw_history = True
                 if payload.get("status") == "done":
                     total_pages = payload.get("total_pages", total_pages)
                     page_idx = payload.get("page_idx", page_idx)
@@ -499,6 +653,18 @@ async def _history_json(
                 total_pages = payload.get("total_pages", total_pages)
                 page_idx = payload.get("page_idx", page_idx)
         if error_payload is not None:
+            if _HISTORY_NOT_FOUND_SNIPPET in str(error_payload.get("error") or ""):
+                page = await _history_page_from_pg(request, params)
+                if page is not None:
+                    return JSONResponse(
+                        {
+                            "request_id": rid,
+                            "ok": True,
+                            "data": page,
+                            "metadata": _web_http_metadata("history.get"),
+                        },
+                        headers=_response_headers(rid, "history.get"),
+                    )
             return JSONResponse(
                 {
                     "request_id": rid,
@@ -512,6 +678,19 @@ async def _history_json(
                 status_code=404,
                 headers=_response_headers(rid, "history.get"),
             )
+        if not saw_history:
+            # 流结束但没有任何 history 帧（转发静默失败）：remote(PG) 模式回退 PG。
+            page = await _history_page_from_pg(request, params)
+            if page is not None:
+                return JSONResponse(
+                    {
+                        "request_id": rid,
+                        "ok": True,
+                        "data": page,
+                        "metadata": _web_http_metadata("history.get"),
+                    },
+                    headers=_response_headers(rid, "history.get"),
+                )
         return JSONResponse(
             {
                 "request_id": rid,
@@ -614,7 +793,7 @@ async def _stream(
     async def gen() -> AsyncIterator[str]:
         outbound = None
         try:
-            outbound, rid, _sid = await dispatch_http_request(
+            dispatch_task = asyncio.ensure_future(dispatch_http_request(
                 channel,
                 method=method,
                 params=params,
@@ -623,13 +802,73 @@ async def _stream(
                 is_stream=True,
                 use_sse=True,
                 client_host=_request_client_host(request),
-            )
-            async for frame in outbound.iter_sse_frames(
+            ))
+
+            def _cleanup_abandoned(task: "asyncio.Future[Any]") -> None:
+                # PG 回退后派发任务仍在后台跑（可能正在拉起会话 pod）：
+                # 完成后把它的 outbound 注销掉，避免常驻注册表泄漏。
+                if task.cancelled() or task.exception() is not None:
+                    return
+                try:
+                    abandoned = task.result()[0]
+                except Exception:  # noqa: BLE001
+                    return
+                if abandoned is None:
+                    return
+                asyncio.ensure_future(
+                    channel.unregister_request_outbound(abandoned),
+                )
+
+            if method == "history.get":
+                dispatch_task.add_done_callback(_cleanup_abandoned)
+
+            rid = req_id
+            pending_first: dict[str, Any] | None = None
+            if method == "history.get":
+                done, _ = await asyncio.wait(
+                    {dispatch_task}, timeout=_HISTORY_FIRST_FRAME_TIMEOUT,
+                )
+                if dispatch_task not in done:
+                    # Agent 派发超预算（会话 pod 大概率已回收，正在走拉起等待）：
+                    # remote(PG) 模式下直接回退 PG 合成历史页，避免客户端无限挂起。
+                    page = await _history_page_from_pg(request, params)
+                    if page is not None:
+                        for sse in _history_page_sse_frames(rid, page):
+                            yield sse
+                        return
+                    # PG 不可用：保持原行为，继续等派发完成
+                outbound, rid, _sid = await dispatch_task
+            else:
+                outbound, rid, _sid = await dispatch_task
+            frame_iter = outbound.iter_sse_frames(
                 rid,
                 timeout=resolve_web_http_sse_timeout(),
                 idle_timeout=resolve_web_http_sse_idle_timeout(),
                 keepalive=resolve_web_http_sse_keepalive(),
-            ):
+            )
+            if method == "history.get":
+                state, first = await _race_history_first_frame(
+                    frame_iter, _HISTORY_FIRST_FRAME_TIMEOUT,
+                )
+                if state == "timeout":
+                    # Agent 首帧超预算（pod 活着但迟迟不应答）：同样回退 PG。
+                    page = await _history_page_from_pg(request, params)
+                    if page is not None:
+                        for sse in _history_page_sse_frames(rid, page):
+                            yield sse
+                        return
+                    # PG 不可用：保持原行为，继续等 Agent 帧
+                elif state == "frame":
+                    pending_first = first
+            saw_history_payload = False
+            while True:
+                if pending_first is not None:
+                    frame, pending_first = pending_first, None
+                else:
+                    try:
+                        frame = await frame_iter.__anext__()
+                    except StopAsyncIteration:
+                        break
                 if await request.is_disconnected():
                     logger.info(
                         "[WebHTTP] SSE client disconnected method=%s request_id=%s",
@@ -654,11 +893,35 @@ async def _stream(
                         return
                     continue
                 if ftype == "event":
+                    ev_name = str(frame.get("event") or "message")
+                    payload = frame.get("payload") if frame.get("payload") is not None else {}
+                    if ev_name == "history.message":
+                        saw_history_payload = True
+                    if (
+                        method == "history.get"
+                        and ev_name == "chat.error"
+                        and isinstance(payload, dict)
+                        and _HISTORY_NOT_FOUND_SNIPPET in str(payload.get("error") or "")
+                    ):
+                        page = await _history_page_from_pg(request, params)
+                        if page is not None:
+                            for sse in _history_page_sse_frames(rid, page):
+                                yield sse
+                            return
                     yield _sse_pack(
                         rid,
-                        str(frame.get("event") or "message"),
-                        frame.get("payload") if frame.get("payload") is not None else {},
+                        ev_name,
+                        payload,
                     )
+            if method == "history.get" and not saw_history_payload:
+                # 流结束（含"秒回 accepted 后立即 EOF"的转发静默失败路径）但没有
+                # 任何 history 帧：remote(PG) 模式下回退 PG，保证前端一定能收到
+                # history.message/done 帧复位加载状态，否则永远停在"历史数据加载中…"。
+                page = await _history_page_from_pg(request, params)
+                if page is not None:
+                    for sse in _history_page_sse_frames(rid, page):
+                        yield sse
+                    return
         except Exception as exc:  # noqa: BLE001
             logger.exception("[WebHTTP] stream %s failed: %s", method, exc)
             yield _sse_pack(req_id, "chat.error", {"error": str(exc)})

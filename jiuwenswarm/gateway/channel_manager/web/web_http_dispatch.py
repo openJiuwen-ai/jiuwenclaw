@@ -128,11 +128,16 @@ async def dispatch_http_request(
         try:
             import json as _json
 
+            # 注入连接级 user_id 到 params，保证 history 回调按正确用户落库
+            # （前端请求体不含 user_id，它来自 X-User-Id Header / 握手 query）。
+            frame_params = dict(params) if isinstance(params, dict) else {}
+            if user_id and not frame_params.get("user") and not frame_params.get("user_id"):
+                frame_params["user_id"] = user_id
             browser_frame = {
                 "type": "req",
                 "id": req_id,
                 "method": method,
-                "params": params,
+                "params": frame_params,
             }
             channel.rpc.record_history_frame(
                 "browser", _json.dumps(browser_frame, ensure_ascii=False),

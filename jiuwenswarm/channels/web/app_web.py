@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import errno
 import http.client
+import io
 import json
 import logging
 import mimetypes
@@ -170,6 +171,7 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
     }
     _WS_LOG_MAX_CHARS = 2000
     _HTTP_PROXY_TIMEOUT = 30
+    _PROXY_STREAM_CHUNK = 65536
     _WS_CONNECT_TIMEOUT = 10
     _WS_SELECT_TIMEOUT = 60
     _WS_RECV_BUFFER = 65536
@@ -378,7 +380,6 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
 
             conn.request(self.command, self.path, body=body, headers=forward_headers)
             resp = conn.getresponse()
-            resp_body = resp.read()
 
             self.send_response(resp.status, resp.reason)
             for key, value in resp.getheaders():
@@ -386,11 +387,29 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
                     continue
                 self.send_header(key, value)
             self.end_headers()
-            if self.command != "HEAD":
-                self.wfile.write(resp_body)
+            if self.command == "HEAD":
+                return
+            # 流式泵送（read1 + 逐块 flush）：SSE（chat.delta / history.message）的
+            # 实时性依赖 body 增量到达。此前 resp.read() 整段读完才回包——响应头
+            # 和全部帧推迟到上游流结束，浏览器把 8s 的流式回复在流结束时一次性
+            # 收到，既丢失流式渲染，又让响应头超过前端 15s 请求超时（触发
+            # REQUEST_TIMEOUT → 前端自动 interrupt）。
+            # 注意必须用 read1：read(65536) 会跨 chunk 凑满 64KB 才返回，SSE 小帧
+            # 永远凑不满，等于仍然整段缓冲。HTTP/1.0 下无 Content-Length 的响应
+            # 由连接关闭定界（SSE 场景）。
+            while True:
+                chunk = resp.read1(self._PROXY_STREAM_CHUNK)
+                if not chunk:
+                    break
+                self.wfile.write(chunk)
+                self.wfile.flush()
         except Exception as exc:  # noqa: BLE001
             self.log_error("proxy http error: %s", exc)
-            self.send_error(502, "proxy http error")
+            try:
+                self.send_error(502, "proxy http error")
+            except Exception:  # noqa: BLE001
+                # 响应头已发出（流中断）：无法再回 502，断开连接由关闭定界
+                self.close_connection = True
         finally:
             conn.close()
 
@@ -692,6 +711,9 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
             ).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
+            # 运行时配置已逐请求注入 index.html，必须禁止缓存，
+            # 否则浏览器会复用含过期/跨用户配置的旧响应。
+            self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
@@ -745,7 +767,9 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
 
     def _is_document_request(self) -> bool:
         path = urlparse(self.path).path
-        return path in ("/", "/index.html") and "text/html" in self.headers.get("Accept", "")
+        # Accept header may be absent (e.g. IAB initial navigation); serve
+        # the runtime-config-injected index.html for root and index.html paths.
+        return path in ("/", "/index.html")
 
     def send_head(self):
         parsed = urlparse(self.path)
@@ -758,6 +782,44 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
 
         if in_base and target.exists():
             return super().send_head()
+
+        # Vite base:'./' produces relative asset URLs (./assets/...). When the
+        # SPA route is a sub-path (e.g. /chat/new), the browser resolves these
+        # to /chat/assets/... which don't exist under dist/. Strip leading path
+        # segments and retry from the dist root before falling back to index.html.
+        static_exts = (".js", ".css", ".svg", ".png", ".jpg", ".jpeg", ".ico",
+                       ".webp", ".gif", ".woff", ".woff2", ".ttf", ".eot",
+                       ".map", ".json", ".webmanifest")
+        if req_path.endswith(static_exts) and "/" in rel_path:
+            basename = rel_path.rsplit("/", 1)[-1]
+            # Try progressively shorter prefixes (e.g. chat/assets/x.js ->
+            # assets/x.js -> x.js).
+            parts = rel_path.split("/")
+            for i in range(1, len(parts)):
+                candidate_rel = "/".join(parts[i:])
+                candidate = (base_dir / candidate_rel).resolve()
+                cand_in_base = os.path.commonpath(
+                    [str(base_dir), str(candidate)]
+                ) == str(base_dir)
+                if cand_in_base and candidate.exists():
+                    self.path = "/" + candidate_rel
+                    return super().send_head()
+
+        # SPA fallback: serve index.html with runtime config injected.
+        index_path = base_dir / "index.html"
+        if index_path.exists():
+            body = _inject_user_web_runtime_config(
+                index_path.read_text(encoding="utf-8"), self.user_web_mode
+            ).encode("utf-8")
+            f = io.BytesIO(body)
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            # 运行时配置已逐请求注入 index.html，必须禁止缓存，
+            # 否则浏览器会复用含过期/跨用户配置的旧响应。
+            self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            return f
 
         self.path = "/index.html"
         return super().send_head()

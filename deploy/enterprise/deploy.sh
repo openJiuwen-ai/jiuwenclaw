@@ -23,6 +23,7 @@ source "gateway_handler.sh"
 source "manager_handler.sh"
 source "web_handler.sh"
 source "runtime_handler.sh"
+source "post_deploy_handler.sh"
 
 process_up() {
     # MODULES是ALL_MODULES的子集，启动顺序正着来
@@ -39,9 +40,14 @@ process_up() {
         if [ ${namespace} != "default" ]; then
             create_k8s_resource "ns" ${namespace}
         fi
-        collect_k8s_cluster_info
     fi
-    
+
+    # collect_k8s_cluster_info 是只读 kubectl 查询。dev 模式渲染
+    # (enable_dev_mode_if_needed) 依赖 CURRENT_NODE_NAME 给 Deployment pin nodeName,
+    # render-only 也必须执行, 否则渲染半途 unbound variable 崩溃,
+    # 产物缺 nodeName/securityContext/fsGroup/OPENJIUWEN_SERVICE_PG_SCHEMA。
+    collect_k8s_cluster_info
+
     exec_cmd mkdir -p ${CONFIG_DIR}
 
     for module in "${sorted_modules[@]}"; do
@@ -57,6 +63,10 @@ process_up() {
             deploy_${fname}
         fi
     done
+
+    # 部署完成后收敛业务侧基线（PG 服务模板行 / Redis scope config 派生副本 /
+    # 节点 hostPath 目录），详见 post_deploy_handler.sh 头注释
+    post_deploy_init_hook
 }
 
 

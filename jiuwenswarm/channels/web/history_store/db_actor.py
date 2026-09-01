@@ -223,6 +223,27 @@ class HistoryDbActor:
     def get_session_detail_sync(self, **kw: Any) -> dict[str, Any] | None:
         return self.run_sync(self._get_session_detail(**kw))
 
+    async def _delete_session(self, session_id: str, *, user: str | None) -> bool:
+        """删除会话的 sessions 行与全部 messages 行。
+
+        ``user`` 非空时校验归属（行不属于该用户则拒绝删除）；为空则仅按
+        session_id 删除（与本地文件删除的无归属校验语义一致）。
+        """
+        handler = await self._get_handler()
+        if user:
+            s = await handler.get("sessions", {"session_id": session_id, "user": user})
+            if s is None:
+                return False
+        await handler.delete("messages", {"session_id": session_id})
+        await handler.delete("sessions", {"session_id": session_id})
+        return True
+
+    async def delete_session(self, session_id: str, *, user: str | None = None) -> bool:
+        return await self.run_async(self._delete_session(session_id, user=user))
+
+    def delete_session_sync(self, session_id: str, *, user: str | None = None) -> bool:
+        return self.run_sync(self._delete_session(session_id, user=user))
+
     def stop(self) -> None:
         if not self._started:
             return

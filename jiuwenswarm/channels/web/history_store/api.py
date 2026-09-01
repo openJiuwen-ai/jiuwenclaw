@@ -64,3 +64,18 @@ def get_session_detail_sync(
     if st is None:
         return None
     return st.get_session_detail_blocking(str(session_id), user=user)
+
+
+def delete_session_sync(
+    session_id: str,
+    store: ChatHistoryStore | None = None,
+    *,
+    user: str | None = None,
+) -> bool:
+    """同步删除会话（sessions 行 + messages 行）。"""
+    if not session_id:
+        return False
+    st = _coerce_store(store)
+    if st is None:
+        return False
+    return st.delete_session_blocking(str(session_id), user=user)

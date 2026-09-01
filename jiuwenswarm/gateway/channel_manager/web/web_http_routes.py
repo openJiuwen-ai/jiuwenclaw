@@ -625,8 +625,67 @@ _HARNESS_ROUTES: tuple[WebHttpMappedRoute, ...] = (
     ),
 )
 
+_PROJECT_QUERY = ("filter", "work_mode", "include_hidden", "limit", "cron_id")
+
+_PROJECT_ROUTES: tuple[WebHttpMappedRoute, ...] = (
+    WebHttpMappedRoute(
+        "GET", "/projects", "project.list",
+        "projects", "列出项目（含默认项目与统计）",
+        query_keys=_PROJECT_QUERY,
+    ),
+    WebHttpMappedRoute(
+        "GET", "/projects/pinned-sessions", "project.pinned_sessions",
+        "projects", "全部置顶会话",
+    ),
+    WebHttpMappedRoute(
+        "GET", "/projects/{project_id}", "project.info",
+        "projects", "项目详情（统计口径同 project.list）",
+        path_to_param={"project_id": "project_id"},
+    ),
+    WebHttpMappedRoute(
+        "GET", "/projects/{project_id}/sessions", "project.get_sessions",
+        "projects", "项目下非置顶普通会话列表",
+        path_to_param={"project_id": "project_id"},
+        query_keys=("limit",),
+    ),
+    WebHttpMappedRoute(
+        "GET", "/projects/{project_id}/cron-sessions", "project.get_cron_sessions",
+        "projects", "项目下定时任务触发会话列表",
+        path_to_param={"project_id": "project_id"},
+        query_keys=("cron_id",),
+    ),
+    WebHttpMappedRoute(
+        "POST", "/projects", "project.create",
+        "projects", "创建项目（name/project_dir/work_mode 均可选）",
+        accept_body=True,
+    ),
+    WebHttpMappedRoute(
+        "POST", "/projects/actions/restore", "project.restore",
+        "projects", "恢复已软删除的项目（body.project_id）",
+        accept_body=True,
+    ),
+    WebHttpMappedRoute(
+        "PATCH", "/projects/{project_id}", "project.rename",
+        "projects", "重命名项目（body.name）",
+        path_to_param={"project_id": "project_id"},
+        accept_body=True,
+    ),
+    WebHttpMappedRoute(
+        "POST", "/projects/{project_id}/actions/pin", "project.pin",
+        "projects", "置顶/取消置顶项目（body.pinned）",
+        path_to_param={"project_id": "project_id"},
+        accept_body=True,
+    ),
+    WebHttpMappedRoute(
+        "DELETE", "/projects/{project_id}", "project.remove",
+        "projects", "移除项目（软删除）",
+        path_to_param={"project_id": "project_id"},
+    ),
+)
+
 WORKSPACE_ROUTES: tuple[WebHttpMappedRoute, ...] = (
     *_PERMISSIONS_ROUTES,
+    *_PROJECT_ROUTES,
     *_SKILLS_ROUTES,
     *_HARNESS_ROUTES,
 )

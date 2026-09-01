@@ -287,7 +287,7 @@ class ChatHistoryStore:
             msgs.sort(key=lambda m: float(m.get("timestamp") or 0))
             return {**s, "messages": msgs}
         try:
-            return self._get_actor().get_session_detail_sync(session_id, user=user)
+            return self._get_actor().get_session_detail_sync(session_id=session_id, user=user)
         except Exception:
             logger.exception("[history] %s 读取会话详情失败", self.backend.upper())
             return None
@@ -306,7 +306,40 @@ class ChatHistoryStore:
             return await asyncio.to_thread(
                 self.get_session_detail_blocking, session_id, user=None,
             )
-        return await self._get_actor().get_session_detail(session_id, user=None)
+        return await self._get_actor().get_session_detail(session_id=session_id, user=None)
+
+    def delete_session_blocking(
+        self, session_id: str, *, user: str | None,
+    ) -> bool:
+        """删除会话（sessions 行 + messages 行）。库不可用返回 False。"""
+        if not session_id:
+            return False
+        if self._memory:
+            with self._mem_lock:
+                s = self._mem_sessions.get(session_id)
+                if s is None:
+                    return False
+                if user and s.get("user") != user:
+                    return False
+                del self._mem_sessions[session_id]
+                self._mem_messages = [
+                    m for m in self._mem_messages if m.get("session_id") != session_id
+                ]
+            return True
+        try:
+            return self._get_actor().delete_session_sync(str(session_id), user=user)
+        except Exception:
+            logger.exception("[history] %s 删除会话失败", self.backend.upper())
+            return False
+
+    async def delete_session(
+        self, session_id: str, *, user: str | None = None,
+    ) -> bool:
+        if self._memory:
+            return await asyncio.to_thread(
+                self.delete_session_blocking, session_id, user=user,
+            )
+        return await self._get_actor().delete_session(str(session_id), user=user)
 
     async def close(self) -> None:
         if self._actor is not None:
