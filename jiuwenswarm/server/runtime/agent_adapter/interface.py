@@ -281,12 +281,6 @@ def _with_heartbeat_history_metadata(
     return result
 
 
-# Sentinel value marking history entries that should only live in the current
-# turn and must not leak into subsequent turns' prompt context (e.g. uploaded
-# images, file attachments).  The frontend may still read these for display.
-_HISTORY_SCOPE_CURRENT_TURN = "current_turn"
-
-
 def _history_user_extra(params: Any) -> dict[str, Any] | None:
     """Extract media/files/skills from ``params`` for the history extra.
 
@@ -308,7 +302,7 @@ def _history_user_extra(params: Any) -> dict[str, Any] | None:
         if media_items:
             extra["media_items"] = {
                 "items": media_items,
-                "scope": _HISTORY_SCOPE_CURRENT_TURN,
+                "scope": "current_turn",
             }
 
     raw_files = params.get("files")
@@ -324,7 +318,7 @@ def _history_user_extra(params: Any) -> dict[str, Any] | None:
             if image_items:
                 files["uploaded_images"] = {
                     "items": image_items,
-                    "scope": _HISTORY_SCOPE_CURRENT_TURN,
+                    "scope": "current_turn",
                 }
         if files:
             extra["files"] = files
