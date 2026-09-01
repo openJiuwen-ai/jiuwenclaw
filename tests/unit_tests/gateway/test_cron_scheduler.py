@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import asyncio
-import os
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -417,10 +416,6 @@ class TestCheckStoreChanged:
         # Modify file externally via second store
         store2 = CronJobStore(path=store_file)
         await _create_one_job(store2, name="job-2", targets="web")
-        # Some filesystems (e.g. coarse mtime) may not advance st_mtime on a
-        # same-second rewrite; bump explicitly so the change is observable.
-        now = time.time() + 1.0
-        os.utime(store_file, (now, now))
 
         changed = await svc.check_store_changed()
         assert changed is True
