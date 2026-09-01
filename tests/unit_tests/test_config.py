@@ -11,13 +11,18 @@ import yaml
 from jiuwenswarm.common.config import (
     get_config_raw,
     get_evolution_auto_save_enabled,
-    get_skill_evolution_enabled,
+    get_evolution_enabled,
+    get_evolution_review_trigger_enabled,
+    get_evolution_signal_trigger_enabled,
+    get_passive_skill_evolution_triggers,
+    get_skill_create_enabled,
     migrate_config_from_template,
     replace_teams_in_config,
     resolve_env_vars,
-    update_external_cli_agents_in_config,
+    resolve_string_or_list_config,
     update_skill_retrieval_in_config,
     update_setup_guide_enabled_in_config,
+    update_evolution_enabled_in_config,
     update_xiaoyi_runtime_in_config,
 )
 
@@ -41,6 +46,28 @@ class TestResolveEnvVars:
         monkeypatch.setenv("TEST_VAR", "actual_value")
         result = resolve_env_vars("${TEST_VAR:-default_value}")
         assert result == "actual_value"
+
+    @staticmethod
+    def test_resolve_unset_only_default_preserves_explicit_empty(
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        monkeypatch.setenv("DISABLED_TOOLS", "")
+        value = resolve_env_vars(
+            "${DISABLED_TOOLS-search_skill,install_skill,uninstall_skill}"
+        )
+        assert resolve_string_or_list_config(value) == []
+
+    @staticmethod
+    def test_resolve_unset_only_default_when_missing(monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.delenv("DISABLED_TOOLS", raising=False)
+        value = resolve_env_vars(
+            "${DISABLED_TOOLS-search_skill,install_skill,uninstall_skill}"
+        )
+        assert resolve_string_or_list_config(value) == [
+            "search_skill",
+            "install_skill",
+            "uninstall_skill",
+        ]
 
     @staticmethod
     def test_resolve_empty_string():
@@ -122,12 +149,25 @@ class TestConfigFunctions:
         monkeypatch: pytest.MonkeyPatch,
         temp_config_file: Path,
     ):
-        monkeypatch.setattr("jiuwenswarm.common.config.CONFIG_YAML_PATH", temp_config_file)
+        monkeypatch.setattr("jiuwenswarm.common.config.get_config_file", lambda: temp_config_file)
 
         update_setup_guide_enabled_in_config(False)
 
         raw = yaml.safe_load(temp_config_file.read_text(encoding="utf-8"))
         assert raw["setup_guide"] == {"enabled": False}
+
+    @staticmethod
+    def test_update_evolution_enabled_in_config(
+        monkeypatch: pytest.MonkeyPatch,
+        temp_config_file: Path,
+    ):
+        monkeypatch.setattr("jiuwenswarm.common.config.get_config_file", lambda: temp_config_file)
+
+        update_evolution_enabled_in_config(False)
+
+        raw = yaml.safe_load(temp_config_file.read_text(encoding="utf-8"))
+        assert raw["react"]["evolution"]["enabled"] is False
+        assert get_evolution_enabled(raw) is False
 
     @pytest.mark.parametrize(
         ("config", "expected"),
@@ -135,17 +175,11 @@ class TestConfigFunctions:
             ({}, False),
             ({"react": {"evolution": {"auto_save": False}}}, False),
             ({"react": {"evolution": {"auto_save": True}}}, True),
-            ({"evolution": {"auto_save": True}}, False),
+            ({"evolution": {"auto_save": True}}, True),
             ({"react": {"evolution": {"auto_save": "true"}}}, False),
         ],
     )
-    def test_evolution_auto_save_config_values(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-        config,
-        expected,
-    ):
-        monkeypatch.delenv("EVOLUTION_AUTO_SAVE", raising=False)
+    def test_evolution_auto_save_config_values(self, config, expected):
         assert get_evolution_auto_save_enabled(config) is expected
 
     @staticmethod
@@ -153,21 +187,94 @@ class TestConfigFunctions:
         def _raise() -> dict:
             raise OSError("config unavailable")
 
-        monkeypatch.delenv("EVOLUTION_AUTO_SAVE", raising=False)
         monkeypatch.setattr("jiuwenswarm.common.config.get_config", _raise)
 
         assert get_evolution_auto_save_enabled() is False
 
     @pytest.mark.parametrize(
-        ("env_value", "config", "expected"),
+        ("env_value", "config", "fallback", "expected"),
         [
-            (None, {"react": {"evolution": {"auto_save": True}}}, True),
-            (None, {"evolution": {"auto_save": True}}, False),
-            ("false", {"react": {"evolution": {"auto_save": True}}}, True),
-            ("true", {"react": {"evolution": {"auto_save": False}}}, False),
+            (None, {"react": {"evolution": {"review_trigger": True}}}, False, True),
+            (None, {"evolution": {"review_trigger": False}}, True, False),
+            (None, {"evolution": {"review_trigger": None}}, True, True),
+            (None, {"evolution": {}}, False, False),
+            ("false", {"react": {"evolution": {"review_trigger": True}}}, True, False),
+            ("true", {"react": {"evolution": {"review_trigger": False}}}, False, True),
         ],
     )
-    def test_evolution_auto_save_config_and_env_values(
+    def test_evolution_review_trigger_config_and_env_values(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        env_value,
+        config,
+        fallback,
+        expected,
+    ):
+        if env_value is None:
+            monkeypatch.delenv("EVOLUTION_REVIEW_TRIGGER", raising=False)
+        else:
+            monkeypatch.setenv("EVOLUTION_REVIEW_TRIGGER", env_value)
+
+        assert get_evolution_review_trigger_enabled(config, fallback=fallback) is expected
+
+    @pytest.mark.parametrize(
+        ("env_value", "config", "fallback", "expected"),
+        [
+            (None, {"react": {"evolution": {"signal_trigger": True}}}, False, True),
+            (None, {"react": {"evolution": {"auto_scan": True}}}, False, True),
+            (None, {"evolution": {"signal_trigger": False}}, True, False),
+            (None, {"evolution": {}}, False, False),
+            (None, {"react": {"evolution": {}}}, True, True),
+            ("true", {"react": {"evolution": {"signal_trigger": False}}}, False, True),
+        ],
+    )
+    def test_evolution_signal_trigger_config_and_env_values(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        env_value,
+        config,
+        fallback,
+        expected,
+    ):
+        monkeypatch.delenv("EVOLUTION_SIGNAL_TRIGGER", raising=False)
+        monkeypatch.delenv("EVOLUTION_AUTO_SCAN", raising=False)
+        if env_value is None:
+            pass
+        else:
+            monkeypatch.setenv("EVOLUTION_SIGNAL_TRIGGER", env_value)
+
+        assert get_evolution_signal_trigger_enabled(config, fallback=fallback) is expected
+
+    @pytest.mark.parametrize(
+        ("config", "expected_signal", "expected_review"),
+        [
+            ({"react": {"evolution": {"signal_trigger": True, "review_trigger": True}}}, True, False),
+            ({"react": {"evolution": {"signal_trigger": False, "review_trigger": True}}}, False, False),
+            ({"react": {"evolution": {}}}, True, False),
+        ],
+    )
+    def test_passive_skill_evolution_triggers_ignore_review_for_single_agent(
+        self,
+        config,
+        expected_signal,
+        expected_review,
+    ):
+        triggers = get_passive_skill_evolution_triggers(config)
+        assert triggers == {
+            "signal_trigger": expected_signal,
+            "review_trigger": expected_review,
+        }
+
+    @pytest.mark.parametrize(
+        ("env_value", "config", "expected"),
+        [
+            (None, {"react": {"evolution": {"skill_create": True}}}, True),
+            (None, {"evolution": {"skill_create": True}}, True),
+            ("false", {"react": {"evolution": {"skill_create": True}}}, False),
+            ("true", {"react": {"evolution": {"skill_create": False}}}, True),
+        ],
+    )
+    def test_skill_create_config_and_env_values(
         self,
         monkeypatch: pytest.MonkeyPatch,
         env_value,
@@ -175,36 +282,34 @@ class TestConfigFunctions:
         expected,
     ):
         if env_value is None:
-            monkeypatch.delenv("EVOLUTION_AUTO_SAVE", raising=False)
+            monkeypatch.delenv("SKILL_CREATE", raising=False)
         else:
-            monkeypatch.setenv("EVOLUTION_AUTO_SAVE", env_value)
+            monkeypatch.setenv("SKILL_CREATE", env_value)
 
-        assert get_evolution_auto_save_enabled(config) is expected
+        assert get_skill_create_enabled(config) is expected
 
     @pytest.mark.parametrize(
         ("config", "expected"),
         [
-            ({"react": {"evolution": {"skill_evolution": True}}}, True),
-            ({"react": {"evolution": {"skill_evolution": False}}}, False),
-            ({"react": {"evolution": {"skill_evolution": True, "auto_scan": False}}}, True),
-            ({"evolution": {"skill_evolution": True}}, False),
-            ({"react": {"evolution": {"enabled": True}}}, False),
+            ({}, False),
+            ({"react": {"evolution": {"enabled": True}}}, True),
+            ({"react": {"evolution": {"enabled": False}}}, False),
+            ({"evolution": {"enabled": True}}, True),
+            ({"evolution": {"enabled": False}}, False),
+            # react.evolution wins over top-level evolution
+            (
+                {
+                    "react": {"evolution": {"enabled": True}},
+                    "evolution": {"enabled": False},
+                },
+                True,
+            ),
+            ({"react": {"evolution": {"enabled": "true"}}}, True),
+            ({"react": {"evolution": {}}}, False),
         ],
     )
-    def test_skill_evolution_uses_only_canonical_switch(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-        config,
-        expected,
-    ):
-        for env_name in (
-            "SKILL_CREATE",
-            "EVOLUTION_AUTO_SCAN",
-            "EVOLUTION_SIGNAL_TRIGGER",
-            "EVOLUTION_REVIEW_TRIGGER",
-        ):
-            monkeypatch.setenv(env_name, "true")
-        assert get_skill_evolution_enabled(config) is expected
+    def test_evolution_enabled_config_values(self, config, expected):
+        assert get_evolution_enabled(config) is expected
 
     @staticmethod
     def test_get_config_raw(temp_config_file: Path):
@@ -265,20 +370,20 @@ symphony:
         assert migrated["symphony"]["fingerprint"]["normalization"]["workers"] == 1
 
     @staticmethod
-    def test_migrate_config_preserves_canonical_evolution_settings(
+    def test_migrate_config_preserves_legacy_evolution_settings(
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ):
-        monkeypatch.delenv("EVOLUTION_AUTO_SCAN", raising=False)
-        monkeypatch.delenv("EVOLUTION_AUTO_SAVE", raising=False)
+        monkeypatch.delenv("EVOLUTION_REVIEW_TRIGGER", raising=False)
         template_path = tmp_path / "template.yaml"
         user_config_path = tmp_path / "config.yaml"
         template_path.write_text(
             """
 react:
   evolution:
-    skill_evolution: false
+    review_trigger:
     auto_save: false
+    enabled: true
 """,
             encoding="utf-8",
         )
@@ -286,21 +391,21 @@ react:
             """
 react:
   evolution:
-    skill_evolution: true
+    review_trigger: true
     auto_save: true
 """,
             encoding="utf-8",
         )
 
-        # The user's canonical values are already complete, so migration is a no-op.
-        assert migrate_config_from_template(template_path, user_config_path) is False
+        assert migrate_config_from_template(template_path, user_config_path) is True
 
         migrated = yaml.safe_load(user_config_path.read_text(encoding="utf-8"))
         assert migrated["react"]["evolution"] == {
-            "skill_evolution": True,
+            "review_trigger": True,
             "auto_save": True,
+            "enabled": True,
         }
-        assert get_skill_evolution_enabled(migrated) is True
+        assert get_evolution_review_trigger_enabled(migrated) is True
         assert get_evolution_auto_save_enabled(migrated) is True
 
     @staticmethod
@@ -336,7 +441,7 @@ symphony:
 """,
             encoding="utf-8",
         )
-        monkeypatch.setattr("jiuwenswarm.common.config.CONFIG_YAML_PATH", temp_config_file)
+        monkeypatch.setattr("jiuwenswarm.common.config.get_config_file", lambda: temp_config_file)
 
         update_skill_retrieval_in_config(
             {
@@ -400,6 +505,7 @@ class TestTeamModesConfig:
             "agents": {
                 "agent_1": {
                     "model": {
+                        "ref": "gpt-4.1#0",
                         "provider": "OpenAI",
                         "model": "gpt-4.1",
                         "api_base": "${OPENAI_BASE_URL:-https://api.openai.com/v1}",
@@ -414,6 +520,7 @@ class TestTeamModesConfig:
                 },
                 "agent_2": {
                     "model": {
+                        "ref": "gpt-4.1-mini#1",
                         "provider": "OpenAI",
                         "model": "gpt-4.1-mini",
                         "api_base": "${OPENAI_BASE_URL:-https://api.openai.com/v1}",
@@ -494,7 +601,7 @@ modes:
 """,
             encoding="utf-8",
         )
-        monkeypatch.setattr("jiuwenswarm.common.config.CONFIG_YAML_PATH", temp_config_file)
+        monkeypatch.setattr("jiuwenswarm.common.config.get_config_file", lambda: temp_config_file)
 
         replace_teams_in_config(TestTeamModesConfig._front_payload(["alpha_team"], enable_permissions=True))
 
@@ -510,19 +617,92 @@ modes:
             "agent_key": "agent_1",
         }
         assert [item["agent_key"] for item in saved["predefined_members"]] == ["agent_1", "agent_2"]
-        assert saved["agents"]["leader"]["model"]["model_client_config"]["client_provider"] == "OpenAI"
-        assert saved["agents"]["leader"]["model"]["model_client_config"]["timeout"] == 1800
-        assert saved["agents"]["leader"]["model"]["model_client_config"]["verify_ssl"] is False
-        assert saved["agents"]["leader"]["model"]["model_client_config"]["custom_headers"] == {}
-        assert saved["agents"]["leader"]["model"]["model_request_config"]["model"] == "gpt-4.1"
+        assert saved["agents"]["leader"]["model"] == {"ref": "gpt-4.1#0"}
         assert saved["agents"]["analyst"]["skills"] == ["team-management"]
         assert saved["agents"]["coder"]["skills"] == ["coding"]
         assert saved.get("teammate") is None
         assert "teammate" not in saved["agents"]
         registry = raw["web_config_panel"]["agent_team_agents"]
         assert set(registry) == {"agent_1", "agent_2"}
-        assert registry["agent_1"]["model"]["model_request_config"]["model"] == "gpt-4.1"
+        assert registry["agent_1"]["model"] == {"ref": "gpt-4.1#0"}
         assert registry["agent_2"]["skills"] == ["coding"]
+        saved_text = temp_config_file.read_text(encoding="utf-8")
+        assert "api_key" not in saved_text
+        assert "api_base" not in saved_text
+        assert "custom_headers" not in saved_text
+
+    @staticmethod
+    def test_replace_teams_in_config_migrates_legacy_inline_model_to_ref(
+        monkeypatch: pytest.MonkeyPatch,
+        temp_config_file: Path,
+    ):
+        temp_config_file.write_text(
+            """
+models:
+  defaults:
+    - model_client_config:
+        model_name: gpt-4.1
+        client_provider: OpenAI
+        api_base: https://api.openai.com/v1
+        api_key: server-secret
+      model_config_obj: {}
+modes: {}
+""",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr("jiuwenswarm.common.config.get_config_file", lambda: temp_config_file)
+        payload = TestTeamModesConfig._front_payload(["alpha_team"])
+        payload["agents"]["agent_1"]["model"] = {
+            "provider": "OpenAI",
+            "api_base": "https://api.openai.com/v1",
+            "api_key": "legacy-secret",
+            "model": "gpt-4.1",
+        }
+
+        replace_teams_in_config(payload)
+
+        raw = yaml.safe_load(temp_config_file.read_text(encoding="utf-8"))
+        saved = raw["modes"]["team"]["alpha_team"]
+        assert saved["agents"]["leader"]["model"] == {"ref": "gpt-4.1#0"}
+        assert "legacy-secret" not in temp_config_file.read_text(encoding="utf-8")
+
+    @staticmethod
+    def test_replace_teams_in_config_resolves_env_before_legacy_model_migration(
+        monkeypatch: pytest.MonkeyPatch,
+        temp_config_file: Path,
+    ):
+        monkeypatch.setenv("MODEL_NAME", "gpt-4.1")
+        monkeypatch.setenv("MODEL_PROVIDER", "OpenAI")
+        monkeypatch.setenv("API_BASE", "https://api.openai.com/v1")
+        temp_config_file.write_text(
+            """
+models:
+  defaults:
+    - model_client_config:
+        model_name: ${MODEL_NAME}
+        client_provider: ${MODEL_PROVIDER}
+        api_base: ${API_BASE}
+        api_key: ${API_KEY}
+      model_config_obj: {}
+modes: {}
+""",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr("jiuwenswarm.common.config.get_config_file", lambda: temp_config_file)
+        payload = TestTeamModesConfig._front_payload(["alpha_team"])
+        payload["agents"]["agent_1"]["model"] = {
+            "provider": "openai",
+            "api_base": "https://api.openai.com/v1/",
+            "api_key": "legacy-secret",
+            "model": "gpt-4.1",
+        }
+
+        replace_teams_in_config(payload)
+
+        raw = yaml.safe_load(temp_config_file.read_text(encoding="utf-8"))
+        assert raw["modes"]["team"]["alpha_team"]["agents"]["leader"]["model"] == {
+            "ref": "gpt-4.1#0",
+        }
 
     @staticmethod
     def test_replace_teams_in_config_expands_reused_agent_specs_without_yaml_aliases(
@@ -539,7 +719,7 @@ modes:
 """,
             encoding="utf-8",
         )
-        monkeypatch.setattr("jiuwenswarm.common.config.CONFIG_YAML_PATH", temp_config_file)
+        monkeypatch.setattr("jiuwenswarm.common.config.get_config_file", lambda: temp_config_file)
 
         replace_teams_in_config(TestTeamModesConfig._front_payload(["alpha_team"], include_teammate=True))
 
@@ -569,7 +749,7 @@ modes:
 """,
             encoding="utf-8",
         )
-        monkeypatch.setattr("jiuwenswarm.common.config._CONFIG_YAML_PATH", temp_config_file)
+        monkeypatch.setattr("jiuwenswarm.common.config.get_config_file", lambda: temp_config_file)
         payload = TestTeamModesConfig._front_payload(["alpha_team"])
         payload["team"] = []
 
@@ -579,7 +759,7 @@ modes:
         assert "team" not in raw["modes"]
         registry = raw["web_config_panel"]["agent_team_agents"]
         assert set(registry) == {"agent_1", "agent_2"}
-        assert registry["agent_1"]["model"]["model_request_config"]["model"] == "gpt-4.1"
+        assert registry["agent_1"]["model"] == {"ref": "gpt-4.1#0"}
         assert registry["agent_2"]["skills"] == ["coding"]
 
     @staticmethod
@@ -587,7 +767,7 @@ modes:
         monkeypatch: pytest.MonkeyPatch,
         temp_config_file: Path,
     ):
-        monkeypatch.setattr("jiuwenswarm.common.config.CONFIG_YAML_PATH", temp_config_file)
+        monkeypatch.setattr("jiuwenswarm.common.config.get_config_file", lambda: temp_config_file)
 
         replace_teams_in_config(TestTeamModesConfig._front_payload(["alpha_team"]))
 
@@ -597,122 +777,11 @@ modes:
         assert "teammate" not in saved["agents"]
 
     @staticmethod
-    def test_replace_teams_in_config_writes_external_cli_agents(
-        monkeypatch: pytest.MonkeyPatch,
-        temp_config_file: Path,
-    ):
-        monkeypatch.setattr("jiuwenswarm.common.config.CONFIG_YAML_PATH", temp_config_file)
-        payload = TestTeamModesConfig._front_payload(["alpha_team"])
-        payload["team"][0]["external_cli_agents"] = [
-            {"cli_agent": "claude", "cli_path": "/opt/claude"},
-            {"cli_agent": "codex", "cli_path": "/opt/codex"},
-        ]
-        payload["team"][0]["external_cli_publish_url"] = "ws://127.0.0.1:19000/ws"
-
-        replace_teams_in_config(payload)
-
-        raw = yaml.safe_load(temp_config_file.read_text(encoding="utf-8"))
-        saved = raw["modes"]["team"]["alpha_team"]
-        assert saved["external_cli_agents"] == [
-            {"cli_agent": "claude", "cli_path": "/opt/claude"},
-            {"cli_agent": "codex", "cli_path": "/opt/codex"},
-        ]
-        assert saved["external_transport"] == {
-            "type": "hybrid",
-            "params": {"external_publish_url": "ws://127.0.0.1:19000/ws"},
-        }
-        assert "external_cli_publish_url" not in saved
-
-    @staticmethod
-    def test_replace_teams_in_config_keeps_claude_without_external_transport(
-        monkeypatch: pytest.MonkeyPatch,
-        temp_config_file: Path,
-    ):
-        monkeypatch.setattr("jiuwenswarm.common.config.CONFIG_YAML_PATH", temp_config_file)
-        payload = TestTeamModesConfig._front_payload(["alpha_team"])
-        payload["team"][0]["external_cli_agents"] = [{"cli_agent": "claude"}]
-
-        replace_teams_in_config(payload)
-
-        raw = yaml.safe_load(temp_config_file.read_text(encoding="utf-8"))
-        saved = raw["modes"]["team"]["alpha_team"]
-        assert saved["external_cli_agents"] == [{"cli_agent": "claude"}]
-        assert "external_transport" not in saved
-
-    @staticmethod
-    def test_replace_teams_in_config_removes_external_transport_without_codex(
-        monkeypatch: pytest.MonkeyPatch,
-        temp_config_file: Path,
-    ):
-        monkeypatch.setattr("jiuwenswarm.common.config.CONFIG_YAML_PATH", temp_config_file)
-        payload = TestTeamModesConfig._front_payload(["alpha_team"])
-        payload["team"][0]["external_cli_agents"] = [{"cli_agent": "claude"}]
-        payload["team"][0]["external_transport"] = {
-            "type": "inprocess",
-            "params": {"external_publish_url": "ws://127.0.0.1:19000/ws"},
-        }
-
-        replace_teams_in_config(payload)
-
-        raw = yaml.safe_load(temp_config_file.read_text(encoding="utf-8"))
-        saved = raw["modes"]["team"]["alpha_team"]
-        assert saved["external_cli_agents"] == [{"cli_agent": "claude"}]
-        assert "external_transport" not in saved
-
-    @staticmethod
-    def test_update_external_cli_agents_in_config_updates_default_team(
-        monkeypatch: pytest.MonkeyPatch,
-        temp_config_file: Path,
-    ):
-        monkeypatch.setattr("jiuwenswarm.common.config.CONFIG_YAML_PATH", temp_config_file)
-
-        update_external_cli_agents_in_config(
-            [
-                {"cli_agent": "claude", "cli_path": "/opt/claude"},
-                {"cli_agent": "codex", "cli_path": "/opt/codex"},
-            ],
-            "ws://127.0.0.1:19000/ws",
-        )
-
-        raw = yaml.safe_load(temp_config_file.read_text(encoding="utf-8"))
-        saved = raw["modes"]["team"]["jiuwen_team"]
-        assert saved["external_cli_agents"] == [
-            {"cli_agent": "claude", "cli_path": "/opt/claude"},
-            {"cli_agent": "codex", "cli_path": "/opt/codex"},
-        ]
-        assert saved["external_transport"] == {
-            "type": "hybrid",
-            "params": {"external_publish_url": "ws://127.0.0.1:19000/ws"},
-        }
-
-    @staticmethod
-    def test_update_external_cli_agents_in_config_removes_external_transport_without_codex(
-        monkeypatch: pytest.MonkeyPatch,
-        temp_config_file: Path,
-    ):
-        monkeypatch.setattr("jiuwenswarm.common.config.CONFIG_YAML_PATH", temp_config_file)
-
-        update_external_cli_agents_in_config(["claude", "codex"], "ws://127.0.0.1:19000/ws")
-        raw = yaml.safe_load(temp_config_file.read_text(encoding="utf-8"))
-        raw["modes"]["team"]["jiuwen_team"]["external_transport"] = {
-            "type": "inprocess",
-            "params": {"external_publish_url": "ws://127.0.0.1:19000/ws"},
-        }
-        temp_config_file.write_text(yaml.safe_dump(raw, allow_unicode=True, sort_keys=False), encoding="utf-8")
-
-        update_external_cli_agents_in_config(["claude"])
-
-        raw = yaml.safe_load(temp_config_file.read_text(encoding="utf-8"))
-        saved = raw["modes"]["team"]["jiuwen_team"]
-        assert saved["external_cli_agents"] == [{"cli_agent": "claude"}]
-        assert "external_transport" not in saved
-
-    @staticmethod
     def test_replace_teams_in_config_rejects_duplicate_team_names(
         monkeypatch: pytest.MonkeyPatch,
         temp_config_file: Path,
     ):
-        monkeypatch.setattr("jiuwenswarm.common.config.CONFIG_YAML_PATH", temp_config_file)
+        monkeypatch.setattr("jiuwenswarm.common.config.get_config_file", lambda: temp_config_file)
 
         with pytest.raises(ValueError, match="duplicate team_name"):
             replace_teams_in_config(TestTeamModesConfig._front_payload(["alpha_team", "alpha_team"]))
@@ -722,7 +791,7 @@ modes:
         monkeypatch: pytest.MonkeyPatch,
         temp_config_file: Path,
     ):
-        monkeypatch.setattr("jiuwenswarm.common.config.CONFIG_YAML_PATH", temp_config_file)
+        monkeypatch.setattr("jiuwenswarm.common.config.get_config_file", lambda: temp_config_file)
         payload = TestTeamModesConfig._front_payload(["alpha_team"])
         payload["team"][0]["predefined_members"][1]["agent_key"] = "missing_agent"
 
@@ -734,7 +803,7 @@ modes:
         monkeypatch: pytest.MonkeyPatch,
         temp_config_file: Path,
     ):
-        monkeypatch.setattr("jiuwenswarm.common.config.CONFIG_YAML_PATH", temp_config_file)
+        monkeypatch.setattr("jiuwenswarm.common.config.get_config_file", lambda: temp_config_file)
         payload = TestTeamModesConfig._front_payload(["alpha_team"], include_teammate=True)
         payload["team"][0]["teammate"]["agent_key"] = "missing_agent"
 
@@ -746,7 +815,7 @@ modes:
         monkeypatch: pytest.MonkeyPatch,
         temp_config_file: Path,
     ):
-        monkeypatch.setattr("jiuwenswarm.common.config.CONFIG_YAML_PATH", temp_config_file)
+        monkeypatch.setattr("jiuwenswarm.common.config.get_config_file", lambda: temp_config_file)
 
         replace_teams_in_config(TestTeamModesConfig._front_payload(["alpha_team", "beta_team"]))
         replace_teams_in_config(TestTeamModesConfig._front_payload(["gamma_team"]))
@@ -759,7 +828,7 @@ modes:
         monkeypatch: pytest.MonkeyPatch,
         temp_config_file: Path,
     ):
-        monkeypatch.setattr("jiuwenswarm.common.config.CONFIG_YAML_PATH", temp_config_file)
+        monkeypatch.setattr("jiuwenswarm.common.config.get_config_file", lambda: temp_config_file)
         payload = TestTeamModesConfig._front_payload(["alpha_team"])
         payload["team"][0]["predefined_members"][1]["member_name"] = "analyst"
 
@@ -783,7 +852,7 @@ modes:
 """,
             encoding="utf-8",
         )
-        monkeypatch.setattr("jiuwenswarm.common.config._CONFIG_YAML_PATH", temp_config_file)
+        monkeypatch.setattr("jiuwenswarm.common.config.get_config_file", lambda: temp_config_file)
 
         # 空 team 数组应该删除 modes.team 配置项
         replace_teams_in_config({"agents": {}, "team": []})
@@ -807,7 +876,7 @@ modes:
 """,
             encoding="utf-8",
         )
-        monkeypatch.setattr("jiuwenswarm.common.config._CONFIG_YAML_PATH", temp_config_file)
+        monkeypatch.setattr("jiuwenswarm.common.config.get_config_file", lambda: temp_config_file)
 
         # 空 team 数组，且 modes.team 不存在，不应报错
         replace_teams_in_config({"agents": {}, "team": []})
@@ -841,7 +910,7 @@ channels:
 """,
             encoding="utf-8",
         )
-        monkeypatch.setattr("jiuwenswarm.common.config.CONFIG_YAML_PATH", temp_config_file)
+        monkeypatch.setattr("jiuwenswarm.common.config.get_config_file", lambda: temp_config_file)
 
         update_xiaoyi_runtime_in_config(
             {
@@ -878,7 +947,7 @@ channels:
 """,
             encoding="utf-8",
         )
-        monkeypatch.setattr("jiuwenswarm.common.config.CONFIG_YAML_PATH", temp_config_file)
+        monkeypatch.setattr("jiuwenswarm.common.config.get_config_file", lambda: temp_config_file)
 
         update_xiaoyi_runtime_in_config(
             {"last_session_id": "sess-2"},
@@ -910,7 +979,7 @@ channels:
 """,
             encoding="utf-8",
         )
-        monkeypatch.setattr("jiuwenswarm.common.config.CONFIG_YAML_PATH", temp_config_file)
+        monkeypatch.setattr("jiuwenswarm.common.config.get_config_file", lambda: temp_config_file)
 
         token = "88062548d4436ba6b6bfb573c641ad5d2a3f10a649dae5f52ad6f31f851cad64"
         update_xiaoyi_runtime_in_config(

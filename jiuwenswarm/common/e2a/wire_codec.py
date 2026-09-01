@@ -256,7 +256,7 @@ def encode_agent_response_for_wire(
                 sequence=sequence,
                 exc=te,
             )
-        logger.info(
+        logger.debug(
             "[E2A][wire][out] unary request_id=%s response_id=%s response_kind=%s legacy_stashed=false",
             rid,
             response_id,

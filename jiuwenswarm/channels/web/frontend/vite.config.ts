@@ -2,10 +2,7 @@ import type { Plugin } from 'vite'
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 import svgr from 'vite-plugin-svgr'
-import { spawnSync } from 'child_process'
 import { createHash } from 'node:crypto'
-import { createHmac, timingSafeEqual } from 'node:crypto'
-import type { ServerResponse } from 'http'
 import path from 'path'
 import fs from 'fs'
 
@@ -179,132 +176,6 @@ function resolveProjectRootDir(): string {
   return repoRoot
 }
 
-const FILE_CONTENT_ENCODING_ALIASES: Record<string, string> = {
-  utf8: 'utf-8',
-  'utf_8': 'utf-8',
-  gb2312: 'gb18030',
-  gbk: 'gb18030',
-  'shift-jis': 'shift_jis',
-  sjis: 'shift_jis',
-  euc_kr: 'euc-kr',
-  latin1: 'iso-8859-1',
-}
-
-function normalizeFileContentEncoding(encoding: string): string {
-  const key = encoding.trim().toLowerCase()
-  return FILE_CONTENT_ENCODING_ALIASES[key] ?? key
-}
-
-function decodeFileContent(raw: Buffer, requestedEncoding: string): { content: string; encoding: string } {
-  const normalizedEncoding = normalizeFileContentEncoding(requestedEncoding || 'utf-8')
-  if (normalizedEncoding !== 'auto') {
-    return {
-      content: new TextDecoder(normalizedEncoding, { fatal: true }).decode(raw),
-      encoding: normalizedEncoding,
-    }
-  }
-
-  const candidates = ['utf-8', 'gb18030', 'big5', 'shift_jis', 'euc-kr', 'iso-8859-1']
-  for (const candidate of candidates) {
-    try {
-      return {
-        content: new TextDecoder(candidate, { fatal: true }).decode(raw),
-        encoding: candidate,
-      }
-    } catch {
-      /* try next encoding */
-    }
-  }
-  throw new Error('Unable to decode file with any known encoding')
-}
-
-const DOWNLOAD_CONTENT_TYPES: Record<string, string> = {
-  '.md': 'text/markdown; charset=utf-8',
-  '.markdown': 'text/markdown; charset=utf-8',
-  '.txt': 'text/plain; charset=utf-8',
-  '.json': 'application/json; charset=utf-8',
-  '.jsonl': 'application/x-ndjson; charset=utf-8',
-  '.csv': 'text/csv; charset=utf-8',
-  '.html': 'text/html; charset=utf-8',
-  '.htm': 'text/html; charset=utf-8',
-  '.js': 'text/javascript; charset=utf-8',
-  '.mjs': 'text/javascript; charset=utf-8',
-  '.ts': 'text/plain; charset=utf-8',
-  '.tsx': 'text/plain; charset=utf-8',
-  '.py': 'text/plain; charset=utf-8',
-  '.png': 'image/png',
-  '.jpg': 'image/jpeg',
-  '.jpeg': 'image/jpeg',
-  '.webp': 'image/webp',
-  '.gif': 'image/gif',
-  '.svg': 'image/svg+xml',
-  '.bmp': 'image/bmp',
-  '.avif': 'image/avif',
-  '.pdf': 'application/pdf',
-  '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-  '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-}
-
-function downloadContentType(filePath: string): string {
-  return DOWNLOAD_CONTENT_TYPES[path.extname(filePath).toLowerCase()] || 'application/octet-stream'
-}
-
-function handleFileStreamError(res: ServerResponse, error: NodeJS.ErrnoException): void {
-  if (res.headersSent) {
-    res.destroy(error)
-    return
-  }
-
-  res.statusCode = error.code === 'EACCES' || error.code === 'EPERM' ? 403 : 500
-  res.removeHeader('content-length')
-  res.removeHeader('content-disposition')
-  res.removeHeader('accept-ranges')
-  res.removeHeader('content-range')
-  res.setHeader('content-type', 'application/json; charset=utf-8')
-  res.end(JSON.stringify({
-    error: res.statusCode === 403 ? 'file_access_denied' : 'file_read_failed',
-  }))
-}
-
-function resolveFileDownloadSecret(): string | null {
-  const envSecret = process.env.JIUWENSWARM_FILE_DOWNLOAD_SECRET
-  if (envSecret && envSecret.length >= 32) return envSecret
-
-  const workspace = process.env.JIUWENSWARM_WORKSPACE || path.join(process.env.HOME || process.env.USERPROFILE || '', '.jiuwenswarm')
-  const secretPath = path.join(workspace, 'config', '.file_download_secret')
-  try {
-    const secret = fs.readFileSync(secretPath, 'utf8').trim()
-    return secret.length >= 32 ? secret : null
-  } catch {
-    return null
-  }
-}
-
-function validateFileDownloadToken(token: string): { path: string } | null {
-  const parts = token.split('.')
-  if (parts.length !== 2) return null
-  const [payloadBase64, signature] = parts
-
-  const secret = resolveFileDownloadSecret()
-  if (!secret) return null
-  const expected = createHmac('sha256', secret).update(payloadBase64).digest('hex')
-  const actual = Buffer.from(signature, 'hex')
-  const expectedBuffer = Buffer.from(expected, 'hex')
-  if (actual.length !== expectedBuffer.length || !timingSafeEqual(actual, expectedBuffer)) return null
-
-  try {
-    const payload = JSON.parse(Buffer.from(payloadBase64, 'base64url').toString('utf8')) as Record<string, unknown>
-    if (
-      typeof payload.path !== 'string' ||
-      !payload.path ||
-      typeof payload.sid !== 'string'
-    ) return null
-    return { path: payload.path }
-  } catch {
-    return null
-  }
-}
-
 /** WS proxy 中常见的、可安全忽略的 socket 错误码（跨平台） */
 const WS_PROXY_IGNORABLE_CODES = new Set([
   'EPIPE',          // 对端已关闭
@@ -430,574 +301,7 @@ function devWsTrafficLogger(): Plugin {
   }
 }
 
-/** 将文件读取接口挂到 Vite dev server，避免额外占用 3003 端口 */
-function devFileContentApi(): Plugin {
-  const projectRootDir = resolveProjectRootDir()
-  const workspaceRootDir = path.resolve(projectRootDir, 'agent')
-  const sessionsRootDir = path.resolve(workspaceRootDir, 'sessions')
-  const agentTeamsRootDir = path.resolve(projectRootDir, '.agent_teams')
-  const webLogsRootDir = path.resolve(workspaceRootDir, '.logs')
-  const autoHarnessDir = path.resolve(projectRootDir, 'auto-harness')
-  const generateAgentFoldersScriptPath = path.resolve(__dirname, '../../../scripts/generate-agent-folders.js')
-  // dev 模式默认开启调试视图，与“前端 dev 即调试模式”一致。
-  let wsDisableCompress = true
-  const isMarkdownFile = (targetPath: string) => {
-    const ext = path.extname(targetPath).toLowerCase()
-    return ext === '.md' || ext === '.mdx'
-  }
-  const isPathUnderAllowedRoot = (targetPath: string) => {
-    const relativeWorkspacePath = path.relative(workspaceRootDir, targetPath)
-    const inWorkspace = !relativeWorkspacePath.startsWith('..') && !path.isAbsolute(relativeWorkspacePath)
-    const relativeAgentTeamsPath = path.relative(agentTeamsRootDir, targetPath)
-    const inAgentTeams = !relativeAgentTeamsPath.startsWith('..') && !path.isAbsolute(relativeAgentTeamsPath)
-    const relativeLogsPath = path.relative(webLogsRootDir, targetPath)
-    const inWebLogs = !relativeLogsPath.startsWith('..') && !path.isAbsolute(relativeLogsPath)
-    const relativeAutoHarnessPath = path.relative(autoHarnessDir, targetPath)
-    const inAutoHarness = !relativeAutoHarnessPath.startsWith('..') && !path.isAbsolute(relativeAutoHarnessPath)
-    return inWorkspace || inAgentTeams || inWebLogs || inAutoHarness
-  }
-
-  return {
-    name: 'dev-file-content-api',
-    configureServer(server) {
-      server.middlewares.use('/share-api/snapshot', (req, res) => {
-        const writeJson = (statusCode: number, payload: unknown) => {
-          res.statusCode = statusCode
-          res.setHeader('content-type', 'application/json; charset=utf-8')
-          res.end(JSON.stringify(payload))
-        }
-
-        if (req.method !== 'GET' && req.method !== 'HEAD') {
-          writeJson(405, { error: 'method_not_allowed' })
-          return
-        }
-        const url = new URL(req.url || '/share-api/snapshot', 'http://localhost')
-        const sessionId = (url.searchParams.get('session_id') || '').trim()
-        if (!sessionId) {
-          writeJson(400, { error: 'missing_session_id' })
-          return
-        }
-
-        const sessionDir = path.resolve(sessionsRootDir, sessionId)
-        const relativeSessionPath = path.relative(sessionsRootDir, sessionDir)
-        if (relativeSessionPath.startsWith('..') || path.isAbsolute(relativeSessionPath)) {
-          writeJson(404, { error: 'history_not_found' })
-          return
-        }
-
-        const jsonlHistoryPath = path.resolve(sessionDir, 'history.jsonl')
-        const legacyHistoryPath = path.resolve(sessionDir, 'history.json')
-        const historyPath = fs.existsSync(jsonlHistoryPath) ? jsonlHistoryPath : legacyHistoryPath
-        if (!fs.existsSync(sessionDir) || !fs.existsSync(historyPath)) {
-          writeJson(404, { error: 'history_not_found' })
-          return
-        }
-
-        try {
-          const historyText = fs.readFileSync(historyPath, 'utf-8')
-          const historyRaw = historyPath.endsWith('.jsonl')
-            ? historyText
-                .split(/\r?\n/)
-                .map((line) => line.trim())
-                .filter(Boolean)
-                .map((line) => JSON.parse(line) as unknown)
-            : (JSON.parse(historyText) as unknown)
-          if (!Array.isArray(historyRaw)) {
-            writeJson(400, { error: 'invalid_history_shape' })
-            return
-          }
-
-          let title = path.basename(sessionDir)
-          const metadataPath = path.resolve(sessionDir, 'metadata.json')
-          if (fs.existsSync(metadataPath)) {
-            const metadata = JSON.parse(fs.readFileSync(metadataPath, 'utf-8')) as { title?: unknown }
-            if (typeof metadata.title === 'string' && metadata.title.trim()) {
-              title = metadata.title.trim()
-            }
-          }
-          if (title === path.basename(sessionDir)) {
-            for (const record of historyRaw) {
-              if (!record || typeof record !== 'object') continue
-              const item = record as { role?: unknown; content?: unknown }
-              if (item.role === 'user' && typeof item.content === 'string' && item.content.trim()) {
-                title = item.content.trim().replace(/\n/g, ' ').slice(0, 80)
-                break
-              }
-            }
-          }
-
-          const now = new Date()
-          const filename = `jiuwenswarm-share-${now.toISOString().replace(/[-:]/g, '').replace(/\..+$/, '').replace('T', '-')}.png`
-          const snapshot = {
-            session_id: sessionId,
-            metadata: {
-              title,
-              exported_at: now.toISOString(),
-              filename,
-            },
-            records: historyRaw,
-          }
-
-          writeJson(200, { filename, snapshot })
-        } catch (error) {
-          writeJson(500, { error: 'snapshot_failed', detail: (error as Error).message })
-        }
-      })
-
-      server.middlewares.use('/file-api/ws-debug-config', (req, res) => {
-        if (req.method === 'GET') {
-          res.statusCode = 200
-          res.setHeader('content-type', 'application/json; charset=utf-8')
-          res.end(JSON.stringify({ wsDisableCompress }))
-          return
-        }
-
-        if (req.method !== 'POST') {
-          res.statusCode = 405
-          res.setHeader('content-type', 'application/json; charset=utf-8')
-          res.end(JSON.stringify({ error: 'method_not_allowed' }))
-          return
-        }
-
-        let raw = ''
-        req.on('data', (chunk) => {
-          raw += chunk.toString()
-        })
-        req.on('end', () => {
-          try {
-            const payload = raw ? JSON.parse(raw) : {}
-            if (typeof payload.wsDisableCompress !== 'boolean') {
-              res.statusCode = 400
-              res.setHeader('content-type', 'application/json; charset=utf-8')
-              res.end(JSON.stringify({ error: 'invalid_ws_disable_compress' }))
-              return
-            }
-            wsDisableCompress = payload.wsDisableCompress
-            res.statusCode = 200
-            res.setHeader('content-type', 'application/json; charset=utf-8')
-            res.end(JSON.stringify({ ok: true, wsDisableCompress }))
-          } catch {
-            res.statusCode = 400
-            res.setHeader('content-type', 'application/json; charset=utf-8')
-            res.end(JSON.stringify({ error: 'invalid_json' }))
-          }
-        })
-      })
-
-      server.middlewares.use('/file-api/rebuild-agent-data', (_req, res) => {
-        if (_req.method !== 'POST') {
-          res.statusCode = 405
-          res.setHeader('content-type', 'application/json; charset=utf-8')
-          res.end(JSON.stringify({ error: 'method_not_allowed' }))
-          return
-        }
-
-        try {
-          const runResult = spawnSync(process.execPath, [generateAgentFoldersScriptPath], {
-            encoding: 'utf-8',
-          })
-          if (runResult.status !== 0) {
-            const output = `${runResult.stdout || ''}\n${runResult.stderr || ''}`.trim()
-            res.statusCode = 500
-            res.setHeader('content-type', 'application/json; charset=utf-8')
-            res.end(JSON.stringify({ error: 'rebuild_failed', detail: output || 'unknown_error' }))
-            return
-          }
-          res.statusCode = 200
-          res.setHeader('content-type', 'application/json; charset=utf-8')
-          res.end(JSON.stringify({ ok: true }))
-        } catch (error) {
-          res.statusCode = 500
-          res.setHeader('content-type', 'application/json; charset=utf-8')
-          res.end(JSON.stringify({ error: 'rebuild_failed', detail: (error as Error).message }))
-        }
-      })
-
-      server.middlewares.use('/file-api/list-markdown', (req, res) => {
-        if (req.method !== 'GET') {
-          res.statusCode = 405
-          res.setHeader('content-type', 'application/json; charset=utf-8')
-          res.end(JSON.stringify({ error: 'method_not_allowed' }))
-          return
-        }
-        const url = new URL(req.url || '/file-api/list-markdown', 'http://localhost')
-        const dir = url.searchParams.get('dir')
-        if (!dir) {
-          res.statusCode = 400
-          res.setHeader('content-type', 'application/json; charset=utf-8')
-          res.end(JSON.stringify({ error: 'missing_dir' }))
-          return
-        }
-        try {
-          const fullDirPath = path.resolve(projectRootDir, dir)
-          if (!isPathUnderAllowedRoot(fullDirPath)) {
-            res.statusCode = 403
-            res.setHeader('content-type', 'application/json; charset=utf-8')
-            res.end(JSON.stringify({ error: 'forbidden_dir' }))
-            return
-          }
-          if (!fs.existsSync(fullDirPath) || !fs.statSync(fullDirPath).isDirectory()) {
-            res.statusCode = 200
-            res.setHeader('content-type', 'application/json; charset=utf-8')
-            res.end(JSON.stringify({ files: [] }))
-            return
-          }
-          const files = fs
-            .readdirSync(fullDirPath, { withFileTypes: true })
-            .filter((entry) => entry.isFile())
-            .map((entry) => entry.name)
-            .filter((name) => isMarkdownFile(name))
-            .sort((a, b) => a.localeCompare(b))
-            .map((name) => ({
-              name,
-              path: path.relative(projectRootDir, path.resolve(fullDirPath, name)),
-            }))
-          res.statusCode = 200
-          res.setHeader('content-type', 'application/json; charset=utf-8')
-          res.end(JSON.stringify({ files }))
-        } catch (error) {
-          res.statusCode = 500
-          res.setHeader('content-type', 'application/json; charset=utf-8')
-          res.end(JSON.stringify({ error: (error as Error).message }))
-        }
-      })
-
-      server.middlewares.use('/file-api/list-files', (req, res) => {
-        if (req.method !== 'GET') {
-          res.statusCode = 405
-          res.setHeader('content-type', 'application/json; charset=utf-8')
-          res.end(JSON.stringify({ error: 'method_not_allowed' }))
-          return
-        }
-        const url = new URL(req.url || '/file-api/list-files', 'http://localhost')
-        const dir = url.searchParams.get('dir')
-        if (!dir) {
-          res.statusCode = 400
-          res.setHeader('content-type', 'application/json; charset=utf-8')
-          res.end(JSON.stringify({ error: 'missing_dir' }))
-          return
-        }
-        try {
-          const fullDirPath = path.resolve(projectRootDir, dir)
-          if (!isPathUnderAllowedRoot(fullDirPath)) {
-            res.statusCode = 403
-            res.setHeader('content-type', 'application/json; charset=utf-8')
-            res.end(JSON.stringify({ error: 'forbidden_dir' }))
-            return
-          }
-          if (!fs.existsSync(fullDirPath) || !fs.statSync(fullDirPath).isDirectory()) {
-            res.statusCode = 200
-            res.setHeader('content-type', 'application/json; charset=utf-8')
-            res.end(JSON.stringify({ files: [] }))
-            return
-          }
-          const files = fs
-            .readdirSync(fullDirPath, { withFileTypes: true })
-            .sort((a, b) => {
-              if (a.isDirectory() !== b.isDirectory()) return a.isDirectory() ? -1 : 1
-              return a.name.localeCompare(b.name)
-            })
-            .map((entry) => {
-              const absolutePath = path.resolve(fullDirPath, entry.name)
-              if (entry.isDirectory()) {
-                return {
-                  name: entry.name,
-                  path: path.relative(projectRootDir, absolutePath),
-                  isMarkdown: false,
-                  isDirectory: true,
-                }
-              }
-              return {
-                name: entry.name,
-                path: path.relative(projectRootDir, absolutePath),
-                isMarkdown: isMarkdownFile(absolutePath),
-                isDirectory: false,
-              }
-            })
-          res.statusCode = 200
-          res.setHeader('content-type', 'application/json; charset=utf-8')
-          res.end(JSON.stringify({ files }))
-        } catch (error) {
-          res.statusCode = 500
-          res.setHeader('content-type', 'application/json; charset=utf-8')
-          res.end(JSON.stringify({ error: (error as Error).message }))
-        }
-      })
-
-      server.middlewares.use('/file-api/download', (req, res) => {
-        if (req.method !== 'GET' && req.method !== 'HEAD') {
-          res.statusCode = 405
-          res.setHeader('content-type', 'application/json; charset=utf-8')
-          res.end(JSON.stringify({ error: 'method_not_allowed' }))
-          return
-        }
-
-        const url = new URL(req.url || '/file-api/download', 'http://localhost')
-        const token = url.searchParams.get('token') || ''
-        const payload = validateFileDownloadToken(token)
-        if (!payload) {
-          res.statusCode = 403
-          res.setHeader('content-type', 'application/json; charset=utf-8')
-          res.end(JSON.stringify({ error: 'invalid_or_expired_token' }))
-          return
-        }
-
-        let stat: fs.Stats
-        try {
-          stat = fs.statSync(payload.path)
-        } catch {
-          res.statusCode = 404
-          res.setHeader('content-type', 'application/json; charset=utf-8')
-          res.end(JSON.stringify({ error: 'file_not_found' }))
-          return
-        }
-        if (!stat.isFile()) {
-          res.statusCode = 404
-          res.setHeader('content-type', 'application/json; charset=utf-8')
-          res.end(JSON.stringify({ error: 'file_not_found' }))
-          return
-        }
-
-        const fileSize = stat.size
-        let start = 0
-        let end = Math.max(0, fileSize - 1)
-        let partial = false
-        const range = req.headers.range
-        if (range) {
-          if (!range.startsWith('bytes=') || range.includes(',') || fileSize === 0) {
-            res.statusCode = 416
-            res.setHeader('content-range', `bytes */${fileSize}`)
-            res.end()
-            return
-          }
-          const [startText, endText] = range.slice(6).split('-', 2)
-          try {
-            if (startText) {
-              start = Number(startText)
-              end = endText ? Number(endText) : end
-            } else {
-              const suffixLength = Number(endText)
-              if (!Number.isInteger(suffixLength) || suffixLength <= 0) throw new Error('invalid_suffix')
-              start = Math.max(0, fileSize - suffixLength)
-            }
-            if (!Number.isInteger(start) || !Number.isInteger(end) || start < 0 || start >= fileSize || end < start) throw new Error('invalid_range')
-            end = Math.min(end, fileSize - 1)
-            partial = true
-          } catch {
-            res.statusCode = 416
-            res.setHeader('content-range', `bytes */${fileSize}`)
-            res.end()
-            return
-          }
-        }
-
-        const contentLength = fileSize === 0 ? 0 : end - start + 1
-        const inline = ['1', 'true'].includes((url.searchParams.get('inline') || '').toLowerCase())
-        const fileName = path.basename(payload.path)
-        res.statusCode = partial ? 206 : 200
-        res.setHeader('content-type', downloadContentType(payload.path))
-        res.setHeader('content-length', String(contentLength))
-        res.setHeader('accept-ranges', 'bytes')
-        res.setHeader('content-disposition', `${inline ? 'inline' : 'attachment'}; filename*=UTF-8''${encodeURIComponent(fileName)}`)
-        res.setHeader('cache-control', 'no-store')
-        if (partial) res.setHeader('content-range', `bytes ${start}-${end}/${fileSize}`)
-        if (req.method === 'HEAD') {
-          res.end()
-          return
-        }
-        const fileStream = fs.createReadStream(payload.path, fileSize === 0 ? undefined : { start, end })
-        fileStream.once('error', (error) => {
-          server.config.logger.error(`[file-api] Failed to read ${payload.path}: ${(error as Error).message}`)
-          handleFileStreamError(res, error)
-        })
-        fileStream.pipe(res)
-      })
-
-      server.middlewares.use('/file-api/raw-file', (req, res) => {
-        if (req.method !== 'GET' && req.method !== 'HEAD') {
-          res.statusCode = 405
-          res.setHeader('content-type', 'application/json; charset=utf-8')
-          res.end(JSON.stringify({ error: 'method_not_allowed' }))
-          return
-        }
-
-        const url = new URL(req.url || '/file-api/raw-file', 'http://localhost')
-        const filePath = url.searchParams.get('path')
-        if (!filePath) {
-          res.statusCode = 400
-          res.setHeader('content-type', 'application/json; charset=utf-8')
-          res.end(JSON.stringify({ error: '缺少文件路径' }))
-          return
-        }
-
-        try {
-          const fullPath = path.resolve(projectRootDir, filePath)
-          if (!isPathUnderAllowedRoot(fullPath)) {
-            res.statusCode = 403
-            res.setHeader('content-type', 'application/json; charset=utf-8')
-            res.end(JSON.stringify({ error: 'forbidden_path' }))
-            return
-          }
-          if (!fs.existsSync(fullPath) || !fs.statSync(fullPath).isFile()) {
-            res.statusCode = 404
-            res.setHeader('content-type', 'application/json; charset=utf-8')
-            res.end(JSON.stringify({ error: '文件不存在', fullPath }))
-            return
-          }
-
-          res.statusCode = 200
-          res.setHeader('content-type', downloadContentType(fullPath))
-          res.setHeader('cache-control', 'no-store')
-          if (req.method === 'HEAD') {
-            res.end()
-            return
-          }
-          const fileStream = fs.createReadStream(fullPath)
-          fileStream.once('error', (error) => {
-            server.config.logger.error(`[file-api] Failed to read ${fullPath}: ${(error as Error).message}`)
-            handleFileStreamError(res, error)
-          })
-          fileStream.pipe(res)
-        } catch (error) {
-          res.statusCode = 500
-          res.setHeader('content-type', 'application/json; charset=utf-8')
-          res.end(JSON.stringify({ error: (error as Error).message }))
-        }
-      })
-
-      server.middlewares.use('/file-api/file-content', (req, res) => {
-        if (req.method === 'GET') {
-          const url = new URL(req.url || '/file-api/file-content', 'http://localhost')
-          const filePath = url.searchParams.get('path')
-          const requestedEncoding = url.searchParams.get('encoding') || 'utf-8'
-          if (!filePath) {
-            res.statusCode = 400
-            res.setHeader('content-type', 'application/json; charset=utf-8')
-            res.end(JSON.stringify({ error: '缺少文件路径' }))
-            return
-          }
-
-          try {
-            const fullPath = path.resolve(projectRootDir, filePath)
-            if (!isPathUnderAllowedRoot(fullPath)) {
-              res.statusCode = 403
-              res.setHeader('content-type', 'application/json; charset=utf-8')
-              res.end(JSON.stringify({ error: 'forbidden_path' }))
-              return
-            }
-            if (!fs.existsSync(fullPath)) {
-              if (filePath.replace(/\\/g, '/') === 'agent/workspace/agent-data.json') {
-                try {
-                  const runResult = spawnSync(process.execPath, [generateAgentFoldersScriptPath], {
-                    encoding: 'utf-8',
-                    env: { ...process.env, JIUWENSWARM_ROOT: projectRootDir },
-                    cwd: path.dirname(path.dirname(generateAgentFoldersScriptPath)),
-                  })
-                  if (runResult.status === 0 && fs.existsSync(fullPath)) {
-                    const { content, encoding } = decodeFileContent(fs.readFileSync(fullPath), requestedEncoding)
-                    res.statusCode = 200
-                    res.setHeader('content-type', 'text/plain; charset=utf-8')
-                    res.setHeader('X-Original-Encoding', encoding)
-                    res.end(content)
-                    return
-                  }
-                } catch {
-                  /* fall through to 404 */
-                }
-              }
-              res.statusCode = 404
-              res.setHeader('content-type', 'application/json; charset=utf-8')
-              res.end(JSON.stringify({ error: '文件不存在', fullPath }))
-              return
-            }
-
-            const { content, encoding } = decodeFileContent(fs.readFileSync(fullPath), requestedEncoding)
-            res.statusCode = 200
-            res.setHeader('content-type', 'text/plain; charset=utf-8')
-            res.setHeader('X-Original-Encoding', encoding)
-            res.end(content)
-          } catch (error) {
-            res.statusCode = 500
-            res.setHeader('content-type', 'application/json; charset=utf-8')
-            res.end(JSON.stringify({ error: (error as Error).message }))
-          }
-          return
-        }
-
-        if (req.method !== 'POST') {
-          res.statusCode = 405
-          res.setHeader('content-type', 'application/json; charset=utf-8')
-          res.end(JSON.stringify({ error: 'method_not_allowed' }))
-          return
-        }
-
-        let raw = ''
-        req.on('data', (chunk) => {
-          raw += chunk.toString()
-        })
-        req.on('end', () => {
-          let payload: { path?: unknown; content?: unknown } = {}
-          try {
-            payload = raw ? JSON.parse(raw) : {}
-          } catch {
-            res.statusCode = 400
-            res.setHeader('content-type', 'application/json; charset=utf-8')
-            res.end(JSON.stringify({ error: 'invalid_json' }))
-            return
-          }
-
-          const requestPath = payload.path
-          const requestContent = payload.content
-          if (typeof requestPath !== 'string' || !requestPath.trim()) {
-            res.statusCode = 400
-            res.setHeader('content-type', 'application/json; charset=utf-8')
-            res.end(JSON.stringify({ error: '缺少文件路径' }))
-            return
-          }
-          if (typeof requestContent !== 'string') {
-            res.statusCode = 400
-            res.setHeader('content-type', 'application/json; charset=utf-8')
-            res.end(JSON.stringify({ error: '缺少文件内容' }))
-            return
-          }
-
-          const fullPath = path.resolve(projectRootDir, requestPath)
-          if (!isPathUnderAllowedRoot(fullPath)) {
-            res.statusCode = 403
-            res.setHeader('content-type', 'application/json; charset=utf-8')
-            res.end(JSON.stringify({ error: 'forbidden_path' }))
-            return
-          }
-          if (!isMarkdownFile(fullPath)) {
-            res.statusCode = 400
-            res.setHeader('content-type', 'application/json; charset=utf-8')
-            res.end(JSON.stringify({ error: '仅支持保存 Markdown 文件' }))
-            return
-          }
-          if (!fs.existsSync(fullPath)) {
-            res.statusCode = 404
-            res.setHeader('content-type', 'application/json; charset=utf-8')
-            res.end(JSON.stringify({ error: '文件不存在' }))
-            return
-          }
-
-          fs.writeFile(fullPath, requestContent, 'utf-8', (error) => {
-            if (error) {
-              res.statusCode = 500
-              res.setHeader('content-type', 'application/json; charset=utf-8')
-              res.end(JSON.stringify({ error: error.message }))
-              return
-            }
-
-            res.statusCode = 200
-            res.setHeader('content-type', 'application/json; charset=utf-8')
-            res.end(JSON.stringify({ ok: true }))
-          })
-        })
-      })
-    },
-  }
-}
+/** file/share HTTP 已迁 Gateway Web HTTP；dev 经 proxy 转发（见 server.proxy）。 */
 
 // https://vitejs.dev/config/
 function portFromEnv(name: string, fallback: number): number {
@@ -1005,24 +309,156 @@ function portFromEnv(name: string, fallback: number): number {
   return Number.isInteger(value) && value > 0 && value <= 65535 ? value : fallback
 }
 
+function resolveWebHttpPort(wsPort: number): number {
+  const envPort = portFromEnv('GATEWAY_WEB_HTTP_PORT', 0)
+  let port = envPort || wsPort + 2
+  const gatewayPort = portFromEnv('GATEWAY_PORT', wsPort + 1)
+  if (port === wsPort || port === gatewayPort) {
+    port = Math.max(wsPort, gatewayPort) + 1
+  }
+  return port
+}
+
+function parseLoginAuthSimulate(raw: string | undefined): boolean {
+  const value = (raw ?? '').trim().toLowerCase()
+  if (!value) return true
+  if (value === 'true') return true
+  if (value === 'false') return false
+  throw new Error(
+    `LOGIN_AUTH_SIMULATE 配置非法：仅支持 true 或 false，当前值为 ${JSON.stringify(raw)}`
+  )
+}
+
+const loginAuthSimulateIncluded = parseLoginAuthSimulate(
+  process.env.INCLUDE_LOGIN_AUTH_SIMULATE ?? process.env.VITE_LOGIN_AUTH_SIMULATE_AVAILABLE
+)
+
+function loginAuthStartupCheck(): Plugin {
+  const userWebMode = (process.env.USER_WEB_MODE || process.env.VITE_USER_WEB_MODE || 'personal')
+    .trim()
+    .toLowerCase()
+  const simulateRaw = process.env.LOGIN_AUTH_SIMULATE ?? process.env.VITE_LOGIN_AUTH_SIMULATE
+  const simulate = parseLoginAuthSimulate(simulateRaw)
+
+  if (userWebMode === 'enterprise' && simulate && !loginAuthSimulateIncluded) {
+    throw new Error(
+      '配置冲突：LOGIN_AUTH_SIMULATE=true，但当前客户交付制品未包含登录认证模拟插件；' +
+      '请设置 LOGIN_AUTH_SIMULATE=false 并接入 manager ID认证服务'
+    )
+  }
+
+  return {
+    name: 'login-auth-startup-check',
+    async configureServer() {
+      if (simulateRaw === undefined || !simulateRaw.trim()) {
+        console.info(
+          '[jiuwenswarm-web] LOGIN_AUTH_SIMULATE 未配置，按默认值 true 启用登录认证模拟调试'
+        )
+      }
+      if (userWebMode !== 'enterprise') {
+        console.info('[jiuwenswarm-web] 单机版模式：跳过企业登录认证')
+        if (!simulate) {
+          console.warn(
+            '[jiuwenswarm-web] 配置冲突：USER_WEB_MODE=personal 始终跳过企业登录；' +
+            'LOGIN_AUTH_SIMULATE=false 不会启用正式身份认证'
+          )
+        }
+        return
+      }
+      if (simulate) {
+        console.info('[jiuwenswarm-web] 【登录认证模拟调试模式已开启】不调用客户侧 manager ID认证服务')
+        return
+      }
+
+      console.info('[jiuwenswarm-web] 【正式身份认证模式，依赖manager ID认证服务】')
+      const targets = [
+        { name: 'manager ID认证服务', env: 'USER_WEB_IDP_TARGET', target: process.env.USER_WEB_IDP_TARGET, path: '/v1/auth/me' },
+        { name: 'Manager业务接口', env: 'USER_WEB_MANAGER_TARGET', target: process.env.USER_WEB_MANAGER_TARGET, path: '/api/v1/user-console/gateways' },
+      ]
+      const missing = targets.filter(({ target }) => !target).map(({ env }) => env)
+      if (missing.length > 0) {
+        console.error(
+          `[jiuwenswarm-web] 正式登录模式下未配置 ${missing.join('、')}；` +
+          '请配置 manager 认证及业务接口地址'
+        )
+        return
+      }
+      for (const item of targets) {
+        const target = item.target!.replace(/\/$/, '')
+        try {
+          const response = await fetch(`${target}${item.path}`, {
+            signal: AbortSignal.timeout(3000),
+          })
+          if (response.status >= 500) throw new Error(`HTTP ${response.status}`)
+          console.info(`[jiuwenswarm-web] ${item.name}连通性检查通过：${target}`)
+        } catch (error) {
+          console.error(
+            `[jiuwenswarm-web] 当前为正式登录模式，${item.name}暂不可用；` +
+            `请检查 ${item.env}（${target}）：${error instanceof Error ? error.message : String(error)}`
+          )
+        }
+      }
+    },
+  }
+}
+
 const frontendPort = portFromEnv('FRONTEND_PORT', 5173)
 const webPort = portFromEnv('WEB_PORT', 19000)
-const webTarget = `http://127.0.0.1:${webPort}`
+const webTarget =
+  process.env.GATEWAY_WEB_WS_URL?.replace(/\/$/, '') ||
+  process.env.GATEWAY_URL?.replace(/\/$/, '') ||
+  `http://127.0.0.1:${webPort}`
+const webHttpPort = resolveWebHttpPort(webPort)
+const webHttpTarget =
+  process.env.GATEWAY_WEB_HTTP_URL?.replace(/\/$/, '') ||
+  `http://127.0.0.1:${webHttpPort}`
 
 export default defineConfig({
-  plugins: [suppressWsProxySocketErrors(), devWsTrafficLogger(), devFileContentApi(), react(), svgr()],
+  // 相对资源路径同时支持独立根路径与 Manager Web 的 /chat/ 同源转发。
+  base: './',
+  plugins: [loginAuthStartupCheck(), suppressWsProxySocketErrors(), devWsTrafficLogger(), react(), svgr()],
   optimizeDeps: {
     include: ['exceljs', 'jszip', 'saxes', 'ssf'],
   },
   resolve: {
     alias: {
       '@': path.resolve(__dirname, './src'),
+      'virtual:login-auth-simulate-provider': path.resolve(
+        __dirname,
+        loginAuthSimulateIncluded
+          ? './src/auth/simulate/available.ts'
+          : './src/auth/simulateUnavailable.ts'
+      ),
     },
   },
   server: {
     port: frontendPort,
     strictPort: true,
     proxy: {
+      '/idp': { target: process.env.USER_WEB_IDP_TARGET || 'http://127.0.0.1:8770', changeOrigin: true, rewrite: (p) => p.replace(/^\/idp/, '') },
+      '/manager-api': { target: process.env.USER_WEB_MANAGER_TARGET || 'http://127.0.0.1:8765', changeOrigin: true, rewrite: (p) => p.replace(/^\/manager-api/, '/api') },
+      '/file-api': {
+        target: webHttpTarget,
+        changeOrigin: true,
+      },
+      '/share-api': {
+        target: webHttpTarget,
+        changeOrigin: true,
+      },
+      // More specific than '/api' — enterprise HTTP APIs live on Web HTTP, not WS port.
+      '/api/v1': {
+        target: webHttpTarget,
+        changeOrigin: true,
+      },
+      '/gateway-api': {
+        target: webHttpTarget,
+        changeOrigin: true,
+        rewrite: (requestPath) => requestPath.replace(/^\/gateway-api/, '/api'),
+      },
+      '/api/sessions': {
+        target: webHttpTarget,
+        changeOrigin: true,
+      },
       '/api': {
         target: webTarget,
         changeOrigin: true,

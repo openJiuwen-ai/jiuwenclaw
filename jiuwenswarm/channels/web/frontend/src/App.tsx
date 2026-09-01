@@ -4,7 +4,7 @@
  * 应用主布局，整合所有组件
  */
 
-import { useState, useCallback, useEffect, useRef, Component, ReactNode, useMemo, type PointerEvent as ReactPointerEvent } from 'react';
+import { useState, useCallback, useEffect, useRef, Component, ReactNode, useMemo } from 'react';
 import { ChatPanel } from './components/ChatPanel';
 import { SessionSidebar } from './components/SessionSidebar';
 import { SkillPanel } from './components/SkillPanel';
@@ -17,6 +17,7 @@ import { ConfigPanel } from './components/ConfigPanel';
 import { ChannelsPanel } from './components/ChannelsPanel';
 import { BrowserPanel } from './components/BrowserPanel';
 import { UpdatePanel } from './components/UpdatePanel';
+import { A2AIngressPanel } from './components/A2AIngressPanel';
 import { ExtensionsHubPanel } from './components/ExtensionsHubPanel';
 import {
   ShareImageDocument,
@@ -26,6 +27,7 @@ import {
 import type { CodeReviewTarget } from './features/code-mode/types';
 
 import { FEATURE_APP_UPDATER_UI } from './featureFlags';
+import { ENTERPRISE_HIDDEN_NAV_ITEMS, isEnterpriseMode } from './edition';
 import {
   beginHistoryRestore,
   fetchHistoryPage,
@@ -35,7 +37,6 @@ import {
   type FetchHistoryPageResult,
 } from './features/historyRestore';
 import { prefetchHistoryPages } from './features/historyPagination';
-import { queueOrAddGoalObjectiveMessage } from './features/goalPendingObjectiveBubble';
 import {
   normalizeToolCallPayload,
   normalizeToolResultPayload,
@@ -43,7 +44,7 @@ import {
 import { useWebSocket, mergePersistedGoalCompletionMessages, stampGoalObjectiveMessages } from './hooks';
 import { webRequest } from './services/webClient';
 import { useTeamPanelState } from './features/teamPanelState';
-import { AgentMode, MediaItem, UserAnswer, ModelEntry, type Session } from './types';
+import { AgentMode, MediaItem, UserAnswer, ModelEntry, type Session, type UserAnswerStatus } from './types';
 import {
   ensureSessionRuntimes,
   useSessionStore,
@@ -51,7 +52,6 @@ import {
   useTodoStore,
   useGoalStore,
   useHarnessStore,
-  usePlanStore,
   useWorkspaceStore,
   useCronStore,
 } from './stores';
@@ -66,7 +66,6 @@ import {
   registerCreatedConversation,
   resetNewConversationRuntime,
 } from './multi-session/state/newConversationLifecycle';
-import { resolveNewConversationProjectDir } from './multi-session/state/newConversationProject';
 import { toDisplaySessionTitle } from './utils/documentMessage';
 import { createConversationSession } from './multi-session/state/createConversationSession';
 import { useTranslation } from 'react-i18next';
@@ -78,7 +77,11 @@ import {
   buildA2UIClientEventContent,
   setA2UIActionHandler,
 } from './features/a2ui/actionBridge';
-import { saveBlob } from './utils/desktopSave';
+import {
+  isDesktopSaveCancelled,
+  isDesktopSaveOk,
+} from './utils/desktopSave';
+import type { DesktopSaveApiResult } from './utils/desktopSave';
 import { generateUuidV4 } from './utils/uuid';
 import {
   ModelSetupGuide,
@@ -87,33 +90,9 @@ import {
 import { isSetupGuideEnabled } from './features/modelSetupGuide/modelSetupGuideState';
 import './App.css';
 
-const TEAM_SESSION_MODES = new Set([
-  'team',
-  'team.plan',
-  'team.plan.normal',
-  'team.plan.code',
-  'code.team',
-]);
-const CHAT_PANEL_DEFAULT_WIDTH_PCT = 33.33;
-const CHAT_PANEL_MIN_WIDTH_PCT = 20;
-const CHAT_PANEL_MAX_WIDTH_PCT = 70;
-
-type ChatPanelResizeDrag = {
-  pointerId: number;
-  startX: number;
-  startPct: number;
-  containerWidth: number;
-};
+const TEAM_SESSION_MODES = new Set(['team', 'team.plan', 'code.team']);
 const PREVIEW_MODEL_SETUP_GUIDE = import.meta.env.DEV
   && new URLSearchParams(window.location.search).get('modelSetupGuide') === '1';
-const EXTERNAL_CLI_AGENT_CONFIG_KEYS = new Set([
-  "external_cli_agent_claude_enabled",
-  "external_cli_agent_claude_use_builtin",
-  "external_cli_agent_claude_cli_path",
-  "external_cli_agent_codex_enabled",
-  "external_cli_agent_codex_use_builtin",
-  "external_cli_agent_codex_cli_path",
-]);
 
 function isTeamMode(mode: string): boolean {
   return TEAM_SESSION_MODES.has(mode);
@@ -123,16 +102,7 @@ function shouldPreviewModelSetupGuide(): boolean {
   return PREVIEW_MODEL_SETUP_GUIDE;
 }
 
-function normalizeConfigBoolean(value: unknown): boolean {
-  if (typeof value === 'boolean') {
-    return value;
-  }
-  return ['1', 'true', 'yes', 'on', 'enabled'].includes(
-    String(value ?? '').trim().toLowerCase(),
-  );
-}
-
-type MainNavKey = 'chat' | 'skills' | 'agents' | 'teams' | 'sessions' | 'cron' | 'channels' | 'extensions' | 'configpanel' | 'browserpanel' | 'updatepanel';
+type MainNavKey = 'chat' | 'skills' | 'agents' | 'teams' | 'sessions' | 'cron' | 'channels' | 'extensions' | 'configpanel' | 'browserpanel' | 'updatepanel' | 'a2aingress';
 
 type LoadedHistoryPage = {
   pageIdx: number;
@@ -142,7 +112,7 @@ type LoadedHistoryPage = {
 
 type AgentsTeamsSavePayload = {
   agents: Record<string, {
-    model: { provider: string; api_base: string; api_key: string; model: string };
+    model: { ref: string };
     skills: string[];
   }>;
   team: Array<{
@@ -151,8 +121,6 @@ type AgentsTeamsSavePayload = {
     teammate_mode: string;
     spawn_mode: string;
     enable_permissions: boolean;
-    external_cli_agents?: Array<{ cli_agent: "claude" | "codex"; cli_path?: string }>;
-    external_cli_publish_url?: string;
     leader: { member_name: string; display_name: string; persona: string; agent_key: string };
     teammate: { agent_key: string };
     predefined_members: Array<{ member_name: string; display_name: string; persona: string; prompt_hint: string; agent_key: string }>;
@@ -166,22 +134,15 @@ type ConfigSaveAllPayload = {
   team?: AgentsTeamsSavePayload["team"];
 };
 
-type ConfigSaveResult = {
-  updated?: string[];
-  applied_without_restart?: boolean;
-  models_count?: number | null;
-  codex_dependency_install?: CodexDependencyInstallStatus;
-};
-
-type CodexDependencyInstallStatus = {
-  status?: string;
-  phase?: string;
-  error?: string;
-  last_log?: string;
-  log_tail?: string[];
-  started_at?: number;
-  finished_at?: number;
-  updated_at?: number;
+type WindowWithPyWebview = Window & {
+  pywebview?: {
+    api?: {
+      save_data_url?: (
+        dataUrl: string,
+        filename: string,
+      ) => DesktopSaveApiResult;
+    };
+  };
 };
 
 function getWorkContextForSession(sessionId: string): {
@@ -275,12 +236,29 @@ function ErrorFallback({ error }: { error: Error | null }) {
   );
 }
 
-async function saveShareImage(blob: Blob, filename: string): Promise<boolean> {
-  const outcome = await saveBlob(blob, filename);
-  if (outcome === 'failed') {
-    throw new Error('share_desktop_save_failed');
+function downloadDataUrl(dataUrl: string, filename: string): void {
+  const link = document.createElement('a');
+  link.href = dataUrl;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+}
+
+async function saveShareImage(dataUrl: string, filename: string): Promise<boolean> {
+  const pywebviewApi = (window as WindowWithPyWebview).pywebview?.api;
+  if (pywebviewApi?.save_data_url) {
+    const result = await pywebviewApi.save_data_url(dataUrl, filename);
+    if (isDesktopSaveCancelled(result)) {
+      return false;
+    }
+    if (!isDesktopSaveOk(result)) {
+      throw new Error('share_desktop_save_failed');
+    }
+    return true;
   }
-  return outcome === 'saved';
+  downloadDataUrl(dataUrl, filename);
+  return true;
 }
 
 function AppContent() {
@@ -293,6 +271,8 @@ function AppContent() {
     return 'new';
   });
 
+  const enterpriseMode = isEnterpriseMode();
+  const enterpriseBlockedNav = new Set<MainNavKey>(ENTERPRISE_HIDDEN_NAV_ITEMS);
   const [activeNav, setActiveNav] = useState<MainNavKey>('chat');
   const [serverConfig, setServerConfig] = useState<Record<string, unknown> | null>(null);
   const [configError, setConfigError] = useState<string | null>(null);
@@ -314,6 +294,7 @@ function AppContent() {
   const [hasVisitedChannels, setHasVisitedChannels] = useState(false);
   const [sidebarMorePanelOpen, setSidebarMorePanelOpen] = useState(false);
   const [modelSetupGuideStep, setModelSetupGuideStep] = useState<ModelSetupGuideStep | null>(null);
+  const [modelSetupGuideManual, setModelSetupGuideManual] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<Session | null>(null);
   const [dialogBusy, setDialogBusy] = useState(false);
   const [dialogError, setDialogError] = useState<string | null>(null);
@@ -352,11 +333,11 @@ function AppContent() {
   useEffect(() => {
     const handler = (e: Event) => {
       const nav = (e as CustomEvent<MainNavKey>).detail;
-      if (nav) setActiveNav(nav);
+      if (nav && !(enterpriseMode && enterpriseBlockedNav.has(nav))) setActiveNav(nav);
     };
     window.addEventListener('jiuwen:nav', handler);
     return () => window.removeEventListener('jiuwen:nav', handler);
-  }, []);
+  }, [enterpriseMode]);
 
   const restartAutoCloseTimerRef = useRef<number | null>(null);
   const saveToastTimerRef = useRef<number | null>(null);
@@ -378,7 +359,7 @@ function AppContent() {
   const historyPageCancelRef = useRef(new Map<string, () => void>());
   const historyBackgroundPrefetchTokensRef = useRef(new Map<string, number>());
   const creatingSessionRef = useRef(false);
-  const sessionIdsCreatedInThisPageRef = useRef(new Set<string>());
+  const promotedFromNewSessionIdsRef = useRef(new Set<string>());
   const shareExportRef = useRef<HTMLDivElement>(null);
   const shareExportFilenameRef = useRef('jiuwenswarm-share.png');
   const shareExportTokenRef = useRef(0);
@@ -491,8 +472,7 @@ function AppContent() {
   const teamTaskEvents = useSessionStore((s) => s.runtimes[sessionId]?.teamTaskEvents ?? []);
   const teamTasks = useSessionStore((s) => s.runtimes[sessionId]?.teamTasks ?? []);
   const teamMembers = useSessionStore((s) => s.runtimes[sessionId]?.teamMembers ?? []);
-  const [chatPanelWidthPct, setChatPanelWidthPct] = useState(CHAT_PANEL_DEFAULT_WIDTH_PCT);
-  const chatPanelResizeDragRef = useRef<ChatPanelResizeDrag | null>(null);
+  const [chatPanelWidthPct, setChatPanelWidthPct] = useState(33.33);
   const [codeReviewTarget, setCodeReviewTarget] = useState<CodeReviewTarget | null>(null);
 
   useEffect(() => {
@@ -512,49 +492,28 @@ function AppContent() {
     setTeamAreaExpanded(true);
   }, [setTeamAreaActiveTab, setTeamAreaExpanded]);
 
-  const handleDividerPointerDown = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
-    if (event.button !== 0 || chatPanelResizeDragRef.current) return;
-    const container = event.currentTarget.parentElement;
+  const handleDividerMouseDown = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startPct = chatPanelWidthPct;
+    const container = (e.currentTarget as HTMLElement).parentElement;
     if (!container) return;
     const containerWidth = container.getBoundingClientRect().width;
-    if (containerWidth <= 0) return;
 
-    event.preventDefault();
-    document.body.classList.add('workspace-resize-active');
-    event.currentTarget.setPointerCapture(event.pointerId);
-    chatPanelResizeDragRef.current = {
-      pointerId: event.pointerId,
-      startX: event.clientX,
-      startPct: chatPanelWidthPct,
-      containerWidth,
+    const onMouseMove = (ev: MouseEvent) => {
+      const dx = ev.clientX - startX;
+      const newPct = Math.min(70, Math.max(20, startPct + (dx / containerWidth) * 100));
+      setChatPanelWidthPct(newPct);
     };
+
+    const onMouseUp = () => {
+      document.removeEventListener('mousemove', onMouseMove);
+      document.removeEventListener('mouseup', onMouseUp);
+    };
+
+    document.addEventListener('mousemove', onMouseMove);
+    document.addEventListener('mouseup', onMouseUp);
   }, [chatPanelWidthPct]);
-
-  const handleDividerPointerMove = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
-    const drag = chatPanelResizeDragRef.current;
-    if (!drag || drag.pointerId !== event.pointerId) return;
-    const dx = event.clientX - drag.startX;
-    const nextWidthPct = drag.startPct + (dx / drag.containerWidth) * 100;
-    const clampedWidthPct = Math.min(
-      CHAT_PANEL_MAX_WIDTH_PCT,
-      Math.max(CHAT_PANEL_MIN_WIDTH_PCT, nextWidthPct),
-    );
-    setChatPanelWidthPct(clampedWidthPct);
-  }, []);
-
-  const clearChatPanelResize = useCallback((pointerId?: number): boolean => {
-    if (pointerId !== undefined && chatPanelResizeDragRef.current?.pointerId !== pointerId) return false;
-    chatPanelResizeDragRef.current = null;
-    document.body.classList.remove('workspace-resize-active');
-    return true;
-  }, []);
-
-  const finishDividerResize = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
-    if (!clearChatPanelResize(event.pointerId)) return;
-    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
-      event.currentTarget.releasePointerCapture(event.pointerId);
-    }
-  }, [clearChatPanelResize]);
 
   const clearMessages = useChatStore((s) => s.clearMessages);
   const clearSubtasks = useChatStore((s) => s.clearSubtasks);
@@ -683,20 +642,6 @@ function AppContent() {
     onConfigChanged: () => {
       handleConfigChanged();
     },
-    onCronResultArrived: (cronSessionId: string, cronJobId: string) => {
-      // 仅当用户当前停留在该任务的"立即执行"页面时才自动跳转：
-      // - 多个任务同时返回结果时，不会互相跳转覆盖
-      // - 用户已手动切走时不打扰
-      // - 定时调度（非"立即执行"）不自动跳转
-      // lastRunSessionId[jobId] 是点击"立即执行"时存入的会话 ID，
-      // sessionIdRef.current 是当前会话，两者一致说明用户还在等这个任务的结果。
-      if (cronJobId) {
-        const lastSid = useCronStore.getState().lastRunSessionId[cronJobId] ?? '';
-        if (lastSid && sessionIdRef.current === lastSid) {
-          void handleRestoreSession(cronSessionId);
-        }
-      }
-    },
   });
 
   const applyHistoryPageResult = useCallback((sid: string, result: FetchHistoryPageResult) => {
@@ -785,8 +730,6 @@ function AppContent() {
       const currentItems = current.map((segment) => ({
         at: new Date(segment.startedAt + 1).toISOString(),
         text: segment.text,
-        // live 内存里的真实末帧时刻并入 replay，刷新重建后耗时终点不丢。
-        updatedAt: segment.updatedAt,
       }));
       store.restoreReasoningSegments(sid, [...result.reasoningReplay, ...currentItems]);
     }
@@ -950,8 +893,11 @@ function AppContent() {
       setConfigError(null);
       if (!modelSetupGuideEvaluatedRef.current) {
         modelSetupGuideEvaluatedRef.current = true;
-        if (shouldPreviewModelSetupGuide() || isSetupGuideEnabled(config.setup_guide_enabled)) {
+        // Enterprise hides configpanel, so the model setup guide has no valid
+        // second-step target and must not be started in this edition.
+        if (!enterpriseMode && (shouldPreviewModelSetupGuide() || isSetupGuideEnabled(config.setup_guide_enabled))) {
           setActiveNav('chat');
+          setModelSetupGuideManual(false);
           setModelSetupGuideStep(1);
         }
       }
@@ -969,7 +915,7 @@ function AppContent() {
     } catch (error) {
       console.warn('Failed to fetch models list:', error);
     }
-  }, [request, t, setAvailableModels]);
+  }, [enterpriseMode, request, t, setAvailableModels]);
 
   useEffect(() => {
     if (!FEATURE_APP_UPDATER_UI || !isConnected || startupUpdateCheckRef.current) {
@@ -1090,76 +1036,23 @@ function AppContent() {
     }
   }, [request, setAvailableModels]);
 
-  const detectExternalCli = useCallback(async (cliAgent: "claude" | "codex", cliPath?: string) => {
-    return request<{
-      cli_agent: "claude" | "codex";
-      status: "ok" | "warning" | "missing" | "unsupported" | "unavailable";
-      path?: string;
-      version?: string;
-      reference_version?: string;
-      message?: string;
-    }>("external_cli.detect", {
-      cli_agent: cliAgent,
-      cli_path: cliPath || "",
-    });
-  }, [request]);
-
-  const selectExternalCliPath = useCallback(async (cliAgent: "claude" | "codex", initialPath?: string) => {
-    const desktopPicker = window.pywebview?.api?.select_local_file_path;
-    const title = t("config.externalCli.selectFileTitle", { agent: cliAgent });
-    if (typeof desktopPicker === "function") {
-      const selectedPath = await desktopPicker(initialPath || "", title);
-      return selectedPath || null;
-    }
-    const payload = await request<{ path?: string | null; cancelled?: boolean }>(
-      "path.select_file",
-      {
-        cli_agent: cliAgent,
-        initial_path: initialPath || "",
-        title,
-      },
-      { timeoutMs: 10 * 60 * 1000 },
-    );
-    if (payload?.cancelled || !payload?.path) {
-      return null;
-    }
-    return payload.path;
-  }, [request, t]);
-
-  const getCodexDependencyInstallStatus = useCallback(async (): Promise<CodexDependencyInstallStatus> => {
-    return request<CodexDependencyInstallStatus>(
-      "external_cli.codex_install_status",
-      {},
-      { timeoutMs: 10 * 1000 },
-    );
-  }, [request]);
-
-  const saveConfigAndRestart = useCallback(async (updates: Record<string, string>): Promise<ConfigSaveResult> => {
-    const payload = await request<ConfigSaveResult>(
+  const saveConfigAndRestart = useCallback(async (updates: Record<string, string>) => {
+    const payload = await request<{ updated?: string[]; applied_without_restart?: boolean }>(
       'config.set',
       updates
     );
-    const codexDependencyInstalling = payload.codex_dependency_install?.status === "running";
-    const effectiveUpdates = codexDependencyInstalling
-      ? Object.fromEntries(
-          Object.entries(updates).filter(([key]) => !EXTERNAL_CLI_AGENT_CONFIG_KEYS.has(key)),
-        )
-      : updates;
     setServerConfig((prev) => {
-      if (!prev) return effectiveUpdates;
-      const next: Record<string, unknown> = { ...prev, ...effectiveUpdates };
+      if (!prev) return updates;
+      const next: Record<string, unknown> = { ...prev, ...updates };
       // Keep the bilingual memory_forbidden_description dictionary structure.
       if (typeof prev?.memory_forbidden_description === 'object' && prev.memory_forbidden_description !== null
-          && !Array.isArray(prev.memory_forbidden_description) && effectiveUpdates.memory_forbidden_description !== undefined) {
+          && !Array.isArray(prev.memory_forbidden_description) && updates.memory_forbidden_description !== undefined) {
         const prevDict = prev.memory_forbidden_description as Record<string, string>;
         const lang = i18n.language || 'zh';
-        next.memory_forbidden_description = { ...prevDict, [lang]: effectiveUpdates.memory_forbidden_description };
+        next.memory_forbidden_description = { ...prevDict, [lang]: updates.memory_forbidden_description };
       }
       return next;
     });
-    if (codexDependencyInstalling) {
-      return payload;
-    }
     setConfigError(null);
     setRestartModalOpen(true);
     setRestartSuccess(false);
@@ -1183,7 +1076,6 @@ function AppContent() {
         }, 5000);
       }
     }
-    return payload;
   }, [clearRestartAutoCloseTimer, closeRestartModal, request]);
 
   const savePermissionSilent = useCallback(async (updates: Record<string, string>) => {
@@ -1217,25 +1109,12 @@ function AppContent() {
     }
   }, [clearRestartAutoCloseTimer, closeRestartModal]);
 
-  const saveSymphonyEnabled = useCallback(async (enabled: boolean) => {
-    const updates = { symphony_enabled: enabled ? 'true' : 'false' };
-    const result = await request<{ updated?: string[]; applied_without_restart?: boolean }>(
-      'config.set',
-      updates,
-    );
-    setServerConfig((prev) => ({ ...(prev ?? {}), ...updates }));
-    setConfigError(null);
-    if (result?.applied_without_restart !== true) {
-      applyConfigSaveUiState(false);
-    }
-  }, [applyConfigSaveUiState, request]);
-
   const buildAgentsTeamsFlatConfig = useCallback((payload: AgentsTeamsSavePayload) => {
     const updates: Record<string, string> = {};
     const agentCount = Object.keys(payload.agents).length;
     Object.entries(payload.agents).forEach(([name, agent], idx) => {
       updates[`agent_name_${idx}`] = name;
-      updates[`agent_model_${idx}`] = agent.model.model;
+      updates[`agent_model_${idx}`] = agent.model.ref;
       updates[`agent_skills_${idx}`] = agent.skills.join(',');
     });
     for (let i = agentCount; i < 10; i++) {
@@ -1258,9 +1137,6 @@ function AppContent() {
       updates[`team_${idx}_predefined_members`] = team.predefined_members?.length
         ? JSON.stringify(team.predefined_members)
         : "";
-      updates[`team_${idx}_external_cli_agents`] = team.external_cli_agents?.length
-        ? JSON.stringify(team.external_cli_agents)
-        : "";
     });
     for (let i = payload.team.length; i < 10; i++) {
       // 使用与后端一致的键名格式：team_${i}_name
@@ -1275,7 +1151,6 @@ function AppContent() {
       updates[`team_${i}_leader_agent_key`] = "";
       updates[`team_${i}_teammate_agent_key`] = "";
       updates[`team_${i}_predefined_members`] = "";
-      updates[`team_${i}_external_cli_agents`] = "";
     }
     return updates;
   }, []);
@@ -1291,30 +1166,24 @@ function AppContent() {
     applyConfigSaveUiState(result?.applied_without_restart === true);
   }, [applyConfigSaveUiState, buildAgentsTeamsFlatConfig, request]);
 
-  const saveAllConfigAndRestart = useCallback(async (payload: ConfigSaveAllPayload): Promise<ConfigSaveResult> => {
+  const saveAllConfigAndRestart = useCallback(async (payload: ConfigSaveAllPayload) => {
     const isA2UIChange = payload.config && 'a2ui_enabled' in payload.config;
-    const result = await request<ConfigSaveResult>(
+    const result = await request<{ updated?: string[]; applied_without_restart?: boolean }>(
       'config.save_all',
       payload as unknown as Record<string, unknown>
     );
-    const codexDependencyInstalling = result.codex_dependency_install?.status === "running";
     setServerConfig((prev) => {
       const next: Record<string, unknown> = { ...(prev ?? {}) };
       if (payload.config) {
-        const effectiveConfig = codexDependencyInstalling
-          ? Object.fromEntries(
-              Object.entries(payload.config).filter(([key]) => !EXTERNAL_CLI_AGENT_CONFIG_KEYS.has(key)),
-            )
-          : payload.config;
-        Object.assign(next, effectiveConfig);
+        Object.assign(next, payload.config);
         if (typeof prev?.memory_forbidden_description === 'object' && prev.memory_forbidden_description !== null
             && !Array.isArray(prev.memory_forbidden_description)
-            && effectiveConfig.memory_forbidden_description !== undefined) {
+            && payload.config.memory_forbidden_description !== undefined) {
           const prevDict = prev.memory_forbidden_description as Record<string, string>;
           const lang = i18n.language || 'zh';
           next.memory_forbidden_description = {
             ...prevDict,
-            [lang]: effectiveConfig.memory_forbidden_description,
+            [lang]: payload.config.memory_forbidden_description,
           };
         }
       }
@@ -1328,9 +1197,6 @@ function AppContent() {
       }
       return next;
     });
-    if (codexDependencyInstalling) {
-      return result;
-    }
     if (isA2UIChange) {
       // Show modal then refresh page after 5 seconds
       setConfigError(null);
@@ -1347,7 +1213,6 @@ function AppContent() {
     } else {
       applyConfigSaveUiState(result?.applied_without_restart === true);
     }
-    return result;
   }, [applyConfigSaveUiState, buildAgentsTeamsFlatConfig, i18n.language, request]);
 
   useEffect(() => {
@@ -1452,7 +1317,7 @@ function AppContent() {
   useEffect(() => {
     if (!isConnected || !sessionId || sessionId === NEW_CONVERSATION_ID) return;
     
-    if (sessionIdsCreatedInThisPageRef.current.has(sessionId)) {
+    if (promotedFromNewSessionIdsRef.current.has(sessionId)) {
       setHistoryPagerMeta(sessionId, null);
       setHistoryLoadingMore(false);
       setLoadingHistory(sessionId, false);
@@ -1468,8 +1333,8 @@ function AppContent() {
       return;
     }
 
-    // 当前页面新建的会话已在上方复用实时内存数据；对于其他会话，
-    // historyPagerMeta 表示已完成 history 首屏恢复，可直接复用并继续补齐剩余分页。
+    // 已有完整历史恢复状态则跳过历史加载，直接使用内存数据。
+    // historyPagerMeta 是唯一可靠的"history 是否完整加载过"标记。
     const existingRuntime = useChatStore.getState().getRuntime(sessionId);
     if (existingRuntime && existingRuntime.historyPagerMeta) {
       setLoadingHistory(sessionId, false);
@@ -1618,15 +1483,6 @@ function AppContent() {
       onReasoningReplay: (items) => {
         restoreReasoningSegments(sessionId, items);
       },
-      onCompactionReplay: (info) => {
-        // 回显「本轮完成上下文压缩 N 次」：恢复进 chatStore，渲染与实时事件同一处
-        const chatStore = useChatStore.getState();
-        chatStore.ensureRuntime(sessionId);
-        chatStore.setContextCompressionStatus(sessionId, undefined, {
-          count: info.count,
-          summaries: info.summaries,
-        });
-      },
       onError: (message) => {
         console.warn('[history.restore]', message);
         setLoadingHistory(sessionId, false);
@@ -1723,11 +1579,7 @@ function AppContent() {
     // 默认模型列表尚未加载完成时兜底沿用当前会话的模型，避免新会话没有模型可用。
     const selectedModelName = useSessionStore.getState().defaultModelName ?? currentRuntime?.selectedModelName ?? null;
     const selectedProject = options.project ?? useWorkspaceStore.getState().selectedProject;
-    const projectDir = resolveNewConversationProjectDir(
-      options.preserveProject,
-      options.project?.project_dir,
-      selectedProject?.project_dir,
-    );
+    const projectDir = options.project?.project_dir ?? selectedProject?.project_dir ?? null;
     disposeInFlightHistoryHandles(
       currentSessionId !== NEW_CONVERSATION_ID ? currentSessionId : undefined,
     );
@@ -1831,21 +1683,8 @@ function AppContent() {
         const pendingSkills = useSessionStore.getState().getRuntime(NEW_CONVERSATION_ID)?.selectedSkills ?? [];
         pendingSkills.forEach((skill) => useSessionStore.getState().addSelectedSkill(newSid, skill));
         useSessionStore.getState().clearSelectedSkills(NEW_CONVERSATION_ID);
-        // Plan 开关是按 session 存的。欢迎页上开关记在 'new' 名下，这里必须搬到真实
-        // 会话，否则 sendMessage 取到的是新会话的默认值 false，这条消息就不会带
-        // `.plan`，整个 Plan 流程（只读约束、计划审批弹窗）全都不会触发。
-        if (usePlanStore.getState().isActive(NEW_CONVERSATION_ID)) {
-          // 连"用户手动打开开关"这个一次性标记一起搬过去：欢迎页那次点击就是显式
-          // 进入 Plan，标记决定这条消息是否带 plan_entry_source。
-          usePlanStore.getState().setActive(newSid, true, {
-            explicitEntry: usePlanStore
-              .getState()
-              .hasPendingExplicitEntry(NEW_CONVERSATION_ID),
-          });
-        }
-        usePlanStore.getState().removeRuntime(NEW_CONVERSATION_ID);
         useWorkspaceStore.getState().upsertSession(createdSession, { isNew: true });
-        sessionIdsCreatedInThisPageRef.current.add(newSid);
+        promotedFromNewSessionIdsRef.current.add(newSid);
         useChatStore.getState().setProcessing(NEW_CONVERSATION_ID, false);
         sessionIdRef.current = newSid;
         setSessionId(newSid);
@@ -1855,7 +1694,13 @@ function AppContent() {
         if (goalArmedOnNew) {
           // 欢迎页 "+" 选了「目标」：这条内容不走普通 chat.send，
           // 本地落一条 user 消息（供徽章匹配）后改调 command.goal（见 InputArea.tsx 的同款分流逻辑）
-          queueOrAddGoalObjectiveMessage(newSid, content);
+          useChatStore.getState().addMessage(newSid, {
+            id: `user-${Date.now()}`,
+            role: 'user',
+            content,
+            timestamp: new Date().toISOString(),
+            isGoalObjectiveMessage: true,
+          });
           setGoalObjective(newSid, content);
         } else {
           const sent = await sendMessage(content, newSid, mediaItems);
@@ -1967,10 +1812,15 @@ function AppContent() {
     [cancel, clearGoal, mode, pause]
   );
 
-  const handleUserAnswer = useCallback((requestId: string, answers: UserAnswer[], source?: string) => {
+  const handleUserAnswer = useCallback((
+    requestId: string,
+    answers: UserAnswer[],
+    source?: string,
+    status?: UserAnswerStatus,
+  ) => {
     const currentSessionId = sessionIdRef.current;
     if (!currentSessionId || currentSessionId === NEW_CONVERSATION_ID) return;
-    void sendUserAnswer(currentSessionId, requestId, answers, source);
+    void sendUserAnswer(currentSessionId, requestId, answers, source, status);
   }, [sendUserAnswer]);
 
   const handleLoadMoreHistory = useCallback(async () => {
@@ -2063,6 +1913,7 @@ function AppContent() {
         }
       }
 
+      setHistoryPagerMeta(targetSessionId, null);
       setHistoryLoadingMore(false);
       const existingRuntime = useChatStore.getState().getRuntime(targetSessionId);
       if (!existingRuntime) {
@@ -2120,6 +1971,7 @@ function AppContent() {
       setActiveNav,
       setCurrentSession,
       setHistoryLoadingMore,
+      setHistoryPagerMeta,
       setMode,
       setPaused,
       setProcessing,
@@ -2194,10 +2046,7 @@ function AppContent() {
   const handleDeleteConversation = useCallback(async () => {
     if (!deleteTarget) return;
     const runtime = useChatStore.getState().getRuntime(deleteTarget.session_id);
-    if (runtime?.isProcessing || runtime?.pendingQuestion) {
-      setDialogError(t('multiSession.deleteRunningDisabled'));
-      return;
-    }
+    if (runtime?.isProcessing || runtime?.pendingQuestion) return;
     setDialogBusy(true); setDialogError(null);
     try {
       const deletedSession = deleteTarget;
@@ -2228,16 +2077,23 @@ function AppContent() {
   }, [deleteTarget, enterNewConversation, request, t]);
 
   const handleNavigate = useCallback((nav: MainNavKey) => {
+    if (enterpriseMode && enterpriseBlockedNav.has(nav)) return;
     setActiveNav(nav);
     if (modelSetupGuideStep === 1 && nav === 'configpanel') {
       setModelSetupGuideStep(2);
     }
     if (nav === 'skills') setHasVisitedSkills(true);
     if (nav === 'channels') setHasVisitedChannels(true);
-  }, [modelSetupGuideStep]);
+  }, [enterpriseMode, modelSetupGuideStep]);
 
-  const dismissModelSetupGuide = useCallback(() => {
+  const skipModelSetupGuide = useCallback(() => {
     setModelSetupGuideStep(null);
+    setModelSetupGuideManual(false);
+  }, []);
+
+  const acknowledgeModelSetupGuide = useCallback(() => {
+    setModelSetupGuideStep(null);
+    setModelSetupGuideManual(false);
 
     void request('config.set', { setup_guide_enabled: 'false' })
       .then(() => {
@@ -2251,20 +2107,6 @@ function AppContent() {
       });
   }, [request]);
 
-  const openModelSetupGuide = useCallback(() => {
-    setModelSetupGuideStep(1);
-
-    void request('config.set', { setup_guide_enabled: 'true' })
-      .then(() => {
-        setServerConfig((current) => ({
-          ...(current ?? {}),
-          setup_guide_enabled: 'true',
-        }));
-      })
-      .catch((error) => {
-        console.error('Failed to enable setup guide:', error);
-      });
-  }, [request]);
 
   const handleExportShare = useCallback(async () => {
     const currentSessionId = sessionIdRef.current;
@@ -2304,7 +2146,8 @@ function AppContent() {
       setShareExportSnapshot(payload.snapshot);
     } catch (error) {
       console.error('Failed to export share image:', error);
-      window.alert(t('share.exportFailed'));
+      const detail = error instanceof Error && error.message ? `: ${error.message}` : '';
+      window.alert(`${t('share.exportFailed')}${detail}`);
       setIsExportingShare(false);
       setShareExportSnapshot(null);
     }
@@ -2323,17 +2166,18 @@ function AppContent() {
         if (!node) {
           throw new Error('share_image_node_missing');
         }
-        const imageBlob = await exportShareImageNode(node);
+        const dataUrl = await exportShareImageNode(node);
         if (shareExportTokenRef.current !== token) {
           return;
         }
-        const saved = await saveShareImage(imageBlob, shareExportFilenameRef.current);
+        const saved = await saveShareImage(dataUrl, shareExportFilenameRef.current);
         if (saved) {
           showSaveToast();
         }
       } catch (error) {
         console.error('Failed to render share image:', error);
-        window.alert(t('share.exportFailed'));
+        const detail = error instanceof Error && error.message ? `: ${error.message}` : '';
+        window.alert(`${t('share.exportFailed')}${detail}`);
       } finally {
         if (shareExportTokenRef.current === token) {
           setIsExportingShare(false);
@@ -2348,16 +2192,8 @@ function AppContent() {
     && missingSessionId === routeSessionId
     && isConversationMissing(routeSessionId, true, sessions);
   const showConversationNotFound = route.kind === 'not-found' || routeSessionMissing;
-  const showWorkspaceDivider = isTeamAreaExpanded && !showConversationNotFound;
-  const isNewSessionPromotion = Boolean(sessionId && sessionIdsCreatedInThisPageRef.current.has(sessionId));
+  const isNewSessionPromotion = Boolean(sessionId && promotedFromNewSessionIdsRef.current.has(sessionId));
   const composerFocusKey = showConversationNotFound ? null : `${sessionId}:${composerFocusNonce}`;
-
-  useEffect(() => {
-    if (!showWorkspaceDivider) clearChatPanelResize();
-    return () => {
-      clearChatPanelResize();
-    };
-  }, [clearChatPanelResize, showWorkspaceDivider]);
 
   return (
     <div
@@ -2373,16 +2209,16 @@ function AppContent() {
         isConnected={isConnected}
         onNewSession={handleNewSession}
         showNewSession={false}
-        hiddenNavItems={['sessions']}
+        hiddenNavItems={enterpriseMode ? ['sessions', ...ENTERPRISE_HIDDEN_NAV_ITEMS] : ['sessions']}
         onMorePanelOpenChange={setSidebarMorePanelOpen}
-        onSetupGuideRequest={openModelSetupGuide}
       />
 
       {modelSetupGuideStep ? (
         <ModelSetupGuide
           step={modelSetupGuideStep}
-          onAcknowledge={dismissModelSetupGuide}
-          onSkip={dismissModelSetupGuide}
+          manual={modelSetupGuideManual}
+          onAcknowledge={acknowledgeModelSetupGuide}
+          onSkip={skipModelSetupGuide}
         />
       ) : null}
 
@@ -2462,18 +2298,10 @@ function AppContent() {
                 </div>
 
                 {/* 可拖拽分割线 */}
-                {showWorkspaceDivider && (
+                {isTeamAreaExpanded && !showConversationNotFound && (
                   <div
-                    className="resize-divider resize-divider--workspace touch-none select-none"
-                    role="separator"
-                    aria-orientation="vertical"
-                    onPointerDown={handleDividerPointerDown}
-                    onPointerMove={handleDividerPointerMove}
-                    onPointerUp={finishDividerResize}
-                    onPointerCancel={finishDividerResize}
-                    onLostPointerCapture={(event) => {
-                      clearChatPanelResize(event.pointerId);
-                    }}
+                    className="resize-divider"
+                    onMouseDown={handleDividerMouseDown}
                   />
                 )}
 
@@ -2579,15 +2407,17 @@ function AppContent() {
               onModelsRefresh={handleModelsRefresh}
               onAgentsTeamsSave={handleAgentsTeamsSave}
               onHasChangesChange={handleHasChangesChange}
-              onDetectExternalCli={detectExternalCli}
-              onSelectExternalCliPath={selectExternalCliPath}
-              onGetCodexDependencyInstallStatus={getCodexDependencyInstallStatus}
             />
           </div>
         )}
         {activeNav === 'browserpanel' && (
           <div className="app-section">
             <BrowserPanel isConnected={isConnected} request={request} />
+          </div>
+        )}
+        {activeNav === 'a2aingress' && (
+          <div className="app-section">
+            <A2AIngressPanel isConnected={isConnected} request={request} />
           </div>
         )}
         {FEATURE_APP_UPDATER_UI && activeNav === 'updatepanel' && (
@@ -2600,10 +2430,7 @@ function AppContent() {
           <div className={`app-section ${activeNav === 'skills' ? '' : 'is-hidden'}`}>
             <SkillPanel
               sessionId={sessionId}
-              isConnected={isConnected}
               isActive={activeNav === 'skills'}
-              symphonyEnabled={normalizeConfigBoolean(serverConfig?.symphony_enabled)}
-              onSymphonyEnabledChange={saveSymphonyEnabled}
               onNavigateToConfig={() => {
                 setConfigInitialExpandGroup('third_party_api');
                 setActiveNav('configpanel');

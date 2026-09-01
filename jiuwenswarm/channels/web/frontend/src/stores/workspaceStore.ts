@@ -1,7 +1,6 @@
 import { create } from 'zustand';
 import i18n from '../i18n';
 import { projectRegistryClient } from '../features/workspace/projectRegistryClient';
-import { persistWorkMode, readStoredWorkMode } from '../features/workspace/workModeStorage';
 import type { ProjectInfo, Session, WorkMode } from '../types';
 import { useChatStore } from './chatStore';
 import { useSessionStore } from './sessionStore';
@@ -9,6 +8,12 @@ import { useSessionStore } from './sessionStore';
 export const PROJECT_SESSION_PAGE_SIZE = 10;
 const DEFAULT_PROJECT_ID = 'default';
 const DEFAULT_CODE_PROJECT_ID = 'default_code';
+const WORK_MODE_STORAGE_KEY = 'jiuwenswarm_work_mode';
+
+function readInitialWorkMode(): WorkMode {
+  if (typeof window === 'undefined') return 'work';
+  return window.localStorage.getItem(WORK_MODE_STORAGE_KEY) === 'code' ? 'code' : 'work';
+}
 
 function normalizeProject(project: ProjectInfo, fallbackWorkMode: WorkMode): ProjectInfo {
   return {
@@ -204,9 +209,7 @@ function shouldKeepPendingLocalSession(session: Session): boolean {
   if (session.pinned) return false;
   if (!getSessionTitle(session)) return false;
   const runtime = useChatStore.getState().getRuntime(session.session_id);
-  return session.is_processing === true
-    || runtime?.isProcessing === true
-    || runtime?.isPaused === true;
+  return session.is_processing === true || runtime?.isProcessing === true;
 }
 
 function reconcileVisibleProjectSessions(serverSessions: Session[], visibleSessions: Session[]): Session[] {
@@ -241,7 +244,7 @@ function getProjectSessionListsAfterPin(
 }
 
 export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
-  workMode: readStoredWorkMode(),
+  workMode: readInitialWorkMode(),
   projects: [],
   projectSessions: {},
   projectSessionTotals: {},
@@ -254,7 +257,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
 
   setWorkMode: async (workMode) => {
     if (get().workMode === workMode) return;
-    persistWorkMode(workMode);
+    window.localStorage.setItem(WORK_MODE_STORAGE_KEY, workMode);
     set({
       workMode,
       projects: [],

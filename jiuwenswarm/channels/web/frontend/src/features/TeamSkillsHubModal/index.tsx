@@ -26,7 +26,8 @@ interface TeamSkillsHubModalProps {
   sessionId: string;
   /** 外部传入的搜索关键词 */
   externalSearchQuery?: string;
-  installedSkillNames?: ReadonlySet<string>;
+  /** 已安装技能的来源标识（用于精确匹配，避免同名误判） */
+  installedSkillOrigins?: ReadonlySet<string>;
   /** 视图模式：列表或平铺 */
   viewMode?: "list" | "grid";
   onClose: () => void;
@@ -38,7 +39,7 @@ export function TeamSkillsHubModal({
   embedded = false,
   sessionId,
   externalSearchQuery,
-  installedSkillNames,
+  installedSkillOrigins,
   viewMode = "list",
   onClose,
   onInstalled,
@@ -49,7 +50,9 @@ export function TeamSkillsHubModal({
   const [loadState, setLoadState] = useState<LoadState>("idle");
   const [message, setMessage] = useState<{ type: "success" | "error"; text: string } | null>(null);
   const [installingAssetId, setInstallingAssetId] = useState<string | null>(null);
-  const [installedNames, setInstalledNames] = useState<Set<string>>(new Set());
+  // 按 asset_id 记录已装（而非 name）：两个 skill name 相同但 asset_id 不同时，
+  // 按 name 会让 B 被误判为"已安装"（A 已装），导致 B 的安装按钮变灰、永远装不上。
+  const [installedAssetIds, setInstalledAssetIds] = useState<Set<string>>(new Set());
   const [hubBaseUrl, setHubBaseUrl] = useState(DEFAULT_TEAMSKILLS_HUB_BASE_URL);
   const messageTimerRef = useRef<number | null>(null);
 
@@ -85,7 +88,7 @@ export function TeamSkillsHubModal({
 
   useEffect(() => {
     if (!open) return;
-    setInstalledNames(new Set());
+    setInstalledAssetIds(new Set());
     setHubBaseUrl(DEFAULT_TEAMSKILLS_HUB_BASE_URL);
   }, [open]);
 
@@ -194,19 +197,44 @@ export function TeamSkillsHubModal({
       if (installingAssetId) return;
       setInstallingAssetId(item.asset_id);
       setMessage(null);
+      let force = false;
       try {
-        const data = await webRequest<{
-          success: boolean;
-          detail?: string;
-          skill?: { name: string };
-        }>("skills.teamskillshub.install", withSession({ asset_id: item.asset_id, force: false }));
-        if (!data.success) {
-          throw new Error(data.detail || t("skills.teamskillshub.errors.installFailed"));
+        while (true) {
+          const data = await webRequest<{
+            success: boolean;
+            detail?: string;
+            detail_key?: string;
+            skill?: { name: string };
+          }>("skills.teamskillshub.install", withSession({
+            asset_id: item.asset_id,
+            force,
+            // 随手把搜索结果里已有的市场展示文案传给后端落盘，
+            // 使「我的技能」页显示与搜索页一致的描述（summary = 市场 short_desc）
+            short_desc: item.summary,
+            display_name: item.display_name,
+          }));
+          if (!data.success) {
+            // 已安装冲突：弹确认框询问是否覆盖
+            if (!force && data.detail_key === "skills.teamskillshub.errors.skillAlreadyInstalled") {
+              const confirmed = window.confirm(
+                t("skills.teamskillshub.replaceConfirm", { name: item.name })
+              );
+              if (confirmed) {
+                force = true;
+                continue;
+              }
+              return;
+            }
+            throw new Error(data.detail || t("skills.teamskillshub.errors.installFailed"));
+          }
+          // 安装成功
+          const skillName = data.skill?.name || item.name;
+          // 按 asset_id 标记已装（唯一身份），同名 B 不会被误判
+          setInstalledAssetIds((prev) => new Set([...prev, item.asset_id]));
+          showMessage("success", t("skills.teamskillshub.messages.installed", { name: skillName }));
+          await onInstalled?.(skillName);
+          break;
         }
-        const skillName = data.skill?.name || item.name;
-        setInstalledNames((prev) => new Set([...prev, skillName]));
-        showMessage("success", t("skills.teamskillshub.messages.installed", { name: skillName }));
-        await onInstalled?.(skillName);
       } catch (error) {
         console.error(error);
         showMessage(
@@ -264,7 +292,7 @@ export function TeamSkillsHubModal({
                 ) : (
                   results.map((item) => {
                     const isInstalled =
-                      installedNames.has(item.name) || (installedSkillNames?.has(item.name) ?? false);
+                      installedAssetIds.has(item.asset_id) || (installedSkillOrigins?.has(`teamskillshub:${item.asset_id}`) ?? false);
                     const isInstalling = installingAssetId === item.asset_id;
                     const avatar = getSkillAvatar(item.name);
                     return (
@@ -457,7 +485,7 @@ export function TeamSkillsHubModal({
                 ) : (
                   results.map((item) => {
                     const isInstalled =
-                      installedNames.has(item.name) || (installedSkillNames?.has(item.name) ?? false);
+                      installedAssetIds.has(item.asset_id) || (installedSkillOrigins?.has(`teamskillshub:${item.asset_id}`) ?? false);
                     const isInstalling = installingAssetId === item.asset_id;
                     const avatar = getSkillAvatar(item.name);
                     return (

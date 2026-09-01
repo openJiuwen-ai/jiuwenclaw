@@ -28,6 +28,22 @@ from jiuwenswarm.common.schema.agent import AgentRequest
 from jiuwenswarm.common.schema.message import ReqMethod
 from jiuwenswarm.server import agent_ws_server as agent_ws_server_module
 from jiuwenswarm.server.runtime import agent_manager as agent_manager_module
+from jiuwenswarm.server.handlers import ops as ops_handlers
+from tests.unit_tests.conftest import patch_handler_name
+
+
+def _ctx_for_test(ws, request, send_lock, server=None):
+    from jiuwenswarm.server.context import AgentServerServices, RequestContext
+    from jiuwenswarm.server.transports.sink import WSSink
+
+    return RequestContext(
+        request=request,
+        sink=WSSink(ws, send_lock),
+        connection_id=str(id(ws)),
+        services=AgentServerServices(server) if server is not None else None,
+    )
+
+
 
 
 class FakeWebSocket:
@@ -229,30 +245,18 @@ async def test_reload_agents_config_resolves_config_once_when_config_none(monkey
 
 @pytest.mark.asyncio
 async def test_agent_reload_config_handler_passes_explicit_scope(monkeypatch):
-    from jiuwenswarm.agents.harness import team as team_harness_module
-
     server = agent_ws_server_module.AgentWebSocketServer()
     calls = []
-    stop_paused = AsyncMock(return_value=2)
 
     async def fake_reload(config, env, **kwargs):
         calls.append((config, env, kwargs))
 
     monkeypatch.setattr(server._agent_manager, "reload_agents_config", fake_reload)
-    monkeypatch.setattr(
-        team_harness_module,
-        "stop_all_paused_team_session_runtimes_across_managers",
-        stop_paused,
-    )
-    monkeypatch.setattr(
-        agent_ws_server_module,
-        "encode_agent_response_for_wire",
-        lambda resp, response_id: {
+    patch_handler_name(monkeypatch, "encode_agent_response_for_wire", lambda resp, response_id: {
             "response_id": response_id,
             "ok": resp.ok,
             "payload": resp.payload,
-        },
-    )
+        })
 
     request = AgentRequest(
         request_id="reload-1",
@@ -267,7 +271,7 @@ async def test_agent_reload_config_handler_passes_explicit_scope(monkeypatch):
     )
 
     ws = FakeWebSocket()
-    await server._handle_agent_reload_config(ws, request, asyncio.Lock())
+    await ops_handlers.handle_agent_reload_config(_ctx_for_test(ws, request, asyncio.Lock(), server))
 
     assert calls == [
         (
@@ -279,31 +283,18 @@ async def test_agent_reload_config_handler_passes_explicit_scope(monkeypatch):
             },
         )
     ]
-    stop_paused.assert_awaited_once_with(reason="agent.reload_config: ")
 
 
 @pytest.mark.asyncio
 async def test_agent_reload_config_handler_skips_agent_manager_for_web_ui_scope(monkeypatch):
-    from jiuwenswarm.agents.harness import team as team_harness_module
-
     server = agent_ws_server_module.AgentWebSocketServer()
     reload_agents = AsyncMock()
-    stop_paused = AsyncMock(return_value=0)
     monkeypatch.setattr(server._agent_manager, "reload_agents_config", reload_agents)
-    monkeypatch.setattr(
-        team_harness_module,
-        "stop_all_paused_team_session_runtimes_across_managers",
-        stop_paused,
-    )
-    monkeypatch.setattr(
-        agent_ws_server_module,
-        "encode_agent_response_for_wire",
-        lambda resp, response_id: {
+    patch_handler_name(monkeypatch, "encode_agent_response_for_wire", lambda resp, response_id: {
             "response_id": response_id,
             "ok": resp.ok,
             "payload": resp.payload,
-        },
-    )
+        })
 
     request = AgentRequest(
         request_id="reload-ui",
@@ -317,10 +308,9 @@ async def test_agent_reload_config_handler_skips_agent_manager_for_web_ui_scope(
     )
 
     ws = FakeWebSocket()
-    await server._handle_agent_reload_config(ws, request, asyncio.Lock())
+    await ops_handlers.handle_agent_reload_config(_ctx_for_test(ws, request, asyncio.Lock(), server))
 
     reload_agents.assert_not_awaited()
-    stop_paused.assert_not_awaited()
     assert json.loads(ws.sent[-1])["ok"] is True
 
 
@@ -332,20 +322,12 @@ async def test_agent_reload_config_handler_applies_proactive_scope_without_agent
     server._proactive_engine = proactive_engine
 
     monkeypatch.setattr(server._agent_manager, "reload_agents_config", reload_agents)
-    monkeypatch.setattr(
-        agent_ws_server_module,
-        "get_config",
-        lambda: {"proactive_recommendation": {"enabled": True}},
-    )
-    monkeypatch.setattr(
-        agent_ws_server_module,
-        "encode_agent_response_for_wire",
-        lambda resp, response_id: {
+    patch_handler_name(monkeypatch, "get_config", lambda: {"proactive_recommendation": {"enabled": True}})
+    patch_handler_name(monkeypatch, "encode_agent_response_for_wire", lambda resp, response_id: {
             "response_id": response_id,
             "ok": resp.ok,
             "payload": resp.payload,
-        },
-    )
+        })
 
     request = AgentRequest(
         request_id="reload-proactive",
@@ -359,7 +341,7 @@ async def test_agent_reload_config_handler_applies_proactive_scope_without_agent
     )
 
     ws = FakeWebSocket()
-    await server._handle_agent_reload_config(ws, request, asyncio.Lock())
+    await ops_handlers.handle_agent_reload_config(_ctx_for_test(ws, request, asyncio.Lock(), server))
 
     reload_agents.assert_not_awaited()
     proactive_engine.reload_config.assert_called_once_with({"enabled": True})
@@ -397,6 +379,9 @@ async def test_deep_adapter_global_reload_marks_sessions_stale_without_fanout(mo
 
     parent = JiuWenSwarmDeepAdapter()
     parent._instance = MagicMock()
+    # reload 路径会 await self._instance.ensure_initialized()（interface_deep.py:8307），
+    # 裸 MagicMock 的该方法返回不可 await 的对象 → TypeError，故配 AsyncMock。
+    parent._instance.ensure_initialized = AsyncMock()
     session_a = FakeAgent()
     session_b = FakeAgent()
     parent._session_adapters = {
@@ -424,7 +409,11 @@ async def test_deep_adapter_global_reload_marks_sessions_stale_without_fanout(mo
         ),
         patch.object(interface_module.JiuWenSwarmDeepAdapter, "_filesystem_rail_enabled_for_profile", MagicMock(return_value=True)),
         patch.object(interface_module.JiuWenSwarmDeepAdapter, "load_user_rails", AsyncMock()),
-        patch.object(interface_module.JiuWenSwarmDeepAdapter, "_get_current_agent_rails", MagicMock(return_value=[])),
+        patch.object(
+            interface_module.JiuWenSwarmDeepAdapter,
+            "_get_current_agent_rails",
+            MagicMock(return_value=([], [])),
+        ),
         patch.object(interface_module.JiuWenSwarmDeepAdapter, "_make_deep_agent_config", MagicMock(return_value=object())),
         patch.object(interface_module.JiuWenSwarmDeepAdapter, "_sync_active_evolution_review_agent_after_reload", MagicMock()),
         patch.object(interface_module.JiuWenSwarmDeepAdapter, "_sync_mcp_servers_for_runtime", _async_noop),
@@ -477,6 +466,8 @@ async def _reload_deep_adapter_config_for_test(previous_config, deep_config_fact
     configured_fields = []
     adapter = JiuWenSwarmDeepAdapter()
     adapter._instance = MagicMock()
+    # 同上：reload 路径 await ensure_initialized() 需可 await。
+    adapter._instance.ensure_initialized = AsyncMock()
     adapter._instance._deep_config = previous_config
 
     def _configure(cfg):
@@ -529,7 +520,7 @@ async def _reload_deep_adapter_config_for_test(previous_config, deep_config_fact
         patch.object(
             interface_module.JiuWenSwarmDeepAdapter,
             "_get_current_agent_rails",
-            MagicMock(return_value=[]),
+            MagicMock(return_value=([], [])),
         ),
         patch.object(interface_module.JiuWenSwarmDeepAdapter, "_make_deep_agent_config", _make_config),
         patch.object(

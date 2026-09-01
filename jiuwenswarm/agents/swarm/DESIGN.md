@@ -83,7 +83,7 @@ _SUBAGENT_PROVIDER_REGISTRY: dict[str, Callable]  # register_subagent_provider(n
 `BuildContext` 是 **dataclass（非 pydantic）**——Spec→Runtime 边界对象，**不参与 JSON 序列化**。跨序列化边界（spawn / 分布式 / 冷恢复）通过：
 - `register_build_context_factory(factory)`：平台注册「从 seed 重建 context」工厂；
 - `TeamAgentSpec.build_context_seed`：spec 上携带可序列化 seed；
-- 接收侧 `build_context_from_seed(seed)` 用本地句柄（config / trajectory span processor）重建活 context。
+- 接收侧 `build_context_from_seed(seed)` 用本地句柄（config / registry）重建活 context。
 
 ---
 
@@ -96,13 +96,13 @@ _SUBAGENT_PROVIDER_REGISTRY: dict[str, Callable]  # register_subagent_provider(n
 | `session_id` / `request_id` / `channel_id` / `channel` / `request_metadata` | str / dict | 请求 | ✅（除非句柄） |
 | `mode` | str | 请求（team / code.team / team.plan） | ✅ |
 | `project_dir` | str\|None | 请求 | ✅ |
-| `team_id` / `team_ws_root` / `team_skill_visibility_path` / `global_skills_dir` | str | team 工作区 | ✅ |
+| `team_id` / `team_ws_root` / `team_skills_dir` / `global_skills_dir` | str | team 工作区 | ✅ |
 | `config` | dict | `get_config()`（config.yaml） | ❌（接收侧本地 `get_config()`） |
-| `trajectory_span_processor` | Any | 进程级 trajectory span processor | ❌（接收侧本地注入） |
+| `trajectory_registry` | Any | 进程内 per-team registry | ❌（接收侧本地重建） |
 | `language` / `member_name` / `role` / `workspace` / `member_card_id` | — | openjiuwen `setup_agent` 经 `derive()` 注入 | per-member 派生 |
 | `extras` | dict | 进程内 side-channel | 运行时句柄（如 `_parent_model` / `_coding_memory_rail`） |
 
-- `to_seed()` / `from_seed(seed, *, config, trajectory_span_processor)`：序列化只导出原语，`config` / `trajectory_span_processor` 由接收侧本地注入。
+- `to_seed()` / `from_seed(seed, *, config, trajectory_registry)`：序列化只导出原语，`config` / `trajectory_registry` 由接收侧本地注入。
 - **`config` 例外说明**：`config` 虽挂在 context 上，但它是 *harness 设定的源*（属性），不是 per-request 环境值。本模块刻意**不让 provider 工厂直接读 `ctx.config` 派生构造参数**——那些属性由 `config_specs` 烘焙进 `params`（见 §6、§7）。`ctx.config` 仅保留给基础设施级用途（如 evolution 热重载 `bind_swarm_context(config=ctx.config)`）。
 
 ---
@@ -169,7 +169,7 @@ class ConstructionInput(BaseModel):
 | **环境值** | 随请求 / 会话 / 成员动态变化吗？ | `context`（`context_field`） | 运行时由 `SwarmBuildContext` 注入 |
 | **基础设施/句柄** | 既非设定也非构造参数（extras / 全局 / env） | 不建模 | 工厂直读 ctx / 全局 / env |
 
-**关键洞察**：`ctx.config` 是「伪装成环境的属性源」。所有 config 派生的构造参数（`skill_mode` / `model_name` / `auto_scan` / `permissions` / `embed` 等）**本质是属性**，统一由 `config_specs` 读 config → 投射进 `RailSpec.params`（与既有 `skills` / `tool_names` / `max_iterations` 同一套机制），provider 工厂只从 `params` 读，**不再在构造期读 `ctx.config` 派生**。
+**关键洞察**：`ctx.config` 是「伪装成环境的属性源」。所有 config 派生的构造参数（`skill_mode` / `model_name` / `review_trigger` / `permissions` / `embed` 等）**本质是属性**，统一由 `config_specs` 读 config → 投射进 `RailSpec.params`（与既有 `skills` / `tool_names` / `max_iterations` 同一套机制），provider 工厂只从 `params` 读，**不再在构造期读 `ctx.config` 派生**。
 
 收益：`RailSpec.params` 自洽且可序列化地描述元素的**全部设定**；`SwarmBuildContext` 保持纯环境；为「配置文件 → harness」loader 打好基础（文件即 params）。
 
@@ -195,7 +195,7 @@ _role_evolution_rails(config, role)            # leader: 进化+创建；teammat
 ```python
 _RAIL_PARAM_BUILDERS: dict[name, (config) -> params]   # context_processor / code_project_memory /
                                                        # permission_interrupt / code_coding_memory /
-                                                       # user_hooks
+                                                       # user_hooks / code_skill_use
 _TOOL_PARAM_BUILDERS: dict[name, (config) -> params]   # send_file / code_extra_tools
 
 [RailSpec(type=name, params=_rail_params(name, config)) for name in _CODE_RAIL_NAMES]
@@ -205,7 +205,7 @@ _TOOL_PARAM_BUILDERS: dict[name, (config) -> params]   # send_file / code_extra_
 
 | param 字段（元素） | 抽取来源 |
 |---|---|
-| `skill_mode`（core.team.skill_use） | `react.skill_mode` 校验（`SkillUseRail.SKILL_MODE_*`）；开启 agentic retrieval 时强制 `auto_list` |
+| `skill_mode`（code_skill_use） | `react.skill_mode` 校验（`SkillUseRail.SKILL_MODE_*`） |
 | `additional_directories`（code_project_memory） | `react.project_memory` + env `JIUWENSWARM_ADDITIONAL_DIRECTORIES` |
 | `permissions_config` + `model_name`（permission_interrupt） | `config.permissions` + `config.models.default…model_name` |
 | `embed_config`（code_coding_memory） | `config.embed` |
@@ -213,14 +213,14 @@ _TOOL_PARAM_BUILDERS: dict[name, (config) -> params]   # send_file / code_extra_
 | `context_engine_enabled` + `context_engine_config`（context_processor） | `get_context_engine_enabled(config)` + `config.context_engine_config` |
 | `acp_enabled`（code_extra_tools） | `config.acp_agents` 非空 |
 | `channels_config`（send_file） | `config.channels` |
-| `evolution_model_config` + `auto_save`（evolution×2） | `resolve_model_config(config)`（序列化 dict）+ `react.evolution.auto_save` |
-| `skill_evolution`（evolution rails） | `react.evolution.skill_evolution` |
+| `evolution_model_config` + `review_trigger` / `auto_save`（team evolution） | `resolve_model_config(config)`（序列化 dict）+ `get_evolution_review_trigger_enabled` / `get_evolution_auto_save_enabled` |
+| `skill_create`（team_skill_create） | `get_skill_create_enabled(config)` |
 
 > **evolution_llm**：`config_specs` 只烘焙*可序列化的模型配置*（`model_client_config` / `model_config_obj` / `model_name`）进 params；活的 LLM 句柄由工厂 `_build_evolution_llm_from(inp.evolution_model_config)` 在 **build 期**构造，**不进 schema**。
 
 > **blob builder**（permission / coding_memory / context_processor）签名不动：`config_specs` 抽 config 子树进 params，工厂传子 dict（如 `build_permission_rail(config={"permissions": inp.permissions_config}, ...)`）。**零 legacy 回归面**。
 
-> **配置烘焙**：canonical `react.evolution` 派生位在 enrich 期一并解析烘焙，随 spec 序列化——与既有 params 一致（团队级配置）。
+> **env 烘焙**：env 派生位（`EVOLUTION_REVIEW_TRIGGER` / `JIUWENSWARM_ADDITIONAL_DIRECTORIES` 等）在 enrich 期一并解析烘焙，随 spec 序列化——与既有 params 一致（团队级配置）。`auto_save` 仅从 yaml（`react.evolution.auto_save`）解析后烘焙，不读环境变量。被动扫描在挂载演进 Rail 后始终开启，不再烘焙 `auto_scan` / `signal_trigger`。
 
 ---
 
@@ -229,7 +229,7 @@ _TOOL_PARAM_BUILDERS: dict[name, (config) -> params]   # send_file / code_extra_
 `enrich_team_spec_for_swarm(spec, *, session_id, mode, project_dir, request_id, channel_id, request_metadata)`（就地改写 `spec`）：
 
 1. `register_swarm_providers()`（幂等，把 manifest catalog 驱动注册进 openjiuwen 注册表）；
-2. 用 `get_config()` + 工作区路径 + 进程级 trajectory span processor 建 `SwarmBuildContext`；
+2. 用 `get_config()` + 工作区路径 + `InMemoryTrajectoryRegistry` 建 per-team `SwarmBuildContext`；
 3. 对 `leader` / `teammate` 调 `build_member_deep_agent_spec`，把能力 spec（含烘焙好的 params）折叠到成员 `DeepAgentSpec`；
 4. `spec.build_context = base`；`spec.build_context_seed = base.to_seed()`（跨边界重建）。
 
@@ -301,14 +301,14 @@ harness_element(kind=RAIL, name=..., builder=SomeRailClass)              # 直�
 
 | name | 模式/角色 | P（属性） | C（环境） |
 |---|---|---|---|
-| `swarm.member_skill_toolkit` | T+K | —（不再收 skills：视图文档由 `core.team.skill_use` 单点播种） | workspace_root, visibility_path（`resolve_member_skill_visibility_path()` 派生，仅用于日志）, global_skills_dir |
+| `swarm.member_skill_toolkit` | T+K | skills | workspace_root, global_skills_dir, team_skills_dir |
 | `swarm.runtime_prompt` | T | — | language, channel |
 | `swarm.team_workspace_report_path` | T+K | — | team_ws_root, team_id, language |
 | `swarm.context_processor` | T+K | context_engine_enabled, context_engine_config | — |
 | `swarm.plugin_rails` | T+K | — | —（全局 rail manager） |
-| `swarm.team_skill_evolution` | T+K / leader | evolution_model_config, auto_save（整条链路受 `skill_evolution` 开关门控） | global_skills_dir, language, role, team_id, trajectory_registry, channel, session_id, team_ws_root |
-| `swarm.team_skill_create` | T+K / leader | —（params 恒为 `{}`，受 `skill_evolution` 开关门控） | global_skills_dir, team_skill_visibility_path, language, channel, session_id, team_ws_root, team_id, trajectory_registry |
-| `swarm.member_skill_evolution` | T+K / teammate | evolution_model_config（受 `skill_evolution` 开关门控） | global_skills_dir, language, trajectory_registry, team_id, channel, session_id |
+| `swarm.team_skill_evolution` | T+K / leader | evolution_model_config, review_trigger, auto_save | team_skills_dir, language, role, team_id, trajectory_registry, channel, session_id, team_ws_root, global_skills_dir |
+| `swarm.team_skill_create` | T+K / leader | skill_create | team_skills_dir, language, channel, session_id, team_ws_root, team_id, trajectory_registry |
+| `swarm.member_skill_evolution` | T+K / teammate | evolution_model_config | team_skills_dir, trajectory_registry, team_id, channel, session_id |
 | `swarm.code_runtime_prompt` | K | — | language, channel |
 | `swarm.code_project_memory` | K | additional_directories | project_dir, language |
 | `swarm.permission_interrupt` | K | permissions_config, model_name | — |
@@ -318,6 +318,7 @@ harness_element(kind=RAIL, name=..., builder=SomeRailClass)              # 直�
 | `swarm.code_task_planning` | K | — | — |
 | `swarm.code_agent_rail` | K | — | workspace_dir |
 | `swarm.user_hooks` | K | hooks_section | — |
+| `swarm.code_skill_use` | K | skill_mode | —（skills_dir/disabled 全局） |
 
 ### 10.3 Rail — 类（3，无输入，`EmptyInput`）
 
@@ -341,46 +342,23 @@ harness_element(kind=RAIL, name=..., builder=SomeRailClass)              # 直�
 
 ---
 
-## 11. 端到端数据流（以 `core.team.skill_use` 为例）
-
-skill 实体只存放在唯一的全局库，成员看得见哪些 skill 由 member / team 两份
-`skills-visibility.json` 决定。成员名是 spawn 时才铸出来的，所以 claw 侧只声明
-「怎么暴露」，身份类 params（库根、两份声明文件路径、seed allow）由 openjiuwen
-的 `agent_teams.skill.rail_spec.complete_declared_team_skill_rails` 在成员装配时补齐。
+## 11. 端到端数据流（以 `code_skill_use` 为例）
 
 ```
 config.yaml: react.skill_mode = "auto_list"
    │ enrich → config_specs._skill_mode(config) = "auto_list"
    ▼
-RailSpec(type="core.team.skill_use",
-         params={"skill_mode": "auto_list", "bootstrap_allow": [...]})   # 属性烘焙
+RailSpec(type="swarm.code_skill_use", params={"skill_mode": "auto_list"})   # 属性烘焙
    │ (随 DeepAgentSpec 序列化 / 跨进程重建保留)
    ▼
-AgentConfigurator.setup_agent → complete_declared_team_skill_rails(...)
-   │ 补 team_name / skills_dir / member_visibility_path / team_visibility_path
-   ▼
 RailSpec.build(language=..., context=SwarmBuildContext)
-   │ openjiuwen: _RAIL_PROVIDER_REGISTRY["core.team.skill_use"](params, context)
+   │ openjiuwen: _RAIL_PROVIDER_REGISTRY["swarm.code_skill_use"](params, context)
    ▼
-TeamSkillUseRail(skills_dir=<全局唯一库>, visibility_provider=...)
-   │ 构造时用 bootstrap_allow 播种成员声明（唯一写者）
-   │ 每轮按两份声明重算 allow/deny；空 allow = 继承全库，deny 优先
+build_code_skill_use(params={"skill_mode": "auto_list"}, ctx)
+   │ inp = CodeSkillUseInput.resolve(params, ctx)   # skill_mode 来自 params
+   ▼
+SkillUseRail(skills_dir=get_agent_skills_dir(), skill_mode="auto_list", ...)
 ```
-
-> 成员 `skills-visibility.json` 的**播种只有这一个写者**：
-> `create_team_skill_use_rail`。`swarm.member_skill_toolkit` 不再写这份文档，
-> 否则同一次装配里两个写者抢同一把文件锁，跳过规则还会各自漂移。
-
-> 团队 `skills-visibility.json` 的**播种者不在 claw**：唯一写者是 openjiuwen 的
-> `team_workspace/manager.py::initialize`（`_seed_team_skill_visibility()`），
-> 团队 workspace 起来时必跑一次。`assembly.py` 只按 `team_ws_root` 算出
-> `team_skill_visibility_path` 注入 `SwarmBuildContext` 供 rail 读取，**不写文件**；
-> `TeamManager` 也不再播种。理由是"缺文件 = 不施加约束"——`read_skill_visibility`
-> 对不存在的文件降级为空文档，`compose_skill_visibility` 里团队传空文档即无约束，
-> 所以没有 workspace 的团队根本不需要这份文件。曾经三处各播一次，语义碰巧一致
-> （空 allow + `AUTHORITY_SEED` + 不覆盖已存文件）才没出事；任一处改播非空 allow，
-> 胜负就变成由调用顺序决定。回归护栏见
-> `tests/unit_tests/agentserver/test_team_shared_skills.py::test_platform_declares_no_team_scope_skill_visibility_seeder`。
 
 ---
 
@@ -388,7 +366,7 @@ TeamSkillUseRail(skills_dir=<全局唯一库>, visibility_provider=...)
 
 - `DeepAgentSpec` / `TeamAgentSpec` 全 pydantic，`model_dump_json()` / `model_validate_json()` 完整 round-trip；rails/tools 序列化为 `{type, params}`、subagents 为 `{factory_name, factory_kwargs, ...}`。
 - 属性全在 `params`（含 `evolution_model_config` 等），跨边界自洽——重建侧无需再读 config 即可还原元素设定。
-- 非序列化句柄（`config` / `trajectory_span_processor` / `extras`）经 `build_context_seed` + `register_build_context_factory` 在接收侧本地重建。
+- 非序列化句柄（`config` / `trajectory_registry` / `extras`）经 `build_context_seed` + `register_build_context_factory` 在接收侧本地重建。
 
 ---
 

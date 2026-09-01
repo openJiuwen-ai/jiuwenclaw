@@ -15,6 +15,7 @@ from typing import Any, Callable
 
 import requests
 from pydantic import BaseModel, Field
+from jiuwenswarm.common.local_env_config import read_env
 from jiuwenswarm.common.schema.message import Message, ReqMethod, EventType
 from jiuwenswarm.gateway.channel_manager.base import RobotMessageRouter, BaseChannel
 from jiuwenswarm.gateway.channel_manager.im_platforms.feishu.feishu_file_service import (
@@ -222,6 +223,19 @@ class FeishuChannel(BaseChannel):
         """返回飞书应用ID，用于ChannelManager索引（ChannelKey.app_id）。"""
         return self.config.app_id or "default"
 
+    def _im_tenant_ids(self, message: Any = None, open_id: str = "") -> tuple[str, str]:
+        """Resolve SessionMap-aligned tenant ids for Feishu inbound traffic."""
+        from jiuwenswarm.gateway.tenant_paths import tenant_ids_from_im_identity
+
+        chat_id = ""
+        if message is not None:
+            chat_id = str(getattr(message, "chat_id", "") or "").strip()
+        return tenant_ids_from_im_identity(
+            chat_id,
+            str(self.config.app_id or ""),
+            open_id or "",
+        )
+
     def on_message(self, callback: Callable[[Message], None]) -> None:
         """
         注册消息回调函数，用于Gateway模式。
@@ -367,13 +381,12 @@ class FeishuChannel(BaseChannel):
             self._im_platform_adapter.set_api_client(self._api_client)
         if hasattr(self._message_storage, 'set_platform_adapter'):
             self._message_storage.set_platform_adapter(self._im_platform_adapter)
-        # 初始化文件服务
-        from jiuwenswarm.common.utils import get_agent_workspace_dir
-        workspace_dir = self.config.temp_file_dir or str(get_agent_workspace_dir())
+        # 初始化文件服务（workspace 按消息租户懒解析；temp_file_dir 可覆盖）
+        workspace_dir = str(self.config.temp_file_dir).strip() if self.config.temp_file_dir else None
         self._file_service = FeishuFileService(
             api_client=self._api_client,
             config=self.config,
-            workspace_dir=workspace_dir,
+            workspace_dir=workspace_dir or None,
         )
         # bot_open_id 改为懒加载，在需要时才获取（见 _replace_mentions_with_names）
 
@@ -437,10 +450,16 @@ class FeishuChannel(BaseChannel):
                 )
                 # 持久化到配置文件（多应用模式下写入对应 app 条目）
                 try:
-                    from jiuwenswarm.common.config import update_channel_app_field
-                    ok = update_channel_app_field(
-                        "feishu", self.config.app_id,
-                        {"bot_open_id": bot_open_id},
+                    from jiuwenswarm.gateway.config.channel.access import (
+                        update_channel_app_field,
+                    )
+                    from jiuwenswarm.gateway.storage.async_bridge import run_awaitable
+
+                    ok = run_awaitable(
+                        update_channel_app_field(
+                            "feishu", self.config.app_id,
+                            {"bot_open_id": bot_open_id},
+                        )
                     )
                     if not ok:
                         logger.debug(
@@ -947,9 +966,9 @@ class FeishuChannel(BaseChannel):
 
     def _generate_group_ack_sync(self, target_name: str, content: str) -> str:
         """调用轻量 LLM 生成群内简短确认文案。"""
-        api_key = os.getenv("API_KEY", "").strip()
-        api_base = os.getenv("API_BASE", "").strip()
-        model_name = os.getenv("MODEL_NAME", "").strip() or "GLM-4.7"
+        api_key = read_env("API_KEY", "").strip()
+        api_base = read_env("API_BASE", "").strip()
+        model_name = read_env("MODEL_NAME", "").strip() or "GLM-4.7"
         if not api_key or not api_base:
             return self._fallback_group_ack()
 
@@ -1648,7 +1667,9 @@ class FeishuChannel(BaseChannel):
                     self._stream_text_buffers.pop(stream_key, None)
                 content_str = self._extract_message_content(msg)
                 is_complete = msg.payload.get("is_complete", False)
-                if is_complete:
+                # chat.final 常带空 content 且未必含 is_complete=True；但必须与上方 pop 出的流式缓冲合并，
+                # 否则缓冲已被弹出却未并入 content_str，会导致正文丢失（仅依赖 processing_status 冲刷时更明显）。
+                if event_name == "chat.final" or is_complete:
                     content_str = self._merge_stream_and_final_content(
                         buffered_text,
                         content_str,
@@ -1729,10 +1750,19 @@ class FeishuChannel(BaseChannel):
             ):
                 req_id = str(getattr(msg, "id", "") or "")
                 already_sent = self._sent_file_paths_by_req.get(req_id, set())
-                detected_files = [
-                    fp for fp in self._detect_workspace_files(content_str)
-                    if os.path.abspath(fp) not in already_sent
-                ]
+                from jiuwenswarm.gateway.tenant_paths import tenant_ids_from_message
+
+                _svc, _aid = tenant_ids_from_message(msg)
+                fs_sid = str(getattr(msg, "session_id", None) or "").strip() or "default"
+                detected_files = []
+                for fp in self._detect_workspace_files(
+                    content_str,
+                    fs_sid,
+                    service_id=_svc,
+                    agent_id=_aid,
+                ):
+                    if os.path.abspath(fp) not in already_sent:
+                        detected_files.append(fp)
                 if detected_files:
                     logger.info(
                         "飞书兜底文件发送：从 chat.final 中检测到 %d 个未发送文件: %s",
@@ -1751,6 +1781,18 @@ class FeishuChannel(BaseChannel):
                                 await self._send_file_card(receive_id, id_type, fp, os.path.basename(fp))
                         except Exception as file_err:
                             logger.error("飞书兜底文件发送失败: %s %s", fp, file_err)
+
+            if not content_str.strip():
+                if files_sent_in_fallback:
+                    return
+                logger.warning("飞书发送：消息内容为空，跳过发送")
+                return
+
+            request_id = str(msg.id or "").strip()
+            if request_id and msg.event_type != EventType.HEARTBEAT_RELAY:
+                self._clear_group_progress_state(request_id)
+
+            content_str = self._filter_user_info_for_group(content_str, meta)
 
             # 群聊数字分身回复到群聊时，@发送人
             if msg.group_digital_avatar and id_type == "chat_id":
@@ -1802,6 +1844,9 @@ class FeishuChannel(BaseChannel):
 
                 # 记录机器人回复消息到群聊历史中去（仅数字分身模式）
                 if chat_id and self.config.group_digital_avatar:
+                    from jiuwenswarm.gateway.tenant_paths import tenant_ids_from_message
+
+                    _svc, _aid = tenant_ids_from_message(msg)
                     self._message_storage.add_message_to_memory(
                             chat_id=chat_id,
                             message={
@@ -1811,7 +1856,9 @@ class FeishuChannel(BaseChannel):
                             "msg_type": "interactive",
                             "open_id": f"bot_{self.config.app_id}",
                             "chat_type": "bot_reply",
-                        }
+                        },
+                            service_id=_svc,
+                            agent_id=_aid,
                     )
             except Exception as e:
                 logger.warning(f"记录机器人回复消息失败: {e}")
@@ -1965,38 +2012,68 @@ class FeishuChannel(BaseChannel):
             self._cardkit_sessions.pop(key, None)
             self._cardkit_buffers.pop(key, None)
 
-    def _detect_workspace_files(self, text: str) -> list[str]:
-        """从文本中提取 workspace 下实际存在的文件路径。
+    def _detect_workspace_files(
+        self,
+        text: str,
+        session_id: str | None = None,
+        *,
+        service_id: str | None = None,
+        agent_id: str | None = None,
+    ) -> list[str]:
+        """从文本中提取当前会话 project_dir（回退租户 workspace）下实际存在的文件路径。
 
         用于兜底检测 LLM 提到但未通过 send_file_to_user 发送的文件。
         支持两种模式：
-        1. 完整绝对路径：/home/xxx/.jiuwenswarm/agent/workspace/xxx.docx
-        2. 仅文件名：'xxx.docx' 或 "xxx.docx"——在 workspace 目录下查找
+        1. 完整绝对路径：以当前会话 ``project_dir`` / 租户 workspace 为前缀
+        2. 仅文件名：'xxx.docx' 或 "xxx.docx"——在该目录下查找
         """
-        from jiuwenswarm.common.utils import get_agent_workspace_dir
-        workspace_dir = str(get_agent_workspace_dir())
+        from jiuwenswarm.common.utils import resolve_tenant_sessions_dir
+        from jiuwenswarm.gateway.tenant_paths import (
+            normalize_channel_tenant_ids,
+            resolve_channel_agent_workspace,
+        )
+        from jiuwenswarm.server.runtime.session.session_metadata import (
+            get_resolved_project_dir,
+        )
+
+        if not text:
+            return []
+
+        sid, aid = normalize_channel_tenant_ids(service_id, agent_id)
+        sess = (session_id or "").strip() or "default"
+        workspace_dir = os.path.abspath(
+            get_resolved_project_dir(
+                sess,
+                resolve_tenant_sessions_dir(sid, aid),
+                default=resolve_channel_agent_workspace(sid, aid),
+            )
+        ).rstrip("/\\")
 
         seen: set[str] = set()
         result: list[str] = []
 
-        # 模式1：完整路径 - 动态匹配当前 workspace 目录
-        # 支持 Linux (/home/xxx/.jiuwenswarm/...) 和 Windows (C:\Users\xxx\.jiuwenswarm\...)
-        workspace_pattern = re.escape(workspace_dir) + r"[^\s\[\]\"']+\.\w+"
-        for m in re.findall(workspace_pattern, text):
-            m = m.rstrip(".,;:!?)")
-            if m not in seen and os.path.isfile(m):
-                seen.add(m)
-                result.append(m)
+        # 模式1：完整路径 — 匹配原生分隔符与正斜杠（LLM 常输出 /）
+        ws_variants = [workspace_dir]
+        ws_fwd = workspace_dir.replace("\\", "/")
+        if ws_fwd != workspace_dir:
+            ws_variants.append(ws_fwd)
+
+        for ws in ws_variants:
+            workspace_pattern = re.escape(ws) + r"[^\s\[\]\"']+\.\w+"
+            for m in re.findall(workspace_pattern, text):
+                m = os.path.normpath(m.rstrip(".,;:!?)"))
+                if m not in seen and os.path.isfile(m):
+                    seen.add(m)
+                    result.append(m)
 
         # 模式2：从引号或书名号中提取文件名，在 workspace 下查找
-        # 匹配 '文件名.ext'、"文件名.ext"、《文件名.ext》
         name_pattern = (
             r"""['"'《]([^'"'》\n]+\."""
             r"""(?:docx?|xlsx?|pptx?|pdf|csv|txt|md|zip|tar|gz|"""
             r"""png|jpg|jpeg|gif|mp3|mp4|wav|opus))['"'》]"""
         )  # noqa: E501
         for fname in re.findall(name_pattern, text, re.IGNORECASE):
-            fpath = os.path.join(workspace_dir, fname)
+            fpath = os.path.normpath(os.path.join(workspace_dir, fname))
             if fpath not in seen and os.path.isfile(fpath):
                 seen.add(fpath)
                 result.append(fpath)
@@ -2661,9 +2738,11 @@ class FeishuChannel(BaseChannel):
             # V2 多应用：写入对应 app 条目，避免多 app 争抢同一个平铺字段
             if self.config.channel_id == "feishu" and not self.config.bot_key:
                 try:
-                    from jiuwenswarm.common.config import update_channel_app_field
+                    from jiuwenswarm.gateway.config.channel.access import (
+                        update_channel_app_field,
+                    )
 
-                    update_channel_app_field(
+                    await update_channel_app_field(
                         "feishu",
                         self.config.app_id,
                         {
@@ -2677,9 +2756,11 @@ class FeishuChannel(BaseChannel):
                     pass
             elif self.channel_id.startswith("feishu_enterprise:") and self.config.bot_key:
                 try:
-                    from jiuwenswarm.common.config import update_channel_subsection_in_config
+                    from jiuwenswarm.gateway.config.channel.access import (
+                        update_channel_subsection_in_config,
+                    )
 
-                    update_channel_subsection_in_config(
+                    await update_channel_subsection_in_config(
                         "feishu_enterprise",
                         self.config.bot_key,
                         {
@@ -2703,6 +2784,9 @@ class FeishuChannel(BaseChannel):
                 pass
 
             # 构建基础 metadata
+            # feishu_create_time：飞书服务端在消息创建（用户发送）时刻打的毫秒时间戳，
+            # 透传到 ChannelManager 入站日志，与本进程收到回调的时刻对比，即可判断
+            # 该入站消息是用户当下新发（差值小）还是飞书延迟补推的旧消息（差值大）。
             base_metadata = {
                 "message_id": message.message_id,
                 "chat_type": message.chat_type,
@@ -2710,12 +2794,20 @@ class FeishuChannel(BaseChannel):
                 "open_id": open_id,
                 "feishu_open_id": open_id,
                 "feishu_chat_id": getattr(message, "chat_id", None) or "",
+                "feishu_create_time": getattr(message, "create_time", None),
                 **({"file_info": file_info} if file_info else {}),
             }
 
             # 记录消息到本地存储（仅数字分身模式）
             if self.config.group_digital_avatar:
                 try:
+                    from jiuwenswarm.gateway.tenant_paths import tenant_ids_from_im_identity
+
+                    _svc, _aid = tenant_ids_from_im_identity(
+                        message.chat_id,
+                        str(self.config.app_id or ""),
+                        open_id or "",
+                    )
                     self._message_storage.add_message_to_memory(
                         chat_id=message.chat_id,
                         message={
@@ -2725,7 +2817,9 @@ class FeishuChannel(BaseChannel):
                             "msg_type": message.message_type,
                             "open_id": open_id,
                             "chat_type": message.chat_type,
-                        }
+                        },
+                        service_id=_svc,
+                        agent_id=_aid,
                     )
                 except Exception as e:
                     logger.warning(f"记录消息到本地存储失败: {e}")
@@ -3036,10 +3130,12 @@ class FeishuChannel(BaseChannel):
                 return "[图片]", None
 
             # 下载图片
-            file_info = await self._file_service.download_image(
-                file_key=image_key,
-                message_id=message.message_id,
-            )
+            _svc, _aid = self._im_tenant_ids(message)
+            with self._file_service.tenant_scope(_svc, _aid):
+                file_info = await self._file_service.download_image(
+                    file_key=image_key,
+                    message_id=message.message_id,
+                )
 
             if file_info:
                 return "[图片]", file_info
@@ -3071,11 +3167,13 @@ class FeishuChannel(BaseChannel):
 
             # 下载文件
             logger.info(f"开始下载飞书文件: {file_name}")
-            file_info = await self._file_service.download_file_resource(
-                file_key=file_key,
-                message_id=message.message_id,
-                extra_info={"file_name": file_name, "file_size": file_size},
-            )
+            _svc, _aid = self._im_tenant_ids(message)
+            with self._file_service.tenant_scope(_svc, _aid):
+                file_info = await self._file_service.download_file_resource(
+                    file_key=file_key,
+                    message_id=message.message_id,
+                    extra_info={"file_name": file_name, "file_size": file_size},
+                )
 
             if file_info:
                 file_info["name"] = file_name
@@ -3101,10 +3199,12 @@ class FeishuChannel(BaseChannel):
                 return "[音频]", None
 
             # 下载音频
-            file_info = await self._file_service.download_audio(
-                file_key=file_key,
-                message_id=message.message_id,
-            )
+            _svc, _aid = self._im_tenant_ids(message)
+            with self._file_service.tenant_scope(_svc, _aid):
+                file_info = await self._file_service.download_audio(
+                    file_key=file_key,
+                    message_id=message.message_id,
+                )
 
             if file_info:
                 duration_sec = duration / 1000
@@ -3127,10 +3227,12 @@ class FeishuChannel(BaseChannel):
                 return "[视频]", None
 
             # 下载视频
-            file_info = await self._file_service.download_media(
-                file_key=file_key,
-                message_id=message.message_id,
-            )
+            _svc, _aid = self._im_tenant_ids(message)
+            with self._file_service.tenant_scope(_svc, _aid):
+                file_info = await self._file_service.download_media(
+                    file_key=file_key,
+                    message_id=message.message_id,
+                )
 
             if file_info:
                 duration_sec = duration / 1000

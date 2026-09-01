@@ -290,7 +290,12 @@ def _convert_stats(raw_stats: dict[str, Any] | None) -> DiffStats:
     )
 
 
-def get_session_extra_history_roots(session_id: str | None) -> list[str]:
+def get_session_extra_history_roots(
+    session_id: str | None,
+    *,
+    sessions_root: str | Path | None = None,
+    agent_workspace_root: str | Path | None = None,
+) -> list[str]:
     """Return team/member/worktree/sub-agent roots for file history monitoring."""
     sid = str(session_id or "").strip()
     if not sid:
@@ -301,7 +306,13 @@ def get_session_extra_history_roots(session_id: str | None) -> list[str]:
 
         # Team roots may be written by a different process; force disk read so
         # diff/restore sees the latest persisted metadata.
-        metadata = get_session_metadata(sid, cache_bust=True, enable_writeback=False)
+        metadata_kwargs: dict[str, Any] = {
+            "cache_bust": True,
+            "enable_writeback": False,
+        }
+        if sessions_root is not None:
+            metadata_kwargs["sessions_root"] = sessions_root
+        metadata = get_session_metadata(sid, **metadata_kwargs)
     except Exception:  # noqa: BLE001
         return []
     raw_roots = metadata.get("team_file_monitor_roots")
@@ -334,7 +345,9 @@ def get_session_extra_history_roots(session_id: str | None) -> list[str]:
             except Exception:  # noqa: BLE001
                 continue
 
-    team_name = str(metadata.get("team_name") or "").strip()
+    team_name = str(
+        metadata.get("runtime_team_name") or metadata.get("team_name") or ""
+    ).strip()
     if team_name:
         spawned_member_names = _session_team_member_names(sid)
         for raw in raw_root_values:
@@ -376,12 +389,21 @@ def get_session_extra_history_roots(session_id: str | None) -> list[str]:
         except Exception:  # noqa: BLE001
             pass
 
-    _discover_sub_agent_workspaces(sid, add_root)
+    _discover_sub_agent_workspaces(
+        sid,
+        add_root,
+        agent_workspace_root=agent_workspace_root,
+    )
 
     return roots
 
 
-def _discover_sub_agent_workspaces(session_id: str, add_root: Callable[[Any], None]) -> None:
+def _discover_sub_agent_workspaces(
+    session_id: str,
+    add_root: Callable[[Any], None],
+    *,
+    agent_workspace_root: str | Path | None = None,
+) -> None:
     """Scan workspace/sub_agents for sub-agent dirs belonging to *session_id*.
 
     In single-agent mode the parent session has no ``team_name`` and no
@@ -395,7 +417,12 @@ def _discover_sub_agent_workspaces(session_id: str, add_root: Callable[[Any], No
     """
     from jiuwenswarm.common.utils import get_agent_workspace_dir
 
-    sub_agents_dir = get_agent_workspace_dir() / "sub_agents"
+    workspace_root = (
+        Path(agent_workspace_root)
+        if agent_workspace_root is not None
+        else get_agent_workspace_dir()
+    )
+    sub_agents_dir = workspace_root / "sub_agents"
     if not sub_agents_dir.is_dir():
         return
     prefix = f"{session_id}_sub_"

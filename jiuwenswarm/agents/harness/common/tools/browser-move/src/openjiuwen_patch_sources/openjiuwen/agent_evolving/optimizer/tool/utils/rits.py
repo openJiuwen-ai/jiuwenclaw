@@ -34,9 +34,7 @@ def rits_response(
     )
     model_client = ModelClientConfig(
         client_provider="OpenAI",
-        # A present-but-blank RITS_API_URL must fall back to the official
-        # endpoint: the shipped .env template declares it empty on purpose.
-        api_base=os.environ.get("RITS_API_URL", "").strip() or "https://api.openai.com/v1",
+        api_base=os.environ.get("RITS_API_URL", "https://api.openai.com/v1"),
         api_key=llm_api_key,
         verify_ssl=verify_ssl
     )

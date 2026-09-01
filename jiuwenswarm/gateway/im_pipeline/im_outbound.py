@@ -13,12 +13,12 @@
 from __future__ import annotations
 
 import logging
-import os
 import re
 import secrets
 from typing import TYPE_CHECKING, Any
 
 from jiuwenswarm.common.config import _parse_custom_headers
+from jiuwenswarm.common.local_env_config import read_env
 from jiuwenswarm.common.reasoning_injector import build_reasoning_model_request_kwargs
 from jiuwenswarm.gateway.routing.interaction_context import PendingInteraction
 
@@ -76,18 +76,18 @@ class IMOutboundPipeline:
         react = cfg.get("react") or {}
         mcc_raw = react.get("model_client_config") or {}
         model_config_obj = react.get("model_config_obj") or {}
-        api_key = (mcc_raw.get("api_key") or os.getenv("API_KEY") or "").strip()
-        api_base = (mcc_raw.get("api_base") or os.getenv("API_BASE") or "").strip()
+        api_key = (mcc_raw.get("api_key") or read_env("API_KEY") or "").strip()
+        api_base = (mcc_raw.get("api_base") or read_env("API_BASE") or "").strip()
         if api_base.endswith("/chat/completions"):
             api_base = api_base.rsplit("/chat/completions", 1)[0]
         model_name = (
             react.get("model_name")
             or mcc_raw.get("model_name")
-            or os.getenv("MODEL_NAME")
+            or read_env("MODEL_NAME")
             or "gpt-4o"
         ).strip()
         client_provider = mcc_raw.get("client_provider", "OpenAI")
-        custom_headers = _parse_custom_headers(mcc_raw.get("custom_headers") or os.getenv("CUSTOM_HEADERS"))
+        custom_headers = _parse_custom_headers(mcc_raw.get("custom_headers") or read_env("CUSTOM_HEADERS"))
 
         if not api_key or not api_base:
             logger.warning(
@@ -142,10 +142,12 @@ class IMOutboundPipeline:
 
     async def apply(self, msg: "Message") -> None:
         """对出站消息执行路由决策，结果写入 msg.metadata（原地修改）。"""
-        meta = dict(msg.metadata or {})
-        is_digital_avatar = msg.group_digital_avatar or bool(meta.get("avatar_mode"))
-        if not is_digital_avatar:
+        # 检查是否需要数字分身路由决策
+        # 优先使用 msg.group_digital_avatar，其次检查 metadata 中的 avatar_mode
+        if not msg.group_digital_avatar and not (msg.metadata or {}).get("avatar_mode"):
             return
+
+        meta = dict(msg.metadata or {})
 
         payload = msg.payload if isinstance(msg.payload, dict) else {}
         message_event_type = getattr(msg, "event_type", None)

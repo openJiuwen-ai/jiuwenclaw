@@ -26,8 +26,6 @@ Configuration validity uses a full SHA-256 fingerprint and a per-process boot ID
 
 The initial speculative candidate prefers Web/work/default-project, and a claimed key is prioritized for replenishment. A matching warming task is promoted to the foreground with its existing Session ID. Foreground entry cancels other speculative work and pauses dispatch of new slots. Foreground/background initialization shares a lock around process-global OpenJiuwen registries, preventing unsafe concurrent mutation while retaining foreground priority.
 
-TUI always establishes its boot session through `session.create` after `connection.ack`, before releasing startup commands or chat. Normal startup, `/new`, and `/clear` omit the ID and retain AgentServer allocation; `--session <id>` is an explicit compatibility exception to allocation, not to ownership. It passes the external ID to AgentServer through `session.create`; AgentServer logs, validates, and serializes this branch, persists or restores its binding, and bypasses prewarming. Other channels cannot create caller-selected IDs.
-
 For eligible single-Agent sessions, final `work_mode` also determines runtime cache identity: `work` maps to `(agent, None)` and `code` maps to `(code, normal)`. AgentServer canonicalizes contradictory legacy Channel requests before metadata persistence and repeats the normalization on chat selection using locked Session state.
 
 ## Consequences
@@ -40,7 +38,6 @@ For eligible single-Agent sessions, final `work_mode` also determines runtime ca
 - Gateway prewarm sync is debounced/coalesced, and MemoryRail full reindex is skipped on first registration and singleflight on real embedding changes.
 - A claimed READY Session cannot switch to a different root cache merely because a Channel sent stale `mode=agent` for a code project.
 - Channel trajectory prediction and pool-size reduction can be layered later without changing identity ownership.
-- TUI automation and existing CLI users retain deterministic startup IDs without letting Gateway or frontend write Session metadata or claim a mismatched warm runtime.
 
 ## Alternatives Rejected
 

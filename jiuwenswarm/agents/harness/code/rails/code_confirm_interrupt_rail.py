@@ -70,6 +70,21 @@ def build_confirm_interrupt_message(tool_name: str, tool_args: dict[str, Any] | 
 class CodeConfirmInterruptRail(ConfirmInterruptRail):
     """ConfirmInterruptRail with tool-specific confirmation copy for code mode."""
 
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._agent: Any | None = None
+
+    def init(self, agent: Any) -> None:
+        """Capture the stateful Code/DeepAgent rather than callback ReActAgent."""
+        super().init(agent)
+        self._agent = agent
+
+    def uninit(self, agent: Any) -> None:  # noqa: ARG002
+        try:
+            super().uninit(agent)
+        finally:
+            self._agent = None
+
     async def resolve_interrupt(
         self,
         ctx: AgentCallbackContext,
@@ -103,15 +118,17 @@ class CodeConfirmInterruptRail(ConfirmInterruptRail):
     ):
         if tool_call is None or (tool_call.name or "") != "switch_mode":
             return None
-        agent = ctx.agent
+        args = self._parse_tool_args(tool_call)
+        target = str(args.get("mode") or args.get("target_mode") or "").strip()
+        # Entering plan mode is valid regardless of current plan state and must
+        # not touch state APIs on the callback's outer ReActAgent.
+        if target not in {"normal", "auto"}:
+            return None
+        agent = self._agent
         if agent is None:
             return None
         plan_state = agent.load_state(ctx.session).plan_mode
         if plan_state.mode != "plan":
-            return None
-        args = self._parse_tool_args(tool_call)
-        target = str(args.get("mode") or args.get("target_mode") or "").strip()
-        if target not in {"normal", "auto"}:
             return None
         language = "cn"
         builder = getattr(agent, "system_prompt_builder", None)

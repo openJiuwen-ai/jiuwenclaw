@@ -6,7 +6,7 @@ from dataclasses import replace
 from importlib import import_module
 from typing import Any, Iterable, List, Tuple
 
-from .naming import fuzzy_name_distance, normalize_name_key, to_pascal_case
+from orchestration.utils.naming import fuzzy_name_distance, normalize_name_key, to_pascal_case
 from .node_spec import CID, NodeSpec, NodeType
 
 
@@ -231,8 +231,9 @@ class CIDTree:
             cid = CID.from_str(text)
             if self.exists(cid):
                 return cid.to_str()
-        except ValueError:
-            pass
+        except ValueError as e:
+            if logger is not None:
+                logger.debug("Direct CID parsing failed for '%s': %s", text, str(e))
 
         segments = [segment.strip() for segment in text.split(".") if segment.strip()]
         if not segments:

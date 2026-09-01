@@ -193,10 +193,75 @@ async def test_web_channel_handle_raw_message_uses_connection_user_id():
         ),
         {"user_id": ["alice"]},
     )
+    await channel.unregister_ws(ws)
 
     assert len(seen) == 1
     assert seen[0].user_id == "alice"
     assert seen[0].metadata.get("user_id") == "alice"
+
+
+@pytest.mark.asyncio
+async def test_web_channel_local_tenant_handler_uses_handshake_scope():
+    channel = WebChannel(WebChannelConfig(enabled=True), RobotMessageRouter())
+    ws = FakeWebSocket(query_user_id="alice")
+    seen_params: list[dict[str, Any]] = []
+
+    async def handler(_ws, _req_id, params, _session_id):
+        seen_params.append(params)
+
+    channel.register_method("cron.job.list", handler)
+    await channel._handle_raw_message(
+        ws,
+        json.dumps(
+            {
+                "type": "req",
+                "id": "req-scope",
+                "method": "cron.job.list",
+                "params": {"user_id": "payload-user"},
+            }
+        ),
+        {
+            "user_id": ["alice"],
+            "group_id": ["group-1"],
+            "bot_id": ["bot-1"],
+        },
+    )
+    await channel.unregister_ws(ws)
+
+    assert seen_params == [
+        {
+            "user_id": "alice",
+            "group_id": "group-1",
+            "bot_id": "bot-1",
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_web_channel_runtime_scope_does_not_replace_business_bot_id():
+    channel = WebChannel(WebChannelConfig(enabled=True), RobotMessageRouter())
+    ws = FakeWebSocket(query_user_id="alice")
+    seen_params: list[dict[str, Any]] = []
+
+    async def handler(_ws, _req_id, params, _session_id):
+        seen_params.append(params)
+
+    channel.register_method("channel.wecom.set_conf", handler)
+    await channel._handle_raw_message(
+        ws,
+        json.dumps(
+            {
+                "type": "req",
+                "id": "req-business-bot",
+                "method": "channel.wecom.set_conf",
+                "params": {"bot_id": "wecom-business-bot"},
+            }
+        ),
+        {"user_id": ["alice"], "group_id": ["group-1"], "bot_id": ["runtime-bot"]},
+    )
+    await channel.unregister_ws(ws)
+
+    assert seen_params == [{"bot_id": "wecom-business-bot"}]
 
 
 @pytest.mark.asyncio
@@ -224,6 +289,7 @@ async def test_web_channel_handle_raw_message_ignores_params_user_id():
         ),
         {"user_id": ["alice"]},
     )
+    await channel.unregister_ws(ws)
 
     assert len(seen) == 1
     assert seen[0].user_id == "alice"
@@ -253,6 +319,7 @@ async def test_web_channel_handle_raw_message_without_user_id():
         ),
         {},
     )
+    await channel.unregister_ws(ws)
 
     assert len(seen) == 1
     assert seen[0].user_id is None

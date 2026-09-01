@@ -14,9 +14,9 @@ elements, each self-gated by the config source and filtered against the swarm
 * ``swarm.xiaoyi_phone`` — the xiaoyi phone tools (channel-switch gated).
 * ``swarm.code_extra_tools`` — code-mode-exclusive ``acp_chat``.
 
-The generic web / vision / audio tools are provided by openjiuwen
-(``core.web_search`` / ``core.web_fetch`` / ``core.web_paid_search`` /
-``core.vision`` / ``core.audio``); ``vision_model_config_params`` /
+Vision and audio tools are provided by openjiuwen (``core.vision`` /
+``core.audio``). Team web tools use Jiuwen's unified search/fetch wrappers;
+``vision_model_config_params`` /
 ``audio_model_config_params`` here fill the openjiuwen ``VisionModelConfig`` /
 ``AudioModelConfig`` constructor kwargs from the swarm config + env so
 ``config_specs`` can bake them into those elements' params.
@@ -24,6 +24,7 @@ The generic web / vision / audio tools are provided by openjiuwen
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 from pathlib import Path
@@ -36,7 +37,12 @@ from openjiuwen.agent_teams.harness.manifest import (
     harness_element,
     param_field,
 )
+from openjiuwen.core.runner import Runner
 
+from jiuwenswarm.agents.harness.common.tools.harness_named_web_tools import (
+    JiuwenHarnessFetchWebpageTool,
+    JiuwenHarnessWebSearchTool,
+)
 from jiuwenswarm.agents.harness.common.tools.image_tools import generate_image
 from jiuwenswarm.agents.harness.common.tools.multimodal_config import (
     apply_audio_model_config_from_yaml,
@@ -86,6 +92,7 @@ from jiuwenswarm.agents.harness.common.tools.xiaoyi_phone_tools import (
 from jiuwenswarm.agents.harness.team.team_runtime_inheritance import TOOL_WHITELIST
 from jiuwenswarm.agents.swarm.context import SwarmBuildContext
 from jiuwenswarm.common.config import get_config
+from jiuwenswarm.common.local_env_config import get_local_config
 from jiuwenswarm.common.tool_ownership import mark_stateless
 from jiuwenswarm.server.runtime.skill.skill_manager import SkillManager
 
@@ -100,6 +107,9 @@ IMAGE_GEN = "swarm.image_gen"
 XIAOYI_PHONE = "swarm.xiaoyi_phone"
 SYMPHONY_TOOLKIT = "swarm.symphony_toolkit"
 CODE_EXTRA_TOOLS = "swarm.code_extra_tools"
+WEB_SEARCH = "swarm.web_search"
+WEB_FETCH = "swarm.web_fetch"
+_CODE_MODES = frozenset({"code.team", "team.plan"})
 
 # xiaoyi phone tool objects, gated by ``channels.xiaoyi.phone_tools_enabled``.
 _XIAOYI_PHONE_TOOLS = (
@@ -138,6 +148,30 @@ def _filter_whitelist(tools: list[Any]) -> list[Any]:
     return [tool for tool in tools if tool.card.name in TOOL_WHITELIST]
 
 
+def _reuse_registered_tool(candidate: Any) -> Any:
+    existing = Runner.resource_mgr.get_tool(candidate.card.id)
+    if existing is None:
+        return candidate
+    if type(existing) is not type(candidate) or existing.card.name != candidate.card.name:
+        raise ValueError(
+            "Registered tool is incompatible with Team web tool: "
+            f"tool_id='{candidate.card.id}', tool_name='{candidate.card.name}'"
+        )
+    return existing
+
+
+def _member_web_tool_identity(ctx: SwarmBuildContext) -> tuple[str | None, str]:
+    agent_id = str(
+        getattr(ctx, "member_card_id", None)
+        or getattr(ctx, "member_name", None)
+        or ""
+    ).strip() or None
+    language = "en" if str(getattr(ctx, "language", "cn")).lower() == "en" else "cn"
+    if agent_id is not None:
+        agent_id = f"{agent_id}:{language}"
+    return agent_id, language
+
+
 def _mark_stateless(tools: list[Any]) -> list[Any]:
     """Flag module-level singleton tools as stateless.
 
@@ -154,81 +188,75 @@ def _workspace_root(ctx: SwarmBuildContext) -> str | None:
     return getattr(ctx.workspace, "root_path", None) if ctx.workspace else None
 
 
-def _skill_library_dir(ctx: SwarmBuildContext) -> Path:
-    """Return the one physical Skill library this context reads."""
-    from jiuwenswarm.common.utils import get_agent_skills_dir
-
-    raw = getattr(ctx, "global_skills_dir", None)
-    return Path(raw).expanduser() if raw else get_agent_skills_dir()
-
-
-def _scan_library_skill_names(library_dir: Path) -> set[str]:
-    """Return every installed Skill name in the library, ignoring visibility.
-
-    A directory counts as a Skill when it holds a ``SKILL.md``; ``_``- and
-    ``.``-prefixed directories are internal (state files, locks) and never
-    Skills.
-
-    Args:
-        library_dir: The single physical Skill library.
-
-    Returns:
-        The installed Skill names (empty when the library does not exist yet).
-    """
-    if not library_dir.is_dir():
-        return set()
+def _scan_skill_names_from_dirs(skill_dirs: list[str], disabled_skills: set[str]) -> set[str]:
     names: set[str] = set()
-    for child in library_dir.iterdir():
-        if not child.is_dir() or child.name.startswith(("_", ".")):
+    for raw_dir in skill_dirs:
+        root = Path(raw_dir).expanduser()
+        if not root.is_dir():
             continue
-        if (child / "SKILL.md").is_file():
-            names.add(child.name)
+        for child in sorted(root.iterdir(), key=lambda path: path.name.lower()):
+            if not child.is_dir() or child.name.startswith("_") or child.name.startswith("."):
+                continue
+            if child.name in disabled_skills:
+                continue
+            if (child / "SKILL.md").is_file():
+                names.add(child.name)
     return names
 
 
-def _apply_skill_visibility(
-    names: set[str],
-    enabled_skills: set[str],
-    disabled_skills: set[str],
-) -> set[str]:
-    """Filter *names* exactly the way ``SkillUseRail`` filters its own view.
+def _collect_disabled_skills_from_state(skill_dirs: list[str]) -> set[str]:
+    disabled: set[str] = set()
+    for raw_dir in skill_dirs:
+        state_path = Path(raw_dir).expanduser() / "skills_state.json"
+        if not state_path.is_file():
+            continue
+        try:
+            data = json.loads(state_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            logger.warning("[swarm.skill_retrieval] failed to read skills state: %s", state_path)
+            continue
+        skill_configs = data.get("skill_configs", {})
+        if not isinstance(skill_configs, dict):
+            continue
+        for name, cfg in skill_configs.items():
+            if isinstance(cfg, dict) and cfg.get("enabled") is False:
+                disabled.add(str(name))
+    return disabled
 
-    An empty ``enabled_skills`` means "no allow filtering", not "deny
-    everything"; ``disabled_skills`` always wins. Keeping the two rules
-    byte-identical to the rail is what makes ``list_skill`` agree with what the
-    member can actually invoke.
 
-    Args:
-        names: Candidate Skill names from the library.
-        enabled_skills: Composed allow-list (possibly empty).
-        disabled_skills: Composed deny-list.
+def _list_skill_dirs_for_context(ctx: SwarmBuildContext) -> list[str]:
+    workspace = getattr(ctx, "workspace", None)
+    skill_dirs: list[str] = []
+    if workspace is not None:
+        get_node_path = getattr(workspace, "get_node_path", None)
+        if callable(get_node_path):
+            skills_base = get_node_path("skills")
+            if skills_base:
+                skill_dirs.append(str(skills_base))
 
-    Returns:
-        The visible subset.
-    """
-    visible = names & enabled_skills if enabled_skills else set(names)
-    return visible - disabled_skills
+        list_team_links = getattr(workspace, "list_team_links", None)
+        if callable(list_team_links):
+            for _team_id, target_path in list_team_links():
+                skill_dirs.append(str(Path(target_path) / "skills"))
+
+    team_skills_dir = getattr(ctx, "team_skills_dir", None)
+    if team_skills_dir:
+        skill_dirs.append(str(team_skills_dir))
+    return list(dict.fromkeys(skill_dirs))
 
 
 def visible_skill_names_for_list_skill(ctx: SwarmBuildContext) -> set[str]:
-    """Return the skill names that the matching SkillUseRail would expose.
+    """Return the skill names that the matching SkillUseRail would expose."""
+    if ctx.mode in _CODE_MODES:
+        from jiuwenswarm.common.utils import get_agent_skills_dir
+        from jiuwenswarm.server.runtime.skill import load_execution_disabled_skills
 
-    Reads the member/team visibility metadata instead of scanning a
-    materialized per-member directory view: there is one physical library and
-    the documents decide who sees what. Deliberately evaluated on every call so
-    a runtime authorization change is reflected without rebuilding the tools.
+        skill_dirs = [str(Path(ctx.global_skills_dir) if ctx.global_skills_dir else get_agent_skills_dir())]
+        return _scan_skill_names_from_dirs(skill_dirs, set(load_execution_disabled_skills()))
 
-    Args:
-        ctx: The per-member build context.
-
-    Returns:
-        The Skill names visible to this member.
-    """
-    from jiuwenswarm.agents.swarm.providers.skills import compose_member_skill_visibility
-
-    names = _scan_library_skill_names(_skill_library_dir(ctx))
-    enabled_skills, disabled_skills = compose_member_skill_visibility(ctx)
-    return _apply_skill_visibility(names, enabled_skills, disabled_skills)
+    skill_dirs = _list_skill_dirs_for_context(ctx)
+    disabled_skills = _collect_disabled_skills_from_state(skill_dirs)
+    return _scan_skill_names_from_dirs(skill_dirs, disabled_skills)
 
 
 def _parse_int(value: Any, default: int) -> int:
@@ -247,6 +275,16 @@ def _parse_int(value: Any, default: int) -> int:
 # ---------------------------------------------------------------------------
 
 
+
+def _tip_getenv(name: str, default: str = "") -> str:
+    """Read Track-B tip (overlay/active); never bare os.environ for business keys."""
+    value = get_local_config(name, default if default else None)
+    if value is None:
+        return default
+    text = str(value).strip()
+    return text if text else default
+
+
 def vision_model_config_params(config: dict[str, Any]) -> dict[str, Any]:
     """Return ``VisionModelConfig`` constructor kwargs, or {} when unconfigured.
 
@@ -256,12 +294,12 @@ def vision_model_config_params(config: dict[str, Any]) -> dict[str, Any]:
     if not dedicated_multimodal_model_configured(config, "vision"):
         return {}
     apply_vision_model_config_from_yaml(config)
-    api_key = str(os.getenv("VISION_API_KEY", "")).strip()
+    api_key = str(_tip_getenv("VISION_API_KEY")).strip()
     base_url = str(
-        os.getenv("VISION_BASE_URL") or os.getenv("VISION_API_BASE") or ""
+        _tip_getenv("VISION_BASE_URL") or _tip_getenv("VISION_API_BASE") or ""
     ).strip()
     model_name = str(
-        os.getenv("VISION_MODEL") or os.getenv("VISION_MODEL_NAME") or ""
+        _tip_getenv("VISION_MODEL") or _tip_getenv("VISION_MODEL_NAME") or ""
     ).strip()
     if not api_key or not base_url or not model_name:
         return {}
@@ -269,7 +307,7 @@ def vision_model_config_params(config: dict[str, Any]) -> dict[str, Any]:
         "api_key": api_key,
         "base_url": base_url,
         "model": model_name,
-        "max_retries": _parse_int(os.getenv("VISION_MAX_RETRIES"), 3),
+        "max_retries": _parse_int(_tip_getenv("VISION_MAX_RETRIES"), 3),
     }
 
 
@@ -283,32 +321,32 @@ def audio_model_config_params(config: dict[str, Any]) -> dict[str, Any]:
     if not complete_multimodal_model_configured(config, "audio"):
         return {}
     apply_audio_model_config_from_yaml(config)
-    api_key = str(os.getenv("AUDIO_API_KEY", "")).strip()
+    api_key = str(_tip_getenv("AUDIO_API_KEY")).strip()
     base_url = str(
-        os.getenv("AUDIO_BASE_URL") or os.getenv("AUDIO_API_BASE") or ""
+        _tip_getenv("AUDIO_BASE_URL") or _tip_getenv("AUDIO_API_BASE") or ""
     ).strip()
     if not api_key or not base_url:
         return {}
     transcription_model = str(
-        os.getenv("AUDIO_TRANSCRIPTION_MODEL") or os.getenv("AUDIO_MODEL_NAME") or "",
+        _tip_getenv("AUDIO_TRANSCRIPTION_MODEL") or _tip_getenv("AUDIO_MODEL_NAME") or "",
     ).strip()
     question_answering_model = str(
-        os.getenv("AUDIO_QUESTION_ANSWERING_MODEL")
-        or os.getenv("AUDIO_MODEL_NAME")
+        _tip_getenv("AUDIO_QUESTION_ANSWERING_MODEL")
+        or _tip_getenv("AUDIO_MODEL_NAME")
         or "",
     ).strip()
     config_kwargs: dict[str, Any] = {
         "api_key": api_key,
         "base_url": base_url,
-        "max_retries": _parse_int(os.getenv("AUDIO_MAX_RETRIES"), 3),
-        "http_timeout": _parse_int(os.getenv("AUDIO_HTTP_TIMEOUT"), 20),
+        "max_retries": _parse_int(_tip_getenv("AUDIO_MAX_RETRIES"), 3),
+        "http_timeout": _parse_int(_tip_getenv("AUDIO_HTTP_TIMEOUT"), 20),
         "max_audio_bytes": _parse_int(
-            os.getenv("AUDIO_MAX_AUDIO_BYTES"), 25 * 1024 * 1024
+            _tip_getenv("AUDIO_MAX_AUDIO_BYTES"), 25 * 1024 * 1024
         ),
     }
-    acr_access_key = str(os.getenv("ACR_ACCESS_KEY", "")).strip()
-    acr_access_secret = str(os.getenv("ACR_ACCESS_SECRET", "")).strip()
-    acr_base_url = str(os.getenv("ACR_BASE_URL", "")).strip()
+    acr_access_key = str(_tip_getenv("ACR_ACCESS_KEY")).strip()
+    acr_access_secret = str(_tip_getenv("ACR_ACCESS_SECRET")).strip()
+    acr_base_url = str(_tip_getenv("ACR_BASE_URL")).strip()
     if acr_access_key:
         config_kwargs["acr_access_key"] = acr_access_key
     if acr_access_secret:
@@ -327,17 +365,10 @@ def audio_model_config_params(config: dict[str, Any]) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-def _build_skill_toolkit_tools() -> list[Any]:
-    """Build the skill-management tools bound to the shared agent workspace.
-
-    Installs land in the one physical Skill library, so the manager is rooted
-    at the shared agent workspace rather than at the member workspace — a
-    member workspace holds a visibility document, never Skill sources.
-    """
-    from jiuwenswarm.common.utils import get_agent_workspace_dir
-
+def _build_skill_toolkit_tools(workspace_root: str | None) -> list[Any]:
+    """Build the skill-management tools bound to the member workspace."""
     try:
-        manager = SkillManager(workspace_dir=str(get_agent_workspace_dir()))
+        manager = SkillManager(workspace_dir=workspace_root)
         toolkit = SkillToolkit(manager=manager)
         return list(toolkit.get_tools())
     except Exception as exc:
@@ -382,9 +413,9 @@ def _build_video_tools(ctx: SwarmBuildContext) -> list[Any]:
     apply_video_model_config_from_yaml(config)
     if not complete_multimodal_model_configured(config, "video"):
         return []
-    video_api_key = str(os.getenv("VIDEO_API_KEY", "")).strip()
-    video_api_base = str(os.getenv("VIDEO_API_BASE", "")).strip()
-    video_model_name = str(os.getenv("VIDEO_MODEL_NAME", "")).strip()
+    video_api_key = str(_tip_getenv("VIDEO_API_KEY")).strip()
+    video_api_base = str(_tip_getenv("VIDEO_API_BASE")).strip()
+    video_model_name = str(_tip_getenv("VIDEO_MODEL_NAME")).strip()
     if not video_api_key or not video_api_base or not video_model_name:
         return []
     return _mark_stateless([video_understanding])
@@ -393,7 +424,7 @@ def _build_video_tools(ctx: SwarmBuildContext) -> list[Any]:
 def _build_image_gen_tools(ctx: SwarmBuildContext) -> list[Any]:
     """Build the image-generation tool when ``models.image_gen`` is configured."""
     apply_image_gen_model_config_from_yaml(ctx.config or {})
-    if not os.getenv("IMAGE_GEN_API_KEY"):
+    if not _tip_getenv("IMAGE_GEN_API_KEY"):
         return []
     return _mark_stateless([generate_image])
 
@@ -426,8 +457,7 @@ class SkillToolkitInput(ConstructionInput):
 
     workspace_root: str | None = context_field(
         resolver=_workspace_root,
-        description="Member workspace root (gate; skipped when absent). Skills "
-        "themselves come from the single shared library, not from here.",
+        description="Member workspace root; the SkillManager resolves skills from it.",
     )
 
 
@@ -442,6 +472,44 @@ class SkillRetrievalInput(ConstructionInput):
 
 @harness_element(
     kind=ElementKind.TOOL,
+    name=WEB_SEARCH,
+    description="Jiuwen unified web search with paid-provider chain and free fallback.",
+)
+def build_jiuwen_web_search(
+    params: dict[str, Any],
+    ctx: SwarmBuildContext,
+) -> list[Any]:
+    agent_id, language = _member_web_tool_identity(ctx)
+    from jiuwenswarm.agents.harness.common.tools.web_search.content_cache import (
+        get_agent_cache_registry,
+    )
+
+    content_cache = get_agent_cache_registry().get_cache_sync(agent_id or "default")
+    tool = JiuwenHarnessWebSearchTool(language=language, agent_id=agent_id, cache=content_cache)
+    return [_reuse_registered_tool(tool)]
+
+
+@harness_element(
+    kind=ElementKind.TOOL,
+    name=WEB_FETCH,
+    description="Jiuwen webpage fetch tool.",
+)
+def build_jiuwen_web_fetch(
+    params: dict[str, Any],
+    ctx: SwarmBuildContext,
+) -> list[Any]:
+    agent_id, language = _member_web_tool_identity(ctx)
+    from jiuwenswarm.agents.harness.common.tools.web_search.content_cache import (
+        get_agent_cache_registry,
+    )
+
+    content_cache = get_agent_cache_registry().get_cache_sync(agent_id or "default")
+    tool = JiuwenHarnessFetchWebpageTool(language=language, agent_id=agent_id, cache=content_cache)
+    return [_reuse_registered_tool(tool)]
+
+
+@harness_element(
+    kind=ElementKind.TOOL,
     name=SKILL_TOOLKIT,
     description="Skill discovery / install / uninstall tools bound to the member workspace.",
     input_model=SkillToolkitInput,
@@ -449,9 +517,7 @@ class SkillRetrievalInput(ConstructionInput):
 def build_skill_toolkit(params: dict[str, Any], ctx: SwarmBuildContext) -> list[Any]:
     """Build the whitelist-filtered skill toolkit tools."""
     inp = SkillToolkitInput.resolve(params, ctx)
-    if not inp.workspace_root:
-        return []
-    return _filter_whitelist(_build_skill_toolkit_tools())
+    return _filter_whitelist(_build_skill_toolkit_tools(inp.workspace_root))
 
 
 @harness_element(
@@ -556,9 +622,13 @@ __all__ = [
     "XIAOYI_PHONE",
     "SYMPHONY_TOOLKIT",
     "CODE_EXTRA_TOOLS",
+    "WEB_SEARCH",
+    "WEB_FETCH",
     "vision_model_config_params",
     "audio_dedicated_configured",
     "audio_model_config_params",
     "build_symphony_toolkit",
     "build_code_extra_tools",
+    "build_jiuwen_web_search",
+    "build_jiuwen_web_fetch",
 ]

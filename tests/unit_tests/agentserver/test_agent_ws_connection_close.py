@@ -2,8 +2,11 @@ import asyncio
 import json
 import logging
 import weakref
+from types import SimpleNamespace
 
 import pytest
+
+from jiuwenswarm.server.handlers import _default
 from websockets.exceptions import ConnectionClosedError
 
 from jiuwenswarm.common.e2a.gateway_normalize import (
@@ -15,6 +18,8 @@ from jiuwenswarm.common.schema.agent import AgentResponse
 from jiuwenswarm.common.schema.message import ReqMethod
 from jiuwenswarm.server import agent_ws_server as agent_ws_server_module
 from jiuwenswarm.server.agent_ws_server import AgentWebSocketServer
+from jiuwenswarm.server.context import AgentServerServices as _services
+from jiuwenswarm.server.handlers import schedule as schedule_handlers
 
 
 class FakeWebSocket:
@@ -38,8 +43,12 @@ class _AgentWsTestHarness(AgentWebSocketServer):
 
 
 class ClosedDuringUnaryServer(_AgentWsTestHarness):
-    async def _handle_unary(self, ws, request, send_lock) -> None:
-        raise ConnectionClosedError(None, None)
+    """连接在非流式处理途中断开。
+
+    默认路径已下沉为 ``handlers/_default`` 的模块级函数，``pipeline`` 在模块级
+    import 它 —— 因此**不能再靠子类覆盖方法**来模拟，桩要打在 ``pipeline``
+    引用的那个名字上（见 :func:`_closed_during_unary`）。
+    """
 
 
 class _FakeInterruptAgent:
@@ -131,9 +140,13 @@ async def _handle_cancel_cleanup_case(env) -> list[tuple[str, str]]:
 
 @pytest.mark.asyncio
 async def test_handle_message_treats_no_close_frame_as_disconnect(caplog) -> None:
+    # 断开诊断日志现在由 server/pipeline 打（汇合点搬过去了）—— 消息内容不变，
+    # 但 logger 名跟着模块走，所以两个都要挂上。
     target_logger = logging.getLogger("jiuwenswarm.server.agent_ws_server")
-    target_logger.addHandler(caplog.handler)
-    caplog.set_level(logging.INFO, logger=target_logger.name)
+    pipeline_logger = logging.getLogger("jiuwenswarm.server.pipeline")
+    for _lg in (target_logger, pipeline_logger):
+        _lg.addHandler(caplog.handler)
+        caplog.set_level(logging.INFO, logger=_lg.name)
     env = e2a_from_agent_fields(
         request_id="req-closed",
         channel_id="tui",
@@ -143,6 +156,13 @@ async def test_handle_message_treats_no_close_frame_as_disconnect(caplog) -> Non
         is_stream=False,
         timestamp=0.0,
     )
+    async def _closed_during_unary(ctx, request) -> None:  # noqa: ANN001
+        raise ConnectionClosedError(None, None)
+
+    from jiuwenswarm.server import pipeline as pipeline_module
+
+    original = pipeline_module._handle_unary
+    pipeline_module._handle_unary = _closed_during_unary
     try:
         await ClosedDuringUnaryServer().handle_message_for_test(
             FakeWebSocket(),
@@ -150,7 +170,9 @@ async def test_handle_message_treats_no_close_frame_as_disconnect(caplog) -> Non
             asyncio.Lock(),
         )
     finally:
-        target_logger.removeHandler(caplog.handler)
+        pipeline_module._handle_unary = original
+        for _lg in (target_logger, pipeline_logger):
+            _lg.removeHandler(caplog.handler)
 
     assert "no close frame received or sent" in caplog.text
     assert "request_id=req-closed" in caplog.text
@@ -170,7 +192,10 @@ async def test_handle_message_ignores_json_error_when_peer_is_closed(caplog) -> 
     finally:
         target_logger.removeHandler(caplog.handler)
 
-    assert "JSON" in caplog.text
+    # 断言 json_error 诊断字段而非日志正文里的 "JSON" 二字：解析段抽到
+    # server/wire_parse.py 后，这条日志同时覆盖 JSON 解码失败与未知方法两种，
+    # 文案泛化成了「解析错误未发送」；具体是哪一种由 log_context 带出来。
+    assert "json_error=" in caplog.text
 
 
 @pytest.mark.asyncio
@@ -283,7 +308,7 @@ async def test_disconnect_cancel_response_reports_runtime_cleanup_failure() -> N
 
 def test_session_mode_sync_lock_cache_does_not_retain_idle_sessions() -> None:
     session_id = "sess-weak-lock"
-    lock = AgentWebSocketServer._session_mode_sync_lock(session_id)
+    lock = _default._session_mode_sync_lock(session_id)
     lock_ref = weakref.ref(lock)
 
     assert agent_ws_server_module._session_mode_sync_locks.get(session_id) is lock
@@ -302,9 +327,11 @@ def test_scheduler_agent_pin_moves_with_persistent_owner() -> None:
     server._agent_manager = manager
     server._scheduler_agent = None
 
-    server._set_scheduler_agent(first)
-    server._set_scheduler_agent(second)
-    server._set_scheduler_agent(second)
+    # 接收者由隐式self变成显式ctx，这里用最小ctx复现生产调用形态。
+    ctx = SimpleNamespace(services=_services(server))
+    schedule_handlers._set_scheduler_agent(ctx, first)
+    schedule_handlers._set_scheduler_agent(ctx, second)
+    schedule_handlers._set_scheduler_agent(ctx, second)
 
     assert manager.pinned == [first, second]
     assert manager.unpinned == [first]

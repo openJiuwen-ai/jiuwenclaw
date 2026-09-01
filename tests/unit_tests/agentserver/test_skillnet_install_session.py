@@ -8,6 +8,28 @@ from unittest.mock import MagicMock
 
 import pytest
 
+def _default_ctx(server, request):
+    import asyncio as _asyncio
+
+    from jiuwenswarm.server.context import AgentServerServices, RequestContext
+    from jiuwenswarm.server.transports.sink import WSSink
+
+    class _NullWs:
+        async def send(self, text):  # noqa: ANN001
+            return None
+
+    _ws = _NullWs()
+    return RequestContext(
+        request=request,
+        sink=WSSink(_ws, _asyncio.Lock()),
+        connection_id=str(id(_ws)),
+        services=AgentServerServices(server),
+    )
+
+
+
+from jiuwenswarm.server.handlers import _default
+
 from jiuwenswarm.server import agent_ws_server as agent_ws_server_module
 from jiuwenswarm.server.runtime.skill import skill_manager as skill_manager_module
 from jiuwenswarm.server.runtime.skill.skill_manager import SkillManager
@@ -75,8 +97,8 @@ async def test_get_stateless_agent_reuses_fallback_on_repeated_cache_miss(monkey
         _FakeSwarm,
     )
 
-    first = await server._get_stateless_agent("web")
-    second = await server._get_stateless_agent("web")
+    first = await _default._get_stateless_agent(_default_ctx(server, None), "web")
+    second = await _default._get_stateless_agent(_default_ctx(server, None), "web")
 
     assert first is second
     assert len(created) == 1
@@ -90,7 +112,7 @@ async def test_get_stateless_agent_prefers_cached_agent_mode_instance():
     server._agent_manager.get_agent_nowait = MagicMock(return_value=cached)
     server._stateless_fallback_agents["web"] = SimpleNamespace(name="fallback")
 
-    got = await server._get_stateless_agent("web")
+    got = await _default._get_stateless_agent(_default_ctx(server, None), "web")
 
     assert got is cached
     server._agent_manager.get_agent_nowait.assert_called_once_with(
@@ -112,8 +134,8 @@ async def test_get_stateless_agent_isolates_fallback_by_channel(monkeypatch):
         _FakeSwarm,
     )
 
-    web = await server._get_stateless_agent("web")
-    cli = await server._get_stateless_agent("cli")
+    web = await _default._get_stateless_agent(_default_ctx(server, None), "web")
+    cli = await _default._get_stateless_agent(_default_ctx(server, None), "cli")
 
     assert web is not cli
     assert server._stateless_fallback_agents["web"] is web
@@ -143,9 +165,11 @@ async def test_skillnet_install_then_status_via_distinct_stateless_fallbacks(
     async def _always_new(_channel_id: str):
         return _EphemeralSwarm()
 
-    monkeypatch.setattr(server, "_get_stateless_agent", _always_new)
+    monkeypatch.setattr(
+        _default, "_get_stateless_agent", lambda _ctx, channel_id: _always_new(channel_id)
+    )
 
-    swarm_install = await server._get_stateless_agent("web")
+    swarm_install = await _default._get_stateless_agent(_default_ctx(server, None), "web")
     manager_install = swarm_install._skill_manager
 
     async def _never_finish(*_args, **_kwargs):
@@ -158,7 +182,7 @@ async def test_skillnet_install_then_status_via_distinct_stateless_fallbacks(
     )
     install_id = install["install_id"]
 
-    swarm_status = await server._get_stateless_agent("web")
+    swarm_status = await _default._get_stateless_agent(_default_ctx(server, None), "web")
     assert swarm_status is not swarm_install
 
     status = await swarm_status._skill_manager.handle_skills_skillnet_install_status(

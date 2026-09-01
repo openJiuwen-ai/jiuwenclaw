@@ -1,12 +1,36 @@
 FROM openeuler/openeuler:24.03
 
+ARG ARCH
+# get by: ping mirrors.huaweicloud.com
+ARG ARM_MIRRORS_IP
+
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    PIP_NO_CACHE_DIR=1
+    PIP_NO_CACHE_DIR=1 \
+    PIP_PROGRESS_BAR=off
 
 RUN echo "sslverify=false" >> /etc/yum.conf
 RUN echo "insecure" >> ~/.curlrc
 RUN sed -i 's/gpgcheck=1/gpgcheck=0/g' /etc/yum.conf /etc/yum.repos.d/openEuler.repo
+
+# 只在 arm64 架构下执行这些步骤
+RUN if [ "$ARCH" = "arm64" ]; then \
+        sed -i '/^mirrorlist=/d' /etc/yum.repos.d/openEuler.repo && \
+        sed -i '/^metalink=/d' /etc/yum.repos.d/openEuler.repo && \
+        sed -i "/^\[OS\]/,/^\[/ s|^baseurl=.*|baseurl=http://${ARM_MIRRORS_IP}/openeuler/openEuler-24.03-LTS-SP3/OS/\\\$basearch|g" /etc/yum.repos.d/openEuler.repo && \
+        sed -i "/^\[everything\]/,/^\[/ s|^baseurl=.*|baseurl=http://${ARM_MIRRORS_IP}/openeuler/openEuler-24.03-LTS-SP3/everything/\\\$basearch|g" /etc/yum.repos.d/openEuler.repo && \
+        sed -i "/^\[EPOL\]/,/^\[/ s|^baseurl=.*|baseurl=http://${ARM_MIRRORS_IP}/openeuler/openEuler-24.03-LTS-SP3/EPOL/main/\\\$basearch|g" /etc/yum.repos.d/openEuler.repo && \
+        sed -i "/^\[debuginfo\]/,/^\[/ s|^baseurl=.*|baseurl=http://${ARM_MIRRORS_IP}/openeuler/openEuler-24.03-LTS-SP3/debuginfo/\\\$basearch|g" /etc/yum.repos.d/openEuler.repo && \
+        sed -i "/^\[source\]/,/^\[/ s|^baseurl=.*|baseurl=http://${ARM_MIRRORS_IP}/openeuler/openEuler-24.03-LTS-SP3/source|g" /etc/yum.repos.d/openEuler.repo && \
+        sed -i "/^\[update\]/,/^\[/ s|^baseurl=.*|baseurl=http://${ARM_MIRRORS_IP}/openeuler/openEuler-24.03-LTS-SP3/update/\\\$basearch|g" /etc/yum.repos.d/openEuler.repo && \
+        sed -i "/^\[update-source\]/,/^\[/ s|^baseurl=.*|baseurl=http://${ARM_MIRRORS_IP}/openeuler/openEuler-24.03-LTS-SP3/update/source|g" /etc/yum.repos.d/openEuler.repo && \
+        sed -i 's/^gpgcheck=1/gpgcheck=0/' /etc/yum.repos.d/openEuler.repo && \
+        sed -i 's/^sslverify=1/sslverify=0/' /etc/yum.repos.d/openEuler.repo && \
+        cat /etc/yum.repos.d/openEuler.repo && \
+        yum clean all && yum makecache; \
+    else \
+        echo "Skipping ARM-specific yum configuration for ARCH=$ARCH"; \
+    fi
 
 RUN yum makecache
 # JDK 17 uses the headless + devel pair (BiSheng OpenJDK 17 on openEuler 24.03):

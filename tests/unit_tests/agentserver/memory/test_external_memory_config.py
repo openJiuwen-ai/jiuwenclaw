@@ -106,7 +106,11 @@ def test_get_memory_engine_valid_values(value, expected):
     {},
     None,
 ])
-def test_get_memory_engine_falls_back_to_builtin(cfg):
+def test_get_memory_engine_falls_back_to_builtin(cfg, monkeypatch):
+    if cfg is None:
+        from jiuwenswarm.agents.harness.common.memory import config as memory_config
+
+        monkeypatch.setattr(memory_config, "get_memory_section", lambda _config: {})
     assert emc.get_memory_engine(cfg) == "builtin"
 
 

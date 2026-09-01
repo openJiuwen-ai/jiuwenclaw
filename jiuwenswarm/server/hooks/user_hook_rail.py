@@ -29,14 +29,6 @@ class UserHookRail(DeepAgentRail):
         self._config = hooks_config
         self._executor = HookExecutor()
 
-    @staticmethod
-    def _session_id(ctx: AgentCallbackContext) -> str:
-        session = getattr(ctx, "session", None)
-        if session is None:
-            return ""
-        get_session_id = getattr(session, "get_session_id", None)
-        return get_session_id() if callable(get_session_id) else ""
-
     # ---- PreToolUse: BEFORE_TOOL_CALL ----
 
     async def before_tool_call(self, ctx: AgentCallbackContext) -> None:
@@ -55,7 +47,7 @@ class UserHookRail(DeepAgentRail):
                 "event": "PreToolUse",
                 "tool_name": tool_name,
                 "tool_input": tool_args,
-                "session_id": self._session_id(ctx),
+                "session_id": getattr(ctx, "session_id", ""),
             },
         )
 
@@ -98,7 +90,7 @@ class UserHookRail(DeepAgentRail):
                 "tool_name": tool_name,
                 "tool_input": ctx.inputs.tool_args,
                 "tool_result": ctx.inputs.tool_result,
-                "session_id": self._session_id(ctx),
+                "session_id": getattr(ctx, "session_id", ""),
             },
         )
 
@@ -131,7 +123,7 @@ class UserHookRail(DeepAgentRail):
                 "tool_name": tool_name,
                 "tool_input": ctx.inputs.tool_args,
                 "error": str(getattr(ctx, "exception", "")),
-                "session_id": self._session_id(ctx),
+                "session_id": getattr(ctx, "session_id", ""),
             },
         )
 
@@ -147,7 +139,7 @@ class UserHookRail(DeepAgentRail):
             hook_input={
                 "event": "Stop",
                 "final_response": getattr(ctx.inputs, "result", None),
-                "session_id": self._session_id(ctx),
+                "session_id": getattr(ctx, "session_id", ""),
             },
         )
 

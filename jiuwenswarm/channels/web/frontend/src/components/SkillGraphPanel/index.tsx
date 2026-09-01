@@ -12,10 +12,10 @@ import {
   Focus,
   GitBranch,
   Loader2,
+  Pause,
   RefreshCw,
   RotateCcw,
   Search,
-  X,
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { webRequest } from '../../services/webClient';
@@ -44,7 +44,7 @@ type BuildProgress = {
   stage?: string;
   label?: string;
   percent?: number;
-  status?: 'idle' | 'running' | 'success' | 'error' | 'cancelled';
+  status?: 'idle' | 'running' | 'success' | 'error' | 'paused';
   current?: number;
   total?: number;
   ts?: string;
@@ -54,12 +54,12 @@ type BuildProgress = {
 type SkillGraphPayload = {
   success?: boolean;
   detail?: string;
-  graph_dir?: string;
+  score_dir?: string;
   build_log?: BuildLogEntry[];
   build_progress?: BuildProgress;
   llm_token_usage?: LLMTokenUsageSummary;
   manifest?: RawRecord;
-  graph_manifest?: RawRecord;
+  score_manifest?: RawRecord;
   orchestration_min_edge_confidence?: number;
   graph?: {
     nodes?: RawRecord[];
@@ -77,10 +77,8 @@ type SkillGraphPayload = {
 type SkillGraphUpdate = {
   success?: boolean;
   detail?: string;
-  background?: boolean;
-  cancelled?: boolean;
-  build_status?: 'idle' | 'running' | 'success' | 'error' | 'cancelled';
-  graph_dir?: string;
+  paused?: boolean;
+  score_dir?: string;
   build_log?: BuildLogEntry[];
   build_progress?: BuildProgress;
   llm_token_usage?: LLMTokenUsageSummary;
@@ -89,7 +87,7 @@ type SkillGraphUpdate = {
 type SkillGraphStatus = {
   success?: boolean;
   detail?: string;
-  graph_dir?: string;
+  score_dir?: string;
   build_log?: BuildLogEntry[];
   build_progress?: BuildProgress;
   llm_token_usage?: LLMTokenUsageSummary;
@@ -155,6 +153,7 @@ const NODE_COLORS: Record<string, string> = {
   unknown: '#7f8a99',
 };
 
+const INDEX_UPDATE_TIMEOUT_MS = 1_800_000;
 const DEFAULT_MIN_CONFIDENCE = 0.7;
 
 type SymphonyBuildMode = 'incremental' | 'full';
@@ -163,8 +162,8 @@ type Translate = (key: string, options?: Record<string, unknown>) => string;
 const BUILD_STAGE_TRANSLATION_KEYS: Record<string, string> = {
   idle: 'idle',
   'update.start': 'updateStart',
-  'update.cancel_requested': 'updateCancelRequested',
-  'update.cancelled': 'updateCancelled',
+  'update.pause_requested': 'updatePauseRequested',
+  'update.paused': 'updatePaused',
   'scan.start': 'scanStart',
   'scan.done': 'scanDone',
   'diff.done': 'diffDone',
@@ -185,8 +184,8 @@ const BUILD_STAGE_TRANSLATION_KEYS: Record<string, string> = {
   'graph.resolve.done': 'graphResolveDone',
   'graph.materialize.start': 'graphMaterializeStart',
   'graph.materialize.done': 'graphMaterializeDone',
-  'graph.lookup.start': 'graphLookupStart',
-  'graph.lookup.done': 'graphLookupDone',
+  'graph.score.start': 'graphScoreStart',
+  'graph.score.done': 'graphScoreDone',
   'graph.build.done': 'graphBuildDone',
   'artifact.graph.write.start': 'artifactGraphWriteStart',
   'artifact.graph.write.done': 'artifactGraphWriteDone',
@@ -198,12 +197,10 @@ const BUILD_STAGE_TRANSLATION_KEYS: Record<string, string> = {
 
 const SERVER_DETAIL_TRANSLATION_KEYS: Record<string, string> = {
   '当前没有正在运行的技能总谱构建。': 'skills.graph.serverDetails.noRunningBuild',
-  '技能总谱后台构建已启动。': 'skills.graph.serverDetails.buildStarted',
-  '技能总谱已在后台构建中。': 'skills.graph.serverDetails.buildRunning',
-  '已取消技能总谱构建，已完成的缓存和 checkpoint 会保留。': 'skills.graph.serverDetails.cancelRequested',
-  '已有技能总谱构建正在运行，请等待完成或先取消当前构建。': 'skills.graph.serverDetails.buildRunning',
-  '技能总谱构建已取消，可再次执行增量构建继续。': 'skills.graph.serverDetails.buildCancelled',
-  '技能总谱不存在或不完整，请先构建总谱。': 'skills.graph.serverDetails.graphMissing',
+  '已请求暂停技能总谱构建，已完成的缓存和 checkpoint 会保留。': 'skills.graph.serverDetails.pauseRequested',
+  '已有技能总谱构建正在运行，请等待完成或先暂停当前构建。': 'skills.graph.serverDetails.buildRunning',
+  '技能总谱构建已暂停，可再次执行增量构建继续。': 'skills.graph.serverDetails.buildPaused',
+  '技能总谱不存在或不完整，请先构建总谱。': 'skills.graph.serverDetails.scoreMissing',
 };
 
 const SERVER_DETAIL_PREFIX_TRANSLATION_KEYS: Array<{ prefix: string; key: string }> = [
@@ -228,7 +225,7 @@ function confidenceValue(value: unknown, fallback: number): number {
 }
 
 function payloadManifest(payload: SkillGraphPayload | null | undefined): RawRecord {
-  return asRecord(payload?.graph_manifest ?? payload?.manifest);
+  return asRecord(payload?.score_manifest ?? payload?.manifest);
 }
 
 function graphConfidenceFloor(payload: SkillGraphPayload | null | undefined): number {
@@ -285,7 +282,7 @@ function labelFromId(id: string): string {
 function normalizeNode(raw: RawRecord, index: number, skillsById: Map<string, RawRecord>): GraphNode {
   const rawId = asString(raw.id ?? raw.node_id ?? raw.skill_id, `node:${index}`);
   const id = rawId.includes(':') ? rawId : `skill:${rawId}`;
-  const skillId = id.replace(/^(?:skill|capability):/, '');
+  const skillId = id.replace(/^skill:/, '');
   const skill = skillsById.get(skillId);
   const properties = {
     ...asRecord(skill),
@@ -421,7 +418,7 @@ function isBuildRunningPayload(data: { build_progress?: BuildProgress }): boolea
 }
 
 function isTerminalBuildStatus(status: BuildProgress['status'] | undefined): boolean {
-  return status === 'success' || status === 'error' || status === 'cancelled';
+  return status === 'success' || status === 'error' || status === 'paused';
 }
 
 function buildStageLabel(stage: string, fallback: string, t: Translate): string {
@@ -612,7 +609,7 @@ function isCompletedBuildLogEntry(entry: BuildLogEntry): boolean {
     || stage === 'graph.candidates.done'
     || stage === 'graph.resolve.done'
     || stage === 'graph.materialize.done'
-    || stage === 'graph.lookup.done'
+    || stage === 'graph.score.done'
     || stage === 'graph.build.done'
     || stage === 'artifact.fingerprints.write.done'
     || stage === 'artifact.graph.write.done'
@@ -631,7 +628,7 @@ function isSupersededBuildStart(entry: BuildLogEntry, index: number, entries: Bu
     'graph.candidates.start': 'graph.candidates.done',
     'graph.resolve.start': 'graph.resolve.done',
     'graph.materialize.start': 'graph.materialize.done',
-    'graph.lookup.start': 'graph.lookup.done',
+    'graph.score.start': 'graph.score.done',
     'graph.build.start': 'graph.build.done',
     'artifact.graph.write.start': 'artifact.graph.write.done',
     'state.write.start': 'state.write.done',
@@ -642,7 +639,7 @@ function isSupersededBuildStart(entry: BuildLogEntry, index: number, entries: Bu
 
 function isTerminalBuildLogEntry(entry: BuildLogEntry): boolean {
   const stage = asString(entry.stage);
-  return stage === 'update.done' || stage === 'update.failed' || stage === 'update.cancelled';
+  return stage === 'update.done' || stage === 'update.failed' || stage === 'update.paused';
 }
 
 function buildLogTime(entry: BuildLogEntry): string {
@@ -696,7 +693,7 @@ export const SkillGraphPanel = forwardRef<SkillGraphPanelHandle, SkillGraphPanel
   const [loading, setLoading] = useState(false);
   const [updating, setUpdating] = useState(false);
   const [buildMode, setBuildMode] = useState<SymphonyBuildMode | null>(null);
-  const [cancellingBuild, setCancellingBuild] = useState(false);
+  const [pausingBuild, setPausingBuild] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [buildLog, setBuildLog] = useState<BuildLogEntry[]>([]);
   const [buildProgress, setBuildProgress] = useState<BuildProgress | null>(null);
@@ -732,15 +729,15 @@ export const SkillGraphPanel = forwardRef<SkillGraphPanelHandle, SkillGraphPanel
     }
   }, []);
 
-  const resetBuildUiOnTerminalStatus = useCallback((data: { detail?: string; cancelled?: boolean; build_progress?: BuildProgress }): boolean => {
-    const status = data.build_progress?.status ?? (data.cancelled ? 'cancelled' : undefined);
+  const resetBuildUiOnTerminalStatus = useCallback((data: { detail?: string; paused?: boolean; build_progress?: BuildProgress }): boolean => {
+    const status = data.build_progress?.status ?? (data.paused ? 'paused' : undefined);
     if (!isTerminalBuildStatus(status)) return false;
     externalBuildRunningRef.current = false;
     setUpdating(false);
     setBuildMode(null);
     setLoading(false);
     if (status === 'error') {
-      setError(data.detail || data.build_progress?.label || t('skills.graph.errors.refreshFailed'));
+      setError(data.detail || data.build_progress?.label || '技能总谱刷新失败');
     }
     return true;
   }, []);
@@ -897,7 +894,7 @@ export const SkillGraphPanel = forwardRef<SkillGraphPanelHandle, SkillGraphPanel
     setError(null);
     let keepLoading = false;
     try {
-      const data = await webRequest<SkillGraphPayload>('skills.graph.get', {}, { timeoutMs: 60_000 });
+      const data = await webRequest<SkillGraphPayload>('symphony.graph', {}, { timeoutMs: 60_000 });
       applyBuildLog(data);
       if (!data.success) {
         if (isBuildRunningPayload(data)) {
@@ -933,7 +930,7 @@ export const SkillGraphPanel = forwardRef<SkillGraphPanelHandle, SkillGraphPanel
 
   const restoreBuildStatus = useCallback(async (): Promise<boolean> => {
     const data = await webRequest<SkillGraphStatus>(
-      'skills.graph.status',
+      'symphony.score_status',
       {},
       { timeoutMs: 60_000 },
     );
@@ -965,43 +962,50 @@ export const SkillGraphPanel = forwardRef<SkillGraphPanelHandle, SkillGraphPanel
     });
     try {
       const data = await webRequest<SkillGraphUpdate>(
-        'skills.graph.build',
+        'symphony.build_score',
         { force },
-        { timeoutMs: 60_000 },
+        { timeoutMs: INDEX_UPDATE_TIMEOUT_MS },
       );
       applyBuildLog(data);
+      const isPaused = data.paused || data.build_progress?.status === 'paused';
+      if (isPaused) {
+        resetBuildUiOnTerminalStatus(data);
+        return;
+      }
       if (!data.success) {
         throw new Error(localizedServerDetail(data.detail, 'skills.graph.errors.refreshFailed', t));
       }
-      externalBuildRunningRef.current = true;
+      await loadGraph();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
+    } finally {
       setUpdating(false);
       setBuildMode(null);
     }
-  }, [applyBuildLog, t]);
+  }, [applyBuildLog, loadGraph, resetBuildUiOnTerminalStatus, t]);
 
-  const cancelBuild = useCallback(async () => {
-    setCancellingBuild(true);
+  const pauseBuild = useCallback(async () => {
+    setPausingBuild(true);
     setShowBuildLogPanel(true);
     setError(null);
     try {
       const data = await webRequest<SkillGraphUpdate>(
-        'skills.graph.cancel',
+        'symphony.pause_build',
         {},
         { timeoutMs: 60_000 },
       );
       applyBuildLog(data);
+      const isPaused = data.paused || data.build_progress?.status === 'paused';
       if (resetBuildUiOnTerminalStatus(data)) {
         return;
       }
-      if (!data.success && data.build_status !== 'idle') {
-        throw new Error(localizedServerDetail(data.detail, 'skills.graph.errors.cancelFailed', t));
+      if (!data.success && !isPaused) {
+        throw new Error(localizedServerDetail(data.detail, 'skills.graph.errors.pauseFailed', t));
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
-      setCancellingBuild(false);
+      setPausingBuild(false);
     }
   }, [applyBuildLog, resetBuildUiOnTerminalStatus, t]);
 
@@ -1034,7 +1038,7 @@ export const SkillGraphPanel = forwardRef<SkillGraphPanelHandle, SkillGraphPanel
     const poll = async () => {
       try {
         const data = await webRequest<SkillGraphStatus>(
-          'skills.graph.status',
+          'symphony.score_status',
           {},
           { timeoutMs: 60_000 },
         );
@@ -1077,7 +1081,7 @@ export const SkillGraphPanel = forwardRef<SkillGraphPanelHandle, SkillGraphPanel
       let nextDelay = 3000;
       try {
         const data = await webRequest<SkillGraphStatus>(
-          'skills.graph.status',
+          'symphony.score_status',
           {},
           { timeoutMs: 60_000 },
         );
@@ -1100,7 +1104,7 @@ export const SkillGraphPanel = forwardRef<SkillGraphPanelHandle, SkillGraphPanel
           }
         }
       } catch {
-        // 被动轮询只用于同步对话侧触发的图谱进度，不影响当前图谱交互。
+        // 被动轮询只用于同步对话侧触发的总谱进度，不影响当前总谱交互。
       }
       if (!stopped) {
         timer = window.setTimeout(() => {
@@ -1351,9 +1355,9 @@ export const SkillGraphPanel = forwardRef<SkillGraphPanelHandle, SkillGraphPanel
   );
 
   const isGraphBuildRunning = buildProgress?.status === 'running';
-  const isGraphBuildCancelled = buildProgress?.status === 'cancelled';
+  const isGraphBuildPaused = buildProgress?.status === 'paused';
   const isBusy = loading || updating;
-  const canCancelBuild = (updating || isGraphBuildRunning) && !cancellingBuild;
+  const canPauseBuild = (updating || isGraphBuildRunning) && !pausingBuild;
   const isIncrementalBuild = updating && buildMode === 'incremental';
   const isFullBuild = updating && buildMode === 'full';
   const manifest = payloadManifest(payload);
@@ -1364,8 +1368,8 @@ export const SkillGraphPanel = forwardRef<SkillGraphPanelHandle, SkillGraphPanel
   const progressLabel = buildProgressLabel(buildProgress, updating, t);
   const progressTitle = isGraphBuildRunning
     ? t('skills.graph.status.refreshing')
-    : isGraphBuildCancelled
-    ? t('skills.graph.status.cancelled')
+    : isGraphBuildPaused
+    ? t('skills.graph.status.paused')
     : progressLabel;
   const recentBuildLog = compactBuildLog(buildLog).slice(-8);
   const tokenUsageText = formatTokenUsage(tokenUsage, t);
@@ -1395,24 +1399,23 @@ export const SkillGraphPanel = forwardRef<SkillGraphPanelHandle, SkillGraphPanel
   }, [onReadingChange]);
 
   return (
-    <div data-testid="skill-graph-panel" className="skill-graph-panel">
-      <aside data-testid="skill-graph-panel-sidebar" className="skill-graph-panel__sidebar">
-        <div data-testid="skill-graph-panel-stats" className="skill-graph-panel__stats skill-graph-panel__stats--compact">
-          <span data-testid="skill-graph-panel-stats-skill-count"><strong>{visibleSkillNodes.length}</strong>{t('skills.graph.stats.skillsSuffix')}</span>
-          <span data-testid="skill-graph-panel-stats-edge-count"><strong>{visible.edges.length}</strong>{t('skills.graph.stats.edgesSuffix')}</span>
+    <div className="skill-graph-panel">
+      <aside className="skill-graph-panel__sidebar">
+        <div className="skill-graph-panel__stats skill-graph-panel__stats--compact">
+          <span><strong>{visibleSkillNodes.length}</strong>{t('skills.graph.stats.skillsSuffix')}</span>
+          <span><strong>{visible.edges.length}</strong>{t('skills.graph.stats.edgesSuffix')}</span>
         </div>
 
-        <label data-testid="skill-graph-panel-search" className="skill-graph-panel__search">
+        <label className="skill-graph-panel__search">
           <Search size={16} aria-hidden="true" />
           <input
             value={query}
             onChange={(event) => setQuery(event.target.value)}
-            data-testid="skill-graph-panel-search-input"
             placeholder={t('skills.graph.searchPlaceholder')}
           />
         </label>
 
-        <div data-testid="skill-graph-panel-filters" className="skill-graph-panel__filters">
+        <div className="skill-graph-panel__filters">
           <label>
             <span>{t('skills.graph.minConfidence', { percent: Math.round(minConfidence * 100) })}</span>
             <input
@@ -1421,7 +1424,6 @@ export const SkillGraphPanel = forwardRef<SkillGraphPanelHandle, SkillGraphPanel
               max={1}
               step={0.05}
               value={minConfidence}
-              data-testid="skill-graph-panel-min-confidence-slider"
               onChange={(event) => {
                 minConfidenceTouchedRef.current = true;
                 setMinConfidence(Number(event.target.value));
@@ -1430,62 +1432,59 @@ export const SkillGraphPanel = forwardRef<SkillGraphPanelHandle, SkillGraphPanel
           </label>
         </div>
 
-        <div data-testid="skill-graph-panel-actions" className="skill-graph-panel__actions">
-          <button type="button" onClick={loadGraph} disabled={isBusy} data-testid="skill-graph-panel-action-read" title={t('skills.graph.actions.read')}>
+        <div className="skill-graph-panel__actions">
+          <button type="button" onClick={loadGraph} disabled={isBusy} title={t('skills.graph.actions.read')}>
             {loading ? <Loader2 size={16} className="skill-graph-panel__spin" aria-hidden="true" /> : <RefreshCw size={16} aria-hidden="true" />}
           </button>
           <button
             type="button"
             onClick={() => void rebuildGraph('incremental')}
             disabled={isBusy}
-            data-testid="skill-graph-panel-action-incremental-build"
             title={t('skills.graph.actions.incrementalBuild')}
           >
             {isIncrementalBuild ? <Loader2 size={16} className="skill-graph-panel__spin" aria-hidden="true" /> : <GitBranch size={16} aria-hidden="true" />}
           </button>
           <button
             type="button"
-            onClick={cancelBuild}
-            disabled={!canCancelBuild}
-            data-testid="skill-graph-panel-action-cancel-build"
-            title={t('skills.graph.actions.cancelBuild')}
+            onClick={pauseBuild}
+            disabled={!canPauseBuild}
+            title={t('skills.graph.actions.pauseBuild')}
           >
-            {cancellingBuild ? <Loader2 size={16} className="skill-graph-panel__spin" aria-hidden="true" /> : <X size={16} aria-hidden="true" />}
+            {pausingBuild ? <Loader2 size={16} className="skill-graph-panel__spin" aria-hidden="true" /> : <Pause size={16} aria-hidden="true" />}
           </button>
           <button
             type="button"
             onClick={() => void rebuildGraph('full')}
             disabled={isBusy}
-            data-testid="skill-graph-panel-action-full-rebuild"
             title={t('skills.graph.actions.fullRebuild')}
           >
             {isFullBuild ? <Loader2 size={16} className="skill-graph-panel__spin" aria-hidden="true" /> : <RotateCcw size={16} aria-hidden="true" />}
           </button>
-          <button type="button" onClick={fitView} disabled={!visible.nodes.length} data-testid="skill-graph-panel-action-fit-view" title={t('skills.graph.actions.fitView')}>
+          <button type="button" onClick={fitView} disabled={!visible.nodes.length} title={t('skills.graph.actions.fitView')}>
             <Focus size={16} aria-hidden="true" />
           </button>
         </div>
 
         {(updating || showBuildLogPanel) ? (
-          <div data-testid="skill-graph-panel-build-log" className="skill-graph-panel__build-log">
-            <div data-testid="skill-graph-panel-progress-head" className="skill-graph-panel__progress-head">
-              <span data-testid="skill-graph-panel-progress-title">{progressTitle}</span>
-              <strong data-testid="skill-graph-panel-progress-percent">{currentProgressPercent}%</strong>
+          <div className="skill-graph-panel__build-log">
+            <div className="skill-graph-panel__progress-head">
+              <span>{progressTitle}</span>
+              <strong>{currentProgressPercent}%</strong>
             </div>
-            <div data-testid="skill-graph-panel-progress-track" className="skill-graph-panel__progress-track" aria-hidden="true">
+            <div className="skill-graph-panel__progress-track" aria-hidden="true">
               <span style={{ width: `${currentProgressPercent}%` }} />
             </div>
             {buildMetricsText ? (
-              <div data-testid="skill-graph-panel-build-metrics" className="skill-graph-panel__build-metrics">
+              <div className="skill-graph-panel__build-metrics">
                 <span>{buildMetricsText}</span>
               </div>
             ) : null}
-            <div data-testid="skill-graph-panel-log-list" className="skill-graph-panel__log-list">
+            <div className="skill-graph-panel__log-list">
               {recentBuildLog.length === 0 ? (
-                <div data-testid="skill-graph-panel-log-list-empty" className="skill-graph-panel__empty skill-graph-panel__empty--compact">{t('skills.graph.status.waitingBuildLogs')}</div>
+                <div className="skill-graph-panel__empty skill-graph-panel__empty--compact">{t('skills.graph.status.waitingBuildLogs')}</div>
               ) : (
                 recentBuildLog.map((entry, index) => (
-                  <div data-testid="skill-graph-panel-log-row" data-variant={entry.ts} className="skill-graph-panel__log-row" key={`${entry.ts || 'log'}-${entry.stage || index}-${index}`}>
+                  <div className="skill-graph-panel__log-row" key={`${entry.ts || 'log'}-${entry.stage || index}-${index}`}>
                     <span>{buildLogTime(entry)}</span>
                     <strong>{buildLogSummary(entry, t)}</strong>
                   </div>
@@ -1496,16 +1495,16 @@ export const SkillGraphPanel = forwardRef<SkillGraphPanelHandle, SkillGraphPanel
         ) : null}
 
         {error && !isGraphBuildRunning ? (
-          <div data-testid="skill-graph-panel-error" className="skill-graph-panel__error">
+          <div className="skill-graph-panel__error">
             <AlertTriangle size={16} aria-hidden="true" />
-            <span data-testid="skill-graph-panel-error-text">{error}</span>
+            <span>{error}</span>
           </div>
         ) : null}
 
-        <section data-testid="skill-graph-panel-node-list" className="skill-graph-panel__node-list">
-          <h3 data-testid="skill-graph-panel-node-list-title">{t('skills.graph.skillList')}</h3>
+        <section className="skill-graph-panel__node-list">
+          <h3>{t('skills.graph.skillList')}</h3>
           {visibleSkillNodes.length === 0 ? (
-            <div data-testid="skill-graph-panel-node-list-empty" className="skill-graph-panel__empty">{t('skills.graph.noVisibleSkills')}</div>
+            <div className="skill-graph-panel__empty">{t('skills.graph.noVisibleSkills')}</div>
           ) : (
             [...visibleSkillNodes]
               .sort((a, b) => b.degree - a.degree)
@@ -1514,7 +1513,6 @@ export const SkillGraphPanel = forwardRef<SkillGraphPanelHandle, SkillGraphPanel
                 <button
                   type="button"
                   key={node.id}
-                  data-testid="skill-graph-panel-node" data-variant={node.id}
                   className={selectedNode?.id === node.id ? 'is-active' : ''}
                   onClick={() => selectNode(node)}
                 >
@@ -1526,15 +1524,14 @@ export const SkillGraphPanel = forwardRef<SkillGraphPanelHandle, SkillGraphPanel
         </section>
       </aside>
 
-      <section data-testid="skill-graph-panel-canvas-wrap" className="skill-graph-panel__canvas-wrap">
+      <section className="skill-graph-panel__canvas-wrap">
         {graphUpdatedAt ? (
-          <div data-testid="skill-graph-panel-graph-meta" className="skill-graph-panel__graph-meta">
+          <div className="skill-graph-panel__graph-meta">
             {t('skills.graph.updatedAt', { time: graphUpdatedAt })}
           </div>
         ) : null}
         <canvas
           ref={canvasRef}
-          data-testid="skill-graph-panel-canvas"
           onPointerDown={(event) => {
             dragRef.current = { active: true, moved: false, x: event.clientX, y: event.clientY };
             event.currentTarget.setPointerCapture(event.pointerId);
@@ -1570,38 +1567,38 @@ export const SkillGraphPanel = forwardRef<SkillGraphPanelHandle, SkillGraphPanel
           }}
         />
         {isBusy ? (
-          <div data-testid="skill-graph-panel-loading" className={`skill-graph-panel__loading${graphUpdatedAt ? ' skill-graph-panel__loading--below-meta' : ''}`}>
+          <div className={`skill-graph-panel__loading${graphUpdatedAt ? ' skill-graph-panel__loading--below-meta' : ''}`}>
             <Loader2 size={18} className="skill-graph-panel__spin" aria-hidden="true" />
-            <span data-testid="skill-graph-panel-loading-text">{isGraphBuildRunning ? `${progressTitle} · ${currentProgressPercent}%` : t('skills.graph.status.reading')}</span>
+            <span>{isGraphBuildRunning ? `${progressTitle} · ${currentProgressPercent}%` : t('skills.graph.status.reading')}</span>
           </div>
         ) : null}
       </section>
 
-      <aside data-testid="skill-graph-panel-detail" className="skill-graph-panel__detail">
+      <aside className="skill-graph-panel__detail">
         {selectedNode ? (
           <>
-            <div data-testid="skill-graph-panel-detail-head">
-              <h3 data-testid="skill-graph-panel-detail-title">{selectedNode.label}</h3>
-              <p data-testid="skill-graph-panel-detail-id">{selectedNode.id}</p>
+            <div>
+              <h3>{selectedNode.label}</h3>
+              <p>{selectedNode.id}</p>
             </div>
-            <div data-testid="skill-graph-panel-detail-grid" className="skill-graph-panel__detail-grid">
-              <span data-testid="skill-graph-panel-detail-in-degree">{t('skills.graph.inDegree')}<strong>{selectedNode.inDegree}</strong></span>
-              <span data-testid="skill-graph-panel-detail-out-degree">{t('skills.graph.outDegree')}<strong>{selectedNode.outDegree}</strong></span>
+            <div className="skill-graph-panel__detail-grid">
+              <span>{t('skills.graph.inDegree')}<strong>{selectedNode.inDegree}</strong></span>
+              <span>{t('skills.graph.outDegree')}<strong>{selectedNode.outDegree}</strong></span>
             </div>
             {asString(selectedNode.properties.description) ? (
-              <p data-testid="skill-graph-panel-detail-description" className="skill-graph-panel__description">
+              <p className="skill-graph-panel__description">
                 {asString(selectedNode.properties.description)}
               </p>
             ) : null}
-            <div data-testid="skill-graph-panel-io-sections" className="skill-graph-panel__io-sections">
-              <section data-testid="skill-graph-panel-io-section-input" className="skill-graph-panel__io-section skill-graph-panel__io-section--input">
-                <h4 data-testid="skill-graph-panel-io-section-input-title">{t('skills.graph.inputs')}</h4>
+            <div className="skill-graph-panel__io-sections">
+              <section className="skill-graph-panel__io-section skill-graph-panel__io-section--input">
+                <h4>{t('skills.graph.inputs')}</h4>
                 {detailInputs.length === 0 ? (
-                  <div data-testid="skill-graph-panel-io-section-input-empty" className="skill-graph-panel__empty skill-graph-panel__empty--compact">{t('skills.graph.noInputs')}</div>
+                  <div className="skill-graph-panel__empty skill-graph-panel__empty--compact">{t('skills.graph.noInputs')}</div>
                 ) : (
-                  <div data-testid="skill-graph-panel-io-section-input-tags" className="skill-graph-panel__tags">
+                  <div className="skill-graph-panel__tags">
                     {detailInputs.slice(0, 18).map((item) => (
-                      <span key={item.key} data-testid="skill-graph-panel-io-section-input-tag" data-variant={item.key} title={item.meta || item.label}>
+                      <span key={item.key} title={item.meta || item.label}>
                         {item.label}
                         {item.meta ? <small>{item.meta}</small> : null}
                       </span>
@@ -1609,14 +1606,14 @@ export const SkillGraphPanel = forwardRef<SkillGraphPanelHandle, SkillGraphPanel
                   </div>
                 )}
               </section>
-              <section data-testid="skill-graph-panel-io-section-output" className="skill-graph-panel__io-section skill-graph-panel__io-section--output">
-                <h4 data-testid="skill-graph-panel-io-section-output-title">{t('skills.graph.outputs')}</h4>
+              <section className="skill-graph-panel__io-section skill-graph-panel__io-section--output">
+                <h4>{t('skills.graph.outputs')}</h4>
                 {detailOutputs.length === 0 ? (
-                  <div data-testid="skill-graph-panel-io-section-output-empty" className="skill-graph-panel__empty skill-graph-panel__empty--compact">{t('skills.graph.noOutputs')}</div>
+                  <div className="skill-graph-panel__empty skill-graph-panel__empty--compact">{t('skills.graph.noOutputs')}</div>
                 ) : (
-                  <div data-testid="skill-graph-panel-io-section-output-tags" className="skill-graph-panel__tags">
+                  <div className="skill-graph-panel__tags">
                     {detailOutputs.slice(0, 18).map((item) => (
-                      <span key={item.key} data-testid="skill-graph-panel-io-section-output-tag" data-variant={item.key} title={item.meta || item.label}>
+                      <span key={item.key} title={item.meta || item.label}>
                         {item.label}
                         {item.meta ? <small>{item.meta}</small> : null}
                       </span>
@@ -1625,11 +1622,11 @@ export const SkillGraphPanel = forwardRef<SkillGraphPanelHandle, SkillGraphPanel
                 )}
               </section>
               {detailTasks.length > 0 ? (
-                <section data-testid="skill-graph-panel-io-section-task" className="skill-graph-panel__io-section skill-graph-panel__io-section--task">
-                  <h4 data-testid="skill-graph-panel-io-section-task-title">{t('skills.graph.tasks')}</h4>
-                  <div data-testid="skill-graph-panel-io-section-task-tags" className="skill-graph-panel__tags">
+                <section className="skill-graph-panel__io-section skill-graph-panel__io-section--task">
+                  <h4>{t('skills.graph.tasks')}</h4>
+                  <div className="skill-graph-panel__tags">
                     {detailTasks.slice(0, 18).map((item) => (
-                      <span key={item.key} data-testid="skill-graph-panel-io-section-task-tag" data-variant={item.key} title={item.meta || item.label}>
+                      <span key={item.key} title={item.meta || item.label}>
                         {item.label}
                         {item.meta ? <small>{item.meta}</small> : null}
                       </span>
@@ -1638,10 +1635,10 @@ export const SkillGraphPanel = forwardRef<SkillGraphPanelHandle, SkillGraphPanel
                 </section>
               ) : null}
             </div>
-            <div data-testid="skill-graph-panel-related" className="skill-graph-panel__related">
-              <h4 data-testid="skill-graph-panel-related-title">{t('skills.graph.relatedEdges')}</h4>
+            <div className="skill-graph-panel__related">
+              <h4>{t('skills.graph.relatedEdges')}</h4>
               {relatedEdges.length === 0 ? (
-                <div data-testid="skill-graph-panel-related-empty" className="skill-graph-panel__empty">{t('skills.graph.noRelatedEdges')}</div>
+                <div className="skill-graph-panel__empty">{t('skills.graph.noRelatedEdges')}</div>
               ) : (
                 relatedEdges.slice(0, 80).map((edge, index) => {
                   const otherId = edge.source === selectedNode.id ? edge.target : edge.source;
@@ -1650,7 +1647,6 @@ export const SkillGraphPanel = forwardRef<SkillGraphPanelHandle, SkillGraphPanel
                     <button
                       type="button"
                       key={`${edge.source}-${edge.target}-${index}`}
-                      data-testid="skill-graph-panel-related-edge" data-variant={`${edge.source}-${edge.target}`}
                       onClick={() => {
                         if (other) selectNode(other);
                       }}
@@ -1670,7 +1666,7 @@ export const SkillGraphPanel = forwardRef<SkillGraphPanelHandle, SkillGraphPanel
             </div>
           </>
         ) : (
-          <div data-testid="skill-graph-panel-detail-empty" className="skill-graph-panel__empty skill-graph-panel__detail-empty">{t('skills.graph.selectSkillHint')}</div>
+          <div className="skill-graph-panel__empty skill-graph-panel__detail-empty">{t('skills.graph.selectSkillHint')}</div>
         )}
       </aside>
     </div>

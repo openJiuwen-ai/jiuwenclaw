@@ -76,11 +76,17 @@ def _add_origin_head(path: str, bare: str) -> None:
     """
     subprocess.run([_GIT, "init", "--bare", "-q", bare], check=True)
     subprocess.run([_GIT, "-C", path, "remote", "add", "origin", bare], check=True)
-    subprocess.run([_GIT, "-C", path, "push", "-q", "origin", "HEAD"], check=True)
+    branch = subprocess.run(
+        [_GIT, "-C", path, "branch", "--show-current"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    subprocess.run([_GIT, "-C", path, "push", "-q", "origin", f"HEAD:{branch}"], check=True)
     # 先 fetch 建立 refs/remotes/origin/* ，再用显式分支名 set-head
     # （`set-head origin HEAD` 在某些 git 版本会静默不写 symref）。
     subprocess.run([_GIT, "-C", path, "fetch", "-q", "origin"], check=True)
-    subprocess.run([_GIT, "-C", path, "remote", "set-head", "origin", "master"], check=True)
+    subprocess.run([_GIT, "-C", path, "remote", "set-head", "origin", branch], check=True)
 
 
 def test_run_security_review_git_succeeds_when_origin_head_set(tmp_path):

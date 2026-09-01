@@ -202,7 +202,10 @@ def test_extract_legacy_params_passthrough_unknown_mode() -> None:
 
 
 @pytest.mark.asyncio
-async def test_ensure_scheduler_requires_message_handler() -> None:
+async def test_ensure_scheduler_skips_when_not_in_registry() -> None:
+    from jiuwenswarm.server.runtime.cron_local_runtime import AgentCronRegistry
+
+    AgentCronRegistry.reset_for_tests()
     tools = CronTools(agent_client=object(), message_handler=None)
     scheduler = await tools.ensure_scheduler()
     assert scheduler is None

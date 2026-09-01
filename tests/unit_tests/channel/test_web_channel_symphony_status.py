@@ -44,13 +44,7 @@ def test_web_channel_preserves_goal_structured_payloads():
                 payload={"event_type": "goal.snapshot", "action": "get", "goal": goal},
                 event_type=EventType.GOAL_SNAPSHOT,
             ),
-            {
-                "event_type": "goal.snapshot",
-                "action": "get",
-                "goal": goal,
-                "session_id": "sess-goal",
-                "request_id": "req-goal-get",
-            },
+            {"event_type": "goal.snapshot", "action": "get", "goal": goal, "session_id": "sess-goal"},
         ),
         (
             "goal.updated",
@@ -65,12 +59,7 @@ def test_web_channel_preserves_goal_structured_payloads():
                 payload={"event_type": "goal.updated", "goal": goal},
                 event_type=EventType.GOAL_UPDATED,
             ),
-            {
-                "event_type": "goal.updated",
-                "goal": goal,
-                "session_id": "sess-goal",
-                "request_id": "req-goal-run",
-            },
+            {"event_type": "goal.updated", "goal": goal, "session_id": "sess-goal"},
         ),
         (
             "runtime.accepted",
@@ -111,13 +100,46 @@ def test_web_channel_preserves_goal_structured_payloads():
                 "message": "round failed",
                 "goal": None,
                 "session_id": "sess-goal",
-                "request_id": "req-goal-run",
             },
         ),
     ]
 
     for event_name, msg, expected in messages:
         assert WebChannel._build_event_payload(msg, event_name) == expected
+
+
+def test_web_channel_preserves_task_lifecycle_payloads():
+    tasks = [
+        {"id": "todo:1", "content": "写封面", "status": "pending"},
+    ]
+    msg = Message(
+        id="req-task",
+        type="event",
+        channel_id="web",
+        session_id="sess-task",
+        params={},
+        timestamp=0.0,
+        ok=True,
+        payload={
+            "event_type": "task.update",
+            "tasks": tasks,
+            "total_tasks": 1,
+            "completed_tasks": 0,
+            "in_progress_tasks": 0,
+            "pending_tasks": 1,
+        },
+        event_type=EventType.TASK_UPDATE,
+    )
+
+    assert WebChannel._build_event_payload(msg, "task.update") == {
+        "event_type": "task.update",
+        "tasks": tasks,
+        "total_tasks": 1,
+        "completed_tasks": 0,
+        "in_progress_tasks": 0,
+        "pending_tasks": 1,
+        "session_id": "sess-task",
+    }
 
 
 @pytest.mark.asyncio
@@ -141,7 +163,7 @@ async def test_web_channel_preserves_symphony_status_payload():
         timestamp=0.0,
         ok=True,
         payload={
-            "source": "symphony_compose_graph",
+            "source": "symphony_compose_score",
             "operation_id": "call-1",
             "phase": "checking_score",
             "content": "Symphony status",
@@ -171,7 +193,7 @@ async def test_web_channel_preserves_symphony_status_payload():
                 "type": "event",
                 "event": "chat.symphony_status",
                 "payload": {
-                    "source": "symphony_compose_graph",
+                    "source": "symphony_compose_score",
                     "operation_id": "call-1",
                     "phase": "checking_score",
                     "content": "Symphony status",

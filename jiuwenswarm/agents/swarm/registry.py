@@ -30,9 +30,6 @@ from openjiuwen.agent_teams.rails.builtin_elements import (
     SYS_OPERATION as _OJ_SYS_OPERATION,
     TASK_PLANNING as _OJ_TASK_PLANNING,
     VISION as _OJ_VISION,
-    WEB_FETCH as _OJ_WEB_FETCH,
-    WEB_PAID_SEARCH as _OJ_WEB_PAID_SEARCH,
-    WEB_SEARCH as _OJ_WEB_SEARCH,
     WORKTREE as _OJ_WORKTREE,
 )
 from openjiuwen.agent_teams.rails.registration import (
@@ -70,21 +67,20 @@ SYMPHONY_TOOLKIT = _tools.SYMPHONY_TOOLKIT
 CRON_TOOLS = _runtime_tools.CRON_TOOLS
 SEND_FILE = _runtime_tools.SEND_FILE
 MEMBER_SKILL_TOOLKIT = _skills.MEMBER_SKILL_TOOLKIT
-# Generic tools provided + registered by openjiuwen (referenced by bare name).
-WEB_SEARCH = _OJ_WEB_SEARCH
-WEB_FETCH = _OJ_WEB_FETCH
-WEB_PAID_SEARCH = _OJ_WEB_PAID_SEARCH
+# Team-owned wrappers around Jiuwen's unified web tools.
+WEB_SEARCH = _tools.WEB_SEARCH
+WEB_FETCH = _tools.WEB_FETCH
 VISION = _OJ_VISION
 AUDIO = _OJ_AUDIO
 RUNTIME_PROMPT = _member_rails.RUNTIME_PROMPT
 TEAM_SKILL_STORAGE_POLICY = _member_rails.TEAM_SKILL_STORAGE_POLICY
-TEAM_SKILL_LIBRARY_RELOAD = _member_rails.TEAM_SKILL_LIBRARY_RELOAD
+TEAM_SHARED_SKILL_LINK_REFRESH = _member_rails.TEAM_SHARED_SKILL_LINK_REFRESH
 TEAM_WORKSPACE_REPORT_PATH = _member_rails.TEAM_WORKSPACE_REPORT_PATH
 CONTEXT_PROCESSOR = _member_rails.CONTEXT_PROCESSOR
-MODEL_ANOMALY_DETECTION = _member_rails.MODEL_ANOMALY_DETECTION
 PLUGIN_RAILS = _member_rails.PLUGIN_RAILS
 SKILL_RETRIEVAL_PROMPT = _member_rails.SKILL_RETRIEVAL_PROMPT
 SYMPHONY_ORCHESTRATION_PROMPT = _member_rails.SYMPHONY_ORCHESTRATION_PROMPT
+DISABLED_TOOLS = _member_rails.DISABLED_TOOLS
 TEAM_PERMISSION = _member_rails.TEAM_PERMISSION
 TEAM_PERMISSION_POLICY = _member_rails.TEAM_PERMISSION_POLICY
 TEAM_SKILL_EVOLUTION = _evolution_rails.TEAM_SKILL_EVOLUTION
@@ -92,7 +88,7 @@ TEAM_SKILL_CREATE = _evolution_rails.TEAM_SKILL_CREATE
 MEMBER_SKILL_EVOLUTION = _evolution_rails.MEMBER_SKILL_EVOLUTION
 EVOLUTION_INTERRUPT = _evolution_rails.EVOLUTION_INTERRUPT
 
-# Code-profile (code.team / team.plan.code) swarm-owned rail provider names.
+# Code-mode (code.team / team.plan) swarm-owned rail provider names.
 CODE_EXTRA_TOOLS = _tools.CODE_EXTRA_TOOLS
 CODE_RUNTIME_PROMPT = _code_rails.CODE_RUNTIME_PROMPT
 CODE_PROJECT_MEMORY = _code_rails.CODE_PROJECT_MEMORY
@@ -104,6 +100,7 @@ STRUCTURED_ASK_USER = _code_rails.STRUCTURED_ASK_USER
 CODE_TASK_PLANNING = _code_rails.CODE_TASK_PLANNING
 CODE_AGENT_RAIL = _code_rails.CODE_AGENT_RAIL
 USER_HOOKS = _code_rails.USER_HOOKS
+CODE_SKILL_USE = _code_rails.CODE_SKILL_USE
 
 # Sub-agent provider names (resolved via SubAgentSpec.factory_name). explore /
 # plan / browser are provided by openjiuwen; code_agent stays swarm-side (reuses
@@ -112,17 +109,12 @@ EXPLORE_AGENT = _OJ_EXPLORE_AGENT
 PLAN_AGENT = _OJ_PLAN_AGENT
 BROWSER_AGENT = _OJ_BROWSER_AGENT
 CODE_AGENT = _code_subagents.CODE_AGENT
-DEFAULT_STATUSLINE_SETUP_MAX_ITERATIONS = (
-    _code_subagents.DEFAULT_STATUSLINE_SETUP_MAX_ITERATIONS
-)
-STATUSLINE_SETUP_AGENT = _code_subagents.STATUSLINE_SETUP_AGENT
 SWARM_BROWSER_AGENT = _code_subagents.SWARM_BROWSER_AGENT
 
 # Swarm-owned no-parameter class rails declared in ``builtin_rails``.
 RESPONSE_PROMPT = _builtin_rails.RESPONSE_PROMPT
 STREAM_EVENT = _builtin_rails.STREAM_EVENT
 AVATAR_PROMPT = _builtin_rails.AVATAR_PROMPT
-MULTIMODAL_IMAGE = _builtin_rails.MULTIMODAL_IMAGE
 
 # Generic rails provided + registered by openjiuwen (referenced by bare name).
 SYS_OPERATION = _OJ_SYS_OPERATION
@@ -141,19 +133,13 @@ def _build_swarm_context_from_seed(seed: dict[str, Any]) -> SwarmBuildContext:
     """Rebuild a :class:`SwarmBuildContext` from a serializable seed.
 
     Sources the non-serializable handles from the receiving process: ``config``
-    from this process's ``config.yaml`` and the process-level Team trajectory
-    span processor.
-    Registered with openjiuwen so ``from_spawn_payload`` / ``recover_from_session``
-    restore the provider build context after deserialization.
+    from this process's ``config.yaml``. Registered with openjiuwen so
+    ``from_spawn_payload`` / ``recover_from_session`` restore the provider build
+    context after deserialization.
     """
-    from jiuwenswarm.agents.harness.observability_runtime import (
-        get_trajectory_span_processor,
-    )
-
     return SwarmBuildContext.from_seed(
         seed,
         config=get_config(),
-        trajectory_span_processor=get_trajectory_span_processor(),
     )
 
 
@@ -191,7 +177,6 @@ __all__ = [
     "SYMPHONY_TOOLKIT",
     "WEB_SEARCH",
     "WEB_FETCH",
-    "WEB_PAID_SEARCH",
     "VISION",
     "AUDIO",
     "CRON_TOOLS",
@@ -199,13 +184,13 @@ __all__ = [
     "MEMBER_SKILL_TOOLKIT",
     "RUNTIME_PROMPT",
     "TEAM_SKILL_STORAGE_POLICY",
-    "TEAM_SKILL_LIBRARY_RELOAD",
+    "TEAM_SHARED_SKILL_LINK_REFRESH",
     "TEAM_WORKSPACE_REPORT_PATH",
     "CONTEXT_PROCESSOR",
-    "MODEL_ANOMALY_DETECTION",
     "PLUGIN_RAILS",
     "SKILL_RETRIEVAL_PROMPT",
     "SYMPHONY_ORCHESTRATION_PROMPT",
+    "DISABLED_TOOLS",
     "TEAM_PERMISSION",
     "TEAM_PERMISSION_POLICY",
     "TEAM_SKILL_EVOLUTION",
@@ -214,7 +199,6 @@ __all__ = [
     "RESPONSE_PROMPT",
     "SYS_OPERATION",
     "STREAM_EVENT",
-    "MULTIMODAL_IMAGE",
     "TASK_PLANNING",
     "SECURITY",
     "HEARTBEAT",
@@ -232,12 +216,11 @@ __all__ = [
     "CODE_TASK_PLANNING",
     "CODE_AGENT_RAIL",
     "USER_HOOKS",
+    "CODE_SKILL_USE",
     "CODE_WORKTREE",
     "EXPLORE_AGENT",
     "PLAN_AGENT",
     "CODE_AGENT",
-    "DEFAULT_STATUSLINE_SETUP_MAX_ITERATIONS",
-    "STATUSLINE_SETUP_AGENT",
     "SWARM_BROWSER_AGENT",
     "BROWSER_AGENT",
 ]

@@ -9,9 +9,13 @@ services:
     command: ["--config=/etc/otel-collector-config.yaml"]
     volumes:
       - ./otel-collector-config.yaml:/etc/otel-collector-config.yaml:ro
+      - type: bind
+        source: ${TELEMETRY_EVIDENCE_DIR:-../../.telemetry-evidence}
+        target: /var/lib/otel/evidence
     ports:
       - "4317:4317"
       - "4318:4318"
+      - "9464:9464"
     depends_on:
       langfuse-web:
         condition: service_started

@@ -3,7 +3,6 @@ import {
   useChatStore,
   useGoalStore,
   useHarnessStore,
-  usePlanStore,
   useSessionStore,
   useTodoStore,
 } from '../../stores';
@@ -45,7 +44,6 @@ export function resetNewConversationRuntime(settings: ConversationRuntimeSetting
   useTodoStore.getState().removeRuntime(NEW_CONVERSATION_ID);
   useHarnessStore.getState().removeRuntime(NEW_CONVERSATION_ID);
   useGoalStore.getState().removeRuntime(NEW_CONVERSATION_ID);
-  usePlanStore.getState().removeRuntime(NEW_CONVERSATION_ID);
   applyRuntimeSettings(NEW_CONVERSATION_ID, settings);
   if (preservedDraft) {
     useChatStore.getState().setInputValue(NEW_CONVERSATION_ID, preservedDraft);

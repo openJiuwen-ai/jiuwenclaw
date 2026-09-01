@@ -1,3 +1,4 @@
+import asyncio
 import time
 
 import pytest
@@ -247,6 +248,22 @@ async def test_dispatch_a2a_request_defaults_metadata_to_empty_dict():
 
 
 @pytest.mark.asyncio
+async def test_cancel_pending_request_wakes_executor_queue():
+    channel = build_channel()
+    channel.on_message(lambda msg: None)
+    pending = await channel.dispatch_a2a_request(
+        request_id="req-cancel",
+        session_id="sess-cancel",
+        query="hello",
+    )
+
+    assert await channel.cancel_pending_request("req-cancel") is True
+    canceled = await pending.queue.get()
+    assert canceled.event_type == EventType.CHAT_INTERRUPT_RESULT
+    assert canceled.payload["is_complete"] is True
+
+
+@pytest.mark.asyncio
 async def test_executor_empty_query_emits_failed_task_lifecycle():
     pytest.importorskip("a2a.types")
     from a2a.types import Message, Part, Role, Task, TaskState, TaskStatusUpdateEvent
@@ -281,6 +298,8 @@ async def test_executor_empty_query_emits_failed_task_lifecycle():
             return ""
 
     channel = build_channel()
+    history_events = []
+    channel.set_request_observer(history_events.append)
 
     event_queue = MockEventQueue()
     await _A2AAgentExecutor(channel).execute(MockContext(), event_queue)
@@ -293,6 +312,9 @@ async def test_executor_empty_query_emits_failed_task_lifecycle():
     assert status_event.task_id == "task-empty"
     assert status_event.context_id == "ctx-empty"
     assert status_event.status.state == TaskState.TASK_STATE_FAILED
+    assert [event["status"] for event in history_events] == ["processing", "failed"]
+    assert history_events[-1]["request_id"] == "task-empty"
+    assert history_events[-1]["error"] == "empty query"
 
 
 def _make_message(
@@ -439,6 +461,8 @@ async def test_executor_streams_reasoning_as_thought_status_updates_by_default()
     from a2a.types import TaskArtifactUpdateEvent
 
     channel = build_channel()
+    history_events = []
+    channel.set_request_observer(history_events.append)
     event_queue = await _run_executor_with_stream(channel, _stream_reasoning_then_final())
 
     artifact_events = [e for e in event_queue.events if isinstance(e, TaskArtifactUpdateEvent)]
@@ -450,6 +474,133 @@ async def test_executor_streams_reasoning_as_thought_status_updates_by_default()
     thought_parts = list(thought_updates[0].status.message.parts)
     assert thought_parts[0].text == "let me think"
     assert dict(thought_parts[0].metadata)[A2A_THOUGHT_METADATA_KEY] is True
+    assert [event["status"] for event in history_events] == ["processing", "completed"]
+
+
+@pytest.mark.asyncio
+async def test_executor_cancellation_records_terminal_history_and_reraises():
+    pytest.importorskip("a2a.types")
+    channel = build_channel()
+    history_events = []
+    callback_started = asyncio.Event()
+
+    async def on_message(msg: Message):
+        callback_started.set()
+        await asyncio.Event().wait()
+
+    channel.on_message(on_message)
+    channel.set_request_observer(history_events.append)
+    event_queue = _FakeEventQueue()
+    execute_task = asyncio.create_task(
+        _A2AAgentExecutor(channel).execute(_FakeContext(), event_queue)
+    )
+    await callback_started.wait()
+    execute_task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await execute_task
+    assert [event["status"] for event in history_events] == ["processing", "canceled"]
+    assert history_events[-1]["error"] is None
+    assert event_queue.closed is True
+
+
+@pytest.mark.asyncio
+async def test_executor_cancel_closes_event_queue_without_immediate():
+    pytest.importorskip("a2a.types")
+
+    class TrackingQueue:
+        def __init__(self) -> None:
+            self.events: list = []
+            self.close_immediate: bool | None = None
+
+        async def enqueue_event(self, event) -> None:
+            self.events.append(event)
+
+        async def close(self, immediate: bool = False) -> None:
+            self.close_immediate = immediate
+
+    channel = build_channel()
+    queue = TrackingQueue()
+    await _A2AAgentExecutor(channel).cancel(_FakeContext(), queue)
+
+    assert queue.close_immediate is False
+    assert queue.events
+
+
+@pytest.mark.asyncio
+async def test_executor_interrupt_survives_closed_event_queue():
+    pytest.importorskip("a2a.types")
+    channel = build_channel()
+    dispatched = asyncio.Event()
+    history_events = []
+
+    async def on_message(msg: Message):
+        dispatched.set()
+
+    channel.on_message(on_message)
+    channel.set_request_observer(history_events.append)
+
+    class ClosedQueue:
+        def __init__(self) -> None:
+            self.closed = False
+            self.close_immediate: bool | None = None
+
+        async def enqueue_event(self, event) -> None:
+            if self.closed:
+                raise RuntimeError("queue is closed")
+
+        async def close(self, immediate: bool = False) -> None:
+            self.closed = True
+            self.close_immediate = immediate
+
+    context = _FakeContext()
+    queue = ClosedQueue()
+    execute_task = asyncio.create_task(
+        _A2AAgentExecutor(channel).execute(context, queue)
+    )
+    await dispatched.wait()
+    await _A2AAgentExecutor(channel).cancel(context, queue)
+    await execute_task
+
+    assert queue.close_immediate is False
+    assert history_events[-1]["status"] == "canceled"
+
+
+@pytest.mark.asyncio
+async def test_executor_history_redacts_internal_exception_text():
+    pytest.importorskip("a2a.types")
+    channel = build_channel()
+    history_events = []
+
+    async def on_message(msg: Message):
+        raise RuntimeError("secret path C:/internal/service")
+
+    channel.on_message(on_message)
+    channel.set_request_observer(history_events.append)
+    await _A2AAgentExecutor(channel).execute(_FakeContext(), _FakeEventQueue())
+
+    assert history_events[-1]["status"] == "failed"
+    assert history_events[-1]["error"] == "request execution failed"
+    assert "secret" not in history_events[-1]["error"]
+
+
+@pytest.mark.asyncio
+async def test_executor_history_uses_display_safe_agent_error_summary():
+    pytest.importorskip("a2a.types")
+    channel = build_channel()
+    history_events = []
+    channel.set_request_observer(history_events.append)
+    await _run_executor_with_stream(
+        channel,
+        [_make_message(
+            payload={"error": "internal host db.private.local failed"},
+            event_type=EventType.CHAT_ERROR,
+        )],
+    )
+
+    assert history_events[-1]["status"] == "failed"
+    assert history_events[-1]["error"] == "agent request failed"
+    assert "db.private.local" not in history_events[-1]["error"]
 
 
 @pytest.mark.asyncio

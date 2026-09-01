@@ -1,6 +1,10 @@
 import { useEffect, useRef, useState } from 'react';
 import { MediaItem } from '../../types';
-import { FileIcon, getFileExtensionLabel } from '../FileIcon';
+import {
+  FileTypeIcon,
+  getFileTypeIconKeyFromFilename,
+  splitFilenameParts,
+} from './FileTypeIcon';
 import { stripUploadDocumentBlocks } from '../../utils/documentMessage';
 
 export { stripUploadDocumentBlocks };
@@ -16,9 +20,9 @@ interface MediaRendererProps {
 const VISIBLE_FILE_COUNT = 2;
 
 function isImageItem(item: MediaItem): boolean {
-  // Attachment routing owns the media/document distinction. MIME metadata alone
-  // must not turn ordinary files such as SVG documents back into image previews.
-  return item.type === 'image';
+  if (item.type === 'image') return true;
+  const mime = (item.mimeType || item.mime_type || '').toLowerCase();
+  return mime.startsWith('image/');
 }
 
 function isCardItem(item: MediaItem): boolean {
@@ -42,7 +46,8 @@ function mediaSrc(item: MediaItem): string | undefined {
 
 function FileCard({ item }: { item: MediaItem }) {
   const filename = item.filename || 'file';
-  const extLabel = getFileExtensionLabel(filename);
+  const { extLabel } = splitFilenameParts(filename);
+  const typeKey = getFileTypeIconKeyFromFilename(filename, item.type);
   const src = mediaSrc(item);
   const showThumb = isImageItem(item) && Boolean(src);
 
@@ -52,7 +57,7 @@ function FileCard({ item }: { item: MediaItem }) {
         {showThumb ? (
           <img src={src} alt="" className="chat-msg-file-card__thumb" />
         ) : (
-          <FileIcon fileName={filename} size={28} />
+          <FileTypeIcon typeKey={typeKey} size={28} />
         )}
       </span>
       <span className="chat-msg-file-card__meta">
@@ -121,6 +126,7 @@ function OverflowMenu({ items }: { items: MediaItem[] }) {
         <div className="chat-msg-file-more__menu" role="menu">
           {items.map((item, index) => {
             const filename = item.filename || 'file';
+            const typeKey = getFileTypeIconKeyFromFilename(filename, item.type);
             const src = mediaSrc(item);
             const showThumb = isImageItem(item) && Boolean(src);
             const content = (
@@ -128,7 +134,7 @@ function OverflowMenu({ items }: { items: MediaItem[] }) {
                 {showThumb ? (
                   <img src={src} alt="" className="chat-msg-file-more__thumb" />
                 ) : (
-                  <FileIcon fileName={filename} size={20} />
+                  <FileTypeIcon typeKey={typeKey} size={20} />
                 )}
                 <span className="chat-msg-file-more__name" title={filename}>
                   {filename}

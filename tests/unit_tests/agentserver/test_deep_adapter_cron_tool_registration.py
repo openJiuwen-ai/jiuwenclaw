@@ -80,6 +80,48 @@ def test_cron_tools_are_built_once_across_turns() -> None:
     }
 
 
+def test_cron_tools_are_not_registered_when_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The OfficeClaw integration can delegate scheduling to Relay's TaskRunnerV2."""
+    monkeypatch.setenv("JIUWENCLAW_DISABLE_CRON_TOOLS", "1")
+    adapter, counters = _make_adapter()
+    adapter._instance.ability_manager.cards = [
+        _FakeCard("cron"),
+        _FakeCard("cron_list_jobs"),
+        _FakeCard("unrelated_tool"),
+    ]
+
+    adapter._ensure_cron_tools_registered("sess_a")
+
+    assert counters["build"] == 0
+    assert [card.name for card in adapter._instance.ability_manager.cards] == [
+        "unrelated_tool"
+    ]
+    assert adapter._cron_tools_registered_language is None
+
+
+@pytest.mark.parametrize("env_value", [None, "0"])
+def test_cron_tools_remain_enabled_when_disable_env_is_not_one(
+    monkeypatch: pytest.MonkeyPatch,
+    env_value: str | None,
+) -> None:
+    """The native cron tools retain their existing default behavior."""
+    if env_value is None:
+        monkeypatch.delenv("JIUWENCLAW_DISABLE_CRON_TOOLS", raising=False)
+    else:
+        monkeypatch.setenv("JIUWENCLAW_DISABLE_CRON_TOOLS", env_value)
+    adapter, counters = _make_adapter()
+
+    adapter._ensure_cron_tools_registered("sess_a")
+
+    assert counters["build"] == 1
+    assert {card.name for card in adapter._instance.ability_manager.cards} == {
+        "cron",
+        "cron_list_jobs",
+    }
+
+
 def test_language_change_rebuilds_cron_tools() -> None:
     """Language is baked into the instances, so switching it must rebuild them."""
     adapter, counters = _make_adapter(language="cn")

@@ -2,7 +2,7 @@
 #
 # Pipeline:  application(otlp/grpc) -> memory_limiter -> batch
 #                                   -> transform/limit_strings
-#                                   -> langfuse / debug
+#                                   -> langfuse / prometheus / fresh-evidence files / debug
 #
 # - The transform processor caps any string attribute at 16 KiB so that
 #   accidentally enormous prompts cannot OOM the backend.
@@ -45,9 +45,26 @@ exporters:
   debug:
     verbosity: basic
 
+  # Machine-readable, append-only evidence consumed by
+  # scripts/e2e_telemetry_trace.py. The host directory is mounted by compose.
+  file/traces:
+    path: /var/lib/otel/evidence/traces.jsonl
+    format: json
+
+  file/metrics:
+    path: /var/lib/otel/evidence/metrics.jsonl
+    format: json
+
+  prometheus:
+    endpoint: 0.0.0.0:9464
+
 service:
   pipelines:
     traces:
       receivers: [otlp]
       processors: [memory_limiter, batch, transform/limit_strings]
-      exporters: [otlphttp/langfuse, debug]
+      exporters: [otlphttp/langfuse, file/traces, debug]
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [prometheus, file/metrics, debug]

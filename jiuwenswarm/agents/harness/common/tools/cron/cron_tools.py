@@ -5,6 +5,7 @@ import contextvars
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -24,9 +25,29 @@ from jiuwenswarm.server.gateway_push import (
     GatewayPushTransport,
     WebSocketGatewayPushTransport,
 )
-from jiuwenswarm.common.utils import get_cron_jobs_path
+from jiuwenswarm.common.utils import (
+    get_multi_tenant_user_workspace_dir,
+    normalize_tenant_scope_id,
+)
 
 logger = logging.getLogger(__name__)
+
+
+def resolve_cron_jobs_path(
+    service_id: str,
+    agent_id: str,
+    workspace_key: str | None = None,
+) -> Path:
+    """Per-tenant cron_jobs.json under ``service_{sid}/agent_{aid}/agent/home/``."""
+    del workspace_key  # legacy kw; disk isolation is service_id + agent_id
+    sid = normalize_tenant_scope_id(service_id)
+    aid = normalize_tenant_scope_id(agent_id)
+    base = get_multi_tenant_user_workspace_dir(sid, aid)
+    if base is None:
+        raise TypeError(
+            f"invalid tenant for cron jobs path: service_id={sid!r}, agent_id={aid!r}"
+        )
+    return base / "agent" / "home" / "cron_jobs.json"
 
 # 按 asyncio Task 隔离：多 session 并发时不能用单例字段存路由，否则后到的请求会覆盖先到的 session_id。
 _cron_route_ctx: contextvars.ContextVar[CronToolRoute | None] = contextvars.ContextVar(
@@ -46,6 +67,9 @@ class CronToolRoute:
     project_dir: str = ""  # 当前 agent 工作目录，用于 cron 任务归属项目解析
     project_id: str = ""  # 当前会话锁定项目 ID；优先于 project_dir，避免同路径双模式误判
     work_mode: str = ""  # 当前会话锁定工作模式，用于 project_dir 归属消歧
+    group_id: str | None = None
+    bot_id: str | None = None
+    user_id: str | None = None
 
 
 class CronTools:
@@ -61,77 +85,132 @@ class CronTools:
         self,
         gateway_push: GatewayPushTransport | None = None,
         *,
+        service_id: str = "default",
+        agent_id: str = "default",
         agent_client: Any | None = None,
         message_handler: Any | None = None,
     ) -> None:
+        self._service_id = str(service_id or "default").strip() or "default"
+        self._agent_id = str(agent_id or "default").strip() or "default"
         self._gateway_push: GatewayPushTransport = gateway_push or WebSocketGatewayPushTransport()
         self._local_store = CronJobStore(
-            path=get_cron_jobs_path()
+            path=resolve_cron_jobs_path(self._service_id, self._agent_id)
         )
         # 内置调度器，用于在 Agent-side 执行定时任务
         self._scheduler: CronSchedulerService | None = None
         self._agent_client = agent_client
         self._message_handler = message_handler
         self._scheduler_started = False
+        # Set by stop_scheduler (tenant eviction); this instance must never start again.
+        self._retired = False
 
     async def ensure_scheduler(self) -> CronSchedulerService | None:
-        """Ensure the scheduler is started."""
+        """Ensure the Agent-side scheduler is started (needed for relay / AgentServer-only)."""
+        if self._enterprise_ready():
+            return None
+        if self._retired:
+            return None
+
         if self._scheduler is not None and self._scheduler.is_running():
             return self._scheduler
-        
-        if self._scheduler_started:
-            # Already tried to start but failed or stopped
-            return self._scheduler
-        
-        # Try to create and start scheduler
-        try:
-            # Lazy import to avoid circular dependency
-            from jiuwenswarm.gateway.routing.agent_client import AgentServerClient
-            
-            agent_client = self._agent_client
-            message_handler = self._message_handler
-            
-            # If not provided, try to get from singletons
-            if agent_client is None:
-                try:
-                    agent_client = AgentServerClient.get_instance()
-                except (RuntimeError, AttributeError):
-                    agent_client = None
-            
-            if message_handler is None:
-                try:
-                    from jiuwenswarm.gateway.message_handler import MessageHandler
-                    message_handler = MessageHandler.get_instance()
-                except RuntimeError:
-                    message_handler = None
-            
-            if agent_client is None:
-                logger.warning("[CronTools] Cannot start scheduler: AgentServerClient not available")
-                self._scheduler_started = True  # Mark as tried
-                return None
 
-            if message_handler is None:
-                logger.warning("[CronTools] Cannot start scheduler: MessageHandler not available")
-                self._scheduler_started = True
-                return None
-            
+        if self._scheduler_started:
+            return self._scheduler
+
+        from jiuwenswarm.server.runtime.cron_local_runtime import (
+            AgentCronRegistry,
+            resolve_agent_side_cron_deps,
+        )
+
+        # Fast path after AgentCronRegistry.remove (or never registered standalone).
+        if not AgentCronRegistry.is_current(self._service_id, self._agent_id, self):
+            return None
+
+        try:
+            agent_client, message_handler = resolve_agent_side_cron_deps(
+                agent_client=self._agent_client,
+                message_handler=self._message_handler,
+            )
             self._scheduler = CronSchedulerService(
                 store=self._local_store,
                 agent_client=agent_client,
                 message_handler=message_handler,
+                service_id=self._service_id,
+                agent_id=self._agent_id,
             )
             await self._scheduler.start()
-            logger.info("[CronTools] Scheduler started successfully")
+
+            # Race: remove/stop may have run during await start().
+            if self._retired or not AgentCronRegistry.is_current(
+                self._service_id, self._agent_id, self
+            ):
+                await self._discard_scheduler_after_stale_start()
+                return None
+
+            logger.info(
+                "[CronTools] Scheduler started service_id=%s agent_id=%s path=%s",
+                self._service_id,
+                self._agent_id,
+                self._local_store.path,
+            )
             self._scheduler_started = True
             return self._scheduler
-            
         except Exception as exc:
-            logger.warning("[CronTools] Failed to start scheduler: %s", exc)
-            self._scheduler_started = True  # Mark as tried
+            logger.warning(
+                "[CronTools] Failed to start scheduler service_id=%s agent_id=%s "
+                "path=%s (will retry on next ensure_scheduler): %s",
+                self._service_id,
+                self._agent_id,
+                self._local_store.path,
+                exc,
+                exc_info=True,
+            )
+            await self._discard_scheduler_after_stale_start()
             return None
 
+    async def _discard_scheduler_after_stale_start(self) -> None:
+        """Stop and clear a scheduler that must not remain (eviction or failed start)."""
+        scheduler = self._scheduler
+        self._scheduler = None
+        self._scheduler_started = False
+        if scheduler is None:
+            return
+        try:
+            await scheduler.stop()
+        except Exception as exc:
+            logger.warning(
+                "[CronTools] Failed to discard stale scheduler "
+                "service_id=%s agent_id=%s: %s",
+                self._service_id,
+                self._agent_id,
+                exc,
+            )
+
+    async def stop_scheduler(self) -> None:
+        """Stop the Agent-side scheduler if running (tenant eviction / shutdown)."""
+        self._retired = True
+        scheduler = self._scheduler
+        self._scheduler = None
+        self._scheduler_started = False
+        if scheduler is None:
+            return
+        try:
+            await scheduler.stop()
+            logger.info(
+                "[CronTools] Scheduler stopped service_id=%s agent_id=%s",
+                self._service_id,
+                self._agent_id,
+            )
+        except Exception as exc:
+            logger.warning(
+                "[CronTools] Failed to stop scheduler service_id=%s agent_id=%s: %s",
+                self._service_id,
+                self._agent_id,
+                exc,
+            )
+
     async def _reload_scheduler(self) -> None:
-        """Reload scheduler if it's running."""
+        """Reload scheduler if it's running (or start it on first mutation)."""
         scheduler = await self.ensure_scheduler()
         if scheduler is not None:
             try:
@@ -154,10 +233,54 @@ class CronTools:
         r = _cron_route_ctx.get()
         return r if r is not None else CronToolRoute()
 
+    @staticmethod
+    def _enterprise_ready() -> bool:
+        from jiuwenswarm.gateway.cron.enterprise_gate import enterprise_cron_enabled
+
+        return enterprise_cron_enabled()
+
+    def _routing_identity_payload(self) -> dict[str, str]:
+        r = self._route()
+        out: dict[str, str] = {}
+        if r.group_id:
+            out["group_id"] = r.group_id
+        if r.bot_id:
+            out["bot_id"] = r.bot_id
+        if r.user_id:
+            out["user_id"] = r.user_id
+        return out
+
+    async def _list_jobs_enterprise(self) -> list[dict[str, Any]]:
+        from jiuwenswarm.gateway.cron.db_store import _row_to_job
+        from jiuwenswarm.gateway.cron.enterprise_gate import (
+            extract_routing_triple,
+            get_bound_jiuwenclaw_id,
+            routing_triple_complete,
+        )
+        from jiuwenswarm.server.runtime.enterprise_config import gateway_db
+
+        identity = self._routing_identity_payload()
+        g, b, u = extract_routing_triple(identity)
+        if not routing_triple_complete(g, b, u):
+            raise ValueError("enterprise cron list requires group_id, bot_id and user_id")
+        filters: dict[str, Any] = {"group_id": g, "bot_id": b, "user_id": u}
+        jid = get_bound_jiuwenclaw_id()
+        if jid:
+            filters["jiuwenclaw_id"] = jid
+        rows = await gateway_db.list_records("cron_job", filters=filters, order_by="updated_at DESC")
+        out: list[dict[str, Any]] = []
+        for row in rows:
+            job = _row_to_job(row)
+            if job is not None:
+                out.append(job.to_dict())
+        return out
+
     async def _send_split(self, action: str, params: dict[str, Any]) -> dict[str, Any]:
         from jiuwenswarm.common.e2a.constants import E2A_RESPONSE_KIND_CRON
 
         r = self._route()
+        data = dict(params or {})
+        data.update(self._routing_identity_payload())
         payload = {
             "request_id": r.request_id,
             "channel_id": r.channel_id,
@@ -166,7 +289,11 @@ class CronTools:
             "body": {
                 "action": action,
                 "status": "ok",
-                "data": dict(params or {}),
+                # Tenant scope follows CronTools instance (per-tenant backend), not route defaults.
+                "service_id": self._service_id,
+                "agent_id": self._agent_id,
+                # data includes enterprise routing identity (group_id/bot_id/user_id) when present.
+                "data": data,
                 "message": "",
             },
         }
@@ -263,6 +390,8 @@ class CronTools:
         return payload
 
     async def list_jobs(self) -> Any:
+        if self._enterprise_ready():
+            return await self._list_jobs_enterprise()
         jobs = await self._local_store.list_jobs()
         # 给受保护的 proactive.tick job 标记 protected，让 LLM 在批量操作时
         # （如"删除所有定时任务"）能识别并优雅跳过，而不是删到一半才遇错。
@@ -278,6 +407,12 @@ class CronTools:
         return out
 
     async def get_job(self, job_id: str) -> Any:
+        if self._enterprise_ready():
+            jobs = await self._list_jobs_enterprise()
+            for item in jobs:
+                if str(item.get("id") or "") == str(job_id or "").strip():
+                    return item
+            return None
         job = await self._local_store.get_job(job_id)
         return job.to_dict() if job else None
 
@@ -349,6 +484,20 @@ class CronTools:
         resolved_project_id = binding.project_id
         work_mode = binding.work_mode
 
+        if self._enterprise_ready():
+            push_payload = {
+                **normalized,
+                "id": str(normalized.get("id") or "").strip() or None,
+                "project_id": resolved_project_id,
+                "work_mode": work_mode,
+                **session_kw,
+                **mode_kw,
+                **model_kw,
+            }
+            push_payload.update(self._routing_identity_payload())
+            await self._send("create", push_payload)
+            return push_payload
+
         job = await self._local_store.create_job(
             job_id=str(normalized.get("id") or "").strip() or None,
             name=str(normalized.get("name") or "").strip(),
@@ -361,7 +510,8 @@ class CronTools:
             delete_after_run=normalized.get("delete_after_run"),
             project_id=resolved_project_id,
             work_mode=work_mode,
-            user_id=str(normalized.get("user_id") or "").strip(),
+            service_id=self._service_id,
+            agent_id=self._agent_id,
             **session_kw,
             **mode_kw,
             **model_kw,
@@ -418,6 +568,15 @@ class CronTools:
         if "session_id" in normalized_patch or "targets" in normalized_patch:
             chat_type = self._route().chat_type
             normalized_patch["chat_type"] = chat_type if chat_type else None
+
+        identity = self._routing_identity_payload()
+        if self._enterprise_ready():
+            await self._send(
+                "update",
+                {"job_id": job_id, "patch": self._sync_patch_payload(normalized_patch), **identity},
+            )
+            return {"job_id": job_id, "status": "forwarded"}
+
         job = await self._local_store.update_job(job_id, normalized_patch)
         try:
             await self._send(
@@ -433,6 +592,10 @@ class CronTools:
         return job.to_dict()
 
     async def delete_job(self, job_id: str) -> Any:
+        identity = self._routing_identity_payload()
+        if self._enterprise_ready():
+            await self._send("delete", {"job_id": job_id, **identity})
+            return True
         deleted = await self._local_store.delete_job(job_id)
         try:
             await self._send("delete", {"job_id": job_id})
@@ -452,6 +615,10 @@ class CronTools:
             raise RuntimeError(
                 "主动推荐定时任务由设置→主动推荐开关控制，不能手动启停；请到设置→主动推荐操作。"
             )
+        identity = self._routing_identity_payload()
+        if self._enterprise_ready():
+            await self._send("toggle", {"job_id": job_id, "enabled": bool(enabled), **identity})
+            return {"job_id": job_id, "enabled": bool(enabled), "status": "forwarded"}
         job = await self._local_store.update_job(job_id, {"enabled": bool(enabled)})
         try:
             await self._send("toggle", {"job_id": job_id, "enabled": bool(enabled)})
@@ -533,13 +700,13 @@ class CronTools:
         return [
             make_tool(
                 name="cron_list_jobs",
-                description="List all cron jobs.",
+                description="列出所有定时任务。",
                 input_params={"type": "object", "properties": {}},
                 func=self.list_jobs,
             ),
             make_tool(
                 name="cron_get_job",
-                description="Get a cron job by id.",
+                description="按 id 获取单个定时任务详情。",
                 input_params={
                     "type": "object",
                     "properties": {"job_id": {"type": "string"}},
@@ -549,7 +716,7 @@ class CronTools:
             ),
             make_tool(
                 name="cron_create_job",
-                description="Create cron job.",
+                description="创建定时任务。",
                 input_params={
                     "type": "object",
                     "properties": {
@@ -602,9 +769,9 @@ class CronTools:
             make_tool(
                 name="cron_update_job",
                 description=(
-                    "Update an existing cron job. Pass job_id and a patch dict with fields to update "
-                    "(name, enabled, cron_expr, timezone, description, wake_offset_seconds, "
-                    "targets, mode, model_name, project_dir, project_id)."
+                    "更新已有定时任务。传入 job_id 与包含待更新字段的 patch 字典"
+                    "（name、enabled、cron_expr、timezone、description、wake_offset_seconds、"
+                    "targets、mode、model_name、project_dir、project_id）。"
                 ),
                 input_params={
                     "type": "object",
@@ -680,10 +847,9 @@ class CronTools:
             make_tool(
                 name="cron_delete_job",
                 description=(
-                    "Delete cron job by id. "
-                    "Note: jobs with protected=true (from cron_list_jobs) are managed by "
-                    "system config and cannot be deleted here; tell the user to toggle the "
-                    "corresponding config switch instead."
+                    "按 id 删除定时任务。"
+                    "注意：protected=true（见 cron_list_jobs）的任务由系统配置管理，"
+                    "不能在此删除；请告知用户去切换相应配置开关。"
                 ),
                 input_params={"type": "object", "properties": {"job_id": {"type": "string"}}, "required": ["job_id"]},
                 func=self.delete_job,
@@ -691,9 +857,8 @@ class CronTools:
             make_tool(
                 name="cron_toggle_job",
                 description=(
-                    "Enable or disable cron job. "
-                    "Note: jobs with protected=true cannot be toggled here; they are driven by "
-                    "system config."
+                    "启用或禁用定时任务。"
+                    "注意：protected=true 的任务不能在此启停；它们由系统配置驱动。"
                 ),
                 input_params={
                     "type": "object",
@@ -707,7 +872,7 @@ class CronTools:
             ),
             make_tool(
                 name="cron_preview_job",
-                description="Preview next runs.",
+                description="预览任务接下来若干次计划执行时间。",
                 input_params={
                     "type": "object",
                     "properties": {
@@ -720,7 +885,7 @@ class CronTools:
             ),
             make_tool(
                 name="cron_run_now",
-                description="Trigger run now.",
+                description="立即触发定时任务执行。",
                 input_params={"type": "object", "properties": {"job_id": {"type": "string"}}, "required": ["job_id"]},
                 func=self.run_now,
             ),

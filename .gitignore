@@ -17,11 +17,14 @@ ENV/
 .coverage.*
 coverage.xml
 htmlcov/
+.telemetry-evidence/
 
 # Node.js / Frontend
 **/node_modules/
 dist/
 build/
+# 构建时下载的 Node 运行时缓存（build-macos.sh / build-exe.ps1 用），不入库
+vendor/node/
 coverage/
 jiuwenswarm/channels/web/frontend/logs/
 jiuwenswarm/channels/web/frontend/cd
@@ -92,23 +95,6 @@ packages/jiuwenswarm-tui/jiuwenswarm_tui/resources/tui-bin/
 
 .crossnote/
 .trae/
-.reasonix/
-reasonix.toml
 
-# Benchmark & evolution artifacts
-benchmark/report/
-benchmark/__pycache__/
-benchmark/skills/**/.DS_Store
-benchmark/skills/**/__pycache__/
-ai/trace*.json
-ai/trace*.txt
-ai/evolve.html
-evolve-draft.md
-traces.db
-
-# 本地工具检索测试脚本/报告（仅本地用，不进 PR）
-cn_recall_test.py
-dynamic_register_test.py
-scale_test.py
-v3_real_eval.py
-测试.md
+# Build-time Node runtime cache used by packaging scripts.
+vendor/node/

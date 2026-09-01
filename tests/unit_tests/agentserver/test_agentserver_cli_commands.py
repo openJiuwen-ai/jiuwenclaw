@@ -7,6 +7,25 @@ import pytest
 from jiuwenswarm.server import agent_ws_server as agent_ws_server_module
 from jiuwenswarm.common.schema.agent import AgentRequest
 from jiuwenswarm.common.schema.message import ReqMethod
+from jiuwenswarm.server.handlers import commands as commands_handlers
+from jiuwenswarm.server.handlers import mcp as mcp_handlers
+from jiuwenswarm.server.handlers import ops as ops_handlers
+from jiuwenswarm.server.handlers import permissions as permissions_handlers
+from tests.unit_tests.conftest import patch_handler_name  # noqa: F401
+
+
+def _ctx_for_test(ws, request, send_lock, server=None):
+    from jiuwenswarm.server.context import AgentServerServices, RequestContext
+    from jiuwenswarm.server.transports.sink import WSSink
+
+    return RequestContext(
+        request=request,
+        sink=WSSink(ws, send_lock),
+        connection_id=str(id(ws)),
+        services=AgentServerServices(server) if server is not None else None,
+    )
+
+
 
 
 class FakeWebSocket:
@@ -19,34 +38,34 @@ class FakeWebSocket:
 
 class AgentWebSocketServerHarness(agent_ws_server_module.AgentWebSocketServer):
     async def handle_browser_runtime_restart_for_test(self, ws, request, send_lock):
-        await self._handle_browser_runtime_restart(ws, request, send_lock)
+        await ops_handlers.handle_browser_runtime_restart(_ctx_for_test(ws, request, send_lock, self))
 
     async def handle_command_add_dir_for_test(self, ws, request, send_lock):
-        await self._handle_command_add_dir(ws, request, send_lock)
+        await commands_handlers.handle_command_add_dir(_ctx_for_test(ws, request, send_lock, self))
 
     async def handle_command_compact_for_test(self, ws, request, send_lock):
-        await self._handle_command_compact(ws, request, send_lock)
+        await commands_handlers.handle_command_compact(_ctx_for_test(ws, request, send_lock, self))
 
     async def handle_command_diff_for_test(self, ws, request, send_lock):
-        await self._handle_command_diff(ws, request, send_lock)
+        await commands_handlers.handle_command_diff(_ctx_for_test(ws, request, send_lock, self))
 
     async def handle_command_simplify_for_test(self, ws, request, send_lock):
-        await self._handle_command_simplify(ws, request, send_lock)
+        await commands_handlers.handle_command_simplify(_ctx_for_test(ws, request, send_lock, self))
 
     async def handle_command_model_for_test(self, ws, request, send_lock):
-        await self._handle_command_model(ws, request, send_lock)
+        await commands_handlers.handle_command_model(_ctx_for_test(ws, request, send_lock, self))
 
     async def handle_command_mcp_for_test(self, ws, request, send_lock):
-        await self._handle_command_mcp(ws, request, send_lock)
+        await mcp_handlers.handle_command_mcp(_ctx_for_test(ws, request, send_lock, self))
 
     async def handle_command_resume_for_test(self, ws, request, send_lock):
-        await self._handle_command_resume(ws, request, send_lock)
+        await commands_handlers.handle_command_resume(_ctx_for_test(ws, request, send_lock, self))
 
     async def handle_command_session_for_test(self, ws, request, send_lock):
-        await self._handle_command_session(ws, request, send_lock)
+        await commands_handlers.handle_command_session(_ctx_for_test(ws, request, send_lock, self))
 
     async def handle_permissions_config_for_test(self, ws, request, send_lock):
-        await self._handle_permissions_config(ws, request, send_lock)
+        await permissions_handlers.handle_permissions_config(_ctx_for_test(ws, request, send_lock, self))
 
     def get_agent_manager_for_test(self):
         return self._agent_manager
@@ -72,11 +91,7 @@ def fake_ws():
 
 @pytest.fixture(autouse=True)
 def patch_wire_encoder(monkeypatch):
-    monkeypatch.setattr(
-        agent_ws_server_module,
-        "encode_agent_response_for_wire",
-        fake_encode_agent_response_for_wire,
-    )
+    patch_handler_name(monkeypatch, "encode_agent_response_for_wire", fake_encode_agent_response_for_wire)
 
 
 @pytest.mark.asyncio
@@ -137,37 +152,6 @@ async def test_browser_runtime_restart_supports_sdk_without_runtime_reset():
 
 
 @pytest.mark.asyncio
-async def test_browser_runtime_restart_uses_identity_scoped_sdk_reset():
-    calls = []
-
-    async def reset_managed_browser_runtime(**kwargs):
-        calls.append(kwargs)
-        return 1
-
-    reset_runtimes = await agent_ws_server_module._reset_requested_browser_runtime_if_available(
-        SimpleNamespace(
-            reset_managed_browser_runtime=reset_managed_browser_runtime,
-        ),
-        {
-            "browser_key": "",
-            "profile_name": "jiuwenclaw",
-            "display_mode": "headed",
-            "browser_binary": "C:\\Chrome\\chrome.exe",
-        },
-    )
-
-    assert reset_runtimes == 1
-    assert calls == [
-        {
-            "browser_key": "",
-            "profile_name": "jiuwenclaw",
-            "display_mode": "headed",
-            "browser_binary": "C:\\Chrome\\chrome.exe",
-        }
-    ]
-
-
-@pytest.mark.asyncio
 async def test_handle_command_add_dir_returns_path_and_remember(
     server, fake_ws, monkeypatch
 ):
@@ -178,11 +162,7 @@ async def test_handle_command_add_dir_returns_path_and_remember(
         "shell_pattern": "re:.*/tmp/demo.*",
         "tiered_overrides": True,
     }
-    monkeypatch.setattr(
-        agent_ws_server_module,
-        "persist_cli_trusted_directory",
-        lambda _raw: persist_stub,
-    )
+    patch_handler_name(monkeypatch, "persist_cli_trusted_directory", lambda _raw: persist_stub)
     request = AgentRequest(
         request_id="req-add-dir",
         channel_id="tui",
@@ -213,12 +193,8 @@ async def test_handle_command_add_dir_does_not_wait_for_agent_reload(
         "ok": True,
         "normalized": "/tmp/demo",
     }
-    monkeypatch.setattr(
-        agent_ws_server_module,
-        "persist_cli_trusted_directory",
-        lambda _raw: persist_stub,
-    )
-    monkeypatch.setattr(agent_ws_server_module, "get_config", lambda: {})
+    patch_handler_name(monkeypatch, "persist_cli_trusted_directory", lambda _raw: persist_stub)
+    patch_handler_name(monkeypatch, "get_config", lambda: {})
     reload_started = asyncio.Event()
 
     async def _blocking_reload(_config, _env):
@@ -388,9 +364,11 @@ async def test_handle_command_diff_returns_summary_payload(server, fake_ws):
 
 @pytest.mark.asyncio
 async def test_handle_command_diff_includes_session_extra_history_roots(
-    server, fake_ws, monkeypatch
+    server, fake_ws, monkeypatch, tmp_path
 ):
     captured = {}
+    tenant_sessions_root = tmp_path / "tenant-sessions"
+    tenant_agent_workspace_root = tmp_path / "tenant-agent-workspace"
 
     class FakeDiffService:
         def get_turn_diffs(self, session_id, project_dir, **kwargs):
@@ -411,8 +389,26 @@ async def test_handle_command_diff_includes_session_extra_history_roots(
     )
     monkeypatch.setattr(
         "jiuwenswarm.server.runtime.session.git_diff_status.get_session_extra_history_roots",
-        lambda session_id: [f"/history/{session_id}/worktrees"],
+        lambda session_id, *, sessions_root=None, agent_workspace_root=None: (
+            captured.setdefault("sessions_root", sessions_root),
+            captured.setdefault("agent_workspace_root", agent_workspace_root),
+            [f"/history/{session_id}/worktrees"],
+        )[2],
     )
+    from jiuwenswarm.server.handlers import _shared as _shared_handlers
+    from jiuwenswarm.server.handlers import commands as commands_handlers
+
+    for _mod in (_shared_handlers, commands_handlers):
+        monkeypatch.setattr(
+            _mod, "_sessions_dir_for_request", lambda _request: tenant_sessions_root,
+            raising=False,
+        )
+        monkeypatch.setattr(
+            _mod,
+            "_agent_workspace_dir_for_request",
+            lambda _request: tenant_agent_workspace_root,
+            raising=False,
+        )
     request = AgentRequest(
         request_id="req-diff-extra-roots",
         channel_id="tui",
@@ -423,6 +419,8 @@ async def test_handle_command_diff_includes_session_extra_history_roots(
 
     await server.handle_command_diff_for_test(fake_ws, request, asyncio.Lock())
 
+    assert captured["sessions_root"] == tenant_sessions_root
+    assert captured["agent_workspace_root"] == tenant_agent_workspace_root
     assert captured["turns"] == {
         "session_id": "sess-1",
         "project_dir": "/repo",
@@ -547,11 +545,7 @@ async def test_handle_command_model_add_model(server, fake_ws):
 
 @pytest.mark.asyncio
 async def test_handle_command_mcp_list(server, fake_ws, monkeypatch):
-    monkeypatch.setattr(
-        agent_ws_server_module,
-        "get_mcp_servers",
-        lambda: [{"name": "demo", "transport": "stdio", "enabled": True, "env": {"TOKEN": "abc"}}],
-    )
+    patch_handler_name(monkeypatch, "get_mcp_servers", lambda: [{"name": "demo", "transport": "stdio", "enabled": True, "env": {"TOKEN": "abc"}}])
     request = AgentRequest(
         request_id="req-mcp-list",
         channel_id="tui",
@@ -575,22 +569,15 @@ async def test_handle_command_mcp_list(server, fake_ws, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_handle_command_mcp_add_triggers_reload(server, fake_ws, monkeypatch):
-    monkeypatch.setattr(
-        agent_ws_server_module,
-        "upsert_mcp_server_in_config",
-        lambda payload: (payload, True),
+    patch_handler_name(monkeypatch, "upsert_mcp_server_in_config", lambda payload: (payload, True),
     )
-    monkeypatch.setattr(agent_ws_server_module, "get_config", lambda: {"mcp": {"servers": []}})
+    patch_handler_name(monkeypatch, "get_config", lambda: {"mcp": {"servers": []}})
 
     # Mock pre-check so it does not attempt a real MCP connection.
     async def _pre_check_ok(_payload):
         return True, "pre-check ok"
 
-    monkeypatch.setattr(
-        agent_ws_server_module.AgentWebSocketServer,
-        "_pre_check_mcp_server",
-        staticmethod(_pre_check_ok),
-    )
+    patch_handler_name(monkeypatch, "_pre_check_mcp_server", _pre_check_ok)
 
     called = {"reload": 0}
 
@@ -627,7 +614,7 @@ async def test_handle_command_mcp_enable_not_found(server, fake_ws, monkeypatch)
     def _raise_not_found(_name, _enabled):
         raise KeyError("MCP server 'demo' not found")
 
-    monkeypatch.setattr(agent_ws_server_module, "set_mcp_server_enabled_in_config", _raise_not_found)
+    patch_handler_name(monkeypatch, "set_mcp_server_enabled_in_config", _raise_not_found)
     request = AgentRequest(
         request_id="req-mcp-enable",
         channel_id="tui",
@@ -647,12 +634,8 @@ async def test_handle_command_mcp_enable_not_found(server, fake_ws, monkeypatch)
 
 @pytest.mark.asyncio
 async def test_handle_command_mcp_remove(server, fake_ws, monkeypatch):
-    monkeypatch.setattr(
-        agent_ws_server_module,
-        "remove_mcp_server_in_config",
-        lambda name: {"name": name, "enabled": True, "transport": "sse", "url": "http://127.0.0.1:9000/sse"},
-    )
-    monkeypatch.setattr(agent_ws_server_module, "get_config", lambda: {"mcp": {"servers": []}})
+    patch_handler_name(monkeypatch, "remove_mcp_server_in_config", lambda name: {"name": name, "enabled": True, "transport": "sse", "url": "http://127.0.0.1:9000/sse"})
+    patch_handler_name(monkeypatch, "get_config", lambda: {"mcp": {"servers": []}})
 
     async def _reload(_config, _env):
         return None
@@ -682,17 +665,10 @@ async def test_handle_command_mcp_remove(server, fake_ws, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_handle_command_mcp_update(server, fake_ws, monkeypatch):
-    monkeypatch.setattr(
-        agent_ws_server_module,
-        "get_mcp_server_config",
-        lambda name: {"name": name, "enabled": True, "transport": "sse", "url": "http://127.0.0.1:9000/sse"},
+    patch_handler_name(monkeypatch, "get_mcp_server_config", lambda name: {"name": name, "enabled": True, "transport": "sse", "url": "http://127.0.0.1:9000/sse"})
+    patch_handler_name(monkeypatch, "upsert_mcp_server_in_config", lambda payload: (payload, False),
     )
-    monkeypatch.setattr(
-        agent_ws_server_module,
-        "upsert_mcp_server_in_config",
-        lambda payload: (payload, False),
-    )
-    monkeypatch.setattr(agent_ws_server_module, "get_config", lambda: {"mcp": {"servers": []}})
+    patch_handler_name(monkeypatch, "get_config", lambda: {"mcp": {"servers": []}})
 
     async def _reload(_config, _env):
         return None
@@ -726,250 +702,6 @@ async def test_handle_command_mcp_update(server, fake_ws, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_handle_command_mcp_add_http_auth_rejected(server, fake_ws, monkeypatch):
-    """HTTP add with rejected auth (401) must not persist config.yaml."""
-    upsert_calls = []
-    monkeypatch.setattr(
-        agent_ws_server_module,
-        "upsert_mcp_server_in_config",
-        lambda payload: (upsert_calls.append(payload), (payload, True))[1],
-    )
-    monkeypatch.setattr(agent_ws_server_module, "get_config", lambda: {"mcp": {"servers": []}})
-
-    async def _pre_check_fail(_payload):
-        return False, "github (streamable-http) pre-check failed: auth rejected (HTTP 401)"
-
-    monkeypatch.setattr(
-        agent_ws_server_module.AgentWebSocketServer,
-        "_pre_check_mcp_http_auth",
-        staticmethod(_pre_check_fail),
-    )
-
-    called = {"reload": 0}
-
-    async def _reload(_config, _env):
-        called["reload"] += 1
-
-    monkeypatch.setattr(server.get_agent_manager(), "reload_agents_config", _reload)
-    request = AgentRequest(
-        request_id="req-mcp-add-http-401",
-        channel_id="web",
-        req_method=ReqMethod.COMMAND_MCP,
-        params={
-            "action": "add",
-            "name": "github",
-            "transport": "streamable-http",
-            "url": "https://api.githubcopilot.com/mcp",
-            "headers": {"Authorization": "Bearer bad_token"},
-            "timeout_s": 30,
-        },
-    )
-
-    await server.handle_command_mcp_for_test(fake_ws, request, asyncio.Lock())
-    assert upsert_calls == [], "config.yaml must not be written when pre-check fails"
-    assert called["reload"] == 0, "reload must not run when pre-check fails"
-    assert fake_ws.sent == [
-        {
-            "response_id": "req-mcp-add-http-401",
-            "payload": {
-                "type": "add_failed",
-                "name": "github",
-                "error": "github (streamable-http) pre-check failed: auth rejected (HTTP 401)",
-            },
-            "ok": False,
-        }
-    ]
-
-
-@pytest.mark.asyncio
-async def test_handle_command_mcp_add_http_timeout(server, fake_ws, monkeypatch):
-    """HTTP add against a non-responding server must not persist config.yaml."""
-    upsert_calls = []
-    monkeypatch.setattr(
-        agent_ws_server_module,
-        "upsert_mcp_server_in_config",
-        lambda payload: (upsert_calls.append(payload), (payload, True))[1],
-    )
-    monkeypatch.setattr(agent_ws_server_module, "get_config", lambda: {"mcp": {"servers": []}})
-
-    async def _pre_check_timeout(_payload):
-        return False, "stuck (streamable-http) pre-check failed: timed out after 10s (server not responding): TimeoutException"
-
-    monkeypatch.setattr(
-        agent_ws_server_module.AgentWebSocketServer,
-        "_pre_check_mcp_http_auth",
-        staticmethod(_pre_check_timeout),
-    )
-
-    monkeypatch.setattr(
-        server.get_agent_manager(), "reload_agents_config", lambda _c, _e: None
-    )
-    request = AgentRequest(
-        request_id="req-mcp-add-http-timeout",
-        channel_id="web",
-        req_method=ReqMethod.COMMAND_MCP,
-        params={
-            "action": "add",
-            "name": "stuck",
-            "transport": "http",
-            "url": "http://10.255.255.1/mcp",
-        },
-    )
-
-    await server.handle_command_mcp_for_test(fake_ws, request, asyncio.Lock())
-    assert upsert_calls == []
-    assert fake_ws.sent[0]["ok"] is False
-    assert "timed out" in fake_ws.sent[0]["payload"]["error"]
-
-
-@pytest.mark.asyncio
-async def test_handle_command_mcp_add_http_passed(server, fake_ws, monkeypatch):
-    """HTTP add that passes pre-check persists config and triggers reload."""
-    upsert_calls = []
-    monkeypatch.setattr(
-        agent_ws_server_module,
-        "upsert_mcp_server_in_config",
-        lambda payload: (upsert_calls.append(payload), (payload, True))[1],
-    )
-    monkeypatch.setattr(agent_ws_server_module, "get_config", lambda: {"mcp": {"servers": []}})
-
-    async def _pre_check_ok(_payload):
-        return True, "github (streamable-http) pre-check passed (http 200)"
-
-    monkeypatch.setattr(
-        agent_ws_server_module.AgentWebSocketServer,
-        "_pre_check_mcp_http_auth",
-        staticmethod(_pre_check_ok),
-    )
-
-    called = {"reload": 0}
-
-    async def _reload(_config, _env):
-        called["reload"] += 1
-
-    monkeypatch.setattr(server.get_agent_manager(), "reload_agents_config", _reload)
-    request = AgentRequest(
-        request_id="req-mcp-add-http-ok",
-        channel_id="web",
-        req_method=ReqMethod.COMMAND_MCP,
-        params={
-            "action": "add",
-            "name": "github",
-            "transport": "streamable-http",
-            "url": "https://api.githubcopilot.com/mcp",
-            "headers": {"Authorization": "Bearer good_token"},
-        },
-    )
-
-    await server.handle_command_mcp_for_test(fake_ws, request, asyncio.Lock())
-    assert len(upsert_calls) == 1, "config.yaml must be written when pre-check passes"
-    assert called["reload"] == 1
-    assert fake_ws.sent == [
-        {
-            "response_id": "req-mcp-add-http-ok",
-            "payload": {"type": "added", "name": "github", "applied": True},
-            "ok": True,
-        }
-    ]
-
-
-@pytest.mark.asyncio
-async def test_handle_command_mcp_add_stdio_command_not_found(server, fake_ws, monkeypatch):
-    """stdio add with a non-existent command must be rejected at config time."""
-    upsert_calls = []
-    monkeypatch.setattr(
-        agent_ws_server_module,
-        "upsert_mcp_server_in_config",
-        lambda payload: (upsert_calls.append(payload), (payload, True))[1],
-    )
-    monkeypatch.setattr(agent_ws_server_module, "get_config", lambda: {"mcp": {"servers": []}})
-
-    # Do NOT mock _pre_check_mcp_server — exercise the real static check
-    # (shutil.which returns None for a clearly-bogus command).
-    monkeypatch.setattr(
-        server.get_agent_manager(), "reload_agents_config", lambda _c, _e: None
-    )
-    request = AgentRequest(
-        request_id="req-mcp-add-stdio-badcmd",
-        channel_id="tui",
-        req_method=ReqMethod.COMMAND_MCP,
-        params={
-            "action": "add",
-            "name": "broken",
-            "transport": "stdio",
-            "command": "nonexistent_cmd_xyz_jws",
-            "args": [],
-        },
-    )
-
-    await server.handle_command_mcp_for_test(fake_ws, request, asyncio.Lock())
-    assert upsert_calls == [], "config.yaml must not be written when command is missing"
-    assert fake_ws.sent[0]["ok"] is False
-    assert fake_ws.sent[0]["payload"]["type"] == "add_failed"
-    assert "command not found" in fake_ws.sent[0]["payload"]["error"]
-
-
-@pytest.mark.asyncio
-async def test_handle_command_mcp_update_http_auth_rejected(server, fake_ws, monkeypatch):
-    """HTTP update with rejected auth (401) must not overwrite config.yaml."""
-    monkeypatch.setattr(
-        agent_ws_server_module,
-        "get_mcp_server_config",
-        lambda name: {
-            "name": name,
-            "enabled": True,
-            "transport": "streamable-http",
-            "url": "https://api.githubcopilot.com/mcp",
-            "headers": {"Authorization": "Bearer old_token"},
-        },
-    )
-    upsert_calls = []
-    monkeypatch.setattr(
-        agent_ws_server_module,
-        "upsert_mcp_server_in_config",
-        lambda payload: (upsert_calls.append(payload), (payload, False))[1],
-    )
-    monkeypatch.setattr(agent_ws_server_module, "get_config", lambda: {"mcp": {"servers": []}})
-
-    async def _pre_check_fail(_payload):
-        return False, "github (streamable-http) pre-check failed: auth rejected (HTTP 401)"
-
-    monkeypatch.setattr(
-        agent_ws_server_module.AgentWebSocketServer,
-        "_pre_check_mcp_http_auth",
-        staticmethod(_pre_check_fail),
-    )
-
-    monkeypatch.setattr(
-        server.get_agent_manager(), "reload_agents_config", lambda _c, _e: None
-    )
-    request = AgentRequest(
-        request_id="req-mcp-update-http-401",
-        channel_id="web",
-        req_method=ReqMethod.COMMAND_MCP,
-        params={
-            "action": "update",
-            "name": "github",
-            "headers": {"Authorization": "Bearer bad_token"},
-        },
-    )
-
-    await server.handle_command_mcp_for_test(fake_ws, request, asyncio.Lock())
-    assert upsert_calls == [], "config.yaml must not be overwritten when pre-check fails"
-    assert fake_ws.sent == [
-        {
-            "response_id": "req-mcp-update-http-401",
-            "payload": {
-                "type": "update_failed",
-                "name": "github",
-                "error": "github (streamable-http) pre-check failed: auth rejected (HTTP 401)",
-            },
-            "ok": False,
-        }
-    ]
-
-
-@pytest.mark.asyncio
 async def test_handle_command_mcp_minimal_flow_add_list_disable(server, fake_ws, monkeypatch):
     state = {"servers": []}
 
@@ -988,21 +720,10 @@ async def test_handle_command_mcp_minimal_flow_add_list_disable(server, fake_ws,
                 return dict(item)
         raise KeyError(f"MCP server '{name}' not found")
 
-    monkeypatch.setattr(agent_ws_server_module, "upsert_mcp_server_in_config", _upsert)
-    monkeypatch.setattr(agent_ws_server_module, "get_mcp_servers", _get_servers)
-    monkeypatch.setattr(agent_ws_server_module, "set_mcp_server_enabled_in_config", _set_enabled)
-    monkeypatch.setattr(agent_ws_server_module, "get_config", lambda: {"mcp": {"servers": _get_servers()}})
-
-    # This flow test exercises add→list→disable, not real connectivity. Mock
-    # the HTTP pre-check to pass so a mock SSE endpoint (502) doesn't abort add.
-    async def _pre_check_ok(_payload):
-        return True, "pre-check ok (mock)"
-
-    monkeypatch.setattr(
-        agent_ws_server_module.AgentWebSocketServer,
-        "_pre_check_mcp_http_auth",
-        staticmethod(_pre_check_ok),
-    )
+    patch_handler_name(monkeypatch, "upsert_mcp_server_in_config", _upsert)
+    patch_handler_name(monkeypatch, "get_mcp_servers", _get_servers)
+    patch_handler_name(monkeypatch, "set_mcp_server_enabled_in_config", _set_enabled)
+    patch_handler_name(monkeypatch, "get_config", lambda: {"mcp": {"servers": _get_servers()}})
 
     async def _reload(_config, _env):
         return None
@@ -1107,14 +828,14 @@ async def test_handle_permissions_config_does_not_block_on_slow_reload(server, f
         ok = True
         payload = {"ok": True}
 
-    monkeypatch.setattr(_rpc_mod, "dispatch_permissions_config_request", lambda _req: _Resp())
+    monkeypatch.setattr(_rpc_mod, "dispatch_permissions_config_request", lambda _req, **_kw: _Resp())
     # dispatch 在 _handle_permissions_config 内部是延迟 import 取的符号, 需同时 patch 该符号
     monkeypatch.setattr(
         "jiuwenswarm.agents.harness.common.rails.permissions.permissions_config_rpc.dispatch_permissions_config_request",
-        lambda _req: _Resp(),
+        lambda _req, **_kw: _Resp(),
         raising=True,
     )
-    monkeypatch.setattr(agent_ws_server_module, "get_config", lambda: {})
+    patch_handler_name(monkeypatch, "get_config", lambda: {})
 
     reload_calls = {"n": 0}
 

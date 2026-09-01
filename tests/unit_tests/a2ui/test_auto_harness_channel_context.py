@@ -46,6 +46,7 @@ async def test_auto_harness_syncs_tui_channel_before_service(monkeypatch):
     adapter._parent_session_id = None
     adapter._auto_harness_service = _FakeAutoHarnessService()
     adapter._stream_event_rail = None
+    adapter._deepresearch_rewrite_tx_uncertain = False
 
     captured = {}
 
@@ -103,8 +104,8 @@ async def test_runtime_config_syncs_channel_and_task_workspace(monkeypatch):
     adapter._project_dir = None
     adapter._workspace_dir = "/tmp"
     adapter._runtime_prompt_rail = None
-    adapter._circuit_breaker_rail = None
-    adapter._subagent_rail = None
+    adapter._stream_event_rail = None
+    adapter._permission_rail = None
 
     captured = {}
 

@@ -24,6 +24,12 @@ logger = logging.getLogger(__name__)
 _GROUP_CHAT_MODE: contextvars.ContextVar[bool] = contextvars.ContextVar(
     "group_chat_mode", default=False,
 )
+_MEMORY_WORKSPACE_CV: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "memory_workspace_dir", default=None
+)
+_MEMORY_AGENT_ID_CV: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "memory_agent_id", default=None
+)
 
 
 def set_group_chat_mode(enabled: bool) -> contextvars.Token:
@@ -32,6 +38,39 @@ def set_group_chat_mode(enabled: bool) -> contextvars.Token:
 
 def is_group_chat_mode() -> bool:
     return _GROUP_CHAT_MODE.get()
+
+
+def bind_memory_workspace_dir(path: str) -> contextvars.Token:
+    return _MEMORY_WORKSPACE_CV.set(path)
+
+
+def reset_memory_workspace_dir(token: contextvars.Token) -> None:
+    _MEMORY_WORKSPACE_CV.reset(token)
+
+
+def bind_memory_agent_id(agent_id: str) -> contextvars.Token:
+    aid = str(agent_id).strip()
+    if not aid:
+        raise ValueError("memory agent_id must be a non-empty string")
+    return _MEMORY_AGENT_ID_CV.set(aid)
+
+
+def reset_memory_agent_id(token: contextvars.Token) -> None:
+    _MEMORY_AGENT_ID_CV.reset(token)
+
+
+def _effective_memory_workspace_dir() -> str:
+    bound = _MEMORY_WORKSPACE_CV.get()
+    if bound:
+        return bound
+    return _global_workspace_dir or DEFAULT_WORKSPACE_DIR
+
+
+def _effective_memory_agent_id() -> str:
+    bound = _MEMORY_AGENT_ID_CV.get()
+    if bound:
+        return bound
+    return _global_agent_id
 
 
 _global_manager: Optional[MemoryIndexManager] = None
@@ -117,7 +156,8 @@ async def init_memory_manager_async(
         logger.info("Memory system is disabled")
         return None
     
-    if _global_manager is not None and _global_workspace_dir == workspace_dir:
+    effective_ws = _effective_memory_workspace_dir()
+    if _global_manager is not None and effective_ws == workspace_dir:
         return _global_manager
     
     settings = create_memory_settings(workspace_dir)
@@ -151,11 +191,12 @@ async def _ensure_global_manager() -> bool:
         return True
     
     try:
-        workspace_dir = _global_workspace_dir or DEFAULT_WORKSPACE_DIR
+        workspace_dir = _effective_memory_workspace_dir()
+        agent_id = _effective_memory_agent_id()
         _global_settings = _global_settings or create_memory_settings(workspace_dir=workspace_dir)
         _global_manager = await MemoryIndexManager.get(
-            agent_id=_global_agent_id,
-            workspace_dir=_global_workspace_dir,
+            agent_id=agent_id,
+            workspace_dir=workspace_dir,
             settings=_global_settings
         )
         return True
@@ -306,16 +347,6 @@ async def write_memory(
     """
     if is_group_chat_mode():
         return {"success": False, "error": "群聊模式下禁止写入记忆文件"}
-    from jiuwenswarm.agents.harness.common.memory.forbidden import (
-        contains_forbidden_memory_content,
-    )
-
-    if contains_forbidden_memory_content(content):
-        return {
-            "success": False,
-            "path": path,
-            "error": "检测到敏感信息，已阻止写入记忆；请删除或脱敏后再保存",
-        }
     try:
         is_valid, result = _validate_memory_path(path)
         if not is_valid:
@@ -377,16 +408,6 @@ async def edit_memory(
     """
     if is_group_chat_mode():
         return {"success": False, "error": "群聊模式下禁止编辑记忆文件"}
-    from jiuwenswarm.agents.harness.common.memory.forbidden import (
-        contains_forbidden_memory_content,
-    )
-
-    if contains_forbidden_memory_content(newText):
-        return {
-            "success": False,
-            "path": path,
-            "error": "检测到敏感信息，已阻止写入记忆；请删除或脱敏后再保存",
-        }
     try:
         is_valid, result = _validate_memory_path(path)
         if not is_valid:

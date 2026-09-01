@@ -93,7 +93,7 @@ Switches secondary style within the current primary mode, more concise than `/mo
 | `/switch normal` | Not supported | → `code.normal` |
 | `/switch team` | Not supported | → `code.team` |
 
-> This section describes the Gateway-controlled `/switch` command used by IM channels. The TUI has a different, conditionally registered command with the same name: when launched under `agentos-tui` supervision (`AGENTOS_TUI_SUPERVISED=1`), `/switch claude` hands the current task off to the Claude TUI and `/switch list` shows available handoff targets. A standalone TUI does not register that handoff command. In TUI, use `/mode ...` or `/plan` for mode switching.
+> The TUI source contains a `/switch` implementation, but the default TUI command registry does not currently register it. In TUI, prefer `/mode ...` or `/plan` for sub-mode switching.
 
 **Usage**
 
@@ -181,27 +181,24 @@ Cancel operation:
 
 ---
 
-### 7. TUI: `/workspace` — Project Scope and Trusted Directories
+### 7. TUI: `/workspace_dir` — Workspace Path for Outbound Requests
 
 **Scope:** Terminal UI (`jiuwenswarm-tui`) only; parsed locally, not by the Gateway control pipeline.
 
 **Behavior**
 
-- **`/workspace`** or **`/workspace get`**: show the system workspace, current project scope, and trusted directories for that project.
-- **`/workspace add [path]`**: add a trusted directory; defaults to the current directory.
-- **`/workspace set <path>`**: switch the in-process project scope to `<path>` and add it to that project's trusted directories. Example: `/workspace set C:\Projects\my-app`.
-- **`/workspace remove <path>`**: remove a trusted directory from the current project.
-- **`/workspace clear`**: clear trusted directories for the current project and fall back to the system workspace.
-- Aliases: **`/workspace_dir`**, **`/workspace-dir`**.
+- **`/workspace_dir`** or **`/workspace_dir get`**: show the saved workspace directory (if any).
+- **`/workspace_dir set <path>`**: save a path (spaces allowed). Example: `/workspace_dir set C:\Projects\my-app`
+- **`/workspace_dir clear`**: clear the saved value.
+- Alias: **`/workspace-dir`**.
 
 **Persistence**
 
-- Trusted directories are stored per project in **`~/.jiuwenswarm-tui/config.json`** under `trustedDirs`.
-- The project-scope override selected by `/workspace set` lasts only for the current TUI process; after restart, the scope is derived from the launch directory again.
+- Stored as a single-line file: **`~/.jiuwenswarm/tui-workspace-dir`**.
 
 **Gateway / Agent**
 
-- TUI includes the current **`trusted_dirs`**, **`project_dir`**, and **`cwd`** in WebSocket request parameters. Gateway and AgentServer use them for project identity, runtime context, and file-access policy.
+- When a non-empty path is set, TUI includes **`workspace_dir`** in the WebSocket **`params`** for fire-and-forget requests built by `sendEventOnly` (e.g. `chat.send`), so Gateway and AgentServer can read it from `Message.params` / `AgentRequest.params`. Downstream usage depends on the agent and extensions.
 
 ---
 

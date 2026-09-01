@@ -12,13 +12,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-import requests
 from openjiuwen.core.foundation.tool import tool
 
 from jiuwenswarm.common.config import get_config
-from jiuwenswarm.common.utils import env_url, get_config_file
+from jiuwenswarm.common.utils import get_config_file
 from jiuwenswarm.agents.harness.common.tools.multimodal_config import apply_video_model_config_from_yaml
 from jiuwenswarm.agents.harness.common.tools.ssl_config import get_requests_verify
+from jiuwenswarm.common.http_proxy_config import requests_post
+from jiuwenswarm.common.local_env_config import get_local_config
 
 
 logger = logging.getLogger(__name__)
@@ -67,14 +68,9 @@ class VideoUnderstandingRequest:
     thinking_enabled: bool = False
 
 
-def _http_post(url: str, **kwargs) -> requests.Response:
+def _http_post(url: str, **kwargs) -> Any:
     kwargs.setdefault("verify", get_requests_verify())
-    try:
-        return requests.post(url, **kwargs)
-    except requests.exceptions.ProxyError:
-        with requests.Session() as session:
-            session.trust_env = False
-            return session.post(url, **kwargs)
+    return requests_post(url, **kwargs)
 
 
 def _guess_video_mime(path: str) -> str:
@@ -129,7 +125,7 @@ def _extract_answer(data: dict[str, Any]) -> str:
 def _normalize_request(inputs: dict[str, Any]) -> VideoUnderstandingRequest:
     query = str(inputs.get("query", "") or "").strip()
     video_path = str(inputs.get("video_path", "") or "").strip()
-    default_model = (os.environ.get("VIDEO_MODEL_NAME") or "glm-4.6v").strip() or "glm-4.6v"
+    default_model = (str(get_local_config("VIDEO_MODEL_NAME", "") or "") or "glm-4.6v").strip() or "glm-4.6v"
     model = str(inputs.get("model", default_model) or default_model).strip()
     timeout_seconds = max(10, min(int(inputs.get("timeout_seconds", 120)), 600))
     max_tokens = max(128, min(int(inputs.get("max_tokens", 2048)), 8192))
@@ -156,8 +152,8 @@ def _resolve_chat_completions_url(base: str) -> str:
 
 
 def _glm_video_understanding_sync(req: VideoUnderstandingRequest) -> str:
-    yaml_key = os.environ.get("VIDEO_API_KEY", "").strip()
-    yaml_base = os.environ.get("VIDEO_API_BASE", "").strip()
+    yaml_key = str(get_local_config("VIDEO_API_KEY", "") or "").strip()
+    yaml_base = str(get_local_config("VIDEO_API_BASE", "") or "").strip()
     
     if yaml_key and yaml_base:
         api_key = yaml_key
@@ -165,13 +161,19 @@ def _glm_video_understanding_sync(req: VideoUnderstandingRequest) -> str:
     elif yaml_key and not yaml_base:
         raise ValueError("VIDEO_API_BASE is required when VIDEO_API_KEY is set.")
     else:
-        api_key = os.environ.get("ZHIPU_API_KEY", "").strip()
+        api_key = str(get_local_config("ZHIPU_API_KEY", "") or "").strip()
         if not api_key:
             raise ValueError(
                 f"No video API credentials. Config file: {get_config_file()}\n"
                 "Set models.video.model_config with api_key and api_base, or set ZHIPU_API_KEY."
             )
-        api_url = env_url("ZHIPU_API_URL", "https://open.bigmodel.cn/api/paas/v4/chat/completions")
+        api_url = str(
+            get_local_config(
+                "ZHIPU_API_URL",
+                "https://open.bigmodel.cn/api/paas/v4/chat/completions",
+            )
+            or "https://open.bigmodel.cn/api/paas/v4/chat/completions"
+        ).strip()
     
     video_url = _video_path_to_url(req.video_path)
     
@@ -210,11 +212,9 @@ def _glm_video_understanding_sync(req: VideoUnderstandingRequest) -> str:
 @tool(
     name="video_understanding",
     description=(
-        "Analyze and understand video content. "
-        "Use this tool when the user provides a video file path (e.g., .mp4, .mov, .avi) "
-        "or video URL and asks questions about the video content, such as describing "
-        "scenes, actions, people, or objects in the video. "
-        "Input: query (question about the video) and video_path (local file path or HTTP/HTTPS URL)."
+        "分析并理解视频内容。用户提供视频文件路径（如 .mp4、.mov、.avi）"
+        "或视频 URL 并询问视频内容时使用，例如描述场景、动作、人物或物体。"
+        "输入：query（关于视频的问题）和 video_path（本地文件路径或 HTTP/HTTPS URL）。"
     ),
 )
 async def video_understanding(inputs: dict[str, Any], **kwargs) -> str:
@@ -228,7 +228,7 @@ async def video_understanding(inputs: dict[str, Any], **kwargs) -> str:
         logger.info(
             "[video_understanding] using model: %s (api_base: %s)",
             req.model, 
-            os.environ.get("VIDEO_API_BASE", "")
+            str(get_local_config("VIDEO_API_BASE", "") or ""),
         )
         return await asyncio.to_thread(_glm_video_understanding_sync, req)
     except Exception as exc:

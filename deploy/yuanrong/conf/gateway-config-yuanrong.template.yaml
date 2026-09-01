@@ -16,7 +16,7 @@ symphony:
   enabled: false
   paths:
     skills_root: ""
-    graph_dir: ""
+    score_dir: ""
 
   fingerprint:
     scan:
@@ -199,7 +199,7 @@ models:
         verify_ssl: false
         custom_headers: {}
       model_config_obj:
-        temperature: 0.95
+        temperature: 0.6
       is_default: true
   video:
       model_client_config:
@@ -210,7 +210,7 @@ models:
         timeout: 1800
         verify_ssl: false
       model_config_obj:
-        temperature: 0.95
+        temperature: 0.6
   audio:
       model_client_config:
         api_base: ${AUDIO_API_BASE}
@@ -220,7 +220,7 @@ models:
         verify_ssl: false
         timeout: 1800
       model_config_obj:
-        temperature: 0.95
+        temperature: 0.6
   vision:
       model_client_config:
         api_base: ${VISION_API_BASE}
@@ -230,7 +230,7 @@ models:
         verify_ssl: false
         timeout: 1800
       model_config_obj:
-        temperature: 0.95
+        temperature: 0.6
   image_gen:
       model_client_config:
         api_base: ${IMAGE_GEN_API_BASE}
@@ -393,8 +393,11 @@ react:
       keep_recent_messages: 4
   # Skills 在线自演进配置
   evolution:
-    skill_evolution: false     # true = 启用技能演进与创建（自动及手动）
-    auto_save: false           # true = 自演进审批无需用户点击自动通过
+    enabled: true             # true = 启用在线 Skills 自演进（挂载后被动扫描始终开启）
+    review_trigger: false      # true = 软触发 review follow-up
+    auto_save: true            # true = 自演进审批无需用户点击自动通过（内部开关）
+    skill_create: false        # true = 注册 SkillCreateRail（单 agent）及 TeamSkillCreateRail（leader）
+    skill_base_dir: "agent/skills"  # Skill 根目录
   a2x_registry:
     base_url: "http://127.0.0.1:8000"
     timeout: 30.0
@@ -410,6 +413,13 @@ react:
     # team.transport.params.bootstrap_direct_addr when available.
     dataset: "team_pool"
     endpoint: ""
+
+  # 同轮多个受控 tool 的批次内并发
+  concurrency:
+    enabled: true
+    tool_limits:
+      web_search: 10
+      task_tool: 10
 
 tools:
   - todo
@@ -488,13 +498,6 @@ gateway:
       port: 2222
       user_template: "yr:instance:{instance}"
       connect_timeout_s: 30
-    # agentos_router.load_router_config 不会解析 ${VAR}，部署时用 <<>> 替换进 yaml。
-    # 部署脚本空值默认 http://<<MASTER_NODE_IP>>:8090；可用 AGENTOS_AUTH_SERVICE_URL 覆盖。
-    auth_service_url: <<AGENTOS_AUTH_SERVICE_URL>>
-    timeout: <<AGENTOS_AUTH_TIMEOUT>>
-    # TUI token 鉴权；本 template 默认开启。true 时创建 AgentOSAuthenticator 校验 TUI 连接。
-    # Web 不挂鉴权 hook（浏览器 WS 无法带 Authorization）。
-    auth_enabled: true
 
 heartbeat:
   # 心跳间隔（秒），默认 3600
@@ -666,15 +669,6 @@ channels:
     listen_port: <<SSH_PORT>>
     host_key_path: ~/.jiuwenswarm/config/ssh_host_key
     relay_timeout_sec: 3600
-    auth:
-      # 公钥认证开关。true 时校验客户端公钥并签发临时密钥；false 为宽松认证。
-      enabled: true
-      # TUI 场景: 临时密钥有效期（秒）
-      ephemeral_key_ttl_sec: 300
-      # 临时密钥类型
-      ephemeral_key_type: "ssh-ed25519"
-      # 过期清理间隔（秒）
-      cleanup_interval_sec: 60
 
 # ========== 细粒度权限管控（tiered_policy）==========
 #
@@ -729,8 +723,7 @@ permissions:
     viking_browse: allow
     viking_remember: allow
     viking_add_resource: allow
-    mcp_free_search: allow
-    mcp_paid_search: allow
+    web_search: allow
     mcp_fetch_webpage: allow
     cron_list_jobs: allow
     cron_get_job: allow
@@ -978,6 +971,16 @@ mcp:
   #       Authorization: Bearer ${MCP_TOKEN}
   #     timeout_s: 30
 
+# Petal search: when true, set PETAL_SEARCH_URL and PETAL_SEARCH_HEADERS in env.
+enable_petal_web_search: true
+
+web_search:
+  timeout_seconds: 30
+  max_results: 8
+  paid_provider_order:
+    - petal
+    - bocha
+
 modes:
   # 一级模式 agent / code / team
   agent:
@@ -1015,9 +1018,8 @@ modes:
     # send_file_to_user 由运行时 _update_session_tools 注册，不在此配置
     # coding_memory_read/write/edit 由 CodingMemoryRail 在 subagent 内部注册，不在此配置
     tools:
-      - web_free_search
+      - web_search
       - web_fetch_webpage
-      - web_paid_search
       - user_todos
       - skill_toolkit
       - skill_retrieval

@@ -11,18 +11,18 @@ from typing import Any
 from openjiuwen.agent_evolving.checkpointing.evolution_store import EvolutionStore
 from openjiuwen.agent_evolving.experience.archive import EvolutionArchivePair, EvolutionArchiveService
 from openjiuwen.agent_evolving.experience.query import ExperienceQueryService
-from openjiuwen.agent_evolving.experience.rebuild import ExperienceRebuildService
 from openjiuwen.harness.rails.evolution.commands import (
     build_evolve_review_command_prompt,
-    build_rebuild_command_prompt,
     build_simplify_command_prompt,
 )
 
 from jiuwenswarm.server.runtime.agent_adapter.evolution_helpers import (
+    filter_evolution_eligible_skill_names,
     validate_evolution_log_writable,
     validate_evolution_skill,
     validate_team_evolution_skill,
 )
+from jiuwenswarm.server.runtime.agent_adapter import evolution_version as evolution_version_ctl
 from jiuwenswarm.server.runtime.skill import filter_visible_skill_names
 
 logger = logging.getLogger(__name__)
@@ -159,7 +159,9 @@ def _format_rollback_usage(
     _ = context
     rollbackable: list[str] = []
     try:
-        skill_names = filter_visible_skill_names(store.list_skill_names())
+        skill_names = filter_evolution_eligible_skill_names(
+            filter_visible_skill_names(store.list_skill_names())
+        )
     except Exception:
         skill_names = []
 
@@ -195,9 +197,11 @@ async def _handle_evolve(
 ) -> dict[str, Any]:
     parts = query.split(maxsplit=2)
     if len(parts) < 2:
-        skill_names = filter_visible_skill_names(store.list_skill_names())
+        skill_names = filter_evolution_eligible_skill_names(
+            filter_visible_skill_names(store.list_skill_names())
+        )
         if not skill_names:
-            return _answer("当前 skills_base_dir 下未找到任何 Skill 目录。")
+            return _answer("当前 skills_base_dir 下未找到可参与自演进的 Skill 目录。")
         summary = await store.list_pending_summary(skill_names)
         return _answer(f"**Skills 演进记录：**\n\n{summary}")
 
@@ -336,9 +340,12 @@ async def _handle_evolve_rebuild(
     store: EvolutionStore,
     context: EvolutionSlashContext,
 ) -> dict[str, Any]:
+    """Parse/validate `/evolve_rebuild`; adapter runs the shared merge pipeline."""
     parts = query.split(maxsplit=2)
-    skill_name = parts[1] if len(parts) > 1 else ""
-    user_intent = parts[2] if len(parts) > 2 else None
+    skill_name = parts[1].strip() if len(parts) > 1 else ""
+    user_intent = parts[2].strip() if len(parts) > 2 else None
+    if user_intent is not None:
+        user_intent = user_intent or None
 
     if not skill_name:
         return _error("请指定 Skill 名称：`/evolve_rebuild <skill_name> [user_intent]`")
@@ -347,39 +354,22 @@ async def _handle_evolve_rebuild(
     validation_error = _validate_skill(
         store,
         skill_name,
-        require_skill_md=False,
+        require_skill_md=True,
         context=context,
         subject=subject,
     )
     if validation_error is not None:
         return _error(validation_error)
+    writable_error = validate_evolution_log_writable(store, skill_name)
+    if writable_error is not None:
+        return _error(writable_error)
 
-    rebuild_service = ExperienceRebuildService(store=store)
-    try:
-        rebuild_context = await rebuild_service.prepare_rebuild_context(
-            subject,
-            user_intent=user_intent,
-        )
-    except Exception as exc:
-        logger.warning("[EvolutionSlash] evolve_rebuild failed: %s", exc)
-        return _error(f"重建失败：{exc}")
-
-    if rebuild_context is None:
-        return _error(f"Skill '{skill_name}' 未生成可执行的重建指令。")
-
-    archive_error = rebuild_context.get("archive_error")
-    if archive_error is not None:
-        return _error(f"重建失败：无法归档 Skill '{skill_name}' 的旧版本：{archive_error}")
-    if not rebuild_context.get("archive_pair"):
-        return _error(f"重建失败：无法归档 Skill '{skill_name}' 的旧版本。")
-
-    prompt = build_rebuild_command_prompt(
-        subject=subject,
-        user_intent=user_intent,
-        rebuild_context=rebuild_context,
-        language=context.language,
-    )
-    return _followup_response("run_rebuild_followup", prompt, skill_name)
+    return {
+        "result_type": "rebuild_request",
+        "action": "run_rebuild_inline",
+        "skill_name": skill_name,
+        "user_intent": user_intent,
+    }
 
 
 async def _handle_evolve_rollback(
@@ -406,39 +396,24 @@ async def _handle_evolve_rollback(
     if validation_error is not None:
         return _error(validation_error)
 
-    subject_kind = str(subject.get("kind") or "skill")
-    pairs = archive_service.list_pairs(skill_name, subject_kind=subject_kind)
-    if not pairs:
-        return _error(f"Skill '{skill_name}' 没有成对归档版本可回滚。")
+    result = await evolution_version_ctl.do_evolve_rollback(
+        store,
+        skill_name,
+        version_raw or None,
+    )
+    if not result.get("ok"):
+        return _error(str(result.get("error") or "回滚失败"))
 
-    if not version_raw:
+    if not result.get("rolled_back"):
+        pairs = result.get("pairs")
+        if not pairs:
+            subject_kind = str(subject.get("kind") or "skill")
+            pairs = archive_service.list_pairs(skill_name, subject_kind=subject_kind)
         return _answer(_format_rollback_versions(skill_name, pairs))
 
-    requested_version = archive_service.normalize_version(version_raw)
-    if requested_version is None:
-        return _error(f"版本 `{version_raw}` 格式无效，请使用短版本号，例如 `{pairs[0].version}`。")
-
-    if requested_version == "latest":
-        pair = pairs[0]
-    else:
-        pair = next((item for item in pairs if item.version == requested_version), None)
-    if pair is None:
-        return _error(f"版本 `{requested_version}` 不存在或归档不成对。")
-
-    try:
-        restored = await archive_service.rollback_to_pair(
-            skill_name,
-            pair,
-            subject_kind=subject_kind,
-        )
-    except Exception as exc:
-        logger.warning("[EvolutionSlash] evolve_rollback failed: %s", exc)
-        return _error(f"回滚失败：{exc}")
-    if not restored:
-        return _error(f"回滚失败：无法将 Skill '{skill_name}' 回滚到 `{pair.version}`。")
-
+    resolved = result.get("version") or version_raw
     return _answer(
-        f"Skill '{skill_name}' 已成功回滚到 `{pair.version}`。\n\n"
+        f"Skill '{skill_name}' 已成功回滚到 `{resolved}`。\n\n"
         "当前状态已自动归档，可再次回滚恢复。"
     )
 

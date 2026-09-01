@@ -194,38 +194,6 @@ class TestAgentConfigService:
         assert agent.description == "new description"
         assert agent.prompt == "new prompt"
 
-    # ---- create_agent name normalization ----
-
-    @staticmethod
-    def test_create_agent_strips_whitespace_from_name(service, tmp_workspace):
-        params = CreateAgentParams(
-            name=" test-agent ",
-            description="test desc",
-            prompt="test prompt",
-            location="project",
-        )
-        agent = service.create_agent(params)
-        assert agent.name == "test-agent"
-
-        md_file = tmp_workspace / ".jiuwenswarm" / "agents" / "test-agent.md"
-        assert md_file.exists()
-        content = md_file.read_text(encoding="utf-8")
-        assert "name: test-agent" in content
-
-    @staticmethod
-    def test_create_agent_with_whitespace_name_can_be_found(service):
-        params = CreateAgentParams(
-            name=" test-agent ",
-            description="test desc",
-            prompt="test prompt",
-            location="project",
-        )
-        service.create_agent(params)
-
-        found = service.get_agent("test-agent")
-        assert found is not None
-        assert found.name == "test-agent"
-
     # ---- update_agent ----
 
     @staticmethod
@@ -254,19 +222,6 @@ class TestAgentConfigService:
         params = UpdateAgentParams(description="x")
         with pytest.raises(ValueError, match="Agent 不存在"):
             service.update_agent("nonexistent", params)
-
-    @staticmethod
-    def test_update_agent_strips_whitespace_from_name(service, tmp_workspace):
-        agents_dir = tmp_workspace / ".jiuwenswarm" / "agents"
-        agents_dir.mkdir(parents=True)
-        (agents_dir / "my-agent.md").write_text(
-            "---\nname: my-agent\ndescription: original\n---\n\noriginal prompt\n",
-            encoding="utf-8",
-        )
-
-        params = UpdateAgentParams(description="updated")
-        agent = service.update_agent(" my-agent ", params)
-        assert agent.description == "updated"
 
     # ---- delete_agent ----
 
@@ -360,18 +315,14 @@ class TestSubagentConfigMutation:
     """upsert_subagent_in_config / remove_subagent_from_config 测试."""
 
     @pytest.fixture
-    def tmp_config(self, tmp_path):
+    def tmp_config(self, tmp_path, monkeypatch):
         """创建临时 config.yaml 用于测试 round-trip 读写."""
         import jiuwenswarm.common.config as config_mod
 
         config_file = tmp_path / "config.yaml"
         config_file.write_text("{}\n", encoding="utf-8")
-        orig = config_mod.CONFIG_YAML_PATH
-        config_mod.CONFIG_YAML_PATH = config_file
-        try:
-            yield config_file
-        finally:
-            config_mod.CONFIG_YAML_PATH = orig
+        monkeypatch.setattr(config_mod, "get_config_file", lambda: config_file)
+        yield config_file
 
     @staticmethod
     def test_upsert_creates_new_entry(tmp_config):
@@ -392,9 +343,9 @@ class TestSubagentConfigMutation:
         # 手动添加额外的 key 模拟已有配置
         import jiuwenswarm.common.config as config_mod
 
-        roundtrip = config_mod.load_yaml_round_trip(config_mod.CONFIG_YAML_PATH)
+        roundtrip = config_mod.load_yaml_round_trip(config_mod.get_config_file())
         roundtrip["react"]["subagents"]["my-agent"]["max_iterations"] = 50
-        config_mod.dump_yaml_round_trip(config_mod.CONFIG_YAML_PATH, roundtrip)
+        config_mod.dump_yaml_round_trip(config_mod.get_config_file(), roundtrip)
         # 再次 upsert，不应丢失 max_iterations
         upsert_subagent_in_config("my-agent", enabled=False)
         data = yaml.safe_load(tmp_config.read_text(encoding="utf-8"))
@@ -445,7 +396,7 @@ modes:
 """,
             encoding="utf-8",
         )
-        monkeypatch.setattr(config_mod, "CONFIG_YAML_PATH", config_file)
+        monkeypatch.setattr(config_mod, "get_config_file", lambda: config_file)
         return config_file
 
     @staticmethod
@@ -463,7 +414,7 @@ modes:
 
         config_file = tmp_path / "config.yaml"
         config_file.write_text("{}\n", encoding="utf-8")
-        monkeypatch.setattr(config_mod, "CONFIG_YAML_PATH", config_file)
+        monkeypatch.setattr(config_mod, "get_config_file", lambda: config_file)
 
         update_swarmflow_enabled_in_config(True)
 

@@ -3,6 +3,7 @@
 """Rail Extension Manager - 管理用户自定义的 Rail 扩展."""
 
 from __future__ import annotations
+from jiuwenswarm.common.local_env_config import is_enterprise
 
 import importlib
 import importlib.util
@@ -10,11 +11,12 @@ import json
 import logging
 import shutil
 import sys
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, List
 
-from jiuwenswarm.common.utils import get_agent_workspace_dir
+from jiuwenswarm.common.utils import get_agent_workspace_dir, get_multi_tenant_user_workspace_dir
 
 logger = logging.getLogger(__name__)
 
@@ -50,47 +52,67 @@ class RailExtension:
 
 
 class RailManager:
-    """Rail 扩展管理器."""
+    """Rail 扩展管理器（按租户 ``(service_id, agent_id, workspace_key)`` 分桶）."""
 
-    _instance = None
-    _extensions_dir: Path
-    _config_file: Path
-    _extensions: dict[str, RailExtension] = {}
-
-    def __new__(cls):
-        if cls._instance is None:
-            cls._instance = super().__new__(cls)
-        return cls._instance
-
-    def __init__(self):
+    def __init__(
+        self,
+        *,
+        service_id: str = "default",
+        agent_id: str = "default",
+        workspace_key: str = "default",
+    ):
         """初始化 Rail 管理器."""
-        if hasattr(self, "_initialized"):
-            return
+        self.service_id = (service_id or "default").strip() or "default"
+        self.agent_id = (agent_id or "default").strip() or "default"
+        self.workspace_key = (workspace_key or "default").strip() or "default"
+        self._extensions: dict[str, RailExtension] = {}
 
-        self._extensions_dir = get_agent_workspace_dir() / "extensions"
-        self._config_file = self._extensions_dir / "extensions_config.json"
-
-        # 确保目录存在
-        self._extensions_dir.mkdir(parents=True, exist_ok=True)
-
-        # 加载配置
+        self.extensions_dir.mkdir(parents=True, exist_ok=True)
         self._load_config()
 
-        # 跟踪已注册的rail扩展名称
         self._registered_rails: set[str] = set()
-        # DeepAgent 实例引用，用于 register/unregister
         self._agent_instance: Any = None
-        # 缓存已加载的 rail 实例，确保同一个 rail 只实例化一次
         self._rail_instances: dict[str, Any] = {}
 
-        self._initialized = True
-        logger.info("[RailManager] 初始化完成，扩展目录: %s", self._extensions_dir)
+        logger.info(
+            "[RailManager] 初始化完成 tenant=(%s,%s,%s) 扩展目录: %s",
+            self.service_id,
+            self.agent_id,
+            self.workspace_key,
+            self.extensions_dir,
+        )
+
+    def dispose(self) -> None:
+        """Drop in-memory rail state when the tenant is evicted from the pool."""
+        self._rail_instances.clear()
+        self._extensions.clear()
+        self._registered_rails.clear()
+        self._agent_instance = None
+
+    def _resolve_extensions_dir(self) -> Path:
+        import os
+        if is_enterprise():
+            workspace = get_multi_tenant_user_workspace_dir(
+                self.service_id, self.agent_id
+            )
+            if workspace is None:
+                return get_agent_workspace_dir() / "extensions"
+            return workspace / "agent" / "workspace" / "extensions"
+        return get_agent_workspace_dir() / "extensions"
+
+    @property
+    def extensions_dir(self) -> Path:
+        return self._resolve_extensions_dir()
+
+    @property
+    def config_file(self) -> Path:
+        return self._resolve_extensions_dir() / "extensions_config.json"
 
     def _load_config(self) -> None:
         """从配置文件加载扩展信息."""
-        if self._config_file.exists():
+        if self.config_file.exists():
             try:
-                with open(self._config_file, "r", encoding="utf-8") as f:
+                with open(self.config_file, "r", encoding="utf-8") as f:
                     data = json.load(f)
                     self._extensions = {
                         name: RailExtension.from_dict(ext_data)
@@ -110,7 +132,7 @@ class RailManager:
                 name: ext.to_dict()
                 for name, ext in self._extensions.items()
             }
-            with open(self._config_file, "w", encoding="utf-8") as f:
+            with open(self.config_file, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=2, ensure_ascii=False)
             logger.debug("[RailManager] 保存配置文件成功")
         except Exception as e:
@@ -164,7 +186,7 @@ class RailManager:
             raise ValueError("rail.py 验证失败") from e
 
         # 复制整个文件夹到扩展目录
-        dest_path = self._extensions_dir / name
+        dest_path = self.extensions_dir / name
         try:
             if dest_path.exists():
                 shutil.rmtree(dest_path)
@@ -314,7 +336,7 @@ class RailManager:
             logger.info("[RailManager] 扩展 '%s' 的缓存实例已清除", name)
 
         # 删除整个文件夹
-        folder_path = self._extensions_dir / name
+        folder_path = self.extensions_dir / name
         if folder_path.exists():
             try:
                 if folder_path.is_dir():
@@ -456,7 +478,7 @@ class RailManager:
         """加载 Rail 类（不实例化，不缓存）."""
         extension = self._extensions[name]
 
-        folder_path = self._extensions_dir / name
+        folder_path = self.extensions_dir / name
         plugin_file = folder_path / "rail.py"
         if not plugin_file.exists():
             raise ValueError(f"扩展插件文件 '{name}/rail.py' 不存在")
@@ -545,6 +567,108 @@ class RailManager:
         return rail_instance
 
 
-def get_rail_manager() -> RailManager:
-    """获取 Rail 管理器单例."""
-    return RailManager()
+def get_rail_manager(scope: Any) -> RailManager:
+    """获取租户级 Rail 管理器。
+
+    ``scope`` must be a ``RuntimeScopeKey`` or ``(service_id, agent_id)`` tuple.
+    For the default tenant pass ``RuntimeScopeKey.from_ids("default", "default")``.
+    """
+    if scope is None:
+        raise TypeError(
+            "get_rail_manager(scope) requires a non-None scope; "
+            "for default tenant pass RuntimeScopeKey.from_ids('default', 'default')"
+        )
+    return RailManagerPool.get_or_create(scope)
+
+
+class RailManagerPool:
+    """Process-level pool of per-tenant RailManager instances."""
+
+    _managers: dict[tuple[str, str, str], RailManager] = {}
+    _lock = threading.Lock()
+
+    @classmethod
+    def _normalize_tenant(cls, scope: Any) -> tuple[str, str, str]:
+        if scope is None:
+            raise TypeError(
+                "RailManagerPool requires a non-None scope; "
+                "for default tenant pass RuntimeScopeKey.from_ids('default', 'default')"
+            )
+        tenant = getattr(scope, "tenant", None)
+        if callable(tenant):
+            parts = tenant()
+            sid = parts[0] if len(parts) > 0 else "default"
+            aid = parts[1] if len(parts) > 1 else "default"
+            wk = parts[2] if len(parts) > 2 else getattr(scope, "workspace_key", "default")
+            return (
+                (str(sid or "default").strip() or "default"),
+                (str(aid or "default").strip() or "default"),
+                (str(wk or "default").strip() or "default"),
+            )
+        if isinstance(scope, (tuple, list)) and len(scope) >= 2:
+            wk = scope[2] if len(scope) >= 3 else "default"
+            return (
+                (str(scope[0] or "default").strip() or "default"),
+                (str(scope[1] or "default").strip() or "default"),
+                (str(wk or "default").strip() or "default"),
+            )
+        sid = getattr(scope, "service_id", None)
+        aid = getattr(scope, "agent_id", None)
+        wk = getattr(scope, "workspace_key", None)
+        if sid is not None or aid is not None or wk is not None:
+            return (
+                (str(sid or "default").strip() or "default"),
+                (str(aid or "default").strip() or "default"),
+                (str(wk or "default").strip() or "default"),
+            )
+        raise TypeError(
+            f"unsupported rail manager scope type: {type(scope)!r}; "
+            "expected RuntimeScopeKey or (service_id, agent_id[, workspace_key])"
+        )
+
+    @classmethod
+    def get_or_create(cls, scope: Any) -> RailManager:
+        key = cls._normalize_tenant(scope)
+        with cls._lock:
+            mgr = cls._managers.get(key)
+            if mgr is None:
+                mgr = RailManager(service_id=key[0], agent_id=key[1], workspace_key=key[2])
+                cls._managers[key] = mgr
+            return mgr
+
+    @classmethod
+    def remove(cls, service_id: str, agent_id: str, workspace_key: str = "default") -> bool:
+        """Evict one tenant RailManager from the process pool."""
+        key = (
+            (str(service_id or "default").strip() or "default"),
+            (str(agent_id or "default").strip() or "default"),
+            (str(workspace_key or "default").strip() or "default"),
+        )
+        with cls._lock:
+            mgr = cls._managers.pop(key, None)
+        if mgr is None:
+            return False
+        try:
+            mgr.dispose()
+        except Exception:
+            logger.warning(
+                "[RailManagerPool] dispose failed tenant=(%s,%s,%s)",
+                key[0],
+                key[1],
+                key[2],
+                exc_info=True,
+            )
+        return True
+
+    @classmethod
+    def reset_for_tests(cls) -> None:
+        with cls._lock:
+            cls._managers.clear()
+
+
+__all__ = [
+    "RailExtension",
+    "RailManager",
+    "RailManagerPool",
+    "get_rail_manager",
+]

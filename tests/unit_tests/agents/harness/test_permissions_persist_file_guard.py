@@ -45,9 +45,9 @@ def config_yaml(tmp_path, monkeypatch):
     )
     from jiuwenswarm.common import config as cfg_mod
 
+    monkeypatch.setattr(cfg_mod, "get_config_file", lambda: cfg)
     monkeypatch.setattr(cfg_mod, "_CONFIG_YAML_PATH", cfg)
-    if hasattr(cfg_mod, "CONFIG_YAML_PATH"):
-        monkeypatch.setattr(cfg_mod, "CONFIG_YAML_PATH", cfg)
+    monkeypatch.setattr(cfg_mod, "CONFIG_YAML_PATH", cfg)
     return cfg
 
 

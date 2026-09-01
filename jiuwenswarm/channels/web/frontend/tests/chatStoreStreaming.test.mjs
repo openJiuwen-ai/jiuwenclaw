@@ -25,3 +25,30 @@ test('setThinking does not notify subscribers when the value is unchanged', () =
     useChatStore.getState().removeRuntime(sessionId);
   }
 });
+
+test('stopStreaming seals the current bubble so later appends do not mix turns', () => {
+  const sessionId = 'overlap-send-seal';
+  const store = useChatStore.getState();
+  store.ensureRuntime(sessionId);
+  try {
+    store.addMessage(sessionId, {
+      id: 'asst-1',
+      role: 'assistant',
+      content: 'first',
+      timestamp: new Date().toISOString(),
+      isStreaming: true,
+    });
+    store.startStreaming(sessionId, 'asst-1');
+    store.stopStreaming(sessionId);
+
+    const sealed = useChatStore.getState().getRuntime(sessionId);
+    assert.equal(sealed.currentStreamId, null);
+    assert.equal(sealed.messages.find((message) => message.id === 'asst-1').isStreaming, false);
+
+    store.appendStreamContent(sessionId, ' leaked');
+    const after = useChatStore.getState().getRuntime(sessionId);
+    assert.equal(after.messages.find((message) => message.id === 'asst-1').content, 'first');
+  } finally {
+    useChatStore.getState().removeRuntime(sessionId);
+  }
+});

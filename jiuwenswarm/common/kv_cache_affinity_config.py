@@ -4,8 +4,9 @@
 
 from __future__ import annotations
 
-import os
 from typing import Any
+
+from jiuwenswarm.common.local_env_config import get_local_config
 
 ASCEND_AFFINITY_PROVIDER = "AscendAffinity"
 KVC_CONFIG_KEYS = frozenset(
@@ -79,7 +80,7 @@ def get_default_model_provider(config: dict[str, Any] | None) -> str:
         provider = str(model_client_config.get("client_provider") or "").strip()
         if provider:
             return provider
-    return str(os.getenv("MODEL_PROVIDER", "")).strip()
+    return str(get_local_config("MODEL_PROVIDER", "") or "").strip()
 
 
 def is_affinity_enabled(config: dict[str, Any] | None) -> bool:

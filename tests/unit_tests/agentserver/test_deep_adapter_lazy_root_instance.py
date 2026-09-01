@@ -8,6 +8,7 @@ import asyncio
 
 import pytest
 
+from jiuwenswarm.server.runtime.agent_adapter import interface_deep as interface_deep_module
 from jiuwenswarm.server.runtime.agent_adapter.interface_deep import JiuWenSwarmDeepAdapter
 
 
@@ -19,17 +20,18 @@ def _make_adapter(session_id: str | None) -> JiuWenSwarmDeepAdapter:
     adapter._parent_session_id = session_id
     adapter._root_instance_requested = False
     adapter._root_instance_lock = None
+    adapter._config_base_cache = None
     adapter._session_instance_config = {"agent_name": "main_agent"}
     adapter._session_instance_mode = "agent"
     adapter._session_instance_sub_mode = None
     return adapter
 
 
-def _stub_create_instance(adapter: JiuWenSwarmDeepAdapter, calls: list[str]) -> None:
+def _stub_create_instance(adapter: JiuWenSwarmDeepAdapter, calls: list[tuple[str, object]]) -> None:
     """Replace ``create_instance`` with a slow builder that records its calls."""
 
-    async def _create_instance(config=None, *, mode="agent", sub_mode=None):
-        calls.append(mode)
+    async def _create_instance(config=None, *, mode="agent", sub_mode=None, config_base=None):
+        calls.append((mode, config_base))
         # Yield control so a concurrent waiter can interleave if the lock is
         # missing; without an await the race would be untestable.
         await asyncio.sleep(0)
@@ -64,14 +66,14 @@ def test_root_adapter_stops_skipping_once_requested() -> None:
 async def test_ensure_instance_builds_the_root_agent_once() -> None:
     """The first call builds; later calls hand back the same instance."""
     adapter = _make_adapter(None)
-    calls: list[str] = []
+    calls: list[tuple[str, object]] = []
     _stub_create_instance(adapter, calls)
 
     first = await adapter.ensure_instance()
     second = await adapter.ensure_instance()
 
     assert first is second
-    assert calls == ["agent"]
+    assert calls == [("agent", None)]
 
 
 @pytest.mark.asyncio
@@ -82,7 +84,7 @@ async def test_concurrent_ensure_instance_builds_only_once() -> None:
     is exactly the duplicate-registration state the owner scoping prevents.
     """
     adapter = _make_adapter(None)
-    calls: list[str] = []
+    calls: list[tuple[str, object]] = []
     _stub_create_instance(adapter, calls)
 
     results = await asyncio.gather(*(adapter.ensure_instance() for _ in range(5)))
@@ -97,7 +99,7 @@ async def test_ensure_instance_returns_existing_instance_without_building() -> N
     adapter = _make_adapter("sess_a")
     existing = object()
     adapter._instance = existing
-    calls: list[str] = []
+    calls: list[tuple[str, object]] = []
     _stub_create_instance(adapter, calls)
 
     assert await adapter.ensure_instance() is existing
@@ -110,9 +112,61 @@ async def test_ensure_instance_preserves_the_configured_mode() -> None:
     adapter = _make_adapter(None)
     adapter._session_instance_mode = "code"
     adapter._session_instance_sub_mode = "plan"
-    calls: list[str] = []
+    calls: list[tuple[str, object]] = []
     _stub_create_instance(adapter, calls)
 
     await adapter.ensure_instance()
 
-    assert calls == ["code"]
+    assert calls == [("code", None)]
+
+
+@pytest.mark.asyncio
+async def test_ensure_instance_reuses_authoritative_config_snapshot() -> None:
+    """A deferred root build must not fall back to config.yaml."""
+    adapter = _make_adapter(None)
+    tenant_config = {"models": {"defaults": [{"model": "tenant-model"}]}}
+    adapter._config_base_cache = tenant_config
+    calls: list[tuple[str, object]] = []
+    _stub_create_instance(adapter, calls)
+
+    await adapter.ensure_instance()
+
+    assert calls == [("agent", tenant_config)]
+
+
+def test_instance_config_base_falls_back_to_native_config(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Deep and Code adapters share the native config.yaml fallback."""
+    disk_config = {"models": {"defaults": [{"model": "disk-model"}]}}
+    monkeypatch.setattr(interface_deep_module, "get_config", lambda: disk_config)
+
+    assert interface_deep_module._resolve_instance_config_base(None) is disk_config
+
+
+@pytest.mark.asyncio
+async def test_session_child_reuses_authoritative_config_snapshot() -> None:
+    """The executing session child must receive the root tenant snapshot."""
+    adapter = _make_adapter(None)
+    tenant_config = {"models": {"defaults": [{"model": "tenant-model"}]}}
+    adapter._config_base_cache = tenant_config
+    adapter._session_adapters = {}
+    adapter._session_adapter_locks = {}
+    calls: list[object] = []
+
+    class FakeChild:
+        async def create_instance(self, _config=None, **kwargs):
+            calls.append(kwargs.get("config_base"))
+
+        async def start_interaction(self, session_id=None):
+            return None
+
+    child = FakeChild()
+    adapter._new_session_scoped_adapter = lambda _sid: child
+
+    async def _reload_noop(_sid, _child):
+        return None
+
+    adapter._reload_session_adapter_if_stale = _reload_noop
+    adapter._touch_session_adapter = lambda _sid: None
+
+    assert await adapter._get_or_create_session_adapter("sess_a") is child
+    assert calls == [tenant_config]

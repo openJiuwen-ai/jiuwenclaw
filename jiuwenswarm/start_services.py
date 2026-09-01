@@ -10,11 +10,6 @@ Multi-instance management commands:
 - ``--stop <name>``: Stop a running instance
 - ``--restart <name>``: Restart an instance
 - ``--name <name>``: Start a named instance with mode
-
-The ``debug`` mode is a developer shortcut handled by
-``jiuwenswarm.debug_launcher``: it runs ``npm install`` + ``npm run build`` +
-``uv sync``, then starts the services detached with their output redirected to
-``logs/swarm-<timestamp>.log``. ``jiuwenswarm-stop`` terminates that service.
 """
 
 from __future__ import annotations
@@ -520,6 +515,8 @@ def _start_process(
                 "FRONTEND_PORT": str(ports["frontend"]),
             }
         )
+        if ports.get("http_api"):
+            env["AGENT_HTTP_PORT"] = str(ports["http_api"])
         env.pop("AGENT_SERVER_URL", None)
     return subprocess.Popen(cmd, cwd=str(cwd), env=env)
 
@@ -550,6 +547,7 @@ def _resolve_runtime_ports() -> dict[str, int]:
         "web": "WEB_PORT",
         "gateway": "GATEWAY_PORT",
         "frontend": "FRONTEND_PORT",
+        "http_api": "AGENT_HTTP_PORT",
     }
     ports = {pt: compute_auto_port(pt, 0) for pt in PORT_TYPES}
     for port_type, env_name in env_map.items():
@@ -645,9 +643,47 @@ def _wait_for_services_ready(
         if agent_port:
             targets.append(("AgentServer WebSocket", agent_port, f"ws://localhost:{agent_port}"))
         if gateway_port:
-            targets.append(("Gateway HTTP", gateway_port, f"http://localhost:{gateway_port}"))
+            targets.append(
+                ("Gateway WebSocket", gateway_port, f"ws://localhost:{gateway_port}/tui"),
+            )
         if web_port:
             targets.append(("WebChannel WebSocket", web_port, f"ws://localhost:{web_port}/ws"))
+            # Keep in sync with web_http_server.resolve_web_http_port (no heavy import).
+            web_http_port = web_port + 2
+            raw_http = os.environ.get("GATEWAY_WEB_HTTP_PORT", "").strip()
+            if raw_http:
+                try:
+                    web_http_port = int(raw_http)
+                except ValueError:
+                    pass
+            if web_http_port in (web_port, gateway_port):
+                web_http_port = max(web_port, gateway_port or 0) + 1
+            targets.append(
+                (
+                    "Web HTTP",
+                    web_http_port,
+                    f"http://localhost:{web_http_port}/api/v1",
+                ),
+            )
+
+        # HTTP/SSE 入口（可选）：与 AgentServer 同进程，开启时才展示。
+        # 配置解析与 AgentServer 共用同一函数，避免两处逻辑漂移。
+        try:
+            from jiuwenswarm.server.agent_http_server import resolve_http_server_settings
+
+            # 是否开启走统一解析；端口以本次实例分配的为准（与子进程 env 一致）。
+            http_enabled, http_host, _ = resolve_http_server_settings("localhost")
+            http_port = ports.get("http_api", 0)
+            if http_enabled and http_port:
+                targets.append(
+                    (
+                        "AgentServer HTTP API",
+                        http_port,
+                        f"http://{http_host or 'localhost'}:{http_port}/api/v1",
+                    )
+                )
+        except Exception as exc:  # noqa: BLE001 - 横幅展示失败不应影响启动
+            logging.debug("[start_services] HTTP API banner entry skipped: %s", exc)
 
     frontend_alive = _proc_alive("web") or _proc_alive("web-dev")
     frontend_port = ports.get("frontend", 0)
@@ -936,14 +972,8 @@ def _parse_args() -> argparse.Namespace:
         "mode",
         nargs="?",
         default="all",
-        choices=["all", "web", "app", "dev", "debug"],
-        help=(
-            "Start mode: all (default), web, app, dev, or debug. "
-            "debug runs npm install + npm run build + uv sync, then starts the "
-            "services in the background with output redirected to a timestamped "
-            "logs/swarm-<timestamp>.log; stop it with 'jiuwenswarm-stop', and "
-            "pass --skip-build to reuse the existing frontend build."
-        ),
+        choices=["all", "web", "app", "dev"],
+        help="Start mode: all (default), web, app, or dev.",
     )
 
     # Instance specification parameter
@@ -951,16 +981,6 @@ def _parse_args() -> argparse.Namespace:
         "--name",
         metavar="<name>",
         help="Start a named instance from instances.yaml.",
-    )
-
-    # debug-mode only: reuse the existing frontend build
-    parser.add_argument(
-        "--skip-build",
-        action="store_true",
-        help=(
-            "debug mode only: skip 'npm install' + 'npm run build' and reuse the "
-            "existing frontend/dist. Use when only Python code changed."
-        ),
     )
 
     # Management function parameters (mutually exclusive group)
@@ -999,22 +1019,6 @@ def _validate_args(args: argparse.Namespace) -> int | None:
         logging.info(f"[start_services] ERROR: Invalid mode '{args.mode}' for --restart")
         return 1
 
-    # debug mode always drives the default instance: it rebuilds the frontend
-    # and syncs the repository, neither of which is per-instance state.
-    if args.mode == "debug" and args.name:
-        logging.info("[start_services] ERROR: 'debug' mode cannot be combined with --name")
-        logging.info(
-            "[start_services] Run 'jiuwenswarm-start debug' for the default instance, "
-            f"or 'jiuwenswarm-start --name {args.name}' to start the named one."
-        )
-        return 1
-
-    # --skip-build only means anything for the mode that builds the frontend.
-    if args.skip_build and args.mode != "debug":
-        logging.info("[start_services] ERROR: --skip-build only applies to 'debug' mode")
-        logging.info("[start_services] Run 'jiuwenswarm-start debug --skip-build'.")
-        return 1
-
     return None
 
 
@@ -1047,11 +1051,6 @@ def _dispatch_action(args: argparse.Namespace) -> int:
     # --restart <name>: restart specific instance
     if args.restart:
         return _action_restart(args.restart, args.mode)
-
-    # debug: rebuild frontend + sync deps, then run the services in background
-    if args.mode == "debug":
-        from jiuwenswarm.debug_launcher import run_debug
-        return run_debug(skip_build=args.skip_build)
 
     # --name <name>: start named instance
     if args.name:

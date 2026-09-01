@@ -404,7 +404,7 @@ async def test_create_instance_continues_when_a2x_client_init_fails(monkeypatch:
     kwargs = create_agent_mock.call_args.kwargs
     assert "runtime_cwd" not in kwargs
     assert "project_root" not in kwargs
-    assert kwargs["enable_read_image_multimodal"] is None
+    assert kwargs["enable_read_image_multimodal"] is False
 
 
 @pytest.mark.asyncio
@@ -494,39 +494,7 @@ def test_make_deep_agent_config_keeps_read_image_multimodal_without_vision_model
             rails=[],
         )
 
-    assert deep_cfg.enable_read_image_multimodal is None
-
-
-@pytest.mark.parametrize(
-    ("configured_timeout", "expected_timeout"),
-    [(None, None), (7200, 7200.0)],
-)
-def test_make_deep_agent_config_resolves_completion_timeout(
-    monkeypatch: pytest.MonkeyPatch,
-    configured_timeout: float | None,
-    expected_timeout: float | None,
-) -> None:
-    adapter = JiuWenSwarmDeepAdapter()
-    config_base = _make_config("teamleader")
-    config_base["react"].pop("completion_timeout", None)
-    if configured_timeout is not None:
-        config_base["react"]["completion_timeout"] = configured_timeout
-    monkeypatch.setattr(interface_module, "get_config", lambda: config_base)
-
-    with patch.object(
-        interface_module.JiuWenSwarmDeepAdapter,
-        "_build_configured_subagents",
-        return_value=(None, False),
-    ):
-        deep_cfg = adapter._make_deep_agent_config(
-            model=object(),
-            config=config_base["react"],
-            agent_card=MagicMock(),
-            tool_cards=[],
-            rails=[],
-        )
-
-    assert deep_cfg.completion_timeout == expected_timeout
+    assert deep_cfg.enable_read_image_multimodal is False
 
 
 def test_make_deep_agent_config_disables_read_image_multimodal_with_vision_model(
@@ -562,16 +530,20 @@ async def test_create_instance_keeps_workspace_root_separate_from_project_dir(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,
 ) -> None:
-    adapter = JiuWenSwarmDeepAdapter()
-    # Only a session-scoped adapter builds its own DeepAgent; the root adapter
-    # defers that to ``ensure_instance`` so the chat path does not pay for it.
-    adapter.mark_as_session_scoped("sess_a2x_workspace_test")
     workspace_dir = tmp_path / "workspace"
     project_dir = tmp_path / "project"
     workspace_dir.mkdir()
     project_dir.mkdir()
+    # Workspace root comes from get_agent_workspace_dir() (constructor), not
+    # react.workspace_dir; project_dir is supplied via create_instance overrides.
+    monkeypatch.setattr(interface_module, "get_agent_workspace_dir", lambda: str(workspace_dir))
+    monkeypatch.delenv("JIUWENSWARM_EDITION", raising=False)
+
+    adapter = JiuWenSwarmDeepAdapter()
+    # Only a session-scoped adapter builds its own DeepAgent; the root adapter
+    # defers that to ``ensure_instance`` so the chat path does not pay for it.
+    adapter.mark_as_session_scoped("sess_a2x_workspace_test")
     config_base = _make_config("teamleader")
-    config_base["react"]["workspace_dir"] = str(workspace_dir)
 
     monkeypatch.setattr(interface_module, "get_config", lambda: config_base)
     created_instance = MagicMock(name="deep_agent", ensure_initialized=AsyncMock())

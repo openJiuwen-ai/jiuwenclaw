@@ -5,16 +5,20 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
+from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, call
 
 import pytest
-from openjiuwen.harness.schema.task import TodoItem, TodoStatus
 
 from openjiuwen.core.single_agent.interrupt.state import INTERRUPTION_KEY
 from jiuwenswarm.common.schema.agent import AgentRequest
 from jiuwenswarm.common.schema.message import ReqMethod
 from jiuwenswarm.server.runtime.agent_adapter.interface_deep import JiuWenSwarmDeepAdapter
+from jiuwenswarm.server.runtime.skill_turbo.permission_bridge import (
+    SKILL_TURBO_RESUME_CTX_KEY,
+)
 
 
 def _build_cancel_request(session_id: str = "tui_sess_1") -> AgentRequest:
@@ -67,54 +71,25 @@ def _make_adapter(**state: object) -> JiuWenSwarmDeepAdapter:
     return adapter
 
 
-@pytest.mark.asyncio
-async def test_cancel_pending_todos_uses_public_tool_api(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Cancel unfinished todos through TodoModifyTool.invoke, not its internals."""
-    from jiuwenswarm.agents.harness.common.tools.todo_compat import (
-        CompatibleTodoModifyTool,
+def _make_message_adapter(monkeypatch: pytest.MonkeyPatch) -> JiuWenSwarmDeepAdapter:
+    adapter = JiuWenSwarmDeepAdapter()
+    adapter._instance = SimpleNamespace(get_context_usage=lambda **_kwargs: {})
+    adapter._is_session_scoped_adapter = True
+    monkeypatch.setattr(adapter, "_has_valid_model_config", lambda _model_name="": True)
+    monkeypatch.setattr(adapter, "_handle_slash_command", AsyncMock(return_value=None))
+    monkeypatch.setattr(adapter, "_resolve_model_for_request", lambda _request: None)
+    monkeypatch.setattr(adapter, "_apply_model_to_react_agent", lambda _model: None)
+    return adapter
+
+
+def _route_test_request(*, stream: bool = False) -> AgentRequest:
+    return AgentRequest(
+        request_id="req-pre-try",
+        channel_id="tui",
+        session_id="sess-pre-try",
+        params={"query": "research", "mode": "agent"},
+        is_stream=stream,
     )
-
-    todos = [
-        TodoItem(id="pending", status=TodoStatus.PENDING),
-        TodoItem(id="running", status=TodoStatus.IN_PROGRESS),
-        TodoItem(id="done", status=TodoStatus.COMPLETED),
-    ]
-    todo_tool = CompatibleTodoModifyTool(operation=MagicMock())
-    todo_tool.load_todos = AsyncMock(return_value=todos)
-    todo_tool.save_todos = AsyncMock()
-    todo_tool.invoke = AsyncMock(wraps=todo_tool.invoke)
-
-    resource_mgr = MagicMock()
-    resource_mgr.get_tool.return_value = todo_tool
-    monkeypatch.setattr(
-        "jiuwenswarm.server.runtime.agent_adapter.interface_deep.Runner.resource_mgr",
-        resource_mgr,
-    )
-
-    ability_manager = MagicMock()
-    ability_manager.get.return_value = MagicMock(id="todo_modify")
-    instance = MagicMock(ability_manager=ability_manager, card=None)
-    formatted_todos = [{"id": "pending", "status": "cancelled"}]
-    rail = MagicMock()
-    rail._format_todos_for_frontend.return_value = formatted_todos
-    adapter = _make_adapter(_instance=instance, _stream_event_rail=rail)
-
-    result = await adapter._cancel_pending_todos("session-1")
-
-    todo_tool.invoke.assert_awaited_once()
-    invoke_args, invoke_kwargs = todo_tool.invoke.await_args
-    assert invoke_args == ({"action": "cancel", "ids": ["pending", "running"]},)
-    assert invoke_kwargs["session"].get_session_id() == "session-1"
-    todo_tool.save_todos.assert_awaited_once_with("session-1", todos)
-    assert [todo.status for todo in todos] == [
-        TodoStatus.CANCELLED,
-        TodoStatus.CANCELLED,
-        TodoStatus.COMPLETED,
-    ]
-    rail._format_todos_for_frontend.assert_called_once_with(todos)
-    assert result == formatted_todos
 
 
 @pytest.mark.asyncio
@@ -149,7 +124,10 @@ async def test_interaction_supplement_clears_pending_ask_user_state() -> None:
 
     response = await adapter.process_interrupt(_build_supplement_request())
 
-    loop_session.update_state.assert_called_once_with({INTERRUPTION_KEY: None})
+    assert loop_session.update_state.call_args_list == [
+        call({INTERRUPTION_KEY: None}),
+        call({SKILL_TURBO_RESUME_CTX_KEY: None}),
+    ]
     context.pop_messages.assert_called_once_with(1, with_history=True)
     context_engine.save_contexts.assert_awaited_once_with(loop_session)
     assert response.payload["intent"] == "supplement"
@@ -338,63 +316,6 @@ async def test_interaction_cancel_skips_pause_when_no_goal() -> None:
 
 
 @pytest.mark.asyncio
-async def test_interaction_cancel_stops_scheduler_task_before_cancel_round() -> None:
-    """A synchronous task_tool subagent must not block the interrupt response."""
-    child_started = asyncio.Event()
-    child_cancelled = asyncio.Event()
-
-    async def _run_child() -> None:
-        child_started.set()
-        try:
-            await asyncio.Event().wait()
-        except asyncio.CancelledError:
-            child_cancelled.set()
-            raise
-
-    child_task = asyncio.create_task(_run_child())
-    await child_started.wait()
-
-    scheduler = SimpleNamespace(_running_tasks={"round-task": (None, child_task)})
-    instance = MagicMock()
-    instance._interaction_started = True
-    instance._loop_controller = SimpleNamespace(_task_scheduler=scheduler)
-    instance.goal_manager = None
-
-    async def _cancel_round(*, reason: str) -> bool:
-        assert reason == "user_cancel"
-        await asyncio.wait_for(child_cancelled.wait(), timeout=0.2)
-        return True
-
-    instance.cancel_round = AsyncMock(side_effect=_cancel_round)
-
-    rail = MagicMock()
-    rail.get_cancelled_tool_results.return_value = []
-    adapter = _make_adapter(
-        _active_session_ids={"sess-task-tool": 1},
-        _stream_event_rail=rail,
-        _instance=instance,
-    )
-    adapter._cancel_pending_todos = AsyncMock(return_value=None)
-    adapter._cancel_session_agent_tasks = AsyncMock(return_value=0)
-
-    try:
-        response = await asyncio.wait_for(
-            adapter.process_interrupt(_build_cancel_request("sess-task-tool")),
-            timeout=0.5,
-        )
-    finally:
-        if not child_task.done():
-            child_task.cancel()
-        await asyncio.gather(child_task, return_exceptions=True)
-
-    assert child_task.cancelled()
-    adapter._cancel_session_agent_tasks.assert_not_awaited()
-    instance.cancel_round.assert_awaited_once_with(reason="user_cancel")
-    assert response.payload["event_type"] == "chat.interrupt_result"
-    assert response.payload["success"] is True
-
-
-@pytest.mark.asyncio
 async def test_interaction_cancel_appends_cancelled_tools_to_history(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -517,6 +438,7 @@ def test_reset_runtime_cron_context_resets_shell_session(
 ) -> None:
     from jiuwenswarm.server.runtime.agent_adapter import interface_deep
     from openjiuwen.core.sys_operation.shell_process_registry import (
+        reset_shell_session_id,
         set_shell_session_id,
     )
 
@@ -531,7 +453,6 @@ def test_reset_runtime_cron_context_resets_shell_session(
         "_CRON_TOOL_METADATA",
         "_CRON_TOOL_SESSION_ID",
         "_CRON_TOOL_CHANNEL_ID",
-        "_CRON_TOOL_USER_ID",
     ):
         monkeypatch.setattr(
             f"jiuwenswarm.server.runtime.agent_adapter.interface_deep.{var_name}",
@@ -539,18 +460,25 @@ def test_reset_runtime_cron_context_resets_shell_session(
         )
 
     shell_token = set_shell_session_id("sess_reset")
-    getattr(JiuWenSwarmDeepAdapter, "_reset_runtime_cron_context")(
-        interface_deep._RuntimeCronContextTokens(
-            channel=MagicMock(),
-            session=MagicMock(),
-            metadata=MagicMock(),
-            mode=MagicMock(),
-            bound=MagicMock(),
-            shell=shell_token,
-            user_id=MagicMock(),
+    adapter = _make_adapter()
+    try:
+        getattr(adapter, "_reset_runtime_cron_context")(
+            interface_deep._RuntimeCronContextTokens(
+                channel=MagicMock(),
+                session=MagicMock(),
+                metadata=MagicMock(),
+                mode=MagicMock(),
+                bound=MagicMock(),
+                shell=shell_token,
+                deepresearch=None,
+                send_file=None,
+            )
         )
-    )
-    reset_shell_mock.assert_called_once_with(shell_token)
+        reset_shell_mock.assert_called_once_with(shell_token)
+    finally:
+        reset_shell_session_id(shell_token)
+
+
 def test_bind_runtime_cron_context_fills_locked_session_project_metadata(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -566,7 +494,8 @@ def test_bind_runtime_cron_context_fills_locked_session_project_metadata(
         },
     )
 
-    tokens = JiuWenSwarmDeepAdapter._bind_runtime_cron_context(
+    adapter = _make_adapter()
+    tokens = adapter._bind_runtime_cron_context(
         channel_id="web",
         session_id="sess_locked",
         metadata={"request_id": "req-old"},
@@ -581,7 +510,7 @@ def test_bind_runtime_cron_context_fills_locked_session_project_metadata(
         assert metadata["project_dir"] == "D:\\locked-project"
         assert metadata["work_mode"] == "code"
     finally:
-        JiuWenSwarmDeepAdapter._reset_runtime_cron_context(tokens)
+        adapter._reset_runtime_cron_context(tokens)
 
 
 def test_runtime_cron_tool_context_falls_back_to_last_bound_session(
@@ -600,7 +529,8 @@ def test_runtime_cron_tool_context_falls_back_to_last_bound_session(
     )
 
     context = interface_deep._RuntimeCronToolContext(tool_scope="runtime_test")
-    tokens = JiuWenSwarmDeepAdapter._bind_runtime_cron_context(
+    adapter = _make_adapter()
+    tokens = adapter._bind_runtime_cron_context(
         channel_id="web",
         session_id="sess_runtime",
         metadata={},
@@ -611,7 +541,7 @@ def test_runtime_cron_tool_context_falls_back_to_last_bound_session(
     try:
         context.remember_current_binding()
     finally:
-        JiuWenSwarmDeepAdapter._reset_runtime_cron_context(tokens)
+        adapter._reset_runtime_cron_context(tokens)
 
     assert context.session_id == "sess_runtime"
     assert context.mode == "agent"
@@ -620,3 +550,652 @@ def test_runtime_cron_tool_context_falls_back_to_last_bound_session(
     assert metadata["project_id"] == "proj_runtime"
     assert metadata["project_dir"] == "D:\\runtime-project"
     assert metadata["work_mode"] == "work"
+
+
+def test_stream_consumer_cancellation_resets_only_deepresearch_route() -> None:
+    from jiuwenswarm.agents.harness.common.tools.deepresearch.tools import _get_route
+    from jiuwenswarm.server.runtime.agent_adapter import interface_deep
+
+    adapter = _make_adapter(
+        _env_service_id="service-cancel",
+        _env_agent_id="agent-cancel",
+    )
+    tokens = adapter._bind_runtime_cron_context(
+        channel_id="tui",
+        session_id="sess-cancel",
+        metadata={},
+        request_id="req-cancel",
+        mode="agent",
+    )
+
+    adapter._reset_stream_runtime_context(
+        tokens,
+        stream_consumer_cancelled=True,
+    )
+    try:
+        assert _get_route()["session_id"] == ""
+        assert interface_deep._CRON_TOOL_SESSION_ID.get() == "sess-cancel"
+    finally:
+        adapter._reset_runtime_cron_context(tokens)
+
+
+def test_stream_normal_completion_resets_route_and_legacy_context_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from jiuwenswarm.agents.harness.common.tools.deepresearch.tools import _get_route
+
+    adapter = _make_adapter(
+        _env_service_id="service-normal",
+        _env_agent_id="agent-normal",
+    )
+    tokens = adapter._bind_runtime_cron_context(
+        channel_id="web",
+        session_id="sess-normal",
+        metadata={},
+        request_id="req-normal",
+        mode="agent",
+    )
+    reset_runtime = MagicMock(wraps=adapter._reset_runtime_cron_context)
+    monkeypatch.setattr(adapter, "_reset_runtime_cron_context", reset_runtime)
+
+    adapter._reset_stream_runtime_context(
+        tokens,
+        stream_consumer_cancelled=False,
+    )
+
+    reset_runtime.assert_called_once_with(tokens)
+    assert _get_route()["session_id"] == ""
+
+
+def test_runtime_route_binds_adapter_artifact_output_dir(tmp_path: Path) -> None:
+    from jiuwenswarm.agents.harness.common.tools.deepresearch import tools as dt
+
+    agent_workspace = tmp_path / "agent-workspace"
+    adapter = _make_adapter(
+        _env_service_id="service-output",
+        _env_agent_id="agent-output",
+        _workspace_dir=str(agent_workspace),
+    )
+    tokens = adapter._bind_runtime_cron_context(
+        channel_id="officeclaw",
+        session_id="sess-output",
+        metadata={},
+        request_id="req-output",
+        mode="agent",
+    )
+    try:
+        assert dt._get_effective_request_output_dir() == (
+            agent_workspace / "projects"
+        ).resolve()
+    finally:
+        adapter._reset_runtime_cron_context(tokens)
+
+
+def test_runtime_route_keeps_artifact_leaf_lexical(tmp_path: Path) -> None:
+    agent_workspace = tmp_path / "agent-workspace"
+    outside = tmp_path / "outside"
+    agent_workspace.mkdir()
+    outside.mkdir()
+    (agent_workspace / "projects").symlink_to(
+        outside, target_is_directory=True
+    )
+    adapter = _make_adapter(
+        _env_service_id="service-output",
+        _env_agent_id="agent-output",
+        _workspace_dir=str(agent_workspace),
+    )
+
+    assert adapter._deepresearch_artifact_output_dir() == str(
+        agent_workspace.resolve() / "projects"
+    )
+
+
+@pytest.mark.parametrize("failure_type", [RuntimeError, asyncio.CancelledError])
+def test_route_bind_failure_rolls_back_legacy_context(
+    monkeypatch: pytest.MonkeyPatch,
+    failure_type: type[BaseException],
+) -> None:
+    from openjiuwen.core.sys_operation.shell_process_registry import get_shell_session_id
+    from jiuwenswarm.server.runtime.agent_adapter import interface_deep
+
+    adapter = _make_adapter(
+        _env_service_id="service-bind-failure",
+        _env_agent_id="agent-bind-failure",
+    )
+    previous_shell_session_id = get_shell_session_id()
+
+    def fail_route_bind(**_kwargs):
+        raise failure_type("route bind failed")
+
+    monkeypatch.setattr(interface_deep, "push_deepresearch_route", fail_route_bind)
+
+    with pytest.raises(failure_type, match="route bind failed"):
+        adapter._bind_runtime_cron_context(
+            channel_id="tui",
+            session_id="sess-bind-failure",
+            metadata={},
+            request_id="req-bind-failure",
+            mode="agent",
+        )
+
+    assert interface_deep._CRON_TOOL_SESSION_ID.get() is None
+    assert interface_deep._CRON_TOOL_BOUND.get() is False
+    assert get_shell_session_id() == previous_shell_session_id
+
+
+def test_full_reset_continues_after_failure_and_is_idempotent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from jiuwenswarm.server.runtime.agent_adapter import interface_deep
+
+    reset_shell = MagicMock()
+    monkeypatch.setattr(
+        "openjiuwen.core.sys_operation.shell_process_registry.reset_shell_session_id",
+        reset_shell,
+    )
+    route_reset = MagicMock(side_effect=RuntimeError("route reset failed"))
+    monkeypatch.setattr(interface_deep, "reset_deepresearch_route", route_reset)
+    context_vars = {}
+    for name in (
+        "_CRON_TOOL_BOUND",
+        "_CRON_TOOL_MODE",
+        "_CRON_TOOL_METADATA",
+        "_CRON_TOOL_SESSION_ID",
+        "_CRON_TOOL_CHANNEL_ID",
+    ):
+        context_vars[name] = MagicMock()
+        monkeypatch.setattr(interface_deep, name, context_vars[name])
+    tokens = interface_deep._RuntimeCronContextTokens(
+        channel=MagicMock(),
+        session=MagicMock(),
+        metadata=MagicMock(),
+        mode=MagicMock(),
+        bound=MagicMock(),
+        shell=MagicMock(),
+        deepresearch=interface_deep._DeepResearchRouteContextToken(MagicMock()),
+    )
+
+    with pytest.raises(RuntimeError, match="route reset failed"):
+        JiuWenSwarmDeepAdapter._reset_runtime_cron_context(tokens)
+
+    reset_shell.assert_called_once()
+    for context_var in context_vars.values():
+        context_var.reset.assert_called_once()
+
+    with pytest.raises(RuntimeError, match="route reset failed"):
+        JiuWenSwarmDeepAdapter._reset_runtime_cron_context(tokens)
+    assert route_reset.call_count == 2
+    reset_shell.assert_called_once()
+    for context_var in context_vars.values():
+        context_var.reset.assert_called_once()
+
+
+def test_cross_context_reset_retains_tokens_for_retry_in_original_context() -> None:
+    from jiuwenswarm.agents.harness.common.tools.deepresearch.tools import _get_route
+
+    adapter = _make_adapter(
+        _env_service_id="service-cross-context",
+        _env_agent_id="agent-cross-context",
+    )
+    tokens = adapter._bind_runtime_cron_context(
+        channel_id="tui",
+        session_id="sess-cross-context",
+        metadata={},
+        request_id="req-cross-context",
+        mode="agent",
+    )
+
+    with pytest.raises(ValueError):
+        contextvars.Context().run(adapter._reset_runtime_cron_context, tokens)
+
+    assert tokens.channel is not None
+    assert tokens.session is not None
+    assert tokens.metadata is not None
+    assert tokens.mode is not None
+    assert tokens.bound is not None
+    assert tokens.shell is not None
+    assert tokens.deepresearch is not None and tokens.deepresearch.token is not None
+
+    adapter._reset_runtime_cron_context(tokens)
+    adapter._reset_runtime_cron_context(tokens)
+    assert _get_route()["session_id"] == ""
+    assert all(
+        token is None
+        for token in (
+            tokens.channel,
+            tokens.session,
+            tokens.metadata,
+            tokens.mode,
+            tokens.bound,
+            tokens.shell,
+        )
+    )
+    assert tokens.deepresearch is not None and tokens.deepresearch.token is None
+
+
+def test_bind_rollback_preserves_cancelled_error_when_shell_reset_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from jiuwenswarm.server.runtime.agent_adapter import interface_deep
+
+    adapter = _make_adapter(
+        _env_service_id="service-bind-failure",
+        _env_agent_id="agent-bind-failure",
+    )
+
+    def fail_route_bind(**_kwargs):
+        raise asyncio.CancelledError("original cancellation")
+
+    monkeypatch.setattr(interface_deep, "push_deepresearch_route", fail_route_bind)
+    monkeypatch.setattr(
+        "openjiuwen.core.sys_operation.shell_process_registry.reset_shell_session_id",
+        MagicMock(side_effect=RuntimeError("shell cleanup failed")),
+    )
+
+    with pytest.raises(asyncio.CancelledError, match="original cancellation"):
+        adapter._bind_runtime_cron_context(
+            channel_id="tui",
+            session_id="sess-bind-failure",
+            metadata={},
+            request_id="req-bind-failure",
+            mode="agent",
+        )
+
+    assert interface_deep._CRON_TOOL_CHANNEL_ID.get() == "web"
+    assert interface_deep._CRON_TOOL_SESSION_ID.get() is None
+    assert interface_deep._CRON_TOOL_METADATA.get() is None
+    assert interface_deep._CRON_TOOL_MODE.get() is None
+    assert interface_deep._CRON_TOOL_BOUND.get() is False
+
+
+@pytest.mark.asyncio
+async def test_chat_pre_try_failure_cleans_route_and_initialized_permission_tokens(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from jiuwenswarm.agents.harness.common.tools.deepresearch.tools import _get_route
+    from jiuwenswarm.server.runtime.agent_adapter import interface_deep
+
+    adapter = _make_message_adapter(monkeypatch)
+    permission_token = object()
+    permission_session_token = object()
+    cleanup_permission = MagicMock()
+    reset_permission_session = MagicMock()
+    monkeypatch.setattr(
+        interface_deep,
+        "setup_permission_context",
+        MagicMock(return_value=permission_token),
+    )
+    monkeypatch.setattr(interface_deep, "cleanup_permission_context", cleanup_permission)
+    monkeypatch.setattr(
+        interface_deep,
+        "setup_permissions_session_scope",
+        MagicMock(return_value=permission_session_token),
+    )
+    monkeypatch.setattr(
+        interface_deep,
+        "reset_permissions_session_scope",
+        reset_permission_session,
+    )
+    monkeypatch.setattr(
+        adapter,
+        "_resolve_model_for_request",
+        MagicMock(side_effect=RuntimeError("model init failed")),
+    )
+
+    with pytest.raises(RuntimeError, match="model init failed"):
+        await adapter.process_message_impl(
+            _route_test_request(),
+            {"query": "research"},
+        )
+
+    assert _get_route()["session_id"] == ""
+    assert interface_deep._CRON_TOOL_SESSION_ID.get() is None
+    cleanup_permission.assert_called_once_with(permission_token)
+    reset_permission_session.assert_called_once_with(permission_session_token)
+
+
+@pytest.mark.asyncio
+async def test_stream_pre_try_cancellation_cleans_route_and_initialized_permission_tokens(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from jiuwenswarm.agents.harness.common.tools.deepresearch.tools import _get_route
+    from jiuwenswarm.server.runtime.agent_adapter import interface_deep
+
+    adapter = _make_message_adapter(monkeypatch)
+    permission_token = object()
+    permission_session_token = object()
+    cleanup_permission = MagicMock()
+    reset_permission_session = MagicMock()
+    monkeypatch.setattr(
+        interface_deep,
+        "setup_permission_context",
+        MagicMock(return_value=permission_token),
+    )
+    monkeypatch.setattr(interface_deep, "cleanup_permission_context", cleanup_permission)
+    monkeypatch.setattr(
+        interface_deep,
+        "setup_permissions_session_scope",
+        MagicMock(return_value=permission_session_token),
+    )
+    monkeypatch.setattr(
+        interface_deep,
+        "reset_permissions_session_scope",
+        reset_permission_session,
+    )
+    monkeypatch.setattr(
+        adapter,
+        "_maybe_apply_pending_reload",
+        AsyncMock(side_effect=asyncio.CancelledError("pre-try cancelled")),
+    )
+
+    with pytest.raises(asyncio.CancelledError, match="pre-try cancelled"):
+        async for _ in adapter.process_message_stream_impl(
+            _route_test_request(stream=True),
+            {"query": "research"},
+        ):
+            pass
+
+    assert _get_route()["session_id"] == ""
+    assert interface_deep._CRON_TOOL_SESSION_ID.get() is None
+    cleanup_permission.assert_called_once_with(permission_token)
+    reset_permission_session.assert_called_once_with(permission_session_token)
+
+
+@pytest.mark.asyncio
+async def test_chat_failure_survives_permission_cleanup_error_and_reaches_route_reset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from jiuwenswarm.server.runtime.agent_adapter import interface_deep
+
+    adapter = _make_message_adapter(monkeypatch)
+    route_reset = MagicMock(wraps=interface_deep.reset_deepresearch_route)
+    monkeypatch.setattr(interface_deep, "reset_deepresearch_route", route_reset)
+    monkeypatch.setattr(
+        interface_deep,
+        "setup_permission_context",
+        MagicMock(return_value=object()),
+    )
+    monkeypatch.setattr(
+        interface_deep,
+        "cleanup_permission_context",
+        MagicMock(side_effect=RuntimeError("permission cleanup failed")),
+    )
+    monkeypatch.setattr(
+        adapter,
+        "_update_runtime_config",
+        AsyncMock(side_effect=RuntimeError("chat execution failed")),
+    )
+
+    with pytest.raises(RuntimeError, match="chat execution failed"):
+        await adapter.process_message_impl(
+            _route_test_request(),
+            {"query": "research"},
+        )
+
+    route_reset.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_stream_consumer_cancellation_survives_permission_cleanup_error_and_resets_route(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from jiuwenswarm.server.runtime.agent_adapter import interface_deep
+
+    adapter = _make_message_adapter(monkeypatch)
+    route_reset = MagicMock(wraps=interface_deep.reset_deepresearch_route)
+    full_reset = MagicMock(wraps=adapter._reset_runtime_cron_context)
+    monkeypatch.setattr(interface_deep, "reset_deepresearch_route", route_reset)
+    monkeypatch.setattr(adapter, "_reset_runtime_cron_context", full_reset)
+    monkeypatch.setattr(
+        interface_deep,
+        "setup_permission_context",
+        MagicMock(return_value=object()),
+    )
+    monkeypatch.setattr(
+        interface_deep,
+        "cleanup_permission_context",
+        MagicMock(side_effect=RuntimeError("permission cleanup failed")),
+    )
+    monkeypatch.setattr(
+        adapter,
+        "_update_runtime_config",
+        AsyncMock(side_effect=asyncio.CancelledError("consumer cancelled")),
+    )
+
+    async def consume() -> None:
+        async for _ in adapter.process_message_stream_impl(
+            _route_test_request(stream=True),
+            {"query": "research"},
+        ):
+            pass
+
+    task = asyncio.create_task(consume())
+    with pytest.raises(asyncio.CancelledError, match="consumer cancelled"):
+        await task
+
+    route_reset.assert_called_once()
+    full_reset.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_skill_turbo_resume_finalize_clears_tie_and_commits() -> None:
+    """resume 跑完必须清掉 INTERRUPTION_KEY、替换 TIE tool_result、补 commit。
+
+    回归 bug：HITL 中断恢复完成后未补 checkpoint，导致下一轮 query 把
+    skill_acceleration_exec 当未完成重新发起，所有后续 query 都重跑
+    第一个任务。
+    """
+    from openjiuwen.core.foundation.llm.schema.message import ToolMessage
+
+    pending_tcid = "call_73bda756260e47708332d92e"
+
+    # context 里最后一条是 TIE 工具结果（tool_call_id == pending_tcid）
+    tie_msg = ToolMessage(tool_call_id=pending_tcid, content="任务已暂停等待审批")
+    other_msg = ToolMessage(tool_call_id="other-tc", content="other")
+    context = MagicMock()
+    context.get_messages.return_value = [other_msg, tie_msg]
+    context.set_messages = MagicMock()
+
+    context_engine = MagicMock()
+    context_engine.get_context.return_value = context
+    context_engine.save_contexts = AsyncMock()
+
+    loop_session = MagicMock()
+    loop_session.get_session_id.return_value = "officeclaw_sess_1"
+
+    instance = MagicMock()
+    instance._loop_session = loop_session
+    instance.react_agent = SimpleNamespace(context_engine=context_engine)
+
+    adapter = _make_adapter(_instance=instance)
+    adapter._persist_session_checkpoint = AsyncMock()
+
+    request = AgentRequest(
+        request_id="req-resume",
+        channel_id="officeclaw",
+        session_id="officeclaw_sess_1",
+        params={"mode": "agent.plan"},
+        is_stream=True,
+    )
+    resume_ctx = {
+        "pending_tool_call_id": pending_tcid,
+        "plan_code": "print('hi')",
+        "inputs": {},
+        "task_states": [],
+    }
+
+    await adapter._finalize_skill_turbo_resume_completion(
+        request=request, resume_ctx=resume_ctx
+    )
+
+    # 1) 中断态被清
+    loop_session.update_state.assert_called_once_with({INTERRUPTION_KEY: None})
+    # 2) TIE 工具结果被替换为成功结果
+    context.set_messages.assert_called_once()
+    set_args = context.set_messages.call_args.args[0]
+    assert any(
+        getattr(m, "tool_call_id", None) == pending_tcid and m.content == "任务已完成"
+        for m in set_args
+    )
+    context_engine.save_contexts.assert_awaited_once_with(loop_session)
+    # 3) checkpoint 被补 commit
+    adapter._persist_session_checkpoint.assert_awaited_once_with(
+        "officeclaw_sess_1", "req-resume"
+    )
+
+
+@pytest.mark.asyncio
+async def test_skill_turbo_resume_finalize_tolerates_missing_loop_session() -> None:
+    """无 _loop_session 时不应抛错，仅跳过中断态清理。"""
+    instance = MagicMock()
+    instance._loop_session = None
+    instance.react_agent = None
+
+    adapter = _make_adapter(_instance=instance)
+    adapter._persist_session_checkpoint = AsyncMock()
+
+    request = AgentRequest(
+        request_id="req-resume",
+        channel_id="officeclaw",
+        session_id="officeclaw_sess_1",
+        params={"mode": "agent.plan"},
+        is_stream=True,
+    )
+    # 不应抛异常
+    await adapter._finalize_skill_turbo_resume_completion(
+        request=request, resume_ctx={"pending_tool_call_id": "tc-1"}
+    )
+    adapter._persist_session_checkpoint.assert_awaited_once_with(
+        "officeclaw_sess_1", "req-resume"
+    )
+
+
+@pytest.mark.asyncio
+async def test_skill_turbo_resume_finalize_skips_commit_when_clear_interrupt_fails() -> None:
+    """step1 清 INTERRUPTION_KEY 抛错时必须跳过 checkpoint commit。
+
+    回归检视意见：清中断态失败仍 commit 会把中断态落盘固化，
+    正是本 PR 要修的 bug 静默复发路径。
+    """
+    loop_session = MagicMock()
+    loop_session.get_session_id.return_value = "officeclaw_sess_1"
+    loop_session.update_state.side_effect = RuntimeError("update_state boom")
+
+    instance = MagicMock()
+    instance._loop_session = loop_session
+    instance.react_agent = SimpleNamespace(context_engine=MagicMock())
+
+    adapter = _make_adapter(_instance=instance)
+    adapter._persist_session_checkpoint = AsyncMock()
+
+    request = AgentRequest(
+        request_id="req-resume",
+        channel_id="officeclaw",
+        session_id="officeclaw_sess_1",
+        params={"mode": "agent.plan"},
+        is_stream=True,
+    )
+    # 不应抛异常；且不得 commit（避免落盘中断态）
+    await adapter._finalize_skill_turbo_resume_completion(
+        request=request, resume_ctx={"pending_tool_call_id": "tc-1"}
+    )
+    adapter._persist_session_checkpoint.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_skill_turbo_resume_finalize_skips_commit_when_replace_tie_fails() -> None:
+    """step2 替换 TIE tool_result 抛错时必须跳过 checkpoint commit。
+
+    回归检视意见：替换失败仍 commit 会把残留的 TIE 工具结果落盘，
+    下一轮 LLM 看到"工具被中断未完成"重新发起同一调用。
+    """
+    from openjiuwen.core.foundation.llm.schema.message import ToolMessage
+
+    pending_tcid = "call_73bda756260e47708332d92e"
+    tie_msg = ToolMessage(tool_call_id=pending_tcid, content="任务已暂停等待审批")
+
+    context = MagicMock()
+    context.get_messages.return_value = [tie_msg]
+    # set_messages 抛错模拟 context 写入失败
+    context.set_messages.side_effect = RuntimeError("set_messages boom")
+
+    context_engine = MagicMock()
+    context_engine.get_context.return_value = context
+    context_engine.save_contexts = AsyncMock()
+
+    loop_session = MagicMock()
+    loop_session.get_session_id.return_value = "officeclaw_sess_1"
+
+    instance = MagicMock()
+    instance._loop_session = loop_session
+    instance.react_agent = SimpleNamespace(context_engine=context_engine)
+
+    adapter = _make_adapter(_instance=instance)
+    adapter._persist_session_checkpoint = AsyncMock()
+
+    request = AgentRequest(
+        request_id="req-resume",
+        channel_id="officeclaw",
+        session_id="officeclaw_sess_1",
+        params={"mode": "agent.plan"},
+        is_stream=True,
+    )
+    # 不应抛异常；且不得 commit（避免落盘残留 TIE）
+    await adapter._finalize_skill_turbo_resume_completion(
+        request=request,
+        resume_ctx={"pending_tool_call_id": pending_tcid},
+    )
+    # step1 清中断态仍应执行成功
+    loop_session.update_state.assert_called_once_with({INTERRUPTION_KEY: None})
+    # 但 step2 失败 → step3 不得 commit
+    adapter._persist_session_checkpoint.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_finalize_skill_turbo_resume_uses_cancel_content_on_cancel() -> None:
+    """cancel 收尾用 "任务已取消" 替换 TIE，避免误导用户以为任务已完成。
+
+    回归 officeclaw_c663d992 案例：用户手动终止 resume 后，finalize 若仍写
+    "任务已完成" 会误导用户。cancel 路径应写 "任务已取消"。
+    """
+    from openjiuwen.core.foundation.llm.schema.message import ToolMessage
+
+    pending_tcid = "call_cancel_tcid"
+    tie_msg = ToolMessage(tool_call_id=pending_tcid, content="任务已暂停等待审批")
+    context = MagicMock()
+    context.get_messages.return_value = [tie_msg]
+    context.set_messages = MagicMock()
+    context_engine = MagicMock()
+    context_engine.get_context.return_value = context
+    context_engine.save_contexts = AsyncMock()
+    loop_session = MagicMock()
+    loop_session.get_session_id.return_value = "officeclaw_sess_cancel"
+    instance = MagicMock()
+    instance._loop_session = loop_session
+    instance.react_agent = SimpleNamespace(context_engine=context_engine)
+    adapter = _make_adapter(_instance=instance)
+    adapter._persist_session_checkpoint = AsyncMock()
+
+    request = AgentRequest(
+        request_id="req-cancel",
+        channel_id="officeclaw",
+        session_id="officeclaw_sess_cancel",
+        params={"mode": "agent.plan"},
+        is_stream=True,
+    )
+    await adapter._finalize_skill_turbo_resume_completion(
+        request=request,
+        resume_ctx={"pending_tool_call_id": pending_tcid},
+        result_content="任务已取消",
+    )
+
+    set_args = context.set_messages.call_args.args[0]
+    replaced = next(
+        (m for m in set_args if getattr(m, "tool_call_id", None) == pending_tcid),
+        None,
+    )
+    assert replaced is not None
+    assert replaced.content == "任务已取消"
+    adapter._persist_session_checkpoint.assert_awaited_once_with(
+        "officeclaw_sess_cancel", "req-cancel"
+    )

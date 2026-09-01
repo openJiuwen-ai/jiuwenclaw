@@ -9,9 +9,12 @@ import logging
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 from jiuwenswarm.gateway.routing.keys import ChannelKey, DeliveryTarget, IdentityKey, RoutingKey
+
+if TYPE_CHECKING:
+    from jiuwenswarm.gateway.storage.protocols.ephemeral import EphemeralStore
 
 logger = logging.getLogger(__name__)
 
@@ -138,12 +141,70 @@ class SessionSharingRegistry:
 
     - 同一 session 下的同一 member_name 可以有多条 Subscription
     - 注册/注销以 sub_id 为精确单位
-    - 纯内存态，asyncio.Lock 保护，Gateway 重启需重新 /join
+    - 默认纯内存态；注入 ``EphemeralStore`` 时在变更时镜像到临时层（读仍走本地缓存）。
+    - Gateway 重启后 Ephemeral 中的订阅可在 ``hydrate_from_ephemeral()`` 恢复（丢了可重建）。
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, ephemeral: "EphemeralStore | None" = None) -> None:
         self._subs: dict[str, dict[str, list[Subscription]]] = {}
         self._lock = asyncio.Lock()
+        self._ephemeral = ephemeral
+
+    async def hydrate_from_ephemeral(self) -> None:
+        """启动时从 Ephemeral 恢复订阅到本地缓存（无 store 时 no-op）。"""
+        if self._ephemeral is None:
+            return
+        from jiuwenswarm.gateway.storage.state.sharing_codec import (
+            SUBSCRIPTIONS_HASH,
+            subscription_from_bytes,
+            subscription_session_id,
+        )
+
+        rows = await self._ephemeral.hgetall(SUBSCRIPTIONS_HASH)
+        if not rows:
+            return
+        restored: dict[str, dict[str, list[Subscription]]] = {}
+        for raw in rows.values():
+            try:
+                sub = subscription_from_bytes(raw)
+            except Exception as exc:
+                logger.warning("[Registry] skip corrupt subscription: %s", exc)
+                continue
+            sid = subscription_session_id(sub)
+            restored.setdefault(sid, {}).setdefault(sub.member_name, []).append(sub)
+        async with self._lock:
+            self._subs = restored
+        logger.info("[Registry] hydrated %d subscription(s) from ephemeral", len(rows))
+
+    async def _persist_sub(self, sub: Subscription) -> None:
+        if self._ephemeral is None:
+            return
+        from jiuwenswarm.gateway.storage.state.sharing_codec import (
+            SUBSCRIPTIONS_HASH,
+            subscription_to_bytes,
+        )
+
+        await self._ephemeral.hset(
+            SUBSCRIPTIONS_HASH,
+            sub.sub_id,
+            subscription_to_bytes(sub),
+        )
+
+    async def _remove_sub(self, sub_id: str) -> None:
+        if self._ephemeral is None:
+            return
+        from jiuwenswarm.gateway.storage.state.sharing_codec import SUBSCRIPTIONS_HASH
+
+        await self._ephemeral.hdel(SUBSCRIPTIONS_HASH, sub_id)
+
+    async def _clear_ephemeral(self) -> None:
+        if self._ephemeral is None:
+            return
+        from jiuwenswarm.gateway.storage.state.sharing_codec import SUBSCRIPTIONS_HASH
+
+        rows = await self._ephemeral.hgetall(SUBSCRIPTIONS_HASH)
+        for sub_id in rows:
+            await self._ephemeral.hdel(SUBSCRIPTIONS_HASH, sub_id)
 
     # ── 注册 / 注销 ──
 
@@ -162,6 +223,7 @@ class SessionSharingRegistry:
         )
         async with self._lock:
             self._subs.setdefault(session_id, {}).setdefault(member_name, []).append(sub)
+        await self._persist_sub(sub)
         logger.info(
             "[Registry] register: session=%s member=%s sub_id=%s",
             session_id, member_name, sub.sub_id,
@@ -185,59 +247,9 @@ class SessionSharingRegistry:
                                 "[Registry] unregister: session=%s member=%s sub_id=%s slot_freed=%s",
                                 sid, mname, sub_id, release.slot_freed,
                             )
+                            await self._remove_sub(sub_id)
                             return release
         return None
-
-    async def unregister_by_ws_id(
-        self,
-        ws_id: str,
-        *,
-        channel_id: str | None = None,
-    ) -> int:
-        """Remove subscriptions whose physical WebSocket has disconnected.
-
-        ``RoutingKey`` entries are transport indexes owned by ``BaseWsChannel``;
-        ``Subscription`` entries live independently in this registry.  Both must
-        be removed when a socket closes, otherwise a reconnect can leave
-        GodView or member delivery pointing at a dead ``ws_id``.
-        """
-        target_ws_id = str(ws_id or "").strip()
-        if not target_ws_id:
-            return 0
-
-        removed_count = 0
-        async with self._lock:
-            for sid, members in list(self._subs.items()):
-                for member_name, subs in list(members.items()):
-                    kept = []
-                    for sub in subs:
-                        matches_ws = (
-                            getattr(sub.delivery, "ws_id", "") == target_ws_id
-                        )
-                        matches_channel = (
-                            channel_id is None
-                            or sub.routing_key.channel_id == channel_id
-                        )
-                        if matches_ws and matches_channel:
-                            removed_count += 1
-                            continue
-                        kept.append(sub)
-                    if kept:
-                        members[member_name] = kept
-                    else:
-                        del members[member_name]
-                if not members:
-                    del self._subs[sid]
-
-        if removed_count:
-            logger.info(
-                "[Registry] unregistered disconnected websocket: "
-                "channel_id=%s ws_id=%s subscriptions=%d",
-                channel_id or "*",
-                target_ws_id,
-                removed_count,
-            )
-        return removed_count
 
     async def unregister_all_for_identity(
         self, channel_id: str, app_id: str, user_id: str,
@@ -250,6 +262,7 @@ class SessionSharingRegistry:
         若指定 member_name，仅移除该 member 的订阅（防止踢掉同一身份的其他席位）。
         """
         results: list[_UnregisterResult] = []
+        removed_ids: list[str] = []
         async with self._lock:
             _sessions = (
                 {session_id: self._subs.get(session_id, {})}
@@ -271,12 +284,15 @@ class SessionSharingRegistry:
                         removed.append(s)
                     for s in removed:
                         subs.remove(s)
+                        removed_ids.append(s.sub_id)
                         slot_freed = not subs
                         if slot_freed:
                             del members[mname]
                         results.append(_UnregisterResult(sid, mname, slot_freed))
                     if not members:
                         del self._subs[sid]
+        for sub_id in removed_ids:
+            await self._remove_sub(sub_id)
         for r in results:
             logger.info(
                 "[Registry] unregister_all_for_identity: session=%s member=%s slot_freed=%s",

@@ -76,6 +76,22 @@ class TestPathResolution:
         assert session_workspace.exists()
 
     @staticmethod
+    def test_collapse_nested_agent_workspace_dir():
+        """PPT historically appended /workspace onto the agent workspace."""
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            agent_ws = tmp_path / "service_default" / "agent_office" / "agent" / "workspace"
+            nested = agent_ws / "workspace"
+            nested.mkdir(parents=True)
+            assert utils.collapse_nested_agent_workspace_dir(nested) == agent_ws.resolve()
+            assert utils.collapse_nested_agent_workspace_dir(agent_ws) == agent_ws.resolve()
+            other = tmp_path / "decks" / "demo"
+            other.mkdir(parents=True)
+            assert utils.collapse_nested_agent_workspace_dir(other) == other.resolve()
+
+    @staticmethod
     def test_path_caching():
         """Test that path results are cached."""
         # First call
@@ -120,11 +136,13 @@ class TestLoggerSetup:
 
     @staticmethod
     def test_logger_handlers():
-        """Test that logger has console and five rotating log files."""
+        """Root only has QueueHandler; files/console live on the listener."""
         logger = utils.setup_logger("INFO")
-        handler_types = [type(h).__name__ for h in logger.handlers]
-        assert "StreamHandler" in handler_types
-        assert handler_types.count("SafeRotatingFileHandler") == 5
+        root_types = [type(h).__name__ for h in logger.handlers]
+        assert root_types == ["QueueHandler"]
+        output_types = [type(h).__name__ for h in utils._iter_log_output_handlers()]
+        assert "StreamHandler" in output_types
+        assert output_types.count("SafeRotatingFileHandler") == 5
 
 
 class TestSourceRecordMasking:
@@ -407,15 +425,18 @@ class TestHardcodedPathsPhase2:
 
     @staticmethod
     def test_cron_tools_path_equivalence():
-        """Test cron_tools.py path matches expected structure (cross-platform)."""
+        """Test cron_tools.py path matches expected multi-tenant structure."""
         from jiuwenswarm.common.utils import get_agent_home_dir, get_user_workspace_dir
 
-        # Original hardcoded: get_user_workspace_dir() / "agent" / "home" / "cron_jobs.json"
-        # New: get_agent_home_dir() / "cron_jobs.json"
-        # get_agent_home_dir() = get_user_workspace_dir() / "agent" / "home"
-
         workspace = get_user_workspace_dir()
-        expected_path = workspace / "agent" / "home" / "cron_jobs.json"
+        expected_path = (
+            workspace
+            / "service_default"
+            / "agent_default"
+            / "agent"
+            / "home"
+            / "cron_jobs.json"
+        )
         actual_path = get_agent_home_dir() / "cron_jobs.json"
 
         assert str(actual_path.resolve()) == str(expected_path.resolve()), \
@@ -435,7 +456,14 @@ class TestHardcodedPathsPhase2:
         from jiuwenswarm.common.utils import get_user_workspace_dir
 
         workspace = get_user_workspace_dir()
-        expected_path = workspace / "agent" / "workspace" / "task-data.json"
+        expected_path = (
+            workspace
+            / "service_default"
+            / "agent_default"
+            / "agent"
+            / "workspace"
+            / "task-data.json"
+        )
         actual_path = Path(_get_task_data_path())
 
         assert str(actual_path.resolve()) == str(expected_path.resolve()), \
@@ -454,7 +482,14 @@ class TestHardcodedPathsPhase2:
         from jiuwenswarm.common.utils import get_deepagent_user_md_path, get_user_workspace_dir
 
         workspace = get_user_workspace_dir()
-        expected_path = workspace / "agent" / "workspace" / "USER.md"
+        expected_path = (
+            workspace
+            / "service_default"
+            / "agent_default"
+            / "agent"
+            / "workspace"
+            / "USER.md"
+        )
         actual_path = get_deepagent_user_md_path()
 
         assert str(actual_path.resolve()) == str(expected_path.resolve()), \
@@ -469,17 +504,26 @@ class TestAdditionalHardcodedPaths:
 
     @staticmethod
     def test_rail_manager_path_structure():
-        """Test rail_manager.py uses get_agent_workspace_dir() for extensions path."""
-        from jiuwenswarm.agents.harness.common.plugins.rail_manager import RailManager
-        from jiuwenswarm.common.utils import get_user_workspace_dir
+        """Test rail_manager uses multi-tenant workspace for extensions path."""
+        from jiuwenswarm.agents.harness.common.plugins.rail_manager import get_rail_manager
+        from jiuwenswarm.common.utils import get_multi_tenant_user_workspace_dir
+        from jiuwenswarm.server.runtime.runtime_scope import RuntimeScopeKey
 
-        workspace = get_user_workspace_dir()
+        scope = RuntimeScopeKey.from_ids()
+        workspace = get_multi_tenant_user_workspace_dir(
+            scope.service_id, scope.agent_id
+        )
         expected_path = workspace / "agent" / "workspace" / "extensions"
-        rail_manager = RailManager()
+        import os
+        os.environ["JIUWENSWARM_EDITION"] = "enterprise"
+        try:
+            rail_manager = get_rail_manager(scope)
 
-        extensions_dir = getattr(rail_manager, '_extensions_dir')
-        assert str(extensions_dir.resolve()) == str(expected_path.resolve()), \
-            f"Expected: {expected_path.resolve()}, Got: {extensions_dir.resolve()}"
+            extensions_dir = rail_manager.extensions_dir
+            assert str(extensions_dir.resolve()) == str(expected_path.resolve()), \
+                f"Expected: {expected_path.resolve()}, Got: {extensions_dir.resolve()}"
+        finally:
+            os.environ.pop("JIUWENSWARM_EDITION", None)
 
     @staticmethod
     def test_config_module_dir_structure(tmp_path):
@@ -507,7 +551,14 @@ class TestAdditionalHardcodedPaths:
         from jiuwenswarm.common.utils import get_interactions_dir, get_user_workspace_dir
 
         workspace = get_user_workspace_dir()
-        expected_path = workspace / "agent" / "workspace" / "interactions"
+        expected_path = (
+            workspace
+            / "service_default"
+            / "agent_default"
+            / "agent"
+            / "workspace"
+            / "interactions"
+        )
         actual_path = get_interactions_dir()
 
         assert str(actual_path.resolve()) == str(expected_path.resolve()), \

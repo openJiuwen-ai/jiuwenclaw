@@ -4,6 +4,12 @@
 interface ImportMetaEnv {
   readonly VITE_API_BASE?: string;
   readonly VITE_WS_BASE?: string;
+  readonly VITE_WEB_TRANSPORT?: string;
+  readonly VITE_TRANSPORT?: string;
+  readonly VITE_GATEWAY_HTTP_BASE?: string;
+  readonly VITE_WEB_HTTP_BASE?: string;
+  readonly VITE_LOGIN_AUTH_SIMULATE?: string;
+  readonly VITE_LOGIN_AUTH_SIMULATE_AVAILABLE?: string;
 }
 
 interface ImportMeta {
@@ -15,10 +21,6 @@ type DesktopSaveResult = {
   cancelled?: boolean;
 };
 
-type DesktopBlobSaveStartResult = DesktopSaveResult & {
-  transfer_id?: string;
-};
-
 interface Window {
   /** Set by desktop_app.py after the webview page loads. */
   __JIUWEN_DESKTOP__?: boolean;
@@ -27,10 +29,6 @@ interface Window {
   pywebview?: {
     api?: {
       download_file?: (url: string, filename: string) => Promise<DesktopSaveResult> | DesktopSaveResult;
-      begin_blob_save?: (filename: string, mimeType: string, totalSize: number) => Promise<DesktopBlobSaveStartResult> | DesktopBlobSaveStartResult;
-      append_blob_save?: (transferId: string, encodedChunk: string) => Promise<boolean> | boolean;
-      finish_blob_save?: (transferId: string) => Promise<DesktopSaveResult> | DesktopSaveResult;
-      abort_blob_save?: (transferId: string) => Promise<boolean> | boolean;
       install_update?: (path: string) => Promise<boolean> | boolean;
       save_data_url?: (dataUrl: string, filename: string) => Promise<DesktopSaveResult> | DesktopSaveResult;
       select_project_directory?: () => Promise<string | null> | string | null;
@@ -38,10 +36,6 @@ interface Window {
         allowMultiple?: boolean,
         initialDir?: string | null,
       ) => Promise<Array<Record<string, unknown>>> | Array<Record<string, unknown>>;
-      select_local_file_path?: (
-        initialPath?: string | null,
-        title?: string | null,
-      ) => Promise<string | null> | string | null;
       describe_local_files?: (
         paths: string[],
       ) => Promise<Array<Record<string, unknown>>> | Array<Record<string, unknown>>;
@@ -52,4 +46,16 @@ interface Window {
   };
   /** Durable ingest hook invoked by desktop_app.py run_js on native file drops. */
   __JIUWEN_INGEST_LOCAL_FILES__?: (detail: unknown) => void;
+  /** Set by the User Web server for enterprise embedding mode. */
+  __JIUWEN_USER_WEB_MODE__?: string;
+  __JIUWEN_USER_WEB_EMBEDDING__?: boolean;
+  /** Login simulation switch injected by the User Web server. */
+  __JIUWEN_LOGIN_AUTH_SIMULATE__?: boolean | string;
+  /** Whether this frontend artifact contains the optional simulation plugin. */
+  __JIUWEN_LOGIN_AUTH_SIMULATE_AVAILABLE__?: boolean | string;
+}
+
+declare module 'virtual:login-auth-simulate-provider' {
+  import type { EnterpriseAuthProvider } from './auth/types';
+  export const simulatedAuthProvider: EnterpriseAuthProvider | null;
 }

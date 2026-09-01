@@ -7,7 +7,7 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import pytest
 
@@ -937,30 +937,46 @@ def test_turn_diff_list_includes_change_set_metadata():
 
 
 def test_get_session_extra_history_roots_infers_team_workspaces(tmp_path):
+    team_home_mock = Mock(return_value=tmp_path / "team-home")
+    metadata_mock = Mock(
+        return_value={
+            "team_name": "unit-team",
+            "runtime_team_name": "unit-team_sess-1",
+            "team_file_monitor_roots": [
+                str(tmp_path / ".agent_teams" / "unit-team_sess-1" / "team-workspace"),
+            ],
+        }
+    )
     with (
         patch(
             "jiuwenswarm.server.runtime.session.session_metadata.get_session_metadata",
-            return_value={
-                "team_name": "unit-team",
-                "team_file_monitor_roots": [
-                    str(tmp_path / ".agent_teams" / "unit-team" / "team-workspace"),
-                ],
-            },
+            metadata_mock,
         ),
         patch(
             "openjiuwen.agent_teams.paths.team_home",
-            return_value=tmp_path / "team-home",
+            team_home_mock,
         ),
     ):
         from jiuwenswarm.server.runtime.session.git_diff_status import (
             get_session_extra_history_roots,
         )
 
-        roots = get_session_extra_history_roots("sess-1")
+        sessions_root = tmp_path / "tenant-sessions"
+        roots = get_session_extra_history_roots(
+            "sess-1",
+            sessions_root=sessions_root,
+        )
 
-    assert str(tmp_path / ".agent_teams" / "unit-team" / "team-workspace") in roots
-    assert str(tmp_path / ".agent_teams" / "unit-team" / "workspaces") in roots
-    assert str(tmp_path / ".agent_teams" / "unit-team" / "sessions" / "sess-1" / "worktrees") in roots
+    metadata_mock.assert_called_once_with(
+        "sess-1",
+        cache_bust=True,
+        enable_writeback=False,
+        sessions_root=sessions_root,
+    )
+    assert {item.args[0] for item in team_home_mock.call_args_list} == {"unit-team_sess-1"}
+    assert str(tmp_path / ".agent_teams" / "unit-team_sess-1" / "team-workspace") in roots
+    assert str(tmp_path / ".agent_teams" / "unit-team_sess-1" / "workspaces") in roots
+    assert str(tmp_path / ".agent_teams" / "unit-team_sess-1" / "sessions" / "sess-1" / "worktrees") in roots
     assert str(tmp_path / "team-home" / "team-workspace") in roots
     assert str(tmp_path / "team-home" / "workspaces") in roots
     assert str(tmp_path / "team-home" / "sessions" / "sess-1" / "worktrees") in roots
@@ -1041,8 +1057,9 @@ def test_get_session_extra_history_roots_adds_spawned_member_workspaces(tmp_path
 
 
 def test_get_session_extra_history_roots_discovers_sub_agent_workspaces(tmp_path):
-    """Single-agent mode (no team_name) should still find sub-agent dirs under workspace/sub_agents."""
-    sub_agents_dir = tmp_path / "workspace" / "sub_agents"
+    """Single-agent mode should scan the explicitly selected tenant workspace."""
+    tenant_workspace = tmp_path / "tenant-workspace"
+    sub_agents_dir = tenant_workspace / "sub_agents"
     sub_agents_dir.mkdir(parents=True)
     (sub_agents_dir / "sess-1_sub_general-purpose_abc").mkdir()
     (sub_agents_dir / "sess-1_sub_general-purpose_def").mkdir()
@@ -1057,14 +1074,17 @@ def test_get_session_extra_history_roots_discovers_sub_agent_workspaces(tmp_path
         ),
         patch(
             "jiuwenswarm.common.utils.get_agent_workspace_dir",
-            return_value=tmp_path / "workspace",
+            return_value=tmp_path / "wrong-default-workspace",
         ),
     ):
         from jiuwenswarm.server.runtime.session.git_diff_status import (
             get_session_extra_history_roots,
         )
 
-        roots = get_session_extra_history_roots("sess-1")
+        roots = get_session_extra_history_roots(
+            "sess-1",
+            agent_workspace_root=tenant_workspace,
+        )
 
     assert str(sub_agents_dir / "sess-1_sub_general-purpose_abc") in roots
     assert str(sub_agents_dir / "sess-1_sub_general-purpose_def") in roots

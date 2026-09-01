@@ -276,6 +276,17 @@ def test_install_skill_builtin_source_routes_to_handle_skills_install_builtin(tm
     assert (user_skills_dir / "my-builtin-skill").is_dir()
 
 
+def test_skill_tool_descriptions_are_chinese(tmp_path):
+    manager = SkillManager(workspace_dir=str(tmp_path / "workspace"))
+    toolkit = SkillToolkit(manager)
+
+    tools = {t.card.name: t.card.description for t in toolkit.get_tools()}
+
+    assert "从 SkillNet、ClawHub、TeamSkillsHub 及内置目录搜索可安装技能。" in tools["search_skill"]
+    assert "安装技能。" in tools["install_skill"]
+    assert tools["uninstall_skill"] == "按名称卸载已安装的技能。"
+
+
 def test_format_skills_for_llm_distinguishes_install_status():
     skills = [
         {"name": "installed-skill", "description": "already there", "installed": True, "source": "local"},

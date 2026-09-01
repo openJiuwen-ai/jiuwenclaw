@@ -135,7 +135,7 @@ def _is_send_file_enabled(config: dict[str, Any] | None, channel_id: str) -> boo
             config.get("channels", {}).get(str(channel_id), {}).get("send_file_allowed")
         )
     if send_file_allowed is None:
-        return channel_id == "web"
+        return channel_id in {"web", "officeclaw"}
     return bool(send_file_allowed)
 
 
@@ -160,14 +160,6 @@ class SendFileInput(ConstructionInput):
     request_metadata: dict[str, Any] | None = context_field(
         attr="request_metadata",
         description="Request metadata mapping.",
-    )
-    project_dir: str | None = context_field(
-        attr="project_dir",
-        description="Active user project directory.",
-    )
-    team_workspace_root: str | None = context_field(
-        attr="team_ws_root",
-        description="Internal team collaboration workspace root.",
     )
 
 
@@ -211,8 +203,6 @@ def build_send_file_tools(params: dict[str, Any], ctx: SwarmBuildContext) -> lis
             session_id=inp.session_id,
             channel_id=inp.channel_id,
             metadata=inp.request_metadata,
-            project_dir=inp.project_dir,
-            team_workspace_root=inp.team_workspace_root,
         )
         tools = list(toolkit.get_tools())
         logger.info(

@@ -17,7 +17,9 @@ from ruamel.yaml import YAML
 from openjiuwen.agent_teams.paths import configure_openjiuwen_home, get_agent_teams_home, team_home
 from jiuwenswarm.agents.harness.team.config_loader import (
     TeamTemplateNotFoundError,
+    build_model_identity_reference,
     get_team_template_snapshot,
+    resolve_team_model_reference,
 )
 from jiuwenswarm.common.utils import get_user_workspace_dir
 from jiuwenswarm.server.runtime.team_binding_store import validate_team_name
@@ -26,6 +28,9 @@ configure_openjiuwen_home(get_user_workspace_dir())
 
 TEAM_ENTITY_META_DIR = ".team-meta"
 TEAM_ENTITY_FILE = "team.yaml"
+
+_SENSITIVE_SNAPSHOT_KEYS = {"api_key", "api_base"}
+_SENSITIVE_HEADER_CONTAINER_KEYS = {"custom-headers", "extra-headers", "default-headers"}
 
 
 class TeamEntityStoreError(ValueError):
@@ -75,6 +80,206 @@ def _yaml() -> YAML:
     return yaml
 
 
+def _find_sensitive_snapshot_path(
+    value: Any,
+    path: tuple[str, ...] = (),
+) -> tuple[str, ...] | None:
+    if isinstance(value, dict):
+        for raw_key, child in value.items():
+            key = str(raw_key)
+            normalized_key = key.strip().lower().replace("_", "-")
+            child_path = (*path, key)
+            if normalized_key.replace("-", "_") in _SENSITIVE_SNAPSHOT_KEYS:
+                return child_path
+            if normalized_key in _SENSITIVE_HEADER_CONTAINER_KEYS and child:
+                return child_path
+            found = _find_sensitive_snapshot_path(child, child_path)
+            if found is not None:
+                return found
+    elif isinstance(value, list):
+        for index, child in enumerate(value):
+            found = _find_sensitive_snapshot_path(child, (*path, str(index)))
+            if found is not None:
+                return found
+    return None
+
+
+def _normalized_text(value: Any) -> str:
+    return str(value or "").strip()
+
+
+def _normalized_endpoint(value: Any) -> str:
+    return _normalized_text(value).rstrip("/")
+
+
+def _resolve_snapshot_model_ref(model: dict[str, Any], config_base: dict[str, Any]) -> str | None:
+    existing_ref = _normalized_text(model.get("ref"))
+    if existing_ref:
+        try:
+            owner = resolve_team_model_reference(existing_ref, config_base)
+        except ValueError:
+            return None
+        owner_client_config = owner.get("model_client_config")
+        if not isinstance(owner_client_config, dict):
+            return None
+        stable_ref = build_model_identity_reference(owner_client_config.get("model_name"), owner_client_config)
+        try:
+            resolve_team_model_reference(stable_ref, config_base)
+        except ValueError:
+            return None
+        return stable_ref
+
+    request_config = model.get("model_request_config")
+    client_config = model.get("model_client_config")
+    if not isinstance(request_config, dict) or not isinstance(client_config, dict):
+        return None
+    model_name = _normalized_text(request_config.get("model"))
+    models = config_base.get("models")
+    defaults = models.get("defaults") if isinstance(models, dict) else None
+    if not model_name or not isinstance(defaults, list):
+        return None
+
+    source_endpoint = _normalized_endpoint(client_config.get("api_base"))
+    source_provider = _normalized_text(client_config.get("client_provider")).lower()
+    source_api_key = _normalized_text(client_config.get("api_key"))
+    source_headers = client_config.get("custom_headers")
+    matches: list[dict[str, Any]] = []
+    for entry in defaults:
+        if not isinstance(entry, dict):
+            continue
+        candidate = entry.get("model_client_config")
+        if not isinstance(candidate, dict) or _normalized_text(candidate.get("model_name")) != model_name:
+            continue
+        if source_endpoint and _normalized_endpoint(candidate.get("api_base")) != source_endpoint:
+            continue
+        if source_provider and _normalized_text(candidate.get("client_provider")).lower() != source_provider:
+            continue
+        if source_api_key and _normalized_text(candidate.get("api_key")) != source_api_key:
+            continue
+        if isinstance(source_headers, dict) and source_headers:
+            if candidate.get("custom_headers") != source_headers:
+                continue
+        matches.append(entry)
+    if len(matches) != 1:
+        return None
+    matched_client_config = matches[0].get("model_client_config")
+    if not isinstance(matched_client_config, dict):
+        return None
+    model_ref = build_model_identity_reference(model_name, matched_client_config)
+    owner_count = 0
+    for entry in defaults:
+        if not isinstance(entry, dict):
+            continue
+        candidate_config = entry.get("model_client_config")
+        if not isinstance(candidate_config, dict):
+            continue
+        candidate_ref = build_model_identity_reference(
+            candidate_config.get("model_name"),
+            candidate_config,
+        )
+        if candidate_ref == model_ref:
+            owner_count += 1
+    return model_ref if owner_count == 1 else None
+
+
+def _resolve_request_only_model_ref(model: dict[str, Any], config_base: dict[str, Any]) -> str | None:
+    """Bind a request-only model (model name only, no client config / ref) to a tenant owner.
+
+    Relay is expected to register each team member's model against the tenant effective
+    model owner (``models.defaults``) and emit a stable ``ref``. When it only sends the
+    model name (``model_request_config``) without credentials, this resolves it to a
+    stable ref when exactly one owner in ``models.defaults`` carries that ``model_name``;
+    when no owner or more than one owner matches, it returns ``None`` so the caller can
+    reject explicitly at bind time instead of letting the request-only model pass through
+    to ``TeamAgentSpec`` creation and surface as a generic "model_client_config Field required".
+    """
+    request_config = model.get("model_request_config")
+    if not isinstance(request_config, dict):
+        return None
+    model_name = _normalized_text(request_config.get("model"))
+    if not model_name:
+        return None
+    models = config_base.get("models")
+    defaults = models.get("defaults") if isinstance(models, dict) else None
+    if not isinstance(defaults, list):
+        return None
+    matches: list[dict[str, Any]] = []
+    for entry in defaults:
+        if not isinstance(entry, dict):
+            continue
+        candidate = entry.get("model_client_config")
+        if isinstance(candidate, dict) and _normalized_text(candidate.get("model_name")) == model_name:
+            matches.append(entry)
+    if len(matches) != 1:
+        return None
+    matched_client_config = matches[0].get("model_client_config")
+    if not isinstance(matched_client_config, dict):
+        return None
+    return build_model_identity_reference(model_name, matched_client_config)
+
+
+def _build_snapshot_model_reference(model_ref: str, model: dict[str, Any]) -> dict[str, Any]:
+    """Keep non-sensitive per-member request overrides alongside an owner reference."""
+    normalized: dict[str, Any] = {"ref": model_ref}
+    request_config = model.get("model_request_config")
+    if not isinstance(request_config, dict):
+        return normalized
+    request_overrides = deepcopy(request_config)
+    # The referenced owner is authoritative for model identity. Other request options
+    # (temperature, top_p, response format, etc.) remain member-specific snapshot data.
+    request_overrides.pop("model", None)
+    if request_overrides:
+        normalized["model_request_config"] = request_overrides
+    return normalized
+
+
+def normalize_team_entity_snapshot(
+    template_snapshot: dict[str, Any],
+    config_base: dict[str, Any] | None,
+) -> dict[str, Any]:
+    snapshot = deepcopy(template_snapshot)
+    agents = snapshot.get("agents")
+    if isinstance(config_base, dict) and isinstance(agents, dict):
+        for agent_key, agent_config in agents.items():
+            if not isinstance(agent_config, dict):
+                continue
+            model = agent_config.get("model")
+            if not isinstance(model, dict):
+                continue
+            model_ref = _resolve_snapshot_model_ref(model, config_base)
+            if model_ref:
+                agent_config["model"] = _build_snapshot_model_reference(model_ref, model)
+            elif "ref" in model:
+                raise TeamEntityStoreError(
+                    "template_snapshot contains an invalid or unowned model reference",
+                    code="BAD_REQUEST",
+                )
+            elif isinstance(model.get("model_request_config"), dict) and not isinstance(
+                model.get("model_client_config"), dict
+            ):
+                # Request-only model: relay sent a model name without a credential owner.
+                # Bind-phase: resolve to a unique tenant owner (stable ref), else reject
+                # explicitly — do not let it pass through to TeamAgentSpec creation and
+                # surface as a generic "model_client_config Field required" error.
+                request_ref = _resolve_request_only_model_ref(model, config_base)
+                if request_ref:
+                    agent_config["model"] = _build_snapshot_model_reference(request_ref, model)
+                    continue
+                model_name = _normalized_text(model.get("model_request_config", {}).get("model"))
+                raise TeamEntityStoreError(
+                    f"team member '{agent_key}' specifies model '{model_name or '<empty>'}' but "
+                    "does not have a unique credential owner in tenant effective models.defaults",
+                    code="BAD_REQUEST",
+                )
+    sensitive_path = _find_sensitive_snapshot_path(snapshot)
+    if sensitive_path is not None:
+        raise TeamEntityStoreError(
+            f"template_snapshot contains sensitive configuration at {'.'.join(sensitive_path)}",
+            code="BAD_REQUEST",
+        )
+    return snapshot
+
+
 class TeamEntityStore:
     """File-backed team entity metadata catalog."""
 
@@ -113,6 +318,12 @@ class TeamEntityStore:
             raise TeamEntityStoreError("template_id is required", code="BAD_REQUEST")
         if not isinstance(template_snapshot, dict) or not template_snapshot:
             raise TeamEntityStoreError("template_snapshot is required", code="BAD_REQUEST")
+        sensitive_path = _find_sensitive_snapshot_path(template_snapshot)
+        if sensitive_path is not None:
+            raise TeamEntityStoreError(
+                f"template_snapshot contains sensitive configuration at {'.'.join(sensitive_path)}",
+                code="BAD_REQUEST",
+            )
 
         path = self.entity_path(normalized_name)
         now = time.time()
@@ -252,6 +463,7 @@ def ensure_team_entity(
 
     if not snapshot or not normalized_template:
         return None
+    snapshot = normalize_team_entity_snapshot(snapshot, config_base)
     return entity_store.write(
         team_name=team_name,
         template_id=normalized_template,

@@ -171,8 +171,8 @@ async def trigger_main_agent(server, request: ProactiveTriggerRequest) -> bool:
         delivered = False
         try:
             async for chunk in agent.process_message_stream(agent_request):
-                # chunk 经 server.send_push 推 Gateway。send_push 内部已用
-                # _current_send_lock 串行化 ws 发送，且 build_server_push_wire 走
+                # chunk 经 server.send_push 推 Gateway。send_push 扇给 PushRegistry，
+                # WS 订阅者内部用连接级 send_lock 串行化写入，且 build_server_push_wire 走
                 # chunk 分支（无 response_kind）正确编码——这里只需带齐 chunk 的
                 # request_id / payload / is_complete，Gateway 才能按 request_id 路由。
                 #

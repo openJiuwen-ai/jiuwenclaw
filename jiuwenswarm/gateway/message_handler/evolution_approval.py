@@ -153,11 +153,14 @@ class EvolutionApprovalCoordinator:
         session_id: str | None,
         new_input: str,
         attachments: list[dict[str, Any]] | None = None,
+        files: list[dict[str, Any]] | None = None,
     ) -> None:
         if not session_id:
             return
         payload: dict[str, Any] = {"new_input": new_input}
-        if attachments:
+        if files:
+            payload["files"] = files
+        elif attachments:
             payload["attachments"] = attachments
         self._queued_supplement_input[session_id] = payload
 

@@ -170,6 +170,28 @@ def test_normalize_gateway_message_preserves_user_id():
     assert normalized.is_stream is True
 
 
+def test_normalize_gateway_message_preserves_app_and_agent_identity():
+    agent_ref = {"mode": "agent", "id": "main"}
+    msg = Message(
+        id="req-chat",
+        type="req",
+        channel_id="web",
+        session_id="sess-1",
+        params={"content": "hi"},
+        timestamp=time.time(),
+        ok=True,
+        req_method=ReqMethod.CHAT_SEND,
+        user_id="user-1",
+        app_id="app-1",
+        agent_ref=agent_ref,
+    )
+
+    normalized = _normalize_gateway_message(msg)
+
+    assert normalized.app_id == "app-1"
+    assert normalized.agent_ref == agent_ref
+
+
 @pytest.mark.asyncio
 async def test_schedule_gateway_restart_sets_event_without_execv(monkeypatch):
     import jiuwenswarm.gateway.app_gateway as gateway_module

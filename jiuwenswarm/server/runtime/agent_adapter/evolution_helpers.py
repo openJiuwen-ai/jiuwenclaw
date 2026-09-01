@@ -4,7 +4,6 @@
 
 from __future__ import annotations
 
-import inspect
 import logging
 import math
 import os
@@ -15,6 +14,7 @@ from typing import Any, Callable
 
 import yaml
 
+from jiuwenswarm.common.utils import get_builtin_skill_names, is_builtin_skill
 from jiuwenswarm.server.runtime.skill import filter_visible_skill_names
 
 logger = logging.getLogger(__name__)
@@ -179,9 +179,78 @@ def read_skill_kind(store: Any, skill_name: str) -> str | None:
     return None
 
 
+def merge_evolution_disabled_skills(
+    disabled_skills: list[str] | set[str] | tuple[str, ...] | str | None = None,
+) -> list[str]:
+    """Union execution-disabled skills with package builtin skills for evolution rails."""
+    merged: set[str] = set()
+    if isinstance(disabled_skills, str):
+        name = disabled_skills.strip()
+        if name:
+            merged.add(name)
+    elif disabled_skills:
+        merged.update(str(name).strip() for name in disabled_skills if str(name).strip())
+    builtin_names = get_builtin_skill_names()
+    if builtin_names:
+        sorted_builtins = sorted(builtin_names)
+        logger.info(
+            "[EvolutionHelpers] exclude %d builtin skill(s) from self-evolution "
+            "(disabled_skills): %s",
+            len(sorted_builtins),
+            ", ".join(sorted_builtins),
+        )
+        merged.update(builtin_names)
+    return sorted(merged)
+
+
+def filter_evolution_eligible_skill_names(skill_names: list[str]) -> list[str]:
+    """Drop package builtin skills that must not participate in self-evolution."""
+    eligible: list[str] = []
+    excluded: list[str] = []
+    for name in skill_names:
+        if is_builtin_skill(name):
+            excluded.append(name)
+        else:
+            eligible.append(name)
+    if excluded:
+        logger.info(
+            "[EvolutionHelpers] exclude builtin skill(s) from self-evolution "
+            "(eligible filter): %s",
+            ", ".join(excluded),
+        )
+    return eligible
+
+
+def guard_builtin_evolution_skill(skill_name: str) -> str | None:
+    """Return an error message when *skill_name* is a package builtin skill."""
+    if not is_builtin_skill(skill_name):
+        return None
+    logger.info(
+        "[EvolutionHelpers] skip skill self-evolution for builtin skill=%s",
+        skill_name,
+    )
+    return f"Skill '{skill_name}' 为内置官方技能，不参与 Skill 自演进。"
+
+
+def sync_evolution_disabled_skills(
+    rail: Any,
+    disabled_skills: list[str] | set[str] | tuple[str, ...] | str | None,
+) -> None:
+    """Keep a rail's mutable ``disabled_skills`` set aligned with the deny-list."""
+    current = getattr(rail, "disabled_skills", None)
+    if not isinstance(current, set):
+        return
+    desired = set(merge_evolution_disabled_skills(disabled_skills))
+    if current != desired:
+        current.clear()
+        current.update(desired)
+
+
 def _available_skill_names(store: Any) -> str:
     try:
-        names = filter_visible_skill_names(store.list_skill_names())
+        names = filter_evolution_eligible_skill_names(
+            filter_visible_skill_names(store.list_skill_names())
+        )
     except Exception:
         names = []
     return "、".join(names) or "（无可用 Skill）"
@@ -217,6 +286,10 @@ def validate_evolution_skill(
     require_skill_md: bool,
 ) -> str | None:
     """Validate that an evolution command can target ``skill_name``."""
+    builtin_error = guard_builtin_evolution_skill(skill_name)
+    if builtin_error is not None:
+        return builtin_error
+
     if not _skill_exists(store, skill_name):
         return f"未找到 Skill '{skill_name}'。当前可用：{_available_skill_names(store)}"
 
@@ -557,6 +630,21 @@ def is_evolution_outcome_event(evt: Any) -> bool:
     return evolution_event_kind(evt) == "outcome"
 
 
+def is_evolution_progress_event(evt: Any) -> bool:
+    """True for rail `_emit_progress` host events (not model reasoning)."""
+    return evolution_event_kind(evt) == "progress"
+
+
+def _skip_evolution_stream_forward(evt: Any) -> bool:
+    """Host progress/approval/outcome must not be re-emitted as chat.reasoning."""
+    return (
+        is_evolution_approval_event(evt)
+        or is_evolution_outcome_event(evt)
+        or is_evolution_progress_event(evt)
+        or team_evolution_terminal_progress(evt) is not None
+    )
+
+
 def evolution_outcome_from_event(evt: Any) -> dict[str, str]:
     payload = event_payload_dict(evt)
     if not isinstance(payload, dict):
@@ -834,20 +922,14 @@ async def broadcast_evolution_progress(
     events: list[Any],
     *,
     parse_stream_chunk: Callable[[Any], dict[str, Any] | None],
-    broadcast_event: Callable[[str | None, str, dict[str, Any]], Any],
+    broadcast_event: Callable[[str | None, str, dict[str, Any]], None],
 ) -> None:
     for evt in events:
-        if (
-            is_evolution_approval_event(evt)
-            or is_evolution_outcome_event(evt)
-            or team_evolution_terminal_progress(evt) is not None
-        ):
+        if _skip_evolution_stream_forward(evt):
             continue
         parsed = parse_stream_chunk(evt)
         if parsed is not None:
-            result = broadcast_event(channel_id, session_id, parsed)
-            if inspect.isawaitable(result):
-                await result
+            broadcast_event(channel_id, session_id, parsed)
 
 
 async def push_evolution_progress(
@@ -859,11 +941,7 @@ async def push_evolution_progress(
     build_push_message: Callable[..., dict[str, Any]],
 ) -> None:
     for evt in events:
-        if (
-            is_evolution_approval_event(evt)
-            or is_evolution_outcome_event(evt)
-            or team_evolution_terminal_progress(evt) is not None
-        ):
+        if _skip_evolution_stream_forward(evt):
             continue
         try:
             parsed = parse_stream_chunk(evt)

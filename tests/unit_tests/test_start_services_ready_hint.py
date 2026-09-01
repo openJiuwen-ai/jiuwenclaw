@@ -153,7 +153,7 @@ def test_wait_for_services_ready_prints_full_port_summary(caplog: pytest.LogCapt
     }
     processes = {"app": app, "web-dev": frontend}
 
-    with _open_ports(5173, 18092, 19000, 19001):
+    with _open_ports(5173, 18092, 19000, 19001, 19002):
         with caplog.at_level(logging.INFO):
             _wait_for_services_ready(ports, processes, overall_timeout=2.0)
 
@@ -161,11 +161,13 @@ def test_wait_for_services_ready_prints_full_port_summary(caplog: pytest.LogCapt
     assert "服务已启动，端口信息如下：" in joined
     assert "✓ Web UI" in joined
     assert "✓ AgentServer WebSocket" in joined
-    assert "✓ Gateway HTTP" in joined
+    assert "✓ Gateway WebSocket" in joined
     assert "✓ WebChannel WebSocket" in joined
+    assert "✓ Web HTTP" in joined
     assert "http://localhost:5173" in joined
-    assert "http://localhost:19001" in joined
+    assert "ws://localhost:19001/tui" in joined
     assert "ws://localhost:19000/ws" in joined
+    assert "http://localhost:19002/api/v1" in joined
     assert "ws://localhost:18092" in joined
 
 
@@ -282,7 +284,7 @@ def test_web_ui_banner_prints_before_backends_ready(caplog: pytest.LogCaptureFix
 
     def _sleep(_seconds: float) -> None:
         # After the first wait tick, backends come up (Web UI already bannered).
-        open_set.update({18092, 19000, 19001})
+        open_set.update({18092, 19000, 19001, 19002})
 
     with patch("socket.socket", side_effect=lambda *a, **k: _Sock()):
         with patch("jiuwenswarm.start_services.time.sleep", side_effect=_sleep):

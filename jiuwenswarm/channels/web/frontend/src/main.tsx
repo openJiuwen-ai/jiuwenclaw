@@ -4,6 +4,7 @@ import { A2UIProvider } from '@a2ui/react';
 import type { A2UIClientEventMessage } from '@a2ui/react';
 import { injectStyles } from '@a2ui/react/styles';
 import App from './App.tsx'
+import { EnterpriseEntry } from './EnterpriseEntry.tsx'
 import { dispatchA2UIAction } from './features/a2ui/actionBridge';
 import { installDesktopLocalFilesBridge } from './features/workspace/localFilePicker';
 import './styles/foundation.css'
@@ -39,7 +40,9 @@ function handleA2UIAction(message: A2UIClientEventMessage) {
 }
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
-  <A2UIProvider onAction={handleA2UIAction}>
-    <App />
-  </A2UIProvider>,
+  <EnterpriseEntry>
+    <A2UIProvider onAction={handleA2UIAction}>
+      <App />
+    </A2UIProvider>
+  </EnterpriseEntry>,
 )

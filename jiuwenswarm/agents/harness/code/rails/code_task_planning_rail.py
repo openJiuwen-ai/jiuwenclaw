@@ -46,6 +46,10 @@ class CodeTaskPlanningRail(TaskPlanningRail):
         max_tracked_task_reminder_sessions: int = _MAX_TRACKED_TASK_REMINDER_SESSIONS,
         **kwargs,
     ) -> None:
+        # Force-off parent progress_repeat: code idle reminders use attachment
+        # task_reminder. Not gated by react.task_planning / TODO_PROGRESS_REPEAT.
+        # Advance still uses parent schedule + inject (called below).
+        kwargs["enable_progress_repeat"] = False
         super().__init__(*args, **kwargs)
         self.task_reminder_turns_since_management = task_reminder_turns_since_management
         self.task_reminder_turns_between_reminders = task_reminder_turns_between_reminders
@@ -63,7 +67,7 @@ class CodeTaskPlanningRail(TaskPlanningRail):
         runtime prompt attachment that reminds it of the task tools and includes
         current todos.
         """
-
+        await self._inject_pending_todo_reminder(ctx)
         await self._switch_model_if_needed(ctx)
 
         session_id = self._session_id(ctx)

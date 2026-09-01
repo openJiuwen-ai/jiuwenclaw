@@ -1,0 +1,83 @@
+"""Stable errors exposed by the A2A outbound domain."""
+
+from __future__ import annotations
+
+from enum import Enum
+
+
+class A2AOutboundErrorCode(str, Enum):
+    DISCOVERY_URL_INVALID = "A2A_DISCOVERY_URL_INVALID"
+    DISCOVERY_BLOCKED = "A2A_DISCOVERY_BLOCKED"
+    CARD_FETCH_FAILED = "A2A_CARD_FETCH_FAILED"
+    CARD_INVALID = "A2A_CARD_INVALID"
+    AGENT_NOT_REGISTERED = "A2A_AGENT_NOT_REGISTERED"
+    AGENT_DISABLED = "A2A_AGENT_DISABLED"
+    AGENT_UNAVAILABLE = "A2A_AGENT_UNAVAILABLE"
+    AGENT_REVIEW_REQUIRED = "A2A_AGENT_REVIEW_REQUIRED"
+    AUTH_REQUIRED = "A2A_AUTH_REQUIRED"
+    DISPATCH_NOT_FOUND = "A2A_DISPATCH_NOT_FOUND"
+    DISPATCH_REJECTED = "A2A_DISPATCH_REJECTED"
+    DISPATCH_TIMEOUT = "A2A_DISPATCH_TIMEOUT"
+    DISPATCH_CONFLICT = "A2A_DISPATCH_CONFLICT"
+    REMOTE_STATUS_UNKNOWN = "A2A_REMOTE_STATUS_UNKNOWN"
+    OUTBOUND_BUSY = "A2A_OUTBOUND_BUSY"
+    STORE_INVALID = "A2A_OUTBOUND_STORE_INVALID"
+
+
+_SAFE_SUMMARIES: dict[A2AOutboundErrorCode, str] = {
+    A2AOutboundErrorCode.DISCOVERY_URL_INVALID: "发现地址无效。",
+    A2AOutboundErrorCode.DISCOVERY_BLOCKED: "发现地址被安全策略拦截。",
+    A2AOutboundErrorCode.CARD_FETCH_FAILED: "无法获取第三方 Agent Card。",
+    A2AOutboundErrorCode.CARD_INVALID: "第三方 Agent Card 无效或不兼容。",
+    A2AOutboundErrorCode.AGENT_NOT_REGISTERED: "指定的第三方 Agent 尚未注册。",
+    A2AOutboundErrorCode.AGENT_DISABLED: "指定的第三方 Agent 已停用。",
+    A2AOutboundErrorCode.AGENT_UNAVAILABLE: "指定的第三方 Agent 当前不可用。",
+    A2AOutboundErrorCode.AGENT_REVIEW_REQUIRED: "第三方 Agent 配置变化需要确认。",
+    A2AOutboundErrorCode.AUTH_REQUIRED: "第三方 Agent 需要有效凭据。",
+    A2AOutboundErrorCode.DISPATCH_NOT_FOUND: "未找到指定的出站请求。",
+    A2AOutboundErrorCode.DISPATCH_REJECTED: "第三方 Agent 拒绝了本次请求。",
+    A2AOutboundErrorCode.DISPATCH_TIMEOUT: "等待第三方 Agent 回复超时。",
+    A2AOutboundErrorCode.DISPATCH_CONFLICT: "出站请求状态已发生变化。",
+    A2AOutboundErrorCode.REMOTE_STATUS_UNKNOWN: "暂时无法确认第三方请求状态。",
+    A2AOutboundErrorCode.OUTBOUND_BUSY: "A2A 出站服务当前繁忙。",
+    A2AOutboundErrorCode.STORE_INVALID: "A2A 出站数据无效。",
+}
+
+
+def safe_error_summary(code: A2AOutboundErrorCode | str) -> str:
+    """Return a fixed displayable summary without exposing exception details."""
+    try:
+        normalized = (
+            code
+            if isinstance(code, A2AOutboundErrorCode)
+            else A2AOutboundErrorCode(str(code))
+        )
+    except ValueError:
+        return "A2A 出站请求处理失败。"
+    return _SAFE_SUMMARIES[normalized]
+
+
+class A2AOutboundError(RuntimeError):
+    """Domain error whose public text is selected from a stable code."""
+
+    def __init__(self, code: A2AOutboundErrorCode | str) -> None:
+        try:
+            self.code = (
+                code
+                if isinstance(code, A2AOutboundErrorCode)
+                else A2AOutboundErrorCode(str(code))
+            )
+        except ValueError:
+            self.code = A2AOutboundErrorCode.STORE_INVALID
+        super().__init__(safe_error_summary(self.code))
+
+    @property
+    def summary(self) -> str:
+        return safe_error_summary(self.code)
+
+
+__all__ = [
+    "A2AOutboundError",
+    "A2AOutboundErrorCode",
+    "safe_error_summary",
+]

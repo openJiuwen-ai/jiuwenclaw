@@ -58,16 +58,37 @@ def get_registered_skill_names(state: dict[str, Any]) -> set[str]:
 def normalize_local_skills(
     raw_local_skills: Any,
     existing_local_skill_names: set[str],
+    existing_clawhub_origins: set[str] | None = None,
 ) -> list[dict[str, Any]]:
-    """Keep only local skill records that still exist under the local skills dir."""
+    """Keep only local skill records that still exist under the local skills dir.
+
+    重名技能下 name 会撞（两个 ClawHub slug 的 SKILL.md name 相同），按 name
+    筛无法区分谁被删、谁还在。因此对带 ``clawhub:`` 前缀 origin 的记录改用
+    origin 精确判存活：从 origin 抽 slug（去掉 owner 前缀）→ 构造 ``clawhub:{slug}``
+    判断是否在 existing_clawhub_origins 中（ClawHub 目录名 = slug，可由磁盘反推）。
+    其余来源（SkillNet URL、teamskillshub:asset_id）的目录名 = skill_name，磁盘
+    反推不出 origin，仍按 name 兜底。无 origin 的历史本地记录同样按 name。
+    """
     if not isinstance(raw_local_skills, list):
         return []
 
+    clawhub_origins = existing_clawhub_origins or set()
     normalized: list[dict[str, Any]] = []
     for item in raw_local_skills:
         if not isinstance(item, dict):
             continue
         name = str(item.get("name", "")).strip()
+        origin = str(item.get("origin", "") or "").strip()
+        # ClawHub 记录：从 origin 抽 slug，按 slug 判存活
+        # origin 可能为 ``clawhub:owner/slug`` 或 ``clawhub:slug``，
+        # 都可以抽出 slug → ``clawhub:{slug}`` 与磁盘反推集合比较。
+        if origin.startswith("clawhub:"):
+            raw_slug = origin.split(":", 1)[1].strip()
+            slug = raw_slug.rsplit("/", 1)[-1]
+            if f"clawhub:{slug}" in clawhub_origins:
+                normalized.append(item)
+            continue
+        # 其余来源 / 无 origin 历史记录：目录名 = skill_name，按 name 兜底判存活
         if not name or name not in existing_local_skill_names:
             continue
         normalized.append(item)

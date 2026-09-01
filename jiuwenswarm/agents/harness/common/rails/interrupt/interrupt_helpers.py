@@ -6,14 +6,13 @@ Provides utilities for converting interrupt payloads to frontend format
 and building permission rails.
 """
 from __future__ import annotations
+from jiuwenswarm.common.local_env_config import is_enterprise
 
+import copy
 import json
 import re
 from typing import Any
 
-from jiuwenswarm.agents.harness.code.prompt.plan_approval import (
-    build_plan_approval_actions,
-)
 from jiuwenswarm.agents.harness.code.rails.code_plan_approval_interrupt_rail import (
     build_plan_approval_options_from_message,
     extract_plan_approval_content,
@@ -39,6 +38,20 @@ SKILL_EVOLUTION_APPROVAL_TOOL_KINDS = {
     "evolve_skill_experiences": "evolve",
     "simplify_skill_experiences": "simplify",
 }
+
+
+def is_interrupt_resume_source(source: Any) -> bool:
+    """True for permission / confirm / ask_user HITL resume sources.
+
+    Used to keep the active skill (and thus skill_envs injection) across
+    security-guard HITL. Intentionally excludes skill-evolution sources.
+    """
+    text = str(source or "").strip()
+    return text in {
+        "permission_interrupt",
+        "confirm_interrupt",
+        "ask_user_interrupt",
+    }
 
 
 def has_interrupt_resume_payload(params: Any) -> bool:
@@ -91,11 +104,14 @@ def build_permission_rail(
     from jiuwenswarm.agents.harness.common.rails.permissions.tool_permission_context import (
         TOOL_PERMISSION_CHANNEL_ID,
     )
-    from jiuwenswarm.common.config import get_config
     from jiuwenswarm.common.e2a.acp.acp_tool_updates import build_acp_tool_descriptor
     from jiuwenswarm.common.utils import get_config_file, get_workspace_dir
+    from jiuwenswarm.agents.harness.common.rails.permissions.config_loader import (
+        get_base_permissions_config,
+        get_effective_permissions_config,
+    )
 
-    permission_config = config.get("permissions", {})
+    permission_config = get_effective_permissions_config()
     logger.info(
         "[InterruptHelpers] build_permission_rail called: enabled=%s",
         permission_config.get("enabled", False)
@@ -157,7 +173,12 @@ def build_permission_rail(
             that the user has already removed via the webui.
             """
             try:
-                from jiuwenswarm.common.config import _dump_yaml_round_trip, _load_yaml_round_trip
+                from jiuwenswarm.agents.harness.common.rails.permissions.config_loader import (
+                    get_base_permissions_config,
+                    is_enterprise,
+                    persist_permissions_mutate,
+                )
+                from jiuwenswarm.common.config import _load_yaml_round_trip
 
                 yaml_path = get_config_file()
                 data = _load_yaml_round_trip(yaml_path)
@@ -166,16 +187,12 @@ def build_permission_rail(
 
                 on_disk_perms = data.get("permissions")
                 if not isinstance(on_disk_perms, dict):
-                    on_disk_perms = {}
+                    on_disk_perms = get_base_permissions_config() if is_enterprise() else {}
 
-                # Overlay path-related deltas + approval_overrides;
-                # keep on-disk tools/defaults/rules to avoid restoring
-                # entries the user already deleted via webui.
                 merged = dict(on_disk_perms)
                 overrides_new = permissions.get("approval_overrides")
                 if overrides_new is not None:
                     merged["approval_overrides"] = overrides_new
-                # 路径信任写 file_guard.paths（agent-core §5.5.6）；过渡期仍接受旧 external_directory
                 fg_new = permissions.get("file_guard")
                 if fg_new is not None:
                     merged["file_guard"] = fg_new
@@ -183,8 +200,11 @@ def build_permission_rail(
                 if ext_dir_new is not None:
                     merged["external_directory"] = ext_dir_new
 
-                data["permissions"] = merged
-                _dump_yaml_round_trip(yaml_path, data)
+                def mutate(perms: dict[str, Any]) -> None:
+                    perms.clear()
+                    perms.update(copy.deepcopy(merged))
+
+                persist_permissions_mutate(mutate)
                 return True
             except Exception as exc:
                 logger.warning("[InterruptHelpers] persist_allow_rule failed: %s", exc)
@@ -245,11 +265,17 @@ def build_permission_rail(
             }
 
             try:
-                response = await get_acp_output_manager().send_jsonrpc_request(
-                    "session/request_permission",
-                    request_params,
-                    session_id=session_id,
+                # ACP permission HITL must not consume StreamingToolExecutor.wait_all budget.
+                from jiuwenswarm.openjiuwen_streaming_tool_patch import (
+                    streaming_tool_wait_timeout_paused,
                 )
+
+                async with streaming_tool_wait_timeout_paused():
+                    response = await get_acp_output_manager().send_jsonrpc_request(
+                        "session/request_permission",
+                        request_params,
+                        session_id=session_id,
+                    )
             except Exception as exc:
                 logger.warning("[InterruptHelpers] ACP permission request failed: %s", exc)
                 return None
@@ -313,6 +339,27 @@ def build_permission_rail(
             ):
                 return ("approve",)
 
+            # deepresearch_execute owns a sequence of native AskUser
+            # interruptions under one outer tool call.  Once its initial tool
+            # permission has been decided, structured card answers must reach
+            # DeepResearchExecutionRail instead of being parsed again as a
+            # ConfirmPayload by the permission rail.  Keep first-pass and
+            # explicit permission responses on the normal permission path.
+            workflow_input = inp.user_input
+            is_deepresearch_workflow = (
+                inp.normalized_tool_name == "deepresearch_execute"
+                and isinstance(workflow_input, dict)
+            )
+            if is_deepresearch_workflow:
+                status = workflow_input.get("status")
+                if status in {
+                    "answered",
+                    "skipped",
+                    "cancelled",
+                    "error",
+                } and isinstance(workflow_input.get("answers"), list):
+                    return ("approve",)
+
             if perm_ctx is None:
                 return None
 
@@ -351,8 +398,7 @@ def build_permission_rail(
             return ("reject", f"[PERMISSION_DENIED] 该工具未被授权 (owner_scopes: {owner_level})")
 
         def _get_permissions_snapshot():
-            cfg = get_config()
-            return cfg.get("permissions") if isinstance(cfg, dict) else {}
+            return get_effective_permissions_config()
 
         host = ToolPermissionHost(
             get_permissions_snapshot=_get_permissions_snapshot,
@@ -363,7 +409,27 @@ def build_permission_rail(
             permission_scene_hook=_permission_scene_hook,
         )
 
-        permission_rail = PermissionInterruptRail(
+        # skill_turbo 启用时使用子类，定制 skill_acceleration_exec 审批消息
+        rail_cls = PermissionInterruptRail
+        try:
+            from jiuwenswarm.common.config import get_config as _get_cfg
+            _cfg = _get_cfg()
+            _react = _cfg.get("react", {}) if isinstance(_cfg, dict) else {}
+            _st = _react.get("skill_turbo", {}) if isinstance(_react, dict) else {}
+            if _st.get("enabled", False):
+                from jiuwenswarm.server.runtime.skill_turbo.rails.permission_rail import (
+                    SkillTurboPermissionRail,
+                )
+                rail_cls = SkillTurboPermissionRail
+                logger.info("[InterruptHelpers] Using SkillTurboPermissionRail")
+        except Exception:
+            logger.debug(
+                "[InterruptHelpers] SkillTurboPermissionRail switch failed, "
+                "fallback to PermissionInterruptRail",
+                exc_info=True,
+            )
+
+        permission_rail = rail_cls(
             config=permission_config,
             tool_names=tool_names,
             llm=llm,
@@ -411,10 +477,6 @@ def _is_ask_user_interrupt_value(value_obj: Any) -> bool:
         return True
     if isinstance(value_obj, dict) and "payload_schema" in value_obj and "questions" in value_obj:
         return True
-    tool_args = _normalize_tool_args(_read_value_field(value_obj, "tool_args", None))
-    if isinstance(tool_args, dict) and str(tool_args.get("query") or "").strip():
-        if not tool_args.get("questions"):
-            return True
     return False
 
 
@@ -589,13 +651,9 @@ def convert_interactions_to_ask_user_question(state_outputs: list) -> dict | Non
             and is_plan_approval_message(message)
         ):
             plan_content, plan_language = extract_plan_approval_content(message)
-            resolved_plan_language = "en" if plan_language == "en" else "cn"
             payload["plan_content"] = plan_content
-            payload["plan_language"] = resolved_plan_language
+            payload["plan_language"] = "en" if plan_language == "en" else "cn"
             payload["plan_approval_kind"] = "plan_approval"
-            # Web 用的动作说明。TUI 忽略该字段，继续使用 questions[].options 的
-            # approve / reject，因此两端行为互不影响。
-            payload["plan_actions"] = build_plan_approval_actions(resolved_plan_language)
         plan_path = str(question_data.get("plan_path") or "").strip()
         plan_slug = str(question_data.get("plan_slug") or "").strip()
         if plan_path:
@@ -693,6 +751,9 @@ def _build_multi_questions(questions_data: list) -> list:
             "options": options,
             "multi_select": q.get("multi_select", False),
         }
+        preview = _normalize_question_preview(q.get("preview"))
+        if preview is not None:
+            question_payload["preview"] = preview
         questions.append(question_payload)
     return questions
 
@@ -730,6 +791,29 @@ def _normalize_question_option(option: dict[str, Any]) -> dict[str, Any]:
     preview = option.get("preview")
     if isinstance(preview, str) and preview.strip():
         normalized["preview"] = preview
+    return normalized
+
+
+def _normalize_question_preview(preview: Any) -> dict[str, Any] | None:
+    if not isinstance(preview, dict):
+        return None
+    text = preview.get("text")
+    if not isinstance(text, str) or not text.strip():
+        return None
+
+    normalized: dict[str, Any] = {"text": text}
+    for field in ("title", "outline_ref"):
+        value = preview.get(field)
+        if isinstance(value, str):
+            normalized[field] = value
+    if preview.get("format") == "markdown":
+        normalized["format"] = "markdown"
+    editable = preview.get("editable")
+    if isinstance(editable, bool):
+        normalized["editable"] = editable
+    meta = preview.get("meta")
+    if isinstance(meta, dict):
+        normalized["meta"] = dict(meta)
     return normalized
 
 

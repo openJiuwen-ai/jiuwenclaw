@@ -4,11 +4,19 @@ export type FileTypeIconKey =
   | 'pdf'
   | 'docx'
   | 'sheet'
+  | 'ppt'
   | 'html'
+  | 'css'
   | 'json'
   | 'ipynb'
   | 'md'
   | 'text'
+  | 'python'
+  | 'code'
+  | 'config'
+  | 'archive'
+  | 'audio'
+  | 'video'
   | 'image'
   | 'file'
   | 'unknown';
@@ -19,9 +27,17 @@ const ICON_COLORS: Record<FileTypeIconKey, { base: string; light: string; fold: 
   md: { base: '#0D9488', light: '#2DD4BF', fold: '#0F766E' },
   text: { base: '#64748B', light: '#94A3B8', fold: '#475569' },
   sheet: { base: '#1FA971', light: '#3FBF88', fold: '#178A5B' },
-  html: { base: '#F08A24', light: '#F5A24D', fold: '#D47312' },
-  json: { base: '#6B7C93', light: '#8796A8', fold: '#556578' },
-  ipynb: { base: '#7B61FF', light: '#9580FF', fold: '#6349E0' },
+  ppt: { base: '#D97706', light: '#F59E0B', fold: '#B45309' },
+  html: { base: '#E44D26', light: '#F16529', fold: '#C13B1A' },
+  css: { base: '#264DE4', light: '#2965F1', fold: '#1C3DB0' },
+  json: { base: '#CA8A04', light: '#EAB308', fold: '#A16207' },
+  ipynb: { base: '#F37726', light: '#F59A56', fold: '#D45F12' },
+  python: { base: '#3776AB', light: '#4B8BBE', fold: '#2A5A8A' },
+  code: { base: '#7C3AED', light: '#8B5CF6', fold: '#6D28D9' },
+  config: { base: '#0E7490', light: '#06B6D4', fold: '#155E75' },
+  archive: { base: '#92400E', light: '#B45309', fold: '#78350F' },
+  audio: { base: '#DB2777', light: '#EC4899', fold: '#BE185D' },
+  video: { base: '#4F46E5', light: '#6366F1', fold: '#3730A3' },
   image: { base: '#E45CA8', light: '#F07BC0', fold: '#C9448F' },
   file: { base: '#3B82F6', light: '#60A5FA', fold: '#2563EB' },
   unknown: { base: '#9AA3AF', light: '#B0B8C2', fold: '#7F8894' },
@@ -85,7 +101,6 @@ function GlyphLines() {
   );
 }
 
-/** Markdown: hash headings style */
 function GlyphMd() {
   return (
     <>
@@ -107,7 +122,6 @@ function GlyphMd() {
   );
 }
 
-/** Plain text: letter T */
 function GlyphTxt() {
   return (
     <path
@@ -133,12 +147,45 @@ function GlyphSheet() {
   );
 }
 
-function GlyphPie() {
+/** Presentation: slide + triangle play mark */
+function GlyphPpt() {
   return (
     <>
-      <circle cx="24" cy="26" r="7.5" fill="white" fillOpacity="0.35" />
-      <path d="M24 18.5V26H31.5A7.5 7.5 0 0 0 24 18.5Z" fill="white" />
-      <path d="M24 26V33.5A7.5 7.5 0 0 0 30.8 29.2L24 26Z" fill="white" fillOpacity="0.85" />
+      <rect x="14.5" y="19.5" width="19" height="13" rx="2" fill="white" fillOpacity="0.95" />
+      <path d="M21.5 23L28 26L21.5 29V23Z" fill="#D97706" />
+    </>
+  );
+}
+
+/** HTML: angle brackets */
+function GlyphHtml() {
+  return (
+    <path
+      d="M20 21.5L15.5 26L20 30.5M28 21.5L32.5 26L28 30.5"
+      stroke="white"
+      strokeWidth="2.4"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    />
+  );
+}
+
+/** CSS: hash / braces */
+function GlyphCss() {
+  return (
+    <>
+      <path
+        d="M19 21V32M24 21V32M17.5 24.5H25.5M17.5 28.5H25.5"
+        stroke="white"
+        strokeWidth="2.2"
+        strokeLinecap="round"
+      />
+      <path
+        d="M29 22.5C30.5 22.5 31.5 23.4 31.5 24.8C31.5 26.8 29.2 27.2 29.2 28.8V30.5"
+        stroke="white"
+        strokeWidth="2.1"
+        strokeLinecap="round"
+      />
     </>
   );
 }
@@ -152,6 +199,69 @@ function GlyphCode() {
       strokeLinecap="round"
       strokeLinejoin="round"
     />
+  );
+}
+
+/** Python: stylized "Py" */
+function GlyphPython() {
+  return (
+    <text
+      x="24"
+      y="30.5"
+      textAnchor="middle"
+      fill="white"
+      fontSize="13"
+      fontWeight="700"
+      fontFamily="Arial, Helvetica, sans-serif"
+    >
+      Py
+    </text>
+  );
+}
+
+function GlyphConfig() {
+  return (
+    <>
+      <circle cx="24" cy="26" r="6.5" stroke="white" strokeWidth="2.2" fill="none" />
+      <path
+        d="M24 17.5V19.2M24 32.8V34.5M15.5 26H17.2M30.8 26H32.5M18.2 20.2L19.4 21.4M28.6 30.6L29.8 31.8M29.8 20.2L28.6 21.4M19.4 30.6L18.2 31.8"
+        stroke="white"
+        strokeWidth="2"
+        strokeLinecap="round"
+      />
+    </>
+  );
+}
+
+function GlyphArchive() {
+  return (
+    <>
+      <rect x="16" y="18.5" width="16" height="15" rx="1.5" fill="white" fillOpacity="0.95" />
+      <rect x="21.5" y="18.5" width="5" height="15" fill="#92400E" fillOpacity="0.85" />
+      <rect x="22.2" y="24" width="3.6" height="3.2" rx="0.6" fill="white" />
+    </>
+  );
+}
+
+function GlyphAudio() {
+  return (
+    <>
+      <path
+        d="M20 22V30M24 20V32M28 23.5V28.5"
+        stroke="white"
+        strokeWidth="2.6"
+        strokeLinecap="round"
+      />
+    </>
+  );
+}
+
+function GlyphVideo() {
+  return (
+    <>
+      <rect x="14.5" y="19.5" width="14" height="13" rx="2" fill="white" fillOpacity="0.95" />
+      <path d="M29.5 23L35 26.5L29.5 30V23Z" fill="white" />
+    </>
   );
 }
 
@@ -193,11 +303,28 @@ function glyphFor(typeKey: FileTypeIconKey): ReactNode {
       return <GlyphTxt />;
     case 'sheet':
       return <GlyphSheet />;
+    case 'ppt':
+      return <GlyphPpt />;
     case 'html':
-      return <GlyphPie />;
+      return <GlyphHtml />;
+    case 'css':
+      return <GlyphCss />;
     case 'json':
+      return <GlyphCode />;
     case 'ipynb':
       return <GlyphCode />;
+    case 'python':
+      return <GlyphPython />;
+    case 'code':
+      return <GlyphCode />;
+    case 'config':
+      return <GlyphConfig />;
+    case 'archive':
+      return <GlyphArchive />;
+    case 'audio':
+      return <GlyphAudio />;
+    case 'video':
+      return <GlyphVideo />;
     case 'image':
       return <GlyphImage />;
     case 'unknown':
@@ -209,19 +336,103 @@ function glyphFor(typeKey: FileTypeIconKey): ReactNode {
   }
 }
 
+const CODE_EXTENSIONS = new Set([
+  '.js',
+  '.jsx',
+  '.ts',
+  '.tsx',
+  '.java',
+  '.c',
+  '.cpp',
+  '.h',
+  '.hpp',
+  '.go',
+  '.rs',
+  '.rb',
+  '.php',
+  '.sql',
+  '.sh',
+  '.bash',
+  '.ps1',
+]);
+
+const CONFIG_EXTENSIONS = new Set([
+  '.xml',
+  '.yaml',
+  '.yml',
+  '.toml',
+  '.ini',
+  '.cfg',
+  '.conf',
+  '.env',
+]);
+
+const ARCHIVE_EXTENSIONS = new Set([
+  '.zip',
+  '.rar',
+  '.7z',
+  '.tar',
+  '.gz',
+  '.tgz',
+  '.bz2',
+]);
+
+const AUDIO_EXTENSIONS = new Set([
+  '.mp3',
+  '.wav',
+  '.flac',
+  '.aac',
+  '.ogg',
+  '.m4a',
+  '.wma',
+]);
+
+const VIDEO_EXTENSIONS = new Set([
+  '.mp4',
+  '.avi',
+  '.mov',
+  '.mkv',
+  '.webm',
+  '.wmv',
+  '.flv',
+]);
+
+const IMAGE_EXTENSIONS = new Set([
+  '.png',
+  '.jpg',
+  '.jpeg',
+  '.gif',
+  '.webp',
+  '.bmp',
+  '.svg',
+  '.ico',
+  '.jfif',
+]);
+
 export function getFileTypeIconKeyFromFilename(filename: string, kind?: string): FileTypeIconKey {
   if (kind === 'image') return 'image';
   const idx = filename.lastIndexOf('.');
   const ext = idx >= 0 ? filename.slice(idx).toLowerCase() : '';
+
   if (ext === '.pdf') return 'pdf';
-  if (ext === '.docx' || ext === '.doc') return 'docx';
-  if (ext === '.xlsx' || ext === '.xls' || ext === '.csv' || ext === '.tsv') return 'sheet';
-  if (ext === '.html' || ext === '.htm' || ext === '.css') return 'html';
+  if (ext === '.docx' || ext === '.doc' || ext === '.rtf' || ext === '.odt') return 'docx';
+  if (ext === '.xlsx' || ext === '.xls' || ext === '.csv' || ext === '.tsv' || ext === '.ods') {
+    return 'sheet';
+  }
+  if (ext === '.ppt' || ext === '.pptx' || ext === '.odp') return 'ppt';
+  if (ext === '.html' || ext === '.htm') return 'html';
+  if (ext === '.css') return 'css';
   if (ext === '.json') return 'json';
   if (ext === '.ipynb') return 'ipynb';
   if (ext === '.md' || ext === '.markdown') return 'md';
-  if (ext === '.txt') return 'text';
-  if (['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.svg'].includes(ext)) return 'image';
+  if (ext === '.txt' || ext === '.log') return 'text';
+  if (ext === '.py') return 'python';
+  if (CODE_EXTENSIONS.has(ext)) return 'code';
+  if (CONFIG_EXTENSIONS.has(ext)) return 'config';
+  if (ARCHIVE_EXTENSIONS.has(ext)) return 'archive';
+  if (AUDIO_EXTENSIONS.has(ext)) return 'audio';
+  if (VIDEO_EXTENSIONS.has(ext)) return 'video';
+  if (IMAGE_EXTENSIONS.has(ext)) return 'image';
   if (!ext) return 'file';
   return 'unknown';
 }

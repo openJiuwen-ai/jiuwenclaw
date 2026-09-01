@@ -8,15 +8,22 @@ This document details each configuration option in the JiuwenSwarm frontend pane
 
 ## 1. Configuration Entry
 
-Click **More** → **Configuration** in the left navigation bar to view and edit settings for models, third-party services, free search, and more. Click **Save** after changes; whether you need to wait for services to become ready depends on your deployment.
+Open **Configuration** from the left navigation bar to view and edit settings for models, third-party services, free search, and more. Click **Save** after changes; whether you need to wait for services to become ready depends on your deployment.
 
-![Configuration Panel](../assets/images/current-ui-en/07-Configuration-Model-Tab.png)
+![Configuration Panel](../assets/images/config.png)
 
-The configuration panel is organized into three tabs:
+The configuration panel contains the following main sections:
 
-- **Model**: Default chat model, video/audio/vision models, Embedding configuration (see [2. Model Configuration](#2-model-configuration))
-- **Security**: Tool security guardrails, sensitive-info filtering (see [7. Tool Security Guardrails](#7-tool-security-guardrails))
-- **Other**: Third-party services, self-evolution, context compression, skill symphony, etc.
+- **Model Configuration**: Default chat model, video/audio/vision models (see [2. Model Configuration](#2-model-configuration))
+- **Embedding Configuration**: Vector embedding service (see [3. Embedding Configuration](#3-embedding-configuration))
+- **Third-Party Services**: Jina, Bocha, Serper, Perplexity, GitHub, etc. (see [4. Third-Party Service Configuration](#4-third-party-service-configuration))
+- **Self-Evolution Configuration**: Automatic skill improvement (see [5. Self-Evolution Configuration](#5-self-evolution-configuration))
+- **Context Compression**: Dialogue history management (see [6. Context Compression](#6-context-compression))
+- **Tool Security Guardrails**: Tool invocation permission checks (see [7. Tool Security Guardrails](#7-tool-security-guardrails))
+- **Memory Sensitive-Info Filtering**: Memory system privacy protection settings (see [8. Memory Sensitive-Info Filtering](#8-memory-sensitive-info-filtering))
+- **Skill Symphony and Skill Retrieval**: Skill-tree retrieval, skill score, and skill orchestration settings (see [9. Skill Symphony and Skill Retrieval Configuration](#9-skill-symphony-and-skill-retrieval-configuration))
+
+The panel also includes **Free Search Engine Configuration**, **Multi-Agent / Team Configuration**, **A2UI**, and **Email Configuration** sections. Configure them as needed.
 
 > 💡 **Tip**: Model configuration (`api_base`, `api_key`, `model`, `model_provider`) is required; all other configurations are optional.
 
@@ -55,7 +62,7 @@ Each model type supports the following parameters:
 
 > 💡 **Test Function**: The configuration panel provides a **Test button**. After filling in the model configuration, you can click "Test" to verify the API connection. The system will send a simple test request and display "Test Successful" if successful, or show error information otherwise.
 
-![Model Configuration Tab](../assets/images/current-ui-en/07-Configuration-Model-Tab.png)
+![Model Test Configuration Example](../assets/images/config_model_connect_test.png)
 
 #### Configuration Examples
 
@@ -228,9 +235,12 @@ The frontend shows the following options under **Self-Evolution Configuration**:
 
 | Switch | Config key | Default | Purpose |
 | --- | --- | --- | --- |
-| **Enable Skills Self-Evolution** | `react.evolution.skill_evolution` | `false` | Controls automatic Skill creation and evolution together. When off, the related Rails, tools, prompts, watchers, and `/evolve` commands are unavailable |
+| **Enable Skills Self-Evolution** (master switch) | `react.evolution.enabled` | `true` | Master switch for self-evolution. When on and the evolution rail is mounted, passive signal scanning is always available; when off, the entire self-evolution chain (including the `/evolve` manual command) is unavailable |
+| **Soft review trigger** | `react.evolution.review_trigger` | `false` | When enabled, periodically enqueue review self-check follow-ups. Env `EVOLUTION_REVIEW_TRIGGER` takes precedence |
+| **Auto-save approvals** | `react.evolution.auto_save` | `true` | When enabled, evolution approvals auto-pass without user clicks; persisted experiences trigger automatic version merge |
+| **Auto-suggest new skill creation** | `react.evolution.skill_create` | `false` | When enabled, the system can propose creating a new Skill when no suitable Skill exists. Env `SKILL_CREATE` takes precedence |
 
-> 💡 **Note**: `react.evolution.auto_save` remains an advanced YAML-only approval setting and is not shown in the frontend. Explicit use of the general `skill-creator` or `swarmskill-creator` capability is independent from this automatic self-evolution switch.
+> 💡 **Note**: `react.evolution.enabled` is the product master switch (on by default). After the evolution rail is mounted, passive scanning is always on; there is no separate `auto_scan` / `signal_trigger` sub-switch. `review_trigger` / `auto_save` / `skill_create` are optional. With `skill_create` off and `review_trigger` off, passive scanning still runs and manual `/evolve` remains available. Execution trajectories always dump to the default directory `~/.jiuwenswarm/agent/evolution_trajectories`; config and env overrides are not supported.
 
 > 📖 For details on the self-evolution mechanism, see [Skill Self-Evolution](SkillSelfEvolution.md).
 
@@ -352,7 +362,7 @@ The system automatically identifies and filters the following types of sensitive
 
 ## 9. Skill Symphony and Skill Retrieval Configuration
 
-Symphony settings control two related capabilities: **Skill Retrieval** finds candidate skills from installed skills, and **Skill Orchestration** uses the skill graph to organize candidates into a confirmable, executable skill chain.
+Symphony settings control two related capabilities: **Skill Retrieval** finds candidate skills from installed skills, and **Skill Orchestration** uses the skill score to organize candidates into a confirmable, executable skill chain.
 
 ### 9.1 Frontend switches
 
@@ -361,11 +371,11 @@ The configuration panel exposes two related switches:
 | Switch | Config key | Default | Purpose |
 | --- | --- | --- | --- |
 | **Enable Skill Retrieval** | `symphony.skill_retrieval.enabled` | `false` | Registers skill-tree retrieval tools such as `skill_branch_explore`, `skill_branch_peek`, and `skill_index_build` |
-| **Enable Skill Symphony** | `symphony.enabled` | `false` | Registers skill graph and orchestration tools such as `symphony_read_graph`, `symphony_refresh_graph`, and `symphony_compose_graph` |
+| **Enable Skill Symphony** | `symphony.enabled` | `false` | Registers skill score and orchestration tools such as `symphony_read_score`, `symphony_refresh_score`, and `symphony_compose_score` |
 
-The two switches are independent. Skill Retrieval answers "how to find candidate skills"; Skill Symphony answers "how to orchestrate candidate skills into a route". If only Skill Retrieval is enabled, the system only gets skill-tree retrieval. If only Skill Symphony is enabled, the system can read and refresh the skill graph, but candidate skills do not automatically come from Skill Retrieval.
+The two switches are independent. Skill Retrieval answers "how to find candidate skills"; Skill Symphony answers "how to orchestrate candidate skills into a route". If only Skill Retrieval is enabled, the system only gets skill-tree retrieval. If only Skill Symphony is enabled, the system can read and refresh the skill score, but candidate skills do not automatically come from Skill Retrieval.
 
-### 9.2 Skill index and skill graph
+### 9.2 Skill index and skill score
 
 Related pages are under **Skills** in the left sidebar:
 
@@ -386,25 +396,25 @@ Advanced build, retrieval, and orchestration parameters are configured in the us
 
 Common settings:
 
-The retained `symphony.fingerprint.scan` and `symphony.fingerprint.extraction`
-settings are mapped by the JiuwenSwarm Adapter to agent-core's
-`SkillFolderScanner` and `FingerprintService` configuration.
-
 | Setting | Default | Description |
 | --- | --- | --- |
 | `symphony.paths.skills_root` | Empty string | Skill source directory; empty means the runtime default is used |
-| `symphony.paths.graph_dir` | Empty string | Skill score artifact directory; empty means the runtime default is used |
-| `symphony.fingerprint.scan.max_depth` | Empty | Maximum skill-file scan depth mapped to agent-core `SkillFolderScanner`; empty means the runtime default is used |
-| `symphony.fingerprint.extraction.workers` | `4` | Fingerprint extraction concurrency mapped to agent-core `FingerprintService` |
-| `symphony.fingerprint.extraction.batch_size` | `2` | Fingerprint extraction batch size mapped to agent-core `FingerprintService` |
-| `symphony.fingerprint.extraction.body_limit` | Empty | Body length limit mapped to agent-core `FingerprintService`; empty means the runtime default is used |
-| `symphony.build.workers` | `4` | Skill graph build concurrency |
-| `symphony.build.batch_size` | `16` | Skill graph build batch size |
+| `symphony.paths.score_dir` | Empty string | Skill score artifact directory; empty means the runtime default is used |
+| `symphony.fingerprint.scan.max_depth` | Empty | Maximum skill-file scan depth; empty means the runtime default is used |
+| `symphony.fingerprint.extraction.workers` | `4` | Skill fingerprint extraction concurrency |
+| `symphony.fingerprint.extraction.batch_size` | `2` | Skill fingerprint extraction batch size |
+| `symphony.fingerprint.extraction.body_limit` | Empty | Body length limit for fingerprint extraction; empty means the runtime default is used |
+| `symphony.fingerprint.normalization.workers` | `4` | Skill fingerprint normalization concurrency |
+| `symphony.fingerprint.normalization.batch_size` | `2` | Skill fingerprint normalization batch size |
+| `symphony.fingerprint.normalization.duplicate_name_similarity_threshold` | `0.8` | Similarity threshold for detecting near-duplicate skill names |
+| `symphony.fingerprint.normalization.max_vocab_size` | Empty | Maximum dynamic vocabulary size; empty means the runtime default is used |
+| `symphony.build.workers` | `4` | Skill score build concurrency |
+| `symphony.build.batch_size` | `16` | Skill score build batch size |
 | `symphony.build.require_consensus` | `false` | Whether multiple judgments must agree before accepting a relationship |
-| `symphony.build.min_edge_confidence` | `0.1` | Minimum edge confidence written into the skill graph |
+| `symphony.build.min_edge_confidence` | `0.1` | Minimum edge confidence written into the skill score |
 | `symphony.orchestration.mode` | `fast` | Orchestration mode. The current runtime uses the fast orchestration path |
 | `symphony.orchestration.max_depth` | `4` | Maximum skill-chain search depth |
-| `symphony.orchestration.min_edge_confidence` | `0.3` | Minimum skill-graph edge confidence preferred by orchestration |
+| `symphony.orchestration.min_edge_confidence` | `0.3` | Minimum skill-score edge confidence preferred by orchestration |
 | `symphony.skill_retrieval.artifact_root` | Empty string | Skill index artifact directory; empty means the default workspace is used; can be supplied by `SYMPHONY_SKILL_RETRIEVAL_ROOT` |
 | `symphony.skill_retrieval.build.branching_factor` | `128` | Skill-tree split-threshold base; controls how coarse or fine the tree is |
 | `symphony.skill_retrieval.build.max_depth` | `6` | Maximum skill-tree depth |
@@ -422,13 +432,13 @@ settings are mapped by the JiuwenSwarm Adapter to agent-core's
 | `symphony.skill_retrieval.retrieve.flatten_tree` | `false` | Whether retrieval flattens the skill tree |
 | `symphony.skill_retrieval.retrieve.max_exposure_depth` | `1` | Maximum tree depth exposed by one `skill_branch_explore` call |
 
-> 📖 For details about Skill Retrieval, the skill graph, and Skill Orchestration, see [Symphony: Skill Retrieval, Orchestration, and Dispatch](symphony.md).
+> 📖 For details about Skill Retrieval, the skill score, and Skill Orchestration, see [Symphony: Skill Retrieval, Orchestration, and Dispatch](symphony.md).
 
 ---
 
 ## 10. Advanced Configuration
 
-Beyond the **Configuration** page, the product may use a **main configuration** for timeouts, temperature, context thresholds, and toggles that work together with **context compression**, **permissions**, **memory restrictions**, and similar UI switches. The main config file is typically located at:
+Beyond the **Configuration** page, the product may use a **main configuration** for timeouts, temperature, heartbeat interval, context thresholds, and toggles that work together with **context compression**, **permissions**, **memory restrictions**, and similar UI switches. The main config file is typically located at:
 
 ```text
 ~/.jiuwenswarm/config/config.yaml
@@ -444,6 +454,7 @@ These are **conceptual** paths in the main configuration for cross-reference wit
 | `models.*.model_client_config.timeout` | Model request timeout (seconds) | `1800` |
 | `models.*.model_client_config.verify_ssl` | Verify SSL | `false` |
 | `models.*.model_config_obj.temperature` | Temperature | `0.95` |
+| `heartbeat.every` | Heartbeat interval (seconds) | `3600` |
 | `react.context_engine_config.dialogue_compressor_config.tokens_threshold` | Dialogue compression token threshold | `100000` |
 | `react.context_engine_config.round_level_compressor_config.trigger_context_ratio` | Round-level compression trigger ratio of the effective context budget | `0.9` |
 

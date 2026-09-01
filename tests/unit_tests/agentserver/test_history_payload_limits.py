@@ -6,6 +6,23 @@ import pytest
 from jiuwenswarm.common.schema.agent import AgentRequest
 from jiuwenswarm.common.schema.message import ReqMethod
 from jiuwenswarm.server import agent_ws_server as agent_ws_server_module
+from jiuwenswarm.server.handlers import session as session_handlers
+from tests.unit_tests.conftest import patch_handler_name
+from jiuwenswarm.server.handlers import team as team_handlers
+
+
+def _ctx_for_test(ws, request, send_lock, server=None):
+    from jiuwenswarm.server.context import AgentServerServices, RequestContext
+    from jiuwenswarm.server.transports.sink import WSSink
+
+    return RequestContext(
+        request=request,
+        sink=WSSink(ws, send_lock),
+        connection_id=str(id(ws)),
+        services=AgentServerServices(server) if server is not None else None,
+    )
+
+
 
 
 class FakeWebSocket:
@@ -46,11 +63,7 @@ def make_large_tool_result_records(count: int = 20) -> list[dict]:
 
 @pytest.fixture(autouse=True)
 def patch_wire_encoder(monkeypatch):
-    monkeypatch.setattr(
-        agent_ws_server_module,
-        "encode_agent_response_for_wire",
-        fake_encode_agent_response_for_wire,
-    )
+    patch_handler_name(monkeypatch, "encode_agent_response_for_wire", fake_encode_agent_response_for_wire)
 
 
 @pytest.mark.asyncio
@@ -61,11 +74,7 @@ async def test_team_history_get_paginates_and_bounds_large_records(monkeypatch):
     ws = FakeWebSocket()
     records = make_large_tool_result_records()
 
-    monkeypatch.setattr(
-        agent_ws_server_module,
-        "read_team_history_records",
-        lambda session_id: records,
-    )
+    patch_handler_name(monkeypatch, "read_team_history_records", lambda session_id: records)
 
     request = AgentRequest(
         request_id="req-team-history",
@@ -74,7 +83,9 @@ async def test_team_history_get_paginates_and_bounds_large_records(monkeypatch):
         params={"session_id": "sess-large", "limit": 20, "max_bytes": 4096},
     )
 
-    await getattr(server, "_handle_team_history_get")(ws, request, asyncio.Lock())
+    await team_handlers.handle_team_history_get(
+        _ctx_for_test(ws, request, asyncio.Lock(), server)
+    )
 
     assert len(ws.sent) == 1
     frame = ws.sent[0]
@@ -96,11 +107,7 @@ async def test_team_history_get_cursor_continues_next_page(monkeypatch):
     )
     records = make_large_tool_result_records()
 
-    monkeypatch.setattr(
-        agent_ws_server_module,
-        "read_team_history_records",
-        lambda session_id: records,
-    )
+    patch_handler_name(monkeypatch, "read_team_history_records", lambda session_id: records)
 
     first_ws = FakeWebSocket()
     first_request = AgentRequest(
@@ -109,7 +116,9 @@ async def test_team_history_get_cursor_continues_next_page(monkeypatch):
         req_method=ReqMethod.TEAM_HISTORY_GET,
         params={"session_id": "sess-large", "limit": 20, "max_bytes": 4096},
     )
-    await getattr(server, "_handle_team_history_get")(first_ws, first_request, asyncio.Lock())
+    await team_handlers.handle_team_history_get(
+        _ctx_for_test(first_ws, first_request, asyncio.Lock(), server)
+    )
     first_payload = first_ws.sent[0]["payload"]
 
     second_ws = FakeWebSocket()
@@ -124,7 +133,9 @@ async def test_team_history_get_cursor_continues_next_page(monkeypatch):
             "max_bytes": 4096,
         },
     )
-    await getattr(server, "_handle_team_history_get")(second_ws, second_request, asyncio.Lock())
+    await team_handlers.handle_team_history_get(
+        _ctx_for_test(second_ws, second_request, asyncio.Lock(), server)
+    )
     second_payload = second_ws.sent[0]["payload"]
 
     assert first_payload["has_more"] is True
@@ -147,14 +158,14 @@ def test_history_get_sanitizes_large_restorable_records(monkeypatch):
         },
     }
 
-    monkeypatch.setattr(agent_ws_server_module, "history_exists", lambda session_id: True)
+    monkeypatch.setattr(session_handlers, "history_exists", lambda session_id: True)
     monkeypatch.setattr(
-        agent_ws_server_module,
+        session_handlers,
         "load_history_records",
         lambda session_id: [large_record],
     )
 
-    result = agent_ws_server_module.AgentWebSocketServer.get_conversation_history(
+    result = session_handlers.get_conversation_history(
         "sess-large",
         1,
     )
@@ -194,11 +205,7 @@ async def test_team_history_get_preserves_too_large_first_record_as_placeholder(
         }
     ]
 
-    monkeypatch.setattr(
-        agent_ws_server_module,
-        "read_team_history_records",
-        lambda session_id: records,
-    )
+    patch_handler_name(monkeypatch, "read_team_history_records", lambda session_id: records)
 
     request = AgentRequest(
         request_id="req-team-history-placeholder",
@@ -207,7 +214,9 @@ async def test_team_history_get_preserves_too_large_first_record_as_placeholder(
         params={"session_id": "sess-large", "limit": 20, "max_bytes": 2048},
     )
 
-    await getattr(server, "_handle_team_history_get")(ws, request, asyncio.Lock())
+    await team_handlers.handle_team_history_get(
+        _ctx_for_test(ws, request, asyncio.Lock(), server)
+    )
 
     payload = ws.sent[0]["payload"]
     encoded_size = len(json.dumps(ws.sent[0], ensure_ascii=False).encode("utf-8"))

@@ -35,7 +35,7 @@ const TOOL_GROUPS: ToolGroup[] = [
   {
     groupKey: "ownerScopes.groups.searchTools",
     groupDescKey: "ownerScopes.groups.searchToolsDesc",
-    toolNames: ["mcp_free_search", "mcp_paid_search"],
+    toolNames: ["web_search"],
   },
   {
     groupKey: "ownerScopes.groups.webFetchTools",

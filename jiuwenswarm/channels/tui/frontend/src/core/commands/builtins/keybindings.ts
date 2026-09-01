@@ -31,7 +31,7 @@ function applyAndReport(ctx: CommandContext): void {
   }
 }
 
-async function openEditor(ctx: CommandContext): Promise<void> {
+function openEditor(ctx: CommandContext): void {
   const path = getKeybindingsPath();
   let created = false;
   if (!existsSync(path)) {
@@ -53,7 +53,7 @@ async function openEditor(ctx: CommandContext): Promise<void> {
   // openInEditor blocks until the editor window closes (TUI frozen in the
   // meantime). Reload keybindings + emit the "已打开…" line in onDone, AFTER
   // the editor exits — so the reload picks up the user's saved changes.
-  await ctx.openInEditor(path, () => {
+  ctx.openInEditor(path, () => {
     applyAndReport(ctx);
     ctx.addItem(
       addInfo(ctx.sessionId, `${created ? "已创建并打开" : "已打开"} ${path}（保存后已重新加载）`, "k"),
@@ -138,10 +138,10 @@ export function createKeybindingsCommand(): SlashCommand {
         action: (ctx) => resetBindings(ctx),
       },
     ],
-    action: async (ctx, args) => {
+    action: (ctx, args) => {
       const sub = args.trim().split(/\s+/)[0];
       if (!sub || sub === "edit") {
-        await openEditor(ctx);
+        openEditor(ctx);
         return;
       }
       if (sub === "list") {

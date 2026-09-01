@@ -8,11 +8,6 @@ from jiuwenswarm.common.work_mode import (
     DEFAULT_WEB_WORK_MODE,
     normalize_work_mode,
 )
-from jiuwenswarm.common.mode_matrix import (
-    TEAM_PLAN_CODE_MODE,
-    TEAM_PLAN_NORMAL_MODE,
-    is_team_mode,
-)
 from jiuwenswarm.gateway.cron.cron_expr import validate_cron_expression
 
 
@@ -80,8 +75,6 @@ CRON_JOB_MODES: frozenset[str] = frozenset(
         "agent.plan",  # legacy（归一到 agent）
         "agent.fast",  # legacy（归一到 agent）
         "team.plan",
-        TEAM_PLAN_NORMAL_MODE,
-        TEAM_PLAN_CODE_MODE,
         "code.team",
         # 不走 chat.send，scheduler 消费时直接发 PROACTIVE_TICK WS 请求
         # 触发 AgentServer ProactiveEngine.tick_now()。由 proactive_cron_sync 自动注册。
@@ -102,7 +95,6 @@ _CRON_JOB_MODE_ALIASES: dict[str, str] = {
     "plan": "agent",
     "agent.plan": "agent",
     "agent.fast": "agent",
-    "team.plan": TEAM_PLAN_NORMAL_MODE,
 }
 
 
@@ -149,6 +141,8 @@ def cron_job_metadata() -> dict[str, str | list[str] | int]:
         "max_timeout_seconds": CRON_MAX_TIMEOUT_SECONDS,
     }
 
+
+_TEAM_CRON_MODES: frozenset[str] = frozenset({"team", "team.plan", "code.team"})
 
 CRON_DEFAULT_TIMEOUT_SECONDS: int = 10 * 60
 CRON_TEAM_DEFAULT_TIMEOUT_SECONDS: int = 20 * 60
@@ -211,7 +205,8 @@ def resolve_cron_job_timeout_seconds(job: "CronJob") -> float:
 
 def is_team_cron_mode(mode: str | None) -> bool:
     """Return True when a cron job should run via Team + SwarmFlow streaming."""
-    return is_team_mode(mode)
+    value = str(mode or "").strip().lower()
+    return value in _TEAM_CRON_MODES
 
 
 @dataclass(frozen=True)
@@ -273,15 +268,18 @@ class CronJob:
     model_name: str | None = None
     # 飞书多应用场景：创建该定时任务的 app_id，用于推送时定位到正确的 app 配置
     app_id: str = ""
-    # 创建者标识（web 端 user_id）。执行时透传给 faas 的 X-Session-Context，
-    # 否则 CreateSandbox 拉不起导致 60s 超时（见 plan-cron-user-id）。
-    # 默认空串兼容旧数据；语义=创建者，创建后不可变。
-    user_id: str = ""
+    # 企业路由身份（与 targets / SessionMap 语义独立；空值兼容非企业旧任务）
+    group_id: str | None = None
+    bot_id: str | None = None
+    user_id: str | None = None
     # 工作模式派生快照：由 project_id 归属推导（"code" / "work"）。
     # 不作为独立隔离维度，任务归属仍以 project_id 为准。
     # from_dict 仅做 normalize + 兜底 "work"，不做跨层 Project 反查；
     # 精确值由创建/更新路径从 Project 记录注入，或由展示层二次查询覆盖。
     work_mode: str = DEFAULT_WEB_WORK_MODE
+    # Multi-tenant scope (Gateway CronTenantRegistry / Agent CronTools).
+    service_id: str = "default"
+    agent_id: str = "default"
 
     def to_dict(self) -> dict[str, Any]:
         d: dict[str, Any] = {
@@ -296,6 +294,8 @@ class CronJob:
             "targets": self.targets,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
+            "service_id": self.service_id,
+            "agent_id": self.agent_id,
         }
         if self.session_id:
             d["session_id"] = self.session_id
@@ -318,6 +318,10 @@ class CronJob:
             d["model_name"] = self.model_name
         if self.app_id:
             d["app_id"] = self.app_id
+        if self.group_id:
+            d["group_id"] = self.group_id
+        if self.bot_id:
+            d["bot_id"] = self.bot_id
         if self.user_id:
             d["user_id"] = self.user_id
         return d
@@ -420,14 +424,16 @@ class CronJob:
         app_id_raw = data.get("app_id", "")
         job_app_id = str(app_id_raw).strip() if isinstance(app_id_raw, str) else ""
 
-        # user_id：老数据兜底（无 user_id → ""）
-        job_user_id_raw = data.get("user_id", "")
-        job_user_id = str(job_user_id_raw).strip() if isinstance(job_user_id_raw, str) else ""
-
         # work_mode：仅做 normalize + 兜底 "work"，不做跨层 Project 反查
         # （gateway.cron.models 是底层数据模型，不应反向依赖 server.runtime.session.project_store）
         # 精确值由创建/更新路径从 Project 记录注入，或由展示层二次查询覆盖。
         job_work_mode = normalize_work_mode(data.get("work_mode"), default=DEFAULT_WEB_WORK_MODE)
+        job_service_id = str(data.get("service_id") or "default").strip() or "default"
+        job_agent_id = str(data.get("agent_id") or "default").strip() or "default"
+
+        def _opt_id(key: str) -> str | None:
+            raw = data.get(key, None)
+            return str(raw).strip() if isinstance(raw, str) and str(raw).strip() else None
 
         return CronJob(
             id=job_id,
@@ -450,8 +456,12 @@ class CronJob:
             last_session_id=last_session_id,
             model_name=job_model_name,
             app_id=job_app_id,
-            user_id=job_user_id,
             work_mode=job_work_mode,
+            group_id=_opt_id("group_id"),
+            bot_id=_opt_id("bot_id"),
+            user_id=_opt_id("user_id"),
+            service_id=job_service_id,
+            agent_id=job_agent_id,
         )
 
 

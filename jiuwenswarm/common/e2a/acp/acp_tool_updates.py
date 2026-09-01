@@ -4,10 +4,18 @@ import json
 from pathlib import PurePath
 from typing import Any, Iterable
 
+from jiuwenswarm.common.utils import fix_json_arguments
+
 
 _TOOL_NAME_ALIASES = {
-    "free_search": "mcp_free_search",
-    "paid_search": "mcp_paid_search",
+    "web_free_search": "web_search",
+    "web_paid_search": "web_search",
+    "free_search": "web_search",
+    "paid_search": "web_search",
+    "mcp_free_search": "web_search",
+    "mcp_paid_search": "web_search",
+    "mcp_petal_search": "web_search",
+    "petal_search": "web_search",
     "fetch_webpage": "mcp_fetch_webpage",
     "exec_command": "mcp_exec_command",
 }
@@ -30,6 +38,9 @@ _SEARCH_TOOL_NAMES = frozenset(
         "grep",
         "glob",
         "glob_file_search",
+        "web_search",
+        "web_free_search",
+        "web_paid_search",
         "mcp_free_search",
         "mcp_paid_search",
         "search",
@@ -301,11 +312,12 @@ def _normalize_arguments(arguments: Any) -> dict[str, Any]:
     if isinstance(arguments, dict):
         return dict(arguments)
     if isinstance(arguments, str):
-        try:
-            parsed = json.loads(arguments)
-        except json.JSONDecodeError:
-            return {"input": arguments} if arguments.strip() else {}
-        return dict(parsed) if isinstance(parsed, dict) else {"input": arguments}
+        parsed = fix_json_arguments(arguments)
+        if isinstance(parsed, dict):
+            return dict(parsed)
+        if arguments.strip():
+            return {"input": arguments}
+        return {}
     return {}
 
 
@@ -328,11 +340,37 @@ def _infer_tool_kind(tool_name: str) -> str:
     return "other"
 
 
+def _first_url_value(arguments: dict[str, Any]) -> str | None:
+    """Resolve the ``url`` argument to a displayable string.
+
+    ``url`` may be a single string or an array of strings (multi-URL fetch).
+    For arrays, the first URL is returned.
+    """
+    value = arguments.get("url")
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    if isinstance(value, (list, tuple)):
+        for item in value:
+            if isinstance(item, str) and item.strip():
+                return item.strip()
+    return None
+
+
+def _url_list(arguments: dict[str, Any]) -> list[str]:
+    """Return the ``url`` argument as a list of non-empty strings."""
+    value = arguments.get("url")
+    if isinstance(value, str) and value.strip():
+        return [value.strip()]
+    if isinstance(value, (list, tuple)):
+        return [str(v).strip() for v in value if str(v).strip()]
+    return []
+
+
 def _build_tool_title(tool_name: str, arguments: dict[str, Any]) -> str:
     normalized = normalize_tool_name(tool_name).lower()
     path = _summarize_path(_first_string_value(arguments, *_PATH_KEYS))
     query = _first_string_value(arguments, "pattern", "query", "term", "text")
-    url = _first_string_value(arguments, "url")
+    url = _first_url_value(arguments)
     command = _first_string_value(arguments, "command", "cmd")
     terminal_id = _first_string_value(arguments, "terminalId", "terminal_id")
 
@@ -350,8 +388,12 @@ def _build_tool_title(tool_name: str, arguments: dict[str, Any]) -> str:
             return f"Running in {path}"
         return "Running command"
 
-    if normalized in _FETCH_TOOL_NAMES and url:
-        return f"Fetching {url}"
+    if normalized in _FETCH_TOOL_NAMES:
+        urls = _url_list(arguments)
+        if len(urls) > 1:
+            return f"Fetching {len(urls)} URLs"
+        if url:
+            return f"Fetching {url}"
     if normalized in _SEARCH_TOOL_NAMES:
         if query and path:
             return f"Searching {query} in {path}"

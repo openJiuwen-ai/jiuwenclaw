@@ -301,7 +301,7 @@ class Sweeper:
         session_dir = Path(self._sessions_dir) / session_id
         history_jsonl = session_dir / "history.jsonl"
         history_json = session_dir / "history.json"
-        history_path = history_jsonl if history_jsonl.exists() else history_json
+        history_path = history_json if history_json.exists() else history_jsonl
         if not history_path.exists():
             return None
         try:
@@ -314,10 +314,12 @@ class Sweeper:
         history_jsonl = session_dir / "history.jsonl"
         history_json = session_dir / "history.json"
         try:
-            if history_jsonl.exists():
+            if history_json.exists():
+                data = _read_history(history_json)
+            elif history_jsonl.exists():
                 data = _read_history_jsonl(history_jsonl)
             else:
-                data = _read_history(history_json)
+                return []
             if not isinstance(data, list):
                 return []
         except Exception:

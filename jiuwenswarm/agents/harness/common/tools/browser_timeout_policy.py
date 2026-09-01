@@ -4,12 +4,13 @@
 
 from __future__ import annotations
 
-import os
 from typing import Optional
+
+from jiuwenswarm.common.local_env_config import get_local_config
 
 
 def allow_short_timeout_override() -> bool:
-    value = (os.getenv("BROWSER_ALLOW_SHORT_TIMEOUT_OVERRIDE") or "").strip().lower()
+    value = str(get_local_config("BROWSER_ALLOW_SHORT_TIMEOUT_OVERRIDE", "") or "").strip().lower()
     return value in {"1", "true", "yes", "on"}
 
 

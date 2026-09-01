@@ -34,21 +34,12 @@ export function getExternalEditor(): string {
 }
 
 export function getEditorInfo(): { source: string; value: string } {
-  if (process.env.VISUAL?.trim()) return { source: "$VISUAL", value: process.env.VISUAL.trim() };
-  if (process.env.EDITOR?.trim()) return { source: "$EDITOR", value: process.env.EDITOR.trim() };
+  if (process.env.VISUAL) return { source: "$VISUAL", value: process.env.VISUAL };
+  if (process.env.EDITOR) return { source: "$EDITOR", value: process.env.EDITOR };
   return {
     source: "default",
     value: process.platform === "win32" ? "start /wait notepad" : "vi",
   };
-}
-
-/** Describe both the selected editor and how the user can change it. */
-export function getEditorEnvironmentHint(): string {
-  const { source, value } = getEditorInfo();
-  if (source !== "default") {
-    return `Using ${source}="${value}". To change editor, set the $EDITOR or $VISUAL environment variable.`;
-  }
-  return `Using default editor "${value}". To use a different editor, set the $EDITOR or $VISUAL environment variable.`;
 }
 
 export function isGuiEditor(editor: string): boolean {
@@ -80,17 +71,6 @@ function spawnFailed(result: SpawnSyncReturns<string | Buffer>): boolean {
 }
 
 /**
- * Let the current terminal input callback unwind before another process
- * inherits stdin. This matters for native Windows processes running under
- * mintty (Git Bash), where an active input callback in the TUI runtime can
- * otherwise keep a synchronously spawned terminal editor from receiving
- * keyboard input.
- */
-function yieldForTerminalHandoff(): Promise<void> {
-  return new Promise((resolve) => setImmediate(resolve));
-}
-
-/**
  * Open a file in the user's external editor.
  *
  * GUI editors (notepad, VS Code, Sublime, etc.) AND terminal editors both
@@ -109,14 +89,9 @@ function yieldForTerminalHandoff(): Promise<void> {
  * closes, exactly like CC's `code -w` + execSync.
  *
  * @param onExit Called synchronously after the editor exits and tui.start()
- *               has restored input. The boolean is false when both the
- *               configured editor and the fallback editor failed.
+ *               has restored input. Runs for both GUI and terminal editors.
  */
-export async function openFileInEditor(
-  tui: TUI,
-  filePath: string,
-  onExit?: (success: boolean) => void,
-): Promise<void> {
+export function openFileInEditor(tui: TUI, filePath: string, onExit?: () => void): void {
   const editor = getExternalEditor();
   const gui = isGuiEditor(editor);
 
@@ -128,14 +103,7 @@ export async function openFileInEditor(
   // Terminal editor: spawnSync + tui.stop/start (blocks until editor exits)
   const { cmd, args } = parseEditorCommand(editor);
 
-  // Stop listening immediately, then let the current pi-tui stdin callback
-  // unwind before another process inherits the handle. On Windows 10 + Git
-  // Bash/mintty, spawning from inside that callback can open vim without
-  // usable input. The macrotask boundary completes the terminal handoff while
-  // keeping the TUI paused, so no extra keystrokes can race into the composer.
   tui.stop();
-  let success = false;
-  await yieldForTerminalHandoff();
 
   try {
     // Enter alt screen + clear + show cursor.
@@ -148,8 +116,9 @@ export async function openFileInEditor(
     process.stdin.resume();
 
     const result = spawnEditorSync(cmd, args, filePath);
-    const finalResult = spawnFailed(result) ? spawnFallbackSync(filePath) : result;
-    success = !spawnFailed(finalResult);
+    if (spawnFailed(result)) {
+      spawnFallbackSync(filePath);
+    }
   } finally {
     // ── Terminal recovery (mirrors claude-code's exitAlternateScreen) ──
     //
@@ -176,7 +145,7 @@ export async function openFileInEditor(
 
     tui.start();
     tui.requestRender(true);
-    onExit?.(success);
+    onExit?.();
   }
 }
 
@@ -208,23 +177,18 @@ export async function openFileInEditor(
  * GUI_EDITOR_WAIT_FLAGS unless the user already supplied it. This matches
  * CC's EDITOR_OVERRIDES = { code: 'code -w', subl: 'subl --wait' }.
  */
-function spawnGuiEditorSync(
-  tui: TUI,
-  editor: string,
-  filePath: string,
-  onExit?: (success: boolean) => void,
-): void {
+function spawnGuiEditorSync(tui: TUI, editor: string, filePath: string, onExit?: () => void): void {
   // Resolve cmd + args, forcing a wait flag for editors that need one.
   const { cmd, args } = parseEditorCommand(editor);
 
   tui.stop();
-  let success = false;
 
   try {
     const result = spawnEditorSync(cmd, args, filePath);
-    // GUI editor failed to launch — fall back to notepad/vi (still blocking).
-    const finalResult = spawnFailed(result) ? spawnFallbackSync(filePath) : result;
-    success = !spawnFailed(finalResult);
+    if (spawnFailed(result)) {
+      // GUI editor failed to launch — fall back to notepad/vi (still blocking).
+      spawnFallbackSync(filePath);
+    }
   } finally {
     // Drain any stdin the editor may have left buffered (defensive — GUI
     // editors shouldn't touch our stdin, but a shell-wrapped one might).
@@ -238,7 +202,7 @@ function spawnGuiEditorSync(
 
     tui.start();
     tui.requestRender(true);
-    onExit?.(success);
+    onExit?.();
   }
 }
 

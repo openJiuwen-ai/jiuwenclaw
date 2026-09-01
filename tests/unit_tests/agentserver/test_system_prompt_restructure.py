@@ -1,5 +1,6 @@
 from types import SimpleNamespace
-from unittest.mock import patch
+from pathlib import Path
+from unittest.mock import ANY, patch
 
 import pytest
 
@@ -14,24 +15,23 @@ from openjiuwen.harness.prompts.prompt_attachment_manager import (
 )
 from openjiuwen.harness.prompts import PromptSection, SystemPromptBuilder
 
-from jiuwenswarm.agents.harness.common.browser_defaults import (
-    DEFAULT_BROWSER_AGENT_MAX_ITERATIONS,
-)
 from jiuwenswarm.common import utils as _utils_mod
 from jiuwenswarm.server.runtime.agent_adapter import interface_deep as interface_module
 from jiuwenswarm.server.runtime.agent_adapter.interface_deep import JiuWenSwarmDeepAdapter
 from jiuwenswarm.agents.harness.common.prompt.prompt_builder import (
     build_agent_identity_prompt,
 )
-from jiuwenswarm.agents.harness.common.prompt.browser_task_prompt import (
-    build_browser_task_prompt,
-)
 from jiuwenswarm.agents.harness.common.rails import skill_retrieval_prompt_rail as _skill_retrieval_prompt_mod
 from jiuwenswarm.agents.harness.common.rails.runtime_prompt_rail import RuntimePromptRail
-from jiuwenswarm.agents.harness.common.rails.response_prompt_rail import ResponsePromptRail
 from jiuwenswarm.agents.harness.common.rails.skill_retrieval_prompt_rail import SkillRetrievalPromptRail
 from jiuwenswarm.agents.harness.common.rails.symphony import (
     SymphonyOrchestrationRail,
+)
+from jiuwenswarm.agents.harness.common.tools.harness_named_web_tools import (
+    JiuwenHarnessFetchWebpageTool,
+)
+from jiuwenswarm.agents.harness.common.tools.web_search.harness import (
+    JiuwenHarnessWebSearchTool,
 )
 
 
@@ -108,6 +108,7 @@ class _FakeResourceManager:
     def __init__(self) -> None:
         self.added: list[str] = []
         self.removed: list[str] = []
+        self.tools: dict[str, SimpleNamespace] = {}
 
     def add_tool(
         self,
@@ -118,9 +119,16 @@ class _FakeResourceManager:
         skip_if_exists: bool = False,
     ) -> None:
         self.added.append(tool.card.name)
+        if skip_if_exists and tool.card.id in self.tools:
+            return
+        self.tools[tool.card.id] = tool
+
+    def get_tool(self, tool_id: str) -> SimpleNamespace | None:
+        return self.tools.get(tool_id)
 
     def remove_tool(self, tool_id: str) -> None:
         self.removed.append(tool_id)
+        self.tools.pop(tool_id, None)
 
 
 class _FakeRuntimeInstance:
@@ -153,43 +161,13 @@ def _tool_call_ctx(
     )
 
 
-def test_build_agent_identity_prompt_contains_stable_identity_and_task_strategy():
+def test_build_agent_identity_prompt_contains_identity_section_only():
     prompt = build_agent_identity_prompt(language="zh")
 
-    assert "# 身份" in prompt
-    assert "# 任务执行策略" in prompt
-    assert "# JiuwenSwarm 内部数据" not in prompt
-    assert "## 输出文件放置规范" not in prompt
-    assert "## 文件发送" not in prompt
+    assert "# JiuwenSwarm 内部数据" in prompt
     assert "## Symphony Orchestration" not in prompt
-    assert "`symphony_compose_graph`" not in prompt
+    assert "`symphony_compose_score`" not in prompt
     assert "# 消息说明" not in prompt
-
-
-@pytest.mark.asyncio
-async def test_response_prompt_rail_splits_input_and_output_rules():
-    builder = SystemPromptBuilder(language="cn")
-    agent = _FakeAgent(builder)
-    rail = ResponsePromptRail()
-    rail.init(agent)
-    ctx = AgentCallbackContext(
-        agent=agent,
-        inputs=None,
-        session=_FakeSession(),
-        extra={},
-    )
-
-    await rail.before_model_call(ctx)
-
-    prompt = builder.build()
-    assert "# 输入说明" in prompt
-    assert "# 输出规则" in prompt
-    assert "## 输出语言" in prompt
-    assert "## 模型名称回答" in prompt
-    assert "# 消息说明" not in prompt
-    assert builder.has_section("input")
-    assert builder.has_section("output")
-    assert not builder.has_section("response")
 
 
 @pytest.mark.asyncio
@@ -199,7 +177,7 @@ async def test_symphony_orchestration_rail_respects_config_snapshot():
     enabled_ctx = AgentCallbackContext(
         agent=enabled_agent,
         inputs=SimpleNamespace(
-            tools=[SimpleNamespace(name="symphony_compose_graph")],
+            tools=[SimpleNamespace(name="symphony_compose_score")],
         ),
         session=_FakeSession(),
         extra={},
@@ -215,7 +193,7 @@ async def test_symphony_orchestration_rail_respects_config_snapshot():
     disabled_ctx = AgentCallbackContext(
         agent=disabled_agent,
         inputs=SimpleNamespace(
-            tools=[SimpleNamespace(name="symphony_compose_graph")],
+            tools=[SimpleNamespace(name="symphony_compose_score")],
         ),
         session=_FakeSession(),
         extra={},
@@ -229,9 +207,9 @@ async def test_symphony_orchestration_rail_respects_config_snapshot():
     enabled_prompt = enabled_builder.build()
     disabled_prompt = disabled_builder.build()
     assert "## Symphony Orchestration" in enabled_prompt
-    assert "`symphony_compose_graph`" in enabled_prompt
+    assert "`symphony_compose_score`" in enabled_prompt
     assert "## Symphony Orchestration" not in disabled_prompt
-    assert "`symphony_compose_graph`" not in disabled_prompt
+    assert "`symphony_compose_score`" not in disabled_prompt
 
 
 @pytest.mark.asyncio
@@ -247,7 +225,7 @@ async def test_symphony_orchestration_rail_injects_when_tool_visible(
     ctx = AgentCallbackContext(
         agent=agent,
         inputs=SimpleNamespace(
-            tools=[SimpleNamespace(name="symphony_compose_graph")],
+            tools=[SimpleNamespace(name="symphony_compose_score")],
         ),
         session=_FakeSession(),
         extra={},
@@ -259,7 +237,7 @@ async def test_symphony_orchestration_rail_injects_when_tool_visible(
 
     prompt = builder.build()
     assert "## Symphony Orchestration" in prompt
-    assert "`symphony_compose_graph`" in prompt
+    assert "`symphony_compose_score`" in prompt
     assert "exact identifiers or names" in prompt
     assert "Do not omit this field" in prompt
     assert "skill_branch_explore" not in prompt
@@ -284,7 +262,7 @@ async def test_symphony_orchestration_rail_backfills_viewed_skills():
         )
 
     compose_ctx = _tool_call_ctx(
-        "symphony_compose_graph",
+        "symphony_compose_score",
         {"query": "build a financial model"},
         extra=invocation_extra,
     )
@@ -307,7 +285,7 @@ async def test_symphony_orchestration_rail_preserves_explicit_candidates():
         )
     )
     compose_ctx = _tool_call_ctx(
-        "symphony_compose_graph",
+        "symphony_compose_score",
         {"query": "task", "candidate_skill_ids": ["explicit-skill"]},
         extra=invocation_extra,
     )
@@ -330,7 +308,7 @@ async def test_symphony_orchestration_rail_does_not_reuse_other_invocation():
         )
     )
     compose_ctx = _tool_call_ctx(
-        "symphony_compose_graph",
+        "symphony_compose_score",
         {"query": "new task"},
         extra={},
     )
@@ -360,7 +338,7 @@ async def test_symphony_orchestration_rail_ignores_disclosure_and_failed_views()
         )
     )
     compose_ctx = _tool_call_ctx(
-        "symphony_compose_graph",
+        "symphony_compose_score",
         {"query": "task"},
         extra=invocation_extra,
     )
@@ -414,7 +392,7 @@ async def test_symphony_orchestration_rail_clears_when_disabled(
     ctx = AgentCallbackContext(
         agent=agent,
         inputs=SimpleNamespace(
-            tools=[SimpleNamespace(name="symphony_compose_graph")],
+            tools=[SimpleNamespace(name="symphony_compose_score")],
         ),
         session=_FakeSession(),
         extra={},
@@ -441,9 +419,9 @@ def test_deep_adapter_syncs_symphony_tools_from_config_snapshot(monkeypatch):
     tools = [
         SimpleNamespace(card=SimpleNamespace(id=name, name=name))
         for name in (
-            "symphony_read_graph",
-            "symphony_refresh_graph",
-            "symphony_compose_graph",
+            "symphony_read_score",
+            "symphony_refresh_score",
+            "symphony_compose_score",
         )
     ]
 
@@ -460,14 +438,14 @@ def test_deep_adapter_syncs_symphony_tools_from_config_snapshot(monkeypatch):
     assert seen_configs == [{"symphony": {"enabled": True}}]
     assert adapter._symphony_tools_registered is True
     assert [card.name for card in adapter._tool_cards] == [
-        "symphony_read_graph",
-        "symphony_refresh_graph",
-        "symphony_compose_graph",
+        "symphony_read_score",
+        "symphony_refresh_score",
+        "symphony_compose_score",
     ]
     assert fake_resource.added == [
-        "symphony_read_graph",
-        "symphony_refresh_graph",
-        "symphony_compose_graph",
+        "symphony_read_score",
+        "symphony_refresh_score",
+        "symphony_compose_score",
     ]
     assert fake_instance.ability_manager.added == fake_resource.added
 
@@ -481,14 +459,14 @@ def test_deep_adapter_syncs_symphony_tools_from_config_snapshot(monkeypatch):
     # sibling adapter still running on it.
     assert fake_resource.removed == []
     assert fake_instance.ability_manager.removed == [
-        "symphony_read_graph",
-        "symphony_refresh_graph",
-        "symphony_compose_graph",
+        "symphony_read_score",
+        "symphony_refresh_score",
+        "symphony_compose_score",
     ]
 
 
 @pytest.mark.asyncio
-async def test_runtime_environment_section_participates_in_priority_order():
+async def test_runtime_time_section_participates_in_priority_order():
     builder = SystemPromptBuilder(language="cn")
     builder.add_section(PromptSection(name="identity", content={"cn": "identity"}, priority=10))
     builder.add_section(PromptSection(name="tools", content={"cn": "# 可用工具"}, priority=30))
@@ -514,14 +492,11 @@ async def test_runtime_environment_section_participates_in_priority_order():
         "identity",
         "# 可用工具",
         "# 工作空间",
-        "# 运行环境",
+        "# 时间说明",
     ]
     positions = [prompt.index(marker) for marker in ordered_markers]
     assert positions == sorted(positions)
-    assert builder.has_section("env")
-    assert not builder.has_section("time")
-    assert not builder.has_section("runtime.model_answer_policy")
-    assert not builder.has_section("language_output")
+    assert builder.has_section("runtime.model_answer_policy")
     assert not builder.has_section("runtime")
     assert "# 运行时状态" not in prompt
 
@@ -545,73 +520,24 @@ async def test_runtime_dynamic_sections_go_to_prompt_attachment_when_manager_ava
     await runtime_rail.before_model_call(ctx)
 
     prompt = builder.build()
-    assert "# Runtime Environment" in prompt
+    assert "# Time Description" in prompt
     assert "# Runtime State" not in prompt
-    assert "# Time Description" not in prompt
-    assert "# Language" not in prompt
-    assert "# Model Name Answer Policy" not in prompt
-    assert "# Browser Tool Policy" not in prompt
-    assert "## Browser Subagent Rules" not in prompt
+    assert "# Language" in prompt
+    assert "# Browser Tool Policy" in prompt
     assert "browser_preflight_submit" not in prompt
     assert "hotel_option_select" not in prompt
     assert "gmail_email_select" not in prompt
     assert "social_post_draft_select" not in prompt
     assert "Mandatory Web A2UI account-action gate" not in prompt
-    assert 'subagent_type` set to `"browser_agent"`' not in prompt
-    assert "## Platform and Shell" in prompt
-    assert "## Time-sensitive Queries" in prompt
-    assert "## Current Channel" in prompt
+    assert 'subagent_type` set to `"browser_agent"`' in prompt
+    assert "# Environment" in prompt
 
     items = await agent.prompt_attachment_manager.collect_for_session("sess1")
     assert [item.id for item in items] == ["session.sess1.runtime.setting"]
     rendered = agent.prompt_attachment_manager.render(items)
     assert "model-x" in rendered
-    assert "Always respond in English" not in prompt
-    assert "# Browser Tool Policy" not in prompt
-    assert "## Browser Subagent Rules" not in prompt
-
-
-@pytest.mark.asyncio
-async def test_browser_policy_is_localized_and_merged_into_task_tool_section():
-    rail = JiuWenSwarmDeepAdapter._build_subagent_rail()
-    if rail is None:
-        pytest.skip("SubagentRail is unavailable with the installed openjiuwen API")
-    rail.tools = [object()]
-    rail.system_prompt_builder = SystemPromptBuilder(language="en")
-
-    ctx = AgentCallbackContext(
-        agent=SimpleNamespace(),
-        inputs=None,
-        session=_FakeSession(),
-        extra={},
-    )
-    await rail.before_model_call(ctx)
-
-    task_section = rail.system_prompt_builder.get_section("task_tool")
-    if task_section is None:
-        pytest.skip("task_tool prompt section is unavailable in this tool configuration")
-    assert "# Subagent Usage Rules" in task_section.content["en"]
-    assert "## task_tool" not in task_section.content["en"]
-    assert "## Browser Subagent Rules" in task_section.content["en"]
-    assert 'set `subagent_type` to `"browser_agent"`' in task_section.content["en"]
-    assert not rail.system_prompt_builder.has_section("browser_tool_policy")
-    assert "浏览器子智能体规则" in build_browser_task_prompt("cn")
-
-    rail.set_channel("tui")
-    rail.system_prompt_builder = SystemPromptBuilder(language="en")
-    await rail.before_model_call(ctx)
-    non_web_task_section = rail.system_prompt_builder.get_section("task_tool")
-    if non_web_task_section is None:
-        pytest.skip("task_tool prompt section is unavailable in this tool configuration")
-    assert "# Subagent Usage Rules" in non_web_task_section.content["en"]
-    assert "## Browser Subagent Rules" not in non_web_task_section.content["en"]
-
-
-def test_task_planning_tools_remain_enabled_without_todo_prompt_section():
-    rail = JiuWenSwarmDeepAdapter._build_task_planning_rail()
-    if rail is None:
-        pytest.skip("TaskPlanningRail is unavailable with the installed openjiuwen API")
-    assert rail.inject_prompt is False
+    assert "Always respond in English" in prompt
+    assert "# Browser Tool Policy" in prompt
 
 
 @pytest.mark.asyncio
@@ -719,17 +645,15 @@ async def test_runtime_prompt_uses_runtime_cwd_over_stale_trusted_dir(tmp_path, 
     await runtime_rail.before_model_call(ctx)
 
     prompt = builder.build()
-    assert "# Directory and File-Operation Boundaries" in prompt
-    assert "# Runtime Directory Context" not in prompt
-    assert "# Working Directory Runtime Values" not in prompt
-    assert "The project directory is your current workspace" in prompt
-    assert f"the current project directory is: `{project_dir}`" in prompt
+    assert "# Runtime Directory Context" in prompt
+    assert "Current project directory (project root and workspace boundary)" in prompt
+    assert "Current working directory (cwd and Bash default directory)" in prompt
     assert "Agent internal data directory" in prompt
-    assert "## JiuwenSwarm Internal Directories" in prompt
+    assert "# Working Directory Policy" in prompt
     assert str(project_dir) in prompt
-    assert str(current_dir) not in prompt
+    assert str(current_dir) in prompt
     assert str(stale_dir) not in prompt
-    assert str(extra_dir) not in prompt
+    assert str(extra_dir) in prompt
     assert "System directory" not in prompt
 
     items = await agent.prompt_attachment_manager.list_by_filter(session_id="sess1")
@@ -766,9 +690,10 @@ async def test_runtime_prompt_describes_external_cwd_without_project(tmp_path, m
     await runtime_rail.before_model_call(ctx)
 
     prompt = builder.build()
-    assert "The project directory is your current workspace" in prompt
-    assert f"the current project directory is: `{task_dir}`" in prompt
-    assert "Other accessible directories" not in prompt
+    assert "Current project directory: not set" in prompt
+    assert str(task_dir) in prompt
+    assert "No user project is currently bound" in prompt
+    assert "it is not a project directory" in prompt
     assert "fallen back to the Agent internal data directory" not in prompt
 
 
@@ -800,73 +725,10 @@ async def test_runtime_prompt_describes_agent_data_cwd_fallback(tmp_path, monkey
     await runtime_rail.before_model_call(ctx)
 
     prompt = builder.build()
-    assert "# 目录与文件操作边界" in prompt
-    assert f"当前项目目录是：`{agent_data_dir}`" in prompt
-    assert "其他可访问目录" not in prompt
-
-
-@pytest.mark.asyncio
-async def test_runtime_prompt_clears_directory_boundaries_outside_web_and_tui(
-    tmp_path,
-    monkeypatch,
-):
-    builder = SystemPromptBuilder(language="cn")
-    agent = _FakeAgent(builder)
-    agent_data_dir = tmp_path / "agent-data"
-    agent_data_dir.mkdir()
-    monkeypatch.setattr(
-        "jiuwenswarm.agents.harness.common.rails.runtime_prompt_rail.get_agent_workspace_dir",
-        lambda: agent_data_dir,
-    )
-
-    runtime_rail = RuntimePromptRail(language="cn", channel="web")
-    runtime_rail.init(agent)
-    ctx = AgentCallbackContext(
-        agent=agent,
-        inputs=None,
-        session=_FakeSession(),
-        extra={},
-    )
-
-    await runtime_rail.before_model_call(ctx)
-    assert "# 目录与文件操作边界" in builder.build()
-
-    runtime_rail.set_channel("a2a")
-    await runtime_rail.before_model_call(ctx)
-    assert "# 目录与文件操作边界" not in builder.build()
-
-
-@pytest.mark.asyncio
-async def test_runtime_prompt_reports_powershell_and_removes_generic_shell_rules(monkeypatch):
-    import jiuwenswarm.agents.harness.common.rails.runtime_prompt_rail as runtime_module
-
-    monkeypatch.setattr(runtime_module.sys, "platform", "win32")
-    monkeypatch.setattr(
-        runtime_module.shutil,
-        "which",
-        lambda command: r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
-        if command == "powershell"
-        else None,
-    )
-
-    builder = SystemPromptBuilder(language="cn")
-    agent = _FakeAgent(builder)
-    runtime_rail = RuntimePromptRail(language="cn", channel="web")
-    runtime_rail.init(agent)
-    ctx = AgentCallbackContext(
-        agent=agent,
-        inputs=None,
-        session=_FakeSession(),
-        extra={},
-    )
-
-    await runtime_rail.before_model_call(ctx)
-
-    prompt = builder.build()
-    assert "- Shell：PowerShell" in prompt
-    assert "Shell 规则：" not in prompt
-    assert "### 项目目录规则" in prompt
-    assert "### 项目录规则" not in prompt
+    assert "当前项目目录：未设置" in prompt
+    assert str(agent_data_dir) in prompt
+    assert "当前工作目录暂时回退到 Agent 内部数据目录" in prompt
+    assert "它仍然是 Agent 内部数据目录，不是用户项目" in prompt
 
 
 @pytest.mark.asyncio
@@ -898,17 +760,13 @@ async def test_runtime_prompt_language_output_prefers_rail_language_over_runtime
     await runtime_rail.before_model_call(ctx)
 
     prompt = builder.build()
-    # The runtime rail now keeps the selected language in the runtime state
-    # instead of emitting the legacy ``language_output`` section.
-    assert "Always respond in Chinese (Simplified)" not in prompt
+    assert "Always respond in Chinese (Simplified)" in prompt
     rendered = agent.prompt_attachment_manager.render(
         await agent.prompt_attachment_manager.list_by_filter(session_id="sess1")
     )
     assert "Always respond in Chinese (Simplified)" not in rendered
     assert "Always respond in English." not in rendered
     assert "Always respond in English." not in prompt
-    # Runtime context is attached separately and rendered by the attachment
-    # manager, rather than being part of the main system-prompt sections.
     assert "当前语言：cn" in rendered
 
 
@@ -1126,9 +984,27 @@ def test_deep_adapter_visible_skill_names_match_list_skill(monkeypatch, tmp_path
     adapter.set_skill_manager(
         SimpleNamespace(list_execution_disabled_skills=lambda: ["beta"])
     )
+    # `_visible_skill_names_for_list_skill` scans `_resolve_skill_dirs()`, which
+    # prefers shared tip dirs (`JIUWEN*_SHARED_SKILLS_DIRS`) over workspace.
+    # Isolate both the resolver and the env whitelist so CI shared roots
+    # (skill-creator / swarmskill-creator) cannot leak into this unit test.
+    monkeypatch.delenv("JIUWENSWARM_SHARED_SKILLS_DIRS", raising=False)
+    monkeypatch.delenv("JIUWENCLAW_SHARED_SKILLS_DIRS", raising=False)
+    monkeypatch.setattr(
+        "jiuwenswarm.common.utils.resolve_agent_registered_skill_dirs",
+        lambda: [tmp_path],
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.common.utils.get_agent_skills_dir",
+        lambda: tmp_path,
+    )
     monkeypatch.setattr(
         "jiuwenswarm.server.runtime.agent_adapter.interface_deep.get_agent_skills_dir",
         lambda: tmp_path,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.skill.skill_manager.enabled_skills_from_environ",
+        lambda: None,
     )
 
     assert adapter._visible_skill_names_for_list_skill() == {"alpha"}
@@ -1226,58 +1102,53 @@ def test_code_adapter_skill_retrieval_sync_respects_configured_tools(monkeypatch
     )
 
 
-def test_resolve_enable_task_loop_forces_true_when_skill_evolution_enabled():
+def test_resolve_enable_task_loop_forces_true_when_skill_create_enabled(monkeypatch):
+    monkeypatch.delenv("SKILL_CREATE", raising=False)
     assert (
         JiuWenSwarmDeepAdapter._resolve_enable_task_loop(
             {"enable_task_loop": False},
-            {"react": {"evolution": {"skill_evolution": True}}},
+            {"evolution": {"skill_create": True}},
         )
         is True
     )
 
 
-def test_resolve_enable_task_loop_ignores_legacy_review_trigger():
+def test_resolve_enable_task_loop_forces_true_when_review_trigger_enabled(monkeypatch):
+    monkeypatch.delenv("EVOLUTION_REVIEW_TRIGGER", raising=False)
     assert (
         JiuWenSwarmDeepAdapter._resolve_enable_task_loop(
             {"enable_task_loop": False},
-            {"react": {"evolution": {"review_trigger": True}}},
+            {"evolution": {"review_trigger": True}},
         )
-        is False
+        is True
     )
 
 
-def test_resolve_enable_task_loop_ignores_legacy_auto_scan():
-    assert (
-        JiuWenSwarmDeepAdapter._resolve_enable_task_loop(
-            {"enable_task_loop": False},
-            {"react": {"evolution": {"auto_scan": True}}},
-        )
-        is False
-    )
-
-
-def test_resolve_enable_task_loop_ignores_legacy_evolution_enabled():
+def test_resolve_enable_task_loop_preserves_false_when_only_evolution_enabled(monkeypatch):
+    monkeypatch.delenv("EVOLUTION_REVIEW_TRIGGER", raising=False)
+    monkeypatch.delenv("SKILL_CREATE", raising=False)
     assert (
         JiuWenSwarmDeepAdapter._resolve_enable_task_loop(
             {"enable_task_loop": False},
             {
-                "react": {"evolution": {
+                "evolution": {
                     "enabled": True,
-                    "signal_trigger": True,
                     "review_trigger": False,
                     "skill_create": False,
-                }}
+                }
             },
         )
         is False
     )
 
 
-def test_resolve_enable_task_loop_preserves_false_without_enforcers():
+def test_resolve_enable_task_loop_preserves_false_without_enforcers(monkeypatch):
+    monkeypatch.delenv("EVOLUTION_REVIEW_TRIGGER", raising=False)
+    monkeypatch.delenv("SKILL_CREATE", raising=False)
     assert (
         JiuWenSwarmDeepAdapter._resolve_enable_task_loop(
             {"enable_task_loop": False},
-            {"react": {"evolution": {"skill_evolution": False}}},
+            {"evolution": {"enabled": False, "skill_create": False}},
         )
         is False
     )
@@ -1312,25 +1183,25 @@ def test_deep_adapter_subagents_includes_optional_browser_and_configured_researc
     ):
         subagents, _ = adapter.build_configured_subagents(model, config)
 
-    assert [
-        item.agent_card.name if hasattr(item, "agent_card") else item
-        for item in subagents
-    ] == ["statusline-setup", "research_spec", "browser_spec"]
-    # sys_operation is forwarded so the subagent shares the parent's filesystem
-    # boundary; this bare adapter has none configured.
+    assert subagents == ["research_spec", "browser_spec"]
     mock_research.assert_called_once_with(
         model,
         workspace="/tmp/jiuwenswarm-workspace",
-        sys_operation=None,
         language="cn",
         max_iterations=9,
+        rails=None,
+        tools=ANY,
     )
+    research_tools = mock_research.call_args.kwargs["tools"]
+    assert len(research_tools) == 2
+    assert isinstance(research_tools[0], JiuwenHarnessWebSearchTool)
+    assert isinstance(research_tools[1], JiuwenHarnessFetchWebpageTool)
     mock_browser.assert_called_once_with(
         model,
         workspace="/tmp/jiuwenswarm-workspace",
-        sys_operation=None,
         language="cn",
         max_iterations=7,
+        rails=None,
     )
 
 
@@ -1354,17 +1225,116 @@ def test_deep_adapter_subagents_omits_research_without_explicit_enable():
     ):
         subagents, _ = adapter.build_configured_subagents(model, config)
 
-    # DeepAdapter: no research_agent configured; built-in status-line setup and
-    # browser remain available.
-    assert [
-        item.agent_card.name if hasattr(item, "agent_card") else item
-        for item in subagents
-    ] == ["statusline-setup", "browser_spec"]
+    # DeepAdapter: no research_agent configured, browser enabled
+    assert subagents == ["browser_spec"]
     mock_research.assert_not_called()
-    mock_browser.assert_called_once_with(
-        model,
-        workspace="/tmp/jiuwenswarm-workspace",
-        sys_operation=None,
+    mock_browser.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_runtime_rail_multi_tenant_workspace_dirs(monkeypatch):
+    """测试注入 workspace_dir 时 _resolve_agent_workspace_and_config 返回正确路径。"""
+    monkeypatch.setenv("JIUWENSWARM_EDITION", "enterprise")
+
+    builder = SystemPromptBuilder(language="cn")
+    workspace_root = Path("/tmp/test_jiuwenswarm/workspace_abc/agent/workspace")
+    runtime_rail = RuntimePromptRail(
         language="cn",
-        max_iterations=DEFAULT_BROWSER_AGENT_MAX_ITERATIONS,
+        channel="web",
+        agent_id="test_agent_001",
+        service_id="test_service_001",
     )
+    runtime_rail.set_runtime_paths(workspace_dir=str(workspace_root))
+    runtime_rail.init(SimpleNamespace(system_prompt_builder=builder))
+
+    ctx = AgentCallbackContext(agent=None, inputs=None, session=None)
+    await runtime_rail.before_model_call(ctx)
+
+    prompt = builder.build()
+
+    assert "config" in prompt
+    assert "workspace" in prompt
+    assert "workspace_abc" in prompt
+    assert "Agent 内部数据目录" in prompt
+
+    expected_base = workspace_root.parent.parent
+    expected_config = str(expected_base / "config")
+    expected_workspace = str(workspace_root)
+    expected_config_win = expected_config.replace("/", "\\")
+    expected_workspace_win = expected_workspace.replace("/", "\\")
+    assert (
+        expected_config in prompt or expected_config_win in prompt
+    ), f"Config path not found: {expected_config}"
+    assert (
+        expected_workspace in prompt or expected_workspace_win in prompt
+    ), f"Workspace path not found: {expected_workspace}"
+
+
+@pytest.mark.asyncio
+async def test_runtime_rail_single_tenant_workspace_dirs():
+    """社区版：未设置租户 ID 时回退到默认 workspace/config 路径。"""
+    builder = SystemPromptBuilder(language="cn")
+    runtime_rail = RuntimePromptRail(
+        language="cn",
+        channel="web",
+        # 不传 agent_id 和 service_id，触发单租户模式
+    )
+    runtime_rail.init(SimpleNamespace(system_prompt_builder=builder))
+
+    with (
+        patch(
+            "jiuwenswarm.agents.harness.common.rails.runtime_prompt_rail.get_user_workspace_dir"
+        ) as mock_user_ws,
+        patch(
+            "jiuwenswarm.agents.harness.common.rails.runtime_prompt_rail.get_agent_workspace_dir"
+        ) as mock_agent_ws,
+    ):
+        mock_user_ws.return_value = Path("/home/user/.jiuwenswarm")
+        mock_agent_ws.return_value = Path("/home/user/.jiuwenswarm/agent/workspace")
+
+        ctx = AgentCallbackContext(agent=None, inputs=None, session=None)
+        await runtime_rail.before_model_call(ctx)
+
+    prompt = builder.build()
+
+    assert "config" in prompt
+    assert "workspace" in prompt
+    assert ".jiuwenswarm" in prompt
+    assert "Agent 内部数据目录" in prompt
+
+    # 验证完整绝对路径（兼容 Windows/Linux 分隔符）
+    expected_config = "/home/user/.jiuwenswarm/config"
+    expected_workspace = "/home/user/.jiuwenswarm/agent/workspace"
+    expected_config_win = expected_config.replace("/", "\\")
+    expected_workspace_win = expected_workspace.replace("/", "\\")
+    assert (
+        expected_config in prompt or expected_config_win in prompt
+    ), f"Config path not found: {expected_config}"
+    assert (
+        expected_workspace in prompt or expected_workspace_win in prompt
+    ), f"Workspace path not found: {expected_workspace}"
+
+
+def test_interface_deep_skill_rail_uses_multi_tenant_paths():
+    """测试 get_multi_tenant_skill_dirs 按 service_id/agent_id 解析路径。"""
+    from jiuwenswarm.common.utils import get_multi_tenant_skill_dirs
+
+    with patch(
+        "jiuwenswarm.common.utils.get_multi_tenant_user_workspace_dir",
+    ) as mock_workspace:
+        mock_workspace.return_value = Path("/tmp/test/service_key123/agent_key123")
+        skill_dirs = get_multi_tenant_skill_dirs(service_id="key123", agent_id="key123")
+
+    assert len(skill_dirs) == 1
+    assert "service_key123" in str(skill_dirs[0]) or "agent_key123" in str(skill_dirs[0])
+    assert "skills" in str(skill_dirs[0])
+    assert "workspace" in str(skill_dirs[0])
+
+    with patch(
+        "jiuwenswarm.common.utils.get_agent_skills_dir",
+    ) as mock_single:
+        mock_single.return_value = Path("/home/user/.jiuwenswarm/skills")
+        skill_dirs_single = get_multi_tenant_skill_dirs()
+
+    assert len(skill_dirs_single) == 1
+    assert skill_dirs_single[0].as_posix() == "/home/user/.jiuwenswarm/skills"

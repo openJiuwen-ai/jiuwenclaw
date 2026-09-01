@@ -103,11 +103,14 @@
 
 .model-setup-guide__title {
   margin: 2px 0 0;
-  padding-right: 48px;
   color: var(--color-text-strong);
   font-size: 17px;
   font-weight: 650;
   line-height: 1.4;
+}
+
+.model-setup-guide__callout--manual .model-setup-guide__title {
+  padding-right: 48px;
 }
 
 .model-setup-guide__description {

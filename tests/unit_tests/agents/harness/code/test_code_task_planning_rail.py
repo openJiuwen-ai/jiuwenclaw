@@ -32,9 +32,14 @@ class FakeAgent:
         self.prompt_attachment_manager = PromptAttachmentManager()
         self.config = SimpleNamespace(model_name="")
         self._llm = None
+        self._state = SimpleNamespace(task_plan=None)
 
     def set_llm(self, llm) -> None:
         self._llm = llm
+
+    def load_state(self, session):  # noqa: ARG002
+        """Match DeepAgent API used by TaskPlanningRail todo/plan sync."""
+        return self._state
 
 
 class FakeTodoTool(TodoTool):
@@ -70,6 +75,14 @@ def _rail(todos: list[TodoItem], **kwargs) -> CodeTaskPlanningRail:
     rail = CodeTaskPlanningRail(**kwargs)
     rail.tools = [FakeTodoTool(todos)]
     return rail
+
+
+def test_code_task_planning_rail_forces_progress_repeat_off() -> None:
+    """Code mode forces progress_repeat off; YAML/env kwargs cannot re-enable it."""
+    rail = CodeTaskPlanningRail()
+    assert rail.enable_progress_repeat is False
+    rail_forced = CodeTaskPlanningRail(enable_progress_repeat=True)
+    assert rail_forced.enable_progress_repeat is False
 
 
 async def _task_reminders(agent: FakeAgent):

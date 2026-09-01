@@ -16,6 +16,16 @@ from .config import (
     is_memory_enabled,
     get_memory_mode,
     get_embed_config,
+    clear_embed_config_db_cache,
+    set_embed_config_db_cache,
+    clear_task_memory_config_db_cache,
+    get_task_memory_config,
+    reload_task_memory_config_from_gateway_db,
+    clear_memory_config_db_cache,
+    merge_memory_config_into_config,
+    reload_memory_config_from_gateway_db,
+    get_memory_section,
+    apply_memory_config_payload,
     DEFAULT_WORKSPACE_DIR,
 )
 from .embeddings import EmbeddingProvider, create_embedding_provider
@@ -26,6 +36,7 @@ from .external_memory_config import (
     get_memory_engine,
     is_builtin_memory_allowed,
     is_external_memory_allowed,
+    external_memory_fingerprint,
 )
 from .external_memory_builder import build_external_memory_rail
 from .internal import (
@@ -66,6 +77,16 @@ __all__ = [
     "is_memory_enabled",
     "get_memory_mode",
     "get_embed_config",
+    "clear_embed_config_db_cache",
+    "set_embed_config_db_cache",
+    "clear_task_memory_config_db_cache",
+    "get_task_memory_config",
+    "reload_task_memory_config_from_gateway_db",
+    "clear_memory_config_db_cache",
+    "merge_memory_config_into_config",
+    "reload_memory_config_from_gateway_db",
+    "get_memory_section",
+    "apply_memory_config_payload",
     "DEFAULT_WORKSPACE_DIR",
     "estimate_tokens",
     "get_external_memory_config",
@@ -75,4 +96,5 @@ __all__ = [
     "get_memory_engine",
     "is_builtin_memory_allowed",
     "is_external_memory_allowed",
+    "external_memory_fingerprint",
 ]

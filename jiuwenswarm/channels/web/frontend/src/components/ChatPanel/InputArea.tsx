@@ -13,20 +13,12 @@
 } from 'react';
 import { createPortal } from 'react-dom';
 import { useTranslation } from 'react-i18next';
-import { AtSign, CircleX, ClipboardList, FileText, Loader2, Plus, Square, Target, X } from 'lucide-react';
+import { AtSign, CircleX, FileText, Loader2, Plus, Square, Target, X } from 'lucide-react';
+import { FileTypeIcon, getFileTypeIconKeyFromFilename, type FileTypeIconKey } from './FileTypeIcon';
 import { useSpeechRecognition } from '../../hooks';
 
 // import { stopAllTts } from '../../utils';
-import {
-  useChatStore,
-  useGoalStore,
-  usePlanStore,
-  useSessionStore,
-  useWorkspaceStore,
-  resolveEffectiveModel,
-} from '../../stores';
-import { supportsPlanMode } from '../../features/planMode/wireMode';
-import { queueOrAddGoalObjectiveMessage } from '../../features/goalPendingObjectiveBubble';
+import { useChatStore, useGoalStore, useSessionStore, useWorkspaceStore, resolveEffectiveModel } from '../../stores';
 import { AgentMode, MediaItem, Permission, type ProjectInfo } from '../../types';
 import { NEW_CONVERSATION_ID } from '../../multi-session/state/newConversationLifecycle';
 import { ProjectCreateMenu, type ProjectCreateMode } from '../../multi-session/sidebar/ProjectCreateMenu';
@@ -35,8 +27,8 @@ import { AGENT_MODE_OPTIONS, PERMISSION_OPTIONS } from '../../config/chatConfig'
 import clsx from 'clsx';
 import { PermissionWarningDialog } from './PermissionWarningDialog';
 import { ModelProviderIcon } from '../ModelProviderIcon';
-import { FileIcon } from '../FileIcon';
 import { getEvolutionPillLabel } from './evolution-status';
+import { isEnterpriseMode } from '../../edition';
 import { webRequest } from '../../services/webClient';
 import { getSkillAvatar } from '../../utils/skillAvatar';
 import { withUploadDocumentBlock } from '../../utils/documentMessage';
@@ -319,6 +311,14 @@ function getFileExtension(filename: string): string {
   return filename.slice(idx).toLowerCase();
 }
 
+function getAttachmentTypeKey(attachment: AttachmentDraft): FileTypeIconKey {
+  return getFileTypeIconKeyFromFilename(attachment.filename, attachment.kind);
+}
+
+function AttachmentTypeIcon({ attachment }: { attachment: AttachmentDraft }) {
+  return <FileTypeIcon typeKey={getAttachmentTypeKey(attachment)} size={32} />;
+}
+
 function attachmentToMediaItem(attachment: AttachmentDraft): MediaItem {
   const persisted = attachment.persistedMediaItem;
   const filename = pickString(persisted?.filename) || attachment.filename;
@@ -575,25 +575,13 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
   const isTeamMode = mode === 'team';
   const isAutoHarnessMode = mode === 'auto_harness';
   const isWorkContextLocked = Boolean(activeSessionId && activeSessionId !== NEW_CONVERSATION_ID);
-  const showWorkContextRow = activeSessionId === NEW_CONVERSATION_ID;
+  const showWorkContextRow = !isEnterpriseMode() && activeSessionId === NEW_CONVERSATION_ID;
   /** Goal 入口是否适用于当前上下文（agent 模式 + 已接入 onSetGoal，如欢迎页新会话就不适用） */
   const canUseGoalMenu = isAgentMode && Boolean(onSetGoal);
   // 只跟 armed 挂钩：这个 tag 是"下一条消息将用于设置目标"的过渡态指示，发送后 armed 变 false
   // 就该跟着消失，不能靠"目标是否存在"续命——目标存在与否、当前状态、编辑/暂停/删除，已经由
   // 输入框上方常驻的 GoalBar 完整覆盖，工具栏这里再挂一份重复的常驻入口只会显得"选择没解除"。
   const goalTagVisible = canUseGoalMenu && goalArmed;
-  // Plan 是持续开关（不是 Goal 那种"下一条消息生效"的过渡态）：打开后一直用
-  // agent.plan 发送，直到用户点叉或后端推 plan.mode_exited。
-  // 和 Goal 一样只对单 agent 开放，集群模式不提供 Plan 入口。
-  const planActive = usePlanStore((s) => s.runtimes[activeSessionId ?? '']?.active ?? false);
-  const planPendingExplicitEntry = usePlanStore(
-    (s) => s.runtimes[activeSessionId ?? '']?.pendingExplicitEntry ?? false,
-  );
-  // Plan 已经真正生效：开关打开且至少发出过一条 Plan 消息（pendingExplicitEntry 已被消费）。
-  // 区别于"刚打开开关但还没发消息"的未提交态——后者和 Goal 的 armed 一样可以被对方随手顶替。
-  const planCommitted = planActive && !planPendingExplicitEntry;
-  const canUsePlanMenu = supportsPlanMode(mode);
-  const planTagVisible = canUsePlanMenu && planActive;
 
   const mentionableMembers = useMemo(() => {
     return teamMembers
@@ -968,15 +956,10 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
         return;
       }
       try {
-        const persistFn = attachment.kind === 'document' ? onPersistDocuments : onPersistMedia;
-        const persisted = await persistFn('', [buildUploadMediaItem(attachment, payload)]);
+        const persisted = await onPersistMedia('', [buildUploadMediaItem(attachment, payload)]);
         const persistedMediaItem = persisted.media_items?.[0];
         if (!persistedMediaItem || !pickString(persistedMediaItem.path)) {
-          throw new Error(
-            attachment.kind === 'document'
-              ? 'document.persist did not return document path'
-              : 'media.persist did not return image path',
-          );
+          throw new Error('media.persist did not return image path');
         }
         updateAttachment(attachment.id, {
           ...payload,
@@ -986,7 +969,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
           error: undefined,
         });
       } catch (error) {
-        console.error(attachment.kind === 'document' ? '文档上传失败:' : '图片上传失败:', error);
+        console.error('图片上传失败:', error);
         updateAttachment(attachment.id, {
           ...payload,
           status: 'error',
@@ -1316,13 +1299,12 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
         (Boolean(pickString(attachment.persistedMediaItem?.path)) || Boolean(attachment.base64Data)),
     );
     const trimmed = buildSubmitContent(trimmedBase, readyDrafts);
-    const hasReadyMedia = readyMediaItems.length > 0;
-    // Block only when there is neither text nor a ready attachment to send.
-    if ((!trimmedBase && !hasReadyMedia) || hasUploadingAttachments || hasAttachmentErrors) return;
+    // Require typed/voice text — attachments alone must not enable send.
+    if (!trimmedBase || hasUploadingAttachments || hasAttachmentErrors) return;
     // In agent mode attachments queue with the task (taskQueue carries mediaItems).
     // Other non-team modes still go through the text-only onInterrupt channel where
     // attachments would be lost, so keep blocking there.
-    if (isInterruptible && !isTeamMode && !isAgentMode && hasReadyMedia) return;
+    if (isInterruptible && !isTeamMode && !isAgentMode && readyMediaItems.length > 0) return;
 
     if (isListening) {
       stopListening();
@@ -1330,14 +1312,15 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
 
     const sid = useChatStore.getState().activeSessionId;
     if (goalArmed && trimmedBase && sid && onSetGoal && sid !== NEW_CONVERSATION_ID) {
-      // command.goal carries a text objective only; silently dropping attachments
-      // would make users believe they were sent, so block explicitly with an alert.
-      if (readyMediaItems.length > 0) {
-        pushAttachmentAlert(t('chat.goalAttachmentsBlocked'));
-        return;
-      }
-      // command.goal 立刻发出（GoalBar「已设置」）；忙碌时用户气泡暂存，答完再入列。
-      queueOrAddGoalObjectiveMessage(sid, trimmedBase);
+      // command.goal 是独立控制信令，不受聊天排队影响，跳过 team/queue/interrupt 判断；
+      // 消息仍要本地落进 chatStore 才能在气泡上显示"设为目标"徽章（见 MessageItem.tsx）
+      useChatStore.getState().addMessage(sid, {
+        id: `user-${Date.now()}`,
+        role: 'user',
+        content: trimmedBase,
+        timestamp: new Date().toISOString(),
+        isGoalObjectiveMessage: true,
+      });
       useGoalStore.getState().setArmed(sid, false);
       onSetGoal(sid, trimmedBase);
     } else if (goalArmed && trimmedBase && sid === NEW_CONVERSATION_ID) {
@@ -1357,12 +1340,12 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
         onSubmit(trimmed, readyMediaItems);
       } else {
         // 保持队列，新消息加入队列
-        useChatStore.getState().addToTaskQueue(sid, trimmed, readyMediaItems);
+        useChatStore.getState().addToTaskQueue(sid, trimmed);
       }
     } else if (isInterruptible) {
       if (isAgentMode) {
         if (sid) {
-          useChatStore.getState().addToTaskQueue(sid, trimmed, readyMediaItems);
+          useChatStore.getState().addToTaskQueue(sid, trimmed);
           // 目标 active 但当前没有任务在处理时，常规的自动排空触发点不会命中，主动兜底一次
           onDrainTaskQueueIfIdle?.(sid);
         }
@@ -1402,11 +1385,13 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
     goalArmed,
     onSetGoal,
     onDrainTaskQueueIfIdle,
-    pushAttachmentAlert,
     t,
   ]);
 
-  const trimmedDraft = (inputValue + pendingVoiceText).trim();
+  // Prefer live contenteditable text so a stale store inputValue cannot keep Send
+  // enabled while the editor is empty (attachments alone must not enable Send).
+  const liveEditorText = inputRef.current ? extractPlainText() : inputValue;
+  const trimmedDraft = (liveEditorText + pendingVoiceText).trim();
   const hasTextDraft = trimmedDraft.length > 0;
   // Attachments / listening still count as "composer busy" so Stop stays hidden
   // while the user is preparing a follow-up, but they do not enable Send.
@@ -1414,9 +1399,8 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
   const isImageInterruptBlocked =
     isInterruptible && !isTeamMode && !isAgentMode && readyMediaItems.length > 0;
   const showStop = isProcessing && !isPaused && !hasDraft;
-  const hasReadyMedia = readyMediaItems.length > 0;
   const canSubmit = showStop || (
-    (hasTextDraft || hasReadyMedia) &&
+    hasTextDraft &&
     !isLoadingHistory &&
     !isImageInterruptBlocked &&
     !hasUploadingAttachments &&
@@ -2032,14 +2016,14 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                 <div
                   className={cx(
                     'chat-input-attachment-preview',
-                    attachment.previewUrl && 'chat-input-attachment-preview--image',
+                    `chat-input-attachment-preview--${getAttachmentTypeKey(attachment)}`,
                   )}
                   aria-hidden="true"
                 >
                   {attachment.previewUrl ? (
                     <img src={attachment.previewUrl} alt="" />
                   ) : (
-                    <FileIcon fileName={attachment.filename} size={32} />
+                    <AttachmentTypeIcon attachment={attachment} />
                   )}
                 </div>
                 <div className="chat-input-attachment-main">
@@ -2223,84 +2207,29 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                     <span className="chat-mode-select__label">{t('chat.addFile')}</span>
                   </span>
                 </button>
-                {canUseGoalMenu && (() => {
-                  // Goal 和 Plan 互斥：已有真正生效的目标/计划时都不能再选目标。已提交的目标沿用
-                  // 原提示；被"计划已生效"挡住时换一条对应文案，避免误导用户去找目标本身的问题。
-                  const goalDisabled = hasUnfinishedGoal || planCommitted;
-                  const goalDisabledTitle = hasUnfinishedGoal
-                    ? t('goal.toolbarUnavailable')
-                    : planCommitted
-                      ? t('goal.toolbarUnavailablePlan')
-                      : undefined;
-                  return (
-                    <button
-                      type="button"
-                      className="chat-mode-select__option"
-                      role="menuitem"
-                      disabled={goalDisabled}
-                      title={goalDisabledTitle}
-                      onClick={() => {
-                        if (goalDisabled) return;
-                        setAttachMenuOpen(false);
-                        if (activeSessionId) {
-                          // 走到这里 planCommitted 一定是 false（否则上面已 disabled），所以 planActive
-                          // 为 true 时只可能是"刚打开开关、还没发过消息"的未提交态，可以放心顶掉。
-                          if (planActive) {
-                            usePlanStore.getState().setActive(activeSessionId, false);
-                          }
-                          useGoalStore.getState().setArmed(activeSessionId, true);
-                        }
-                      }}
-                    >
-                      <span className="chat-mode-select__option-main">
-                        <span className="chat-mode-select__icon" aria-hidden="true">
-                          <Target className="w-4 h-4" />
-                        </span>
-                        <span className="chat-mode-select__label">{t('goal.toolbarTag')}</span>
+                {canUseGoalMenu && (
+                  <button
+                    type="button"
+                    className="chat-mode-select__option"
+                    role="menuitem"
+                    disabled={hasUnfinishedGoal}
+                    title={hasUnfinishedGoal ? t('goal.toolbarUnavailable') : undefined}
+                    onClick={() => {
+                      if (hasUnfinishedGoal) return;
+                      setAttachMenuOpen(false);
+                      if (activeSessionId) {
+                        useGoalStore.getState().setArmed(activeSessionId, true);
+                      }
+                    }}
+                  >
+                    <span className="chat-mode-select__option-main">
+                      <span className="chat-mode-select__icon" aria-hidden="true">
+                        <Target className="w-4 h-4" />
                       </span>
-                    </button>
-                  );
-                })()}
-                {canUsePlanMenu && (() => {
-                  // 对称地：已有未完成目标时不能选计划；对话进行中（isProcessing）时也先禁掉，
-                  // 避免在当前这轮还没结束时又叠加切一次模式。
-                  const planDisabled = hasUnfinishedGoal || isProcessing;
-                  const planDisabledTitle = hasUnfinishedGoal
-                    ? t('plan.toolbarUnavailableGoal')
-                    : isProcessing
-                      ? t('plan.toolbarUnavailableProcessing')
-                      : undefined;
-                  return (
-                    <button
-                      type="button"
-                      className="chat-mode-select__option"
-                      role="menuitem"
-                      disabled={planDisabled}
-                      title={planDisabledTitle}
-                      onClick={() => {
-                        if (planDisabled) return;
-                        setAttachMenuOpen(false);
-                        if (activeSessionId) {
-                          // 走到这里 hasUnfinishedGoal 一定是 false，goalArmed 为 true 时只可能是
-                          // "刚选了目标、还没发消息"的未提交态，顶掉换成 Plan。
-                          useGoalStore.getState().setArmed(activeSessionId, false);
-                          // explicitEntry：这是用户手动打开开关，下一条 Plan 消息要带
-                          // plan_entry_source，否则会被后端的防重入闸门拦下。
-                          usePlanStore
-                            .getState()
-                            .setActive(activeSessionId, true, { explicitEntry: true });
-                        }
-                      }}
-                    >
-                      <span className="chat-mode-select__option-main">
-                        <span className="chat-mode-select__icon" aria-hidden="true">
-                          <ClipboardList className="w-4 h-4" />
-                        </span>
-                        <span className="chat-mode-select__label">{t('plan.toolbarTag')}</span>
-                      </span>
-                    </button>
-                  );
-                })()}
+                      <span className="chat-mode-select__label">{t('goal.toolbarTag')}</span>
+                    </span>
+                  </button>
+                )}
               </div>,
               document.body
             )}
@@ -2433,32 +2362,6 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
             </div>
           )}
 
-          {planTagVisible && (
-            <div className="chat-goal-tag">
-              <button type="button" className="chat-mode-select__trigger">
-                <span className="chat-mode-select__value">
-                  <span className="chat-mode-select__icon" aria-hidden="true">
-                    <ClipboardList className="w-4 h-4" />
-                  </span>
-                  <span className="chat-mode-select__label">{t('plan.toolbarTag')}</span>
-                </span>
-              </button>
-              <button
-                type="button"
-                className="chat-goal-tag__close"
-                disabled={isProcessing}
-                title={isProcessing ? t('plan.closeTagDisabled') : t('plan.closeTag')}
-                onClick={() => {
-                  if (isProcessing) return;
-                  if (!activeSessionId) return;
-                  usePlanStore.getState().setActive(activeSessionId, false);
-                }}
-              >
-                <X size={11} strokeWidth={2.5} />
-              </button>
-            </div>
-          )}
-
           {evolutionLabel && (
             <div className="chat-input-evolution-pill" title={evolutionLabel}>
               <span className="chat-input-evolution-pill__dot" />
@@ -2545,7 +2448,6 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                   type="button"
                   className="chat-work-select__clear"
                   aria-label={t('multiSession.project.clearProject')}
-                  data-tooltip={t('multiSession.project.clearProject')}
                   onClick={() => {
                     setSelectedProject(null);
                     setWorkMenuOpen(null);
@@ -2648,11 +2550,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
             >
               <WorkIcon name="close" />
             </button>
-            <div className="chat-work-dialog__title">
-              {projectCreateMode === 'existing'
-                ? t('multiSession.project.selectExisting')
-                : t('multiSession.project.createBlank')}
-            </div>
+            <div className="chat-work-dialog__title">{t('multiSession.project.newProject')}</div>
             <input
               className="chat-work-dialog__input"
               value={projectNameDraft}
@@ -2665,10 +2563,9 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                 className="chat-work-dialog__input"
                 value={projectDirDraft}
                 onChange={(event) => setProjectDirDraft(event.target.value)}
-                placeholder={t('multiSession.project.pathPlaceholder')}
+                placeholder="/Users/name/work/project"
               />
             ) : null}
-            {projectDirError ? <div className="chat-work-dialog__error">{projectDirError}</div> : null}
             <div className="chat-work-dialog__actions">
               <button
                 type="button"
@@ -2688,6 +2585,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                 {t('multiSession.project.confirm')}
               </button>
             </div>
+            {projectDirError ? <div className="chat-work-dialog__error">{projectDirError}</div> : null}
           </form>
         </div>
       ) : null}

@@ -4,7 +4,25 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any
+
+logger = logging.getLogger(__name__)
+
+
+def _propagate_stream_source_id(src_payload: Any) -> dict[str, Any]:
+    """从上游 payload 提取 stream_source_id（skill_turbo 并发节点用它标识 source）。
+
+    并发节点（如 p6_1_page_worker）在 llm_reasoning / llm_output 的 payload 里注入
+    stream_source_id，前端据其把内容路由到 subagent 行。解析分支重建 payload 时
+    必须原样透传，否则并发思考/正文无法分桶、逐字交错。无 source_id 返回空 dict，
+    行为与不透传完全一致。
+    """
+    if isinstance(src_payload, dict):
+        source_id = src_payload.get("stream_source_id")
+        if source_id:
+            return {"stream_source_id": source_id}
+    return {}
 
 
 def parse_stream_chunk(chunk: Any, *, _has_streamed_content: bool = False) -> dict[str, Any] | None:
@@ -84,6 +102,16 @@ def _parse_dict_chunk(chunk: dict[str, Any], _has_streamed_content: bool) -> dic
                 "event_type": "chat.error",
                 "error": chunk.get("output", ""),
             }
+        output = chunk.get("output")
+        if isinstance(output, dict) and output.get("result_type") == "error":
+            logger.warning(
+                "[stream_utils] nested_error_chunk_detected output.result_type=error output=%s",
+                output.get("output", ""),
+            )
+            return {
+                "event_type": "chat.error",
+                "error": output.get("output", ""),
+            }
         output = chunk.get("output", "")
         if not output or not output.strip():
             return None
@@ -112,6 +140,46 @@ def _parse_typed_chunk(chunk: Any, _has_streamed_content: bool) -> dict[str, Any
     if chunk_type == "chat.ask_user_question":
         return parse_ask_user_question_payload(payload)
 
+    if chunk_type == "task.start":
+        if isinstance(payload, dict):
+            return {
+                "event_type": "task.start",
+                "task_id": payload.get("task_id"),
+                "task_content": payload.get("task_content"),
+                "task_index": payload.get("task_index"),
+                "total_tasks": payload.get("total_tasks"),
+                "parent_request_id": payload.get("parent_request_id"),
+                "timestamp": payload.get("timestamp"),
+            }
+        return None
+
+    if chunk_type == "task.update":
+        if isinstance(payload, dict):
+            return {
+                "event_type": "task.update",
+                "tasks": payload.get("tasks", []),
+                "total_tasks": payload.get("total_tasks", 0),
+                "completed_tasks": payload.get("completed_tasks", 0),
+                "in_progress_tasks": payload.get("in_progress_tasks", 0),
+                "pending_tasks": payload.get("pending_tasks", 0),
+                "parent_request_id": payload.get("parent_request_id"),
+                "timestamp": payload.get("timestamp"),
+            }
+        return None
+
+    if chunk_type == "task.complete":
+        if isinstance(payload, dict):
+            return {
+                "event_type": "task.complete",
+                "task_id": payload.get("task_id"),
+                "task_content": payload.get("task_content"),
+                "status": payload.get("status"),
+                "duration_ms": payload.get("duration_ms"),
+                "error": payload.get("error"),
+                "timestamp": payload.get("timestamp"),
+            }
+        return None
+
     if isinstance(chunk_type, str) and "." in chunk_type:
         if chunk_type == "context.compression_state":
             if hasattr(payload, "model_dump"):
@@ -126,7 +194,11 @@ def _parse_typed_chunk(chunk: Any, _has_streamed_content: bool) -> dict[str, Any
             if payload_dict:
                 return {
                     "event_type": "context.compression_state",
-                    **payload_dict,
+                    "status": payload_dict.get("status", ""),
+                    "phase": payload_dict.get("phase", ""),
+                    "processor": payload_dict.get("processor", ""),
+                    "summary": payload_dict.get("summary", ""),
+                    "operation_id": payload_dict.get("operation_id", ""),
                 }
         if isinstance(payload, dict):
             return {
@@ -189,7 +261,11 @@ def _parse_typed_chunk(chunk: Any, _has_streamed_content: bool) -> dict[str, Any
         )
         if not content or not content.strip():
             return None
-        return {"event_type": "chat.delta", "content": content}
+        return {
+            "event_type": "chat.delta",
+            "content": content,
+            **_propagate_stream_source_id(payload),
+        }
 
     if chunk_type == "llm_reasoning":
         content = (
@@ -199,7 +275,11 @@ def _parse_typed_chunk(chunk: Any, _has_streamed_content: bool) -> dict[str, Any
         )
         if not content or not content.strip():
             return None
-        return {"event_type": "chat.reasoning", "content": content}
+        return {
+            "event_type": "chat.reasoning",
+            "content": content,
+            **_propagate_stream_source_id(payload),
+        }
 
     if chunk_type == "content_chunk":
         content = (
@@ -209,7 +289,11 @@ def _parse_typed_chunk(chunk: Any, _has_streamed_content: bool) -> dict[str, Any
         )
         if not content or not content.strip():
             return None
-        return {"event_type": "chat.delta", "content": content}
+        return {
+            "event_type": "chat.delta",
+            "content": content,
+            **_propagate_stream_source_id(payload),
+        }
 
     if chunk_type == "answer":
         if isinstance(payload, dict):
@@ -219,6 +303,15 @@ def _parse_typed_chunk(chunk: Any, _has_streamed_content: bool) -> dict[str, Any
                     "error": payload.get("output", "未知错误"),
                 }
             output = payload.get("output", {})
+            if isinstance(output, dict) and output.get("result_type") == "error":
+                logger.warning(
+                    "[stream_utils] nested_answer_error_detected output.result_type=error output=%s",
+                    output.get("output", "未知错误"),
+                )
+                return {
+                    "event_type": "chat.error",
+                    "error": output.get("output", "未知错误"),
+                }
             content = (
                 output.get("output", "")
                 if isinstance(output, dict)
@@ -237,7 +330,9 @@ def _parse_typed_chunk(chunk: Any, _has_streamed_content: bool) -> dict[str, Any
             return None
 
         if _has_streamed_content and not is_chunked:
-            return {"event_type": "chat.final", "content": content}
+            # Keep chat.final as a completion marker when the final answer text
+            # has already been streamed via chat.delta.
+            return {"event_type": "chat.final", "content": ""}
         if is_chunked:
             return {"event_type": "chat.delta", "content": content}
         return {"event_type": "chat.final", "content": content}
@@ -288,8 +383,8 @@ def _parse_typed_chunk(chunk: Any, _has_streamed_content: bool) -> dict[str, Any
                     "status",
                     "is_error",
                     "summary",
-                    "graph_status",
-                    "graph_build",
+                    "score_status",
+                    "score_build",
                     "direct_display",
                     "display_format",
                     "mermaid",
@@ -311,7 +406,24 @@ def _parse_typed_chunk(chunk: Any, _has_streamed_content: bool) -> dict[str, Any
         )
         return {"event_type": "chat.error", "error": error_msg}
 
-    if chunk_type == "thinking":
+    if chunk_type == "retry_notification":
+        if isinstance(payload, dict):
+            output = payload.get("output", {})
+            content = output.get("output", "") if isinstance(output, dict) else str(output)
+        else:
+            content = str(payload)
+        return {
+            "event_type": "chat.delta",
+            "content": content,
+            "source_chunk_type": chunk_type,
+        }
+
+    if chunk_type in ("thinking", "llm_toolcall_progress"):
+        # `thinking`: model 处理中（既有）。
+        # `llm_toolcall_progress`: tool_call 长流式期间 react_agent 节流发的心跳
+        # （本修复新增）。两者都映射为业务帧 chat.processing_status——relay 看门狗
+        # 计为业务帧重置 300s；前端静默 setAgentStatus(streaming)。
+        # 不设 is_complete——避免触发关流启发式。
         return {
             "event_type": "chat.processing_status",
             "is_processing": True,
@@ -540,6 +652,16 @@ def _parse_response_chunk(chunk: Any, _has_streamed_content: bool) -> dict[str, 
                 return {
                     "event_type": "chat.error",
                     "error": payload.get("output", ""),
+                }
+            output = payload.get("output")
+            if isinstance(output, dict) and output.get("result_type") == "error":
+                logger.warning(
+                    "[stream_utils] nested_response_error_detected output.result_type=error output=%s",
+                    output.get("output", ""),
+                )
+                return {
+                    "event_type": "chat.error",
+                    "error": output.get("output", ""),
                 }
             return {
                 "event_type": "chat.delta" if not _has_streamed_content else "chat.final",

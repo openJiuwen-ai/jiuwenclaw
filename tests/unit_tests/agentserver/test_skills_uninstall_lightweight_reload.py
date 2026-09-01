@@ -60,7 +60,7 @@ def _write_skill(skills_root: Path, name: str, description: str) -> Path:
     skill_dir = skills_root / name
     skill_dir.mkdir()
     (skill_dir / "SKILL.md").write_text(
-        f"---\ndescription: {description}\n---\n\n# {name}\n",
+        f"---\nname: {name}\ndescription: {description}\n---\n\n# {name}\n",
         encoding="utf-8",
     )
     return skill_dir
@@ -82,11 +82,8 @@ async def swarm_with_fake_adapter(monkeypatch):
 
     swarm._skill_manager = _StubSkillManager()
 
-    # Stub the live team skill-view reload (no-op)
-    async def _noop_reload(session_id=None):
-        return None
-
-    swarm._reload_team_skill_rails = _noop_reload
+    # Stub _refresh_team_shared_skill_links (no-op)
+    swarm._refresh_team_shared_skill_links = lambda session_id=None: None
 
     return swarm
 

@@ -183,11 +183,15 @@ def _normalize_tool_args(tool_args: Any) -> dict[str, Any]:
 
 
 def persist_permission_allow_rule(tool_name: str, tool_args: dict | str) -> bool:
-    """用户选择「总是允许」时，将 allow 规则写入 config.yaml 的 permissions 段。"""
+    """用户选择「总是允许」时，将 allow 规则写入 permissions 配置。"""
     tool_args = _normalize_tool_args(tool_args)
 
-    data, yaml_path = _load_config_yaml_round_trip()
-    permissions = data.get("permissions")
+    from jiuwenswarm.agents.harness.common.rails.permissions.config_loader import (
+        get_effective_permissions_config,
+        persist_permissions_mutate,
+    )
+
+    permissions = get_effective_permissions_config()
     if not isinstance(permissions, dict):
         logger.warning(
             "[PermissionPersist] persist_permission_allow_rule.abort reason=no_permissions_section tool=%s",
@@ -198,8 +202,12 @@ def persist_permission_allow_rule(tool_name: str, tool_args: dict | str) -> bool
     merged, ok = merge_permission_allow_rule_into_permissions(permissions, tool_name, tool_args)
     if not ok:
         return False
-    data["permissions"] = merged
-    _dump_config_yaml_round_trip(yaml_path, data)
+
+    def mutate(perms: dict[str, Any]) -> None:
+        perms.clear()
+        perms.update(merged)
+
+    persist_permissions_mutate(mutate)
     return True
 
 
