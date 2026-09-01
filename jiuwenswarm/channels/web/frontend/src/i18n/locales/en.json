@@ -2927,7 +2927,8 @@
       "addMcp": "Add connector",
       "pickSkillTitle": "Select skills",
       "pickMcpTitle": "Select connector",
-      "submitError": "Creation failed - this still awaits backend support",
+      "submitError": "Creation failed. Please check your input and try again.",
+      "fieldRequired": "This field is required",
       "withSkillNotWired": "This entry point isn't wired to the chat panel yet"
     },
     "chatPrompts": {

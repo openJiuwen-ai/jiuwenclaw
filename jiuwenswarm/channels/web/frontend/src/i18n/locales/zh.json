@@ -2909,7 +2909,8 @@
       "addMcp": "添加连接器",
       "pickSkillTitle": "选择技能",
       "pickMcpTitle": "选择连接器",
-      "submitError": "创建失败，该功能仍在等待后端支持",
+      "submitError": "创建失败，请检查填写内容后重试",
+      "fieldRequired": "该项为必填项，请填写",
       "withSkillNotWired": "该入口尚未接入聊天面板，需先在聊天输入框完成对接"
     },
     "chatPrompts": {
