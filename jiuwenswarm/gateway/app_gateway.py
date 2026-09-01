@@ -52,7 +52,7 @@ from jiuwenswarm.common.utils import (
     get_root_dir,
     get_user_workspace_dir,
     prepare_workspace,
-    reset_free_search_runtime_flags,
+    prewarm_enabled_by_env,
 )
 from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
 from jiuwenswarm.common.schema.message import ReqMethod, Message, Mode
@@ -1687,8 +1687,11 @@ async def _run(
 
     updater_service = UpdaterService()
     prewarm_sync_debounce_task: asyncio.Task[None] | None = None
+    _gateway_prewarm_enabled = prewarm_enabled_by_env()
 
     async def _sync_agent_prewarm_channels() -> None:
+        if not _gateway_prewarm_enabled:
+            return
         try:
             prewarm_channels = {
                 channel
@@ -1720,6 +1723,8 @@ async def _run(
         name: str, *, delay_seconds: float = 1.0
     ) -> None:
         """Coalesce startup/config/channel churn into one settled sync."""
+        if not _gateway_prewarm_enabled:
+            return
         nonlocal prewarm_sync_debounce_task
         previous = prewarm_sync_debounce_task
         if previous is not None and not previous.done():
@@ -2739,7 +2744,7 @@ async def _run(
     prewarm_sync_task = asyncio.create_task(
         _periodic_agent_prewarm_sync(),
         name="agent-prewarm-periodic-sync",
-    )
+    ) if _gateway_prewarm_enabled else None
 
     await channel_manager.start_dispatch()
     # cron jobs 的 work_mode 补全已改为惰性迁移:scheduler.start() → reload() →
@@ -2790,11 +2795,12 @@ async def _run(
                 await prewarm_sync_debounce_task
             except asyncio.CancelledError:
                 pass
-        prewarm_sync_task.cancel()
-        try:
-            await prewarm_sync_task
-        except asyncio.CancelledError:
-            pass
+        if prewarm_sync_task is not None:
+            prewarm_sync_task.cancel()
+            try:
+                await prewarm_sync_task
+            except asyncio.CancelledError:
+                pass
         if a2a_task is not None:
             a2a_task.cancel()
             try:
