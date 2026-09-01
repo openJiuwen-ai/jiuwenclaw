@@ -435,7 +435,7 @@ class RuntimePromptRail(DeepAgentRail):
         ).strip()
         available_models_str = ", ".join(available_models) if available_models else model
         configured_mode = str(
-            runtime_state.get("mode") or self._mode or "unknown"
+            self._mode or runtime_state.get("mode") or "unknown"
         ).strip()
         mode = self._resolve_current_mode(ctx, configured_mode)
         language_val = (
