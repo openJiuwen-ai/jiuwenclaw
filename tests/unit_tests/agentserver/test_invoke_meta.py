@@ -630,7 +630,7 @@ async def test_invoke_requires_business_credential_ignores_oa_key(monkeypatch):
 
     headers = build_runtime_headers(extra={"x-plugin-session-id": "pluginabc"})
     assert "x-api-key" not in headers
-    assert headers["x-request-from"] == "openclaw"
+    assert headers["x-request-from"] == "xiaoyiWork"
     assert "x-sandbox-id" not in headers
     assert headers["x-plugin-session-id"] == "pluginabc"
 
@@ -665,7 +665,7 @@ def test_mcp_run_product_headers_prefer_business_credential(monkeypatch):
     assert headers["x-plugin-session-id"] == "pluginabc"
     assert "x-hag-trace-id" in headers
     assert "x-api-key" not in headers
-    assert headers["x-request-from"] == "openclaw"
+    assert headers["x-request-from"] == "xiaoyiWork"
     assert "x-sandbox-id" not in headers
     assert "x-relay-role" not in headers
 

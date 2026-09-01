@@ -99,13 +99,13 @@ def resolve_device_sandbox_system() -> str:
 
 
 def build_product_mcp_headers(*, plugin_session_id: str = "", extra: dict[str, str] | None = None) -> dict[str, str]:
-    """Handshake headers for mcp/run: businessCredential, openclaw request-from, trace, optional uid/device."""
+    """Handshake headers for mcp/run: businessCredential, xiaoyiWork request-from, trace, optional uid/device."""
     uid = resolve_runtime_uid()
     device_id = resolve_runtime_device_id()
     headers: dict[str, str] = {
         "Content-Type": "application/json",
         "businessCredential": resolve_business_credential(),
-        "x-request-from": "openclaw",
+        "x-request-from": "xiaoyiWork",
         "x-hag-trace-id": uuid.uuid4().hex,
     }
     if uid:
