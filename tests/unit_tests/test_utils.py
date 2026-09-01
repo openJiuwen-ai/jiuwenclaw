@@ -82,7 +82,7 @@ class TestPathResolution:
 
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
-            agent_ws = tmp_path / "service_default" / "agent_office" / "agent" / "workspace"
+            agent_ws = tmp_path / "workspace_office" / "agent" / "workspace"
             nested = agent_ws / "workspace"
             nested.mkdir(parents=True)
             assert utils.collapse_nested_agent_workspace_dir(nested) == agent_ws.resolve()
@@ -431,8 +431,7 @@ class TestHardcodedPathsPhase2:
         workspace = get_user_workspace_dir()
         expected_path = (
             workspace
-            / "service_default"
-            / "agent_default"
+            / "workspace_default"
             / "agent"
             / "home"
             / "cron_jobs.json"
@@ -458,8 +457,7 @@ class TestHardcodedPathsPhase2:
         workspace = get_user_workspace_dir()
         expected_path = (
             workspace
-            / "service_default"
-            / "agent_default"
+            / "workspace_default"
             / "agent"
             / "workspace"
             / "task-data.json"
@@ -484,8 +482,7 @@ class TestHardcodedPathsPhase2:
         workspace = get_user_workspace_dir()
         expected_path = (
             workspace
-            / "service_default"
-            / "agent_default"
+            / "workspace_default"
             / "agent"
             / "workspace"
             / "USER.md"
@@ -510,9 +507,7 @@ class TestAdditionalHardcodedPaths:
         from jiuwenswarm.server.runtime.runtime_scope import RuntimeScopeKey
 
         scope = RuntimeScopeKey.from_ids()
-        workspace = get_multi_tenant_user_workspace_dir(
-            scope.service_id, scope.agent_id
-        )
+        workspace = get_multi_tenant_user_workspace_dir(scope.workspace_key)
         expected_path = workspace / "agent" / "workspace" / "extensions"
         import os
         os.environ["JIUWENSWARM_EDITION"] = "enterprise"
@@ -553,8 +548,7 @@ class TestAdditionalHardcodedPaths:
         workspace = get_user_workspace_dir()
         expected_path = (
             workspace
-            / "service_default"
-            / "agent_default"
+            / "workspace_default"
             / "agent"
             / "workspace"
             / "interactions"

@@ -2123,6 +2123,7 @@ class JiuWenSwarmDeepAdapter:
         # overwrite for per-agent scopes.
         self._env_agent_id: str = "default"
         self._env_service_id: str = "default"
+        self._workspace_key: str = "default"
         self._user_workspace_dir: Any | None = None
         self._checkpointer: Any | None = None
         # Eager lock: lazy None→Lock races let concurrent set_checkpoint callers
@@ -2297,6 +2298,7 @@ class JiuWenSwarmDeepAdapter:
         """Copy tenant tip namespace bindings from another adapter instance."""
         self._env_agent_id = getattr(source, "_env_agent_id", "default")
         self._env_service_id = getattr(source, "_env_service_id", "default")
+        self._workspace_key = getattr(source, "_workspace_key", "default")
         user_ws = getattr(source, "_user_workspace_dir", None)
         if user_ws is not None:
             self._user_workspace_dir = user_ws
@@ -2681,11 +2683,15 @@ class JiuWenSwarmDeepAdapter:
     def _bind_request_env_overlay(
         self,
         env_overrides: dict[str, Any] | None = None,
-    ) -> tuple[Any, Any]:
+    ) -> tuple[Any, Any, Any]:
         """Seal Track-B reads for the current request (formula B tip ± extras)."""
+        from jiuwenswarm.server.runtime.tenant_context import bind_workspace_key
+
         service_id = getattr(self, "_env_service_id", "default")
         agent_id = getattr(self, "_env_agent_id", "default")
+        workspace_key = getattr(self, "_workspace_key", "default")
         ns_token = bind_agent_env_ns(service_id, agent_id)
+        wk_token = bind_workspace_key(workspace_key)
         overlay = build_effective_env_overlay(
             env_overrides,
             service_id=service_id,
@@ -2708,12 +2714,13 @@ class JiuWenSwarmDeepAdapter:
             logger.exception(
                 "[JiuWenSwarmDeepAdapter] pin browser runtime generation failed"
             )
-        return ns_token, overlay_token
+        return ns_token, overlay_token, wk_token
 
     def _reset_request_env_bindings(
         self,
         ns_token: Any,
         overlay_token: Any,
+        wk_token: Any = None,
     ) -> None:
         pin = getattr(self, "_chat_browser_runtime_pin", None)
         if pin is not None:
@@ -2728,10 +2735,14 @@ class JiuWenSwarmDeepAdapter:
                     "[JiuWenSwarmDeepAdapter] reset browser runtime generation failed"
                 )
             self._chat_browser_runtime_pin = None
+        from jiuwenswarm.server.runtime.tenant_context import reset_workspace_key
+
         if overlay_token is not None:
             reset_task_env_overlay(overlay_token)
         if ns_token is not None:
             reset_agent_env_ns(ns_token)
+        if wk_token is not None:
+            reset_workspace_key(wk_token)
 
     async def _maybe_apply_pending_reload(self) -> ReloadResult | None:
         if self._pending_reload is None or self._adapter_is_working():
@@ -4904,7 +4915,7 @@ class JiuWenSwarmDeepAdapter:
         return service_id, agent_id
 
     async def set_checkpoint(self) -> None:
-        """Create / reuse a per-agent sqlite checkpointer under ``…/agent_{aid}/.checkpoint``."""
+        """Create / reuse a per-agent sqlite checkpointer under ``workspace_{key}/.checkpoint``."""
         if self._checkpointer is not None:
             self._bind_checkpointer_to_rails()
             return
@@ -4914,13 +4925,11 @@ class JiuWenSwarmDeepAdapter:
                 return
             try:
                 PersistenceCheckpointerProvider()
-                service_id, agent_id = self._tenant_disk_ids()
-                workspace = get_multi_tenant_user_workspace_dir(service_id, agent_id)
-                if workspace is None:
-                    raise ValueError(
-                        f"invalid tenant for checkpoint: service_id={service_id!r}, "
-                        f"agent_id={agent_id!r}"
-                    )
+                user_ws = getattr(self, "_user_workspace_dir", None)
+                if user_ws is not None:
+                    workspace = Path(user_ws)
+                else:
+                    workspace = get_multi_tenant_user_workspace_dir("default")
                 checkpoint_path = workspace / ".checkpoint"
                 checkpoint_path.mkdir(parents=True, exist_ok=True)
                 conf: dict[str, Any] = {
@@ -4957,9 +4966,7 @@ class JiuWenSwarmDeepAdapter:
                 self._bind_checkpointer_to_rails()
                 logger.info(
                     "[JiuWenSwarmDeepAdapter] persistent checkpointer ready: "
-                    "service_id=%s agent_id=%s path=%s",
-                    service_id,
-                    agent_id,
+                    "path=%s",
                     checkpoint_path / "checkpoint",
                 )
             except Exception as exc:
@@ -7159,6 +7166,7 @@ class JiuWenSwarmDeepAdapter:
                 "session_id": scope.session_id,
                 "service_id": scope.service_id,
                 "agent_id": scope.agent_id,
+                "workspace_key": scope.workspace_key,
                 "output_dir": self._deepresearch_artifact_output_dir(),
             }
         context = self._runtime_cron_tool_context
@@ -7170,6 +7178,7 @@ class JiuWenSwarmDeepAdapter:
             "session_id": scope.session_id,
             "service_id": scope.service_id,
             "agent_id": scope.agent_id,
+            "workspace_key": scope.workspace_key,
             "output_dir": self._deepresearch_artifact_output_dir(),
         }
 
@@ -8106,7 +8115,7 @@ class JiuWenSwarmDeepAdapter:
         # Bind tenant tip before get_config/_create_model. Without this, session
         # adapters resolve ${API_KEY}/${MODEL_NAME} from process/.env placeholders
         # (your-model-name) instead of the synced office tip bag.
-        ns_token, overlay_token = self._bind_request_env_overlay()
+        ns_token, overlay_token, wk_token = self._bind_request_env_overlay()
         try:
             load_dotenv_runtime(dotenv_path=get_env_file(), override=True)
             incoming_config_base = config_base
@@ -8287,7 +8296,7 @@ class JiuWenSwarmDeepAdapter:
             await self.load_user_rails()
             self._register_extension_tools()
         finally:
-            self._reset_request_env_bindings(ns_token, overlay_token)
+            self._reset_request_env_bindings(ns_token, overlay_token, wk_token)
 
     def _register_extension_tools(self) -> None:
         """将 ExtensionRegistry 登记的扩展本地工具挂到 Runner 与 ability_manager。"""
@@ -8641,18 +8650,18 @@ class JiuWenSwarmDeepAdapter:
             # it has nothing of its own to reconfigure, but the cached config
             # snapshot still has to move forward and the live session adapters
             # still have to be reloaded.
-            ns_token, overlay_token = self._bind_request_env_overlay(env_overrides)
+            ns_token, overlay_token, wk_token = self._bind_request_env_overlay(env_overrides)
             try:
                 config_base = await self._apply_reload_config_snapshot(config_base, env_overrides)
                 await self._fan_out_reload_to_session_adapters(config_base, env_overrides, target_sid)
             finally:
-                self._reset_request_env_bindings(ns_token, overlay_token)
+                self._reset_request_env_bindings(ns_token, overlay_token, wk_token)
             logger.info(
                 "[JiuWenSwarmDeepAdapter] 配置已热更新（root 实例未构建，仅刷新缓存并级联 session adapter）"
             )
             return ReloadResult(applied=True)
 
-        ns_token, overlay_token = self._bind_request_env_overlay(env_overrides)
+        ns_token, overlay_token, wk_token = self._bind_request_env_overlay(env_overrides)
         try:
             # TaskMemory: clear when env keys that feed the fingerprint change.
             if env_touches_task_memory(env_overrides):
@@ -8779,7 +8788,7 @@ class JiuWenSwarmDeepAdapter:
             logger.info("[JiuWenSwarmDeepAdapter] 配置已热更新（configure），未重启进程")
             return ReloadResult(applied=True)
         finally:
-            self._reset_request_env_bindings(ns_token, overlay_token)
+            self._reset_request_env_bindings(ns_token, overlay_token, wk_token)
 
     def _bind_runtime_cron_context(
         self,
@@ -8884,6 +8893,7 @@ class JiuWenSwarmDeepAdapter:
                 session_id=scope.session_id,
                 service_id=scope.service_id,
                 agent_id=scope.agent_id,
+                workspace_key=scope.workspace_key,
                 output_dir=self._deepresearch_artifact_output_dir(),
             )
         except BaseException:
@@ -9782,11 +9792,11 @@ class JiuWenSwarmDeepAdapter:
         # start() via asyncio.create_task) inherits the correct namespace.
         # Without this, the supervisor task's context copy lacks the overlay
         # and reads env from the wrong namespace (default/default).
-        ns_token, overlay_token = self._bind_request_env_overlay()
+        ns_token, overlay_token, wk_token = self._bind_request_env_overlay()
         try:
             await self._instance.start(session=session)
         finally:
-            self._reset_request_env_bindings(ns_token, overlay_token)
+            self._reset_request_env_bindings(ns_token, overlay_token, wk_token)
         if getattr(self._instance, "_interaction_started", True) is not True:
             raise RuntimeError(f"DeepAgent interaction did not become ready: {session_id}")
         logger.info(
@@ -12734,7 +12744,7 @@ class JiuWenSwarmDeepAdapter:
             resolved_skill_md,
         )
 
-        ns_token, overlay_token = self._bind_request_env_overlay()
+        ns_token, overlay_token, wk_token = self._bind_request_env_overlay()
         try:
             if self._instance is None:
                 await self.ensure_instance()
@@ -12805,7 +12815,7 @@ class JiuWenSwarmDeepAdapter:
                 "cleared": finalized.get("cleared"),
             }
         finally:
-            self._reset_request_env_bindings(ns_token, overlay_token)
+            self._reset_request_env_bindings(ns_token, overlay_token, wk_token)
 
     def _apply_rebuild_permission_trusted_dirs(self, skill_md_path: str | None) -> None:
         """Allow write_file/edit_file on the rebuild SKILL.md even without HITL.
@@ -15234,15 +15244,12 @@ class JiuWenSwarmDeepAdapter:
 
                 from jiuwenswarm.server.runtime.tenant_agent_pool import TenantAgentPool
 
-                tenant_agent_id, tenant_service_id, _workspace_key = (
+                _tenant_agent_id, _tenant_service_id, workspace_key = (
                     TenantAgentPool.extract_ids(request)
                 )
                 team_stream_kwargs = {
                     "config_base": self._config_base_cache,
-                    "sessions_root": resolve_tenant_sessions_dir(
-                        tenant_service_id,
-                        tenant_agent_id,
-                    ),
+                    "sessions_root": resolve_tenant_sessions_dir(workspace_key),
                 }
                 if (
                     evolution_slash_command_name(str(inputs.get("query") or ""))

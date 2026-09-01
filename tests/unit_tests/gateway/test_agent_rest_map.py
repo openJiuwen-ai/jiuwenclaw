@@ -315,6 +315,9 @@ def test_identity_headers_omit_optional_ids():
     assert "X-Bot-Id" not in assembled.headers
     assert "X-Group-Id" not in assembled.headers
     assert "X-Gateway-Id" not in assembled.headers
+    assert "X-Service-Id" not in assembled.headers
+    assert "X-Agent-Id" not in assembled.headers
+    assert "X-Workspace-Key" not in assembled.headers
 
 
 def test_identity_headers_carry_routing_from_channel_context():
@@ -343,6 +346,23 @@ def test_identity_headers_carry_routing_from_channel_context():
     assert assembled.headers["X-Group-Id"] == "__none__"
     assert assembled.headers["X-Bot-Id"] == "d64efe50-3b44-4895-b040-df922e1df242"
     assert assembled.headers["X-Gateway-Id"] == "4e3a795a-2339-4efd-895f-bc796943f57c"
+
+
+def test_identity_headers_carry_tenant_ids():
+    """企业租户顶层字段经 X-Service/Agent/Workspace-Key 透传，不进 REST body。"""
+    env = _env(
+        ReqMethod.CHAT_SEND,
+        params={"session_id": "sess_1", "query": "hi"},
+        user_id="user1",
+    )
+    env.service_id = "svc-hash"
+    env.agent_id = "ag-hash"
+    env.workspace_key = "wk-hash"
+    assembled = assemble_rest_request(env, base_url=BASE)
+    assert assembled.json_body == {"session_id": "sess_1", "query": "hi"}
+    assert assembled.headers["X-Service-Id"] == "svc-hash"
+    assert assembled.headers["X-Agent-Id"] == "ag-hash"
+    assert assembled.headers["X-Workspace-Key"] == "wk-hash"
 
 
 def test_normalize_base_empty_raises():

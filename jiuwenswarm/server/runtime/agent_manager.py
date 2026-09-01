@@ -130,6 +130,7 @@ class AgentManager:
         last_reload_trace_id: str | None = None,
         env_agent_id: str | None = None,
         env_service_id: str | None = None,
+        workspace_key: str | None = None,
     ) -> None:
         self.agents: dict[str, dict[str, "JiuWenSwarm"]] = {}
         # 记录每个 (channel_id, mode) 的创建参数, 便于 recreate_agent 立刻重建
@@ -147,6 +148,7 @@ class AgentManager:
         self.service_id = service_id or "default"
         self._env_agent_id: str = env_agent_id or agent_id or "default"
         self._env_service_id: str = env_service_id or service_id or "default"
+        self._workspace_key: str = (workspace_key or "").strip() or "default"
         self._user_workspace_dir = user_workspace_dir
         if env_overrides is not None and isinstance(env_overrides, dict):
             omission_removals = infer_multimodal_env_removals(
@@ -200,9 +202,11 @@ class AgentManager:
         self.warm_pool = AgentWarmPool(self)
         if self._user_workspace_dir is not None and is_enterprise():
             logger.info(
-                "[AgentManager] enterprise init: agent_id=%s service_id=%s user_workspace=%s",
+                "[AgentManager] enterprise init: agent_id=%s service_id=%s "
+                "workspace_key=%s user_workspace=%s",
                 self.agent_id,
                 self.service_id,
+                self._workspace_key,
                 self._user_workspace_dir,
             )
 
@@ -525,6 +529,7 @@ class AgentManager:
             )
             setattr(agent, "_env_agent_id", self._env_agent_id)
             setattr(agent, "_env_service_id", self._env_service_id)
+            setattr(agent, "_workspace_key", self._workspace_key)
             if self._user_workspace_dir is not None:
                 setattr(agent, "_user_workspace_dir", self._user_workspace_dir)
             await agent.create_instance(
@@ -1437,6 +1442,9 @@ class AgentManager:
                 agent_id=self.agent_id,
                 service_id=self.service_id,
             )
+            setattr(agent, "_env_agent_id", self._env_agent_id)
+            setattr(agent, "_env_service_id", self._env_service_id)
+            setattr(agent, "_workspace_key", self._workspace_key)
             if self._latest_env_overrides:
                 overlay = build_effective_env_overlay(self._latest_env_overrides)
                 if overlay:
@@ -1489,7 +1497,7 @@ class AgentManager:
                         get_session_metadata,
                     )
                     sessions_root = resolve_tenant_sessions_dir(
-                        self.service_id, self.agent_id,
+                        getattr(self, "_workspace_key", None) or "default",
                     )
                     meta = get_session_metadata(
                         sid, cache_bust=True, enable_writeback=False,
@@ -1551,7 +1559,7 @@ class AgentManager:
                     )
 
                     sessions_root = resolve_tenant_sessions_dir(
-                        self.service_id, self.agent_id,
+                        getattr(self, "_workspace_key", None) or "default",
                     )
                     meta = get_session_metadata(
                         sid,

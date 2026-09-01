@@ -57,14 +57,21 @@ identity_from_envelope = _routed_mod.identity_from_envelope
 
 
 def _chat_env():
+    from jiuwenswarm.common.request_identity import apply_routing_metadata
+
     return e2a_from_agent_fields(
         request_id="req-1",
         channel_id="web",
         session_id="sess-1",
         req_method=ReqMethod.CHAT_SEND,
+        # group/bot 仍放 params 供 identity_from_envelope 做 route（与 invoke_ids 权威源解耦）
         params={"query": "hi", "group_id": "grp-1", "bot_id": "bot-1"},
         is_stream=True,
         user_id="user-1",
+        metadata=apply_routing_metadata(
+            {},
+            {"user_id": "user-1", "group_id": "grp-1", "bot_id": "bot-1"},
+        ),
     )
 
 
@@ -160,6 +167,12 @@ async def test_unary_routes_then_http_then_touch() -> None:
     assert route.routes[0]["session_id"] == "sess-1"
     assert http.calls[0] == ("unary", "http://10.1.2.3:8080", "req-1")
     assert route.touches
+    # 发往 Agent 前应已补齐 MD5 workspace_key（TenantAgentPool.workspace_key）
+    import hashlib
+
+    assert env.workspace_key == hashlib.md5(b"grp-1bot-1user-1").hexdigest()
+    assert env.service_id == hashlib.md5(b"grp-1bot-1").hexdigest()
+    assert env.agent_id == hashlib.md5(b"grp-1bot-1user-1").hexdigest()
     await client.disconnect()
 
 
