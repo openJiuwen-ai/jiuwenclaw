@@ -56,6 +56,21 @@ _RPC_ALLOWLIST = frozenset(
         "files.get",
         "harness.packages.import",
         "harness.packages.export",
+        # sandbox.* 8 个：WS-only RPC（handler 见 server/sandbox_config_rpc.py，
+        # 经 agent_ws_server._handle_agent_request_body 派发），无 HTTP REST 路由，
+        # 与 config.get / logging.set 同类“有实现但不走 REST”，走 POST /rpc/{method}。
+        "sandbox.enabled.get",
+        "sandbox.enabled.set",
+        "sandbox.startup_mode.get",
+        "sandbox.startup_mode.set",
+        "sandbox.files.get",
+        "sandbox.files.set",
+        "sandbox.network.get",
+        "sandbox.network.set",
+        # expert.* / experts.list：全仓仅有 ReqMethod 枚举、无任何实现，遗留
+        "experts.list",
+        "expert.load",
+        "expert.unload",
     }
 )
 
