@@ -2,10 +2,13 @@
 """RSI AgentServer 分发层 + Gateway 注册单测（B0/B2 + P1 推送）。"""
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from jiuwenswarm.agents.harness.common.rsi import build_rsi_service_context
+from jiuwenswarm.agents.harness.common.rsi.errors import RsiPathInvalid
+from jiuwenswarm.agents.harness.common.rsi.services import _ensure_provider_valid
 from jiuwenswarm.common.schema.message import ReqMethod
 from jiuwenswarm.server.rsi import RsiAgentServerHandlers
 
@@ -92,6 +95,18 @@ class TestDispatch:
         assert result["ok"] is True
         assert result["payload"]["sample_count"] == 2
         assert result["payload"]["valid"] is True
+
+    def test_provider_path_error_uses_matching_error_reason(self):
+        result = SimpleNamespace(
+            valid=False,
+            errors=[
+                {"code": "ARTIFACT_PATH_REQUIRED", "message": "artifact path required"},
+                {"code": "PATH_INVALID", "message": "path is not readable"},
+            ],
+        )
+
+        with pytest.raises(RsiPathInvalid, match="path is not readable"):
+            _ensure_provider_valid(result)
 
 
 class TestP1Push:

@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from jiuwenswarm.agents.harness.common.rsi import build_rsi_service_context
+from jiuwenswarm.agents.harness.common.rsi.mock_artifact_provider import MockArtifactProvider
 from jiuwenswarm.common.schema.message import ReqMethod
 from jiuwenswarm.server.rsi import RsiAgentServerHandlers
 
@@ -223,3 +224,19 @@ async def test_provider_snapshots_survive_service_context_restart(tmp_path: Path
     )
     assert downloaded["ok"] is True
     assert Path(downloaded["payload"]["path"]).is_file()
+
+
+@pytest.mark.asyncio
+async def test_mock_provider_does_not_rewind_terminal_state(tmp_path: Path):
+    provider = MockArtifactProvider(tmp_path / "tasks", "program")
+    task_id = "rsi-terminal"
+    state = provider._new_state(task_id, 2)  # noqa: SLF001 - seed durable provider state
+    state.update({"status": "completed", "best_node_id": "node-2"})
+    provider._save_state(task_id, state)  # noqa: SLF001 - seed durable provider state
+
+    paused = await provider.pause(task_id)
+    terminated = await provider.terminate(task_id)
+
+    assert paused.status == "completed"
+    assert terminated.status == "completed"
+    assert provider.read_state(task_id).status == "completed"

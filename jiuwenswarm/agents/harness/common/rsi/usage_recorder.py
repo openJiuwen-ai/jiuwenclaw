@@ -57,8 +57,6 @@ class RsiUsageRecorder:
         model_call_raw = payload.get("model_call")
         if not isinstance(model_call_raw, dict):
             return
-        from jiuwenswarm.agents.harness.common.rsi.models import Tokens
-
         tokens_raw = model_call_raw.get("tokens") or {}
         tokens = Tokens(
             input=int(tokens_raw.get("input") or 0),

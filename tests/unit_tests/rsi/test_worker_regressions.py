@@ -9,11 +9,13 @@ import asyncio
 import contextlib
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from jiuwenswarm.agents.harness.common.rsi import build_rsi_service_context
 from jiuwenswarm.agents.harness.common.rsi.errors import (
+    RsiNotReady,
     RsiTaskNotFound,
     RsiTaskStateConflict,
 )
@@ -34,6 +36,35 @@ def _create(ctx, name="t"):
         "input_file": "C:/d.json",
         "model_refs": {"optimizer": "o", "tester": "e"},
     })["task_id"]
+
+
+class _ControlAdapter:
+    supports_pause = True
+    supports_resume = True
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+        self.pause_started = asyncio.Event()
+        self.pause_release = asyncio.Event()
+        self.terminate_started = asyncio.Event()
+        self.terminate_release = asyncio.Event()
+
+    async def pause(self, task_id: str):
+        self.calls.append(f"pause:{task_id}")
+        self.pause_started.set()
+        await self.pause_release.wait()
+        return SimpleNamespace(status="PAUSED")
+
+    async def terminate(self, task_id: str):
+        self.calls.append(f"terminate:{task_id}")
+        self.terminate_started.set()
+        await self.terminate_release.wait()
+        return SimpleNamespace(status="TERMINATED")
+
+
+def _mark_running(ctx, task_id: str) -> None:
+    ctx.store.update_status(task_id, ["CREATED"], "QUEUED", cause="test")
+    ctx.store.update_status(task_id, ["QUEUED"], "RUNNING", cause="test")
 
 
 class TestWorkerEnqueue:
@@ -118,6 +149,99 @@ class TestWorkerRunLoop:
         ctx.worker._persist_results(t, FakeResult())
         assert captured["task_id"] == t
         assert captured["results"] == {"best_score": 0.8, "state_path": "/s"}
+
+
+class TestProviderControl:
+    async def test_pause_commits_state_after_provider_returns(self, ctx):
+        adapter = _ControlAdapter()
+        ctx.register_adapters({"HARNESS": adapter})
+        task_id = _create(ctx)
+        _mark_running(ctx, task_id)
+
+        assert ctx.worker.cancel(task_id, "pause") == TaskStatus.RUNNING.value
+        assert ctx.store.get(task_id).status == TaskStatus.RUNNING.value
+        control = ctx.worker._control_tasks[task_id]  # noqa: SLF001 - inspect scheduled control
+
+        adapter.pause_release.set()
+        await control
+
+        assert ctx.store.get(task_id).status == TaskStatus.PAUSED.value
+
+    async def test_failed_provider_control_keeps_public_state(self, ctx):
+        class FailingAdapter(_ControlAdapter):
+            async def pause(self, task_id: str):
+                self.calls.append(f"pause:{task_id}")
+                raise RuntimeError("provider pause failed")
+
+        adapter = FailingAdapter()
+        ctx.register_adapters({"HARNESS": adapter})
+        task_id = _create(ctx)
+        _mark_running(ctx, task_id)
+
+        assert ctx.worker.cancel(task_id, "pause") == TaskStatus.RUNNING.value
+        control = ctx.worker._control_tasks[task_id]  # noqa: SLF001 - inspect scheduled control
+        with pytest.raises(RuntimeError, match="provider pause failed"):
+            await control
+
+        assert ctx.store.get(task_id).status == TaskStatus.RUNNING.value
+
+    async def test_controls_are_serialized_instead_of_dropped(self, ctx):
+        adapter = _ControlAdapter()
+        ctx.register_adapters({"HARNESS": adapter})
+        task_id = _create(ctx)
+        _mark_running(ctx, task_id)
+
+        assert ctx.worker.cancel(task_id, "pause") == TaskStatus.RUNNING.value
+        assert ctx.worker.cancel(task_id, "terminate") == TaskStatus.RUNNING.value
+        control = ctx.worker._control_tasks[task_id]  # noqa: SLF001 - inspect scheduled control
+
+        await asyncio.wait_for(adapter.pause_started.wait(), timeout=1)
+        assert adapter.calls == [f"pause:{task_id}"]
+        assert ctx.store.get(task_id).status == TaskStatus.RUNNING.value
+
+        adapter.pause_release.set()
+        await asyncio.wait_for(adapter.terminate_started.wait(), timeout=1)
+        assert adapter.calls == [f"pause:{task_id}", f"terminate:{task_id}"]
+        assert ctx.store.get(task_id).status == TaskStatus.PAUSED.value
+
+        adapter.terminate_release.set()
+        await control
+        assert ctx.store.get(task_id).status == TaskStatus.TERMINATED.value
+
+    async def test_terminate_notifies_provider_for_paused_artifact(self, ctx, tmp_path: Path):
+        adapter = _ControlAdapter()
+        artifact_path = tmp_path / "program"
+        artifact_path.mkdir()
+        task_id = ctx.task_service.create({
+            "scenario": "ARTIFACT",
+            "artifact_type": "PROGRAM",
+            "name": "paused-program",
+            "artifact_path": str(artifact_path),
+            "model_refs": {"optimizer": "mock"},
+        })["task_id"]
+        ctx.register_adapters({"ARTIFACT:PROGRAM": adapter})
+        _mark_running(ctx, task_id)
+        ctx.store.update_status(task_id, ["RUNNING"], "PAUSED", cause="test")
+
+        assert ctx.worker.cancel(task_id, "terminate") == TaskStatus.PAUSED.value
+        control = ctx.worker._control_tasks[task_id]  # noqa: SLF001 - inspect scheduled control
+        await asyncio.wait_for(adapter.terminate_started.wait(), timeout=1)
+        assert adapter.calls == [f"terminate:{task_id}"]
+        assert ctx.store.get(task_id).status == TaskStatus.PAUSED.value
+
+        adapter.terminate_release.set()
+        await control
+        assert ctx.store.get(task_id).status == TaskStatus.TERMINATED.value
+
+    def test_provider_control_requires_running_loop(self, ctx):
+        adapter = _ControlAdapter()
+        ctx.register_adapters({"HARNESS": adapter})
+        task_id = _create(ctx)
+        _mark_running(ctx, task_id)
+
+        with pytest.raises(RsiNotReady):
+            ctx.worker.cancel(task_id, "pause")
+        assert ctx.store.get(task_id).status == TaskStatus.RUNNING.value
 
 
 class TestStoreMerge:
