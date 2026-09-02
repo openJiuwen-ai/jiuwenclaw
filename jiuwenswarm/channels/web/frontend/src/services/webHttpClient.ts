@@ -10,6 +10,7 @@ import {
   WsEvent,
 } from '../types';
 import { getGatewayHttpBase } from '../utils/env';
+import { isEnterprise } from '../edition';
 import i18n from '../i18n';
 import { buildRuntimeIdentityHeaders } from './runtimeScope';
 import { PauseBufferHook, PAUSABLE_STREAM_EVENTS } from './webClient';
@@ -367,7 +368,8 @@ function payloadFromData(
 
 function extractSseRequestId(
   raw: Record<string, unknown> | null,
-  payload: Record<string, unknown>
+  payload: Record<string, unknown>,
+  frameId?: string
 ): string | undefined {
   if (raw) {
     const top = typeof raw.request_id === 'string' ? raw.request_id : undefined;
@@ -376,7 +378,9 @@ function extractSseRequestId(
   const inner = typeof payload.request_id === 'string' ? payload.request_id : undefined;
   if (inner) return inner;
   const rid = typeof payload.rid === 'string' ? payload.rid : undefined;
-  return rid;
+  if (rid) return rid;
+  const id = typeof frameId === 'string' ? frameId.trim() : '';
+  return id || undefined;
 }
 
 export function sseFrameToWsEvent(frame: SseFrame): WsEvent | null {
@@ -388,7 +392,13 @@ export function sseFrameToWsEvent(frame: SseFrame): WsEvent | null {
   if (!eventName) {
     return null;
   }
-  const requestId = extractSseRequestId(raw, payload);
+  // SSE 标准 id 字段承载 Gateway 生成的 request_id；HTTP 模式下 data
+  // 往往不重复携带该字段，必须保留它才能恢复 WS 帧的请求关联语义。
+  const requestId = extractSseRequestId(
+    raw,
+    payload,
+    isEnterprise() ? frame.id : undefined
+  );
   return {
     type: 'event',
     event: eventName,
@@ -434,8 +444,21 @@ function isSseContentType(contentType: string | null | undefined): boolean {
   return Boolean(contentType && contentType.toLowerCase().includes('text/event-stream'));
 }
 
-function isChatSseTerminal(eventName: string): boolean {
-  return eventName === 'chat.final' || eventName === 'chat.error';
+function isChatSseTerminal(event: WsEvent): boolean {
+  if (event.event === 'chat.error') {
+    return true;
+  }
+  // 仅企业版使用任务级 SSE 生命周期：chat.final 只是回复段结束，
+  // 必须继续读到 processing_status(false)，避免工具状态停在 pending。
+  // 个人版保持原有 chat.final 即结束的协议，避免改变个人版行为。
+  if (!isEnterprise()) {
+    return event.event === 'chat.final';
+  }
+  return (
+    event.event === 'chat.processing_status' &&
+    isRecord(event.payload) &&
+    event.payload.is_processing === false
+  );
 }
 
 /**
@@ -833,7 +856,7 @@ export class WebHttpClient {
             continue;
           }
           this.dispatchEvent(event);
-          if (kind === 'sse' && isChatSseTerminal(event.event)) {
+          if (kind === 'sse' && isChatSseTerminal(event)) {
             await reader.cancel().catch(() => undefined);
             return;
           }
