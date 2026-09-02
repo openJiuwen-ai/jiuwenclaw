@@ -343,6 +343,13 @@ def e2a_response_from_agent_chunk(
         )
 
     if chunk.is_complete and pl.get("event_type") == "chat.error":
+        error_code = str(pl.get("code") or pl.get("error_code") or "chat.error")
+        error_message = str(
+            pl.get("message")
+            or pl.get("error_message")
+            or pl.get("error")
+            or "未知错误"
+        )
         return E2AResponse(
             protocol_version=E2A_PROTOCOL_VERSION,
             response_id=response_id,
@@ -354,8 +361,8 @@ def e2a_response_from_agent_chunk(
             timestamp=ts,
             provenance=prov,
             body={
-                "code": "chat.error",
-                "message": str(pl.get("error", "")),
+                "code": error_code,
+                "message": error_message,
                 "details": pl,
             },
             channel=chunk.channel_id or None,
