@@ -48,6 +48,7 @@ interface ChatTimelineListProps {
   staticTimeline?: boolean;
   mode?: string;
   disableA2UIInteraction?: boolean;
+  incrementalStaticRendering?: boolean;
   renderAfterMessage?: (message: Message) => ReactNode;
 }
 
@@ -408,6 +409,7 @@ export function ChatTimelineList({
   staticTimeline = false,
   mode = 'default',
   disableA2UIInteraction = false,
+  incrementalStaticRendering = false,
   renderAfterMessage,
 }: ChatTimelineListProps) {
   const isTeamMode = mode === 'team';
@@ -487,8 +489,22 @@ export function ChatTimelineList({
   }, [streaksForRender]);
   const [expandedTurns, setExpandedTurns] = useState<Record<number, boolean>>({});
   const [expandedStreaks, setExpandedStreaks] = useState<Record<string, boolean>>({});
+  const incrementallyRenderItems = staticTimeline && incrementalStaticRendering;
+  const [staticRenderItemCount, setStaticRenderItemCount] = useState(1);
+  const visibleRenderItemCount = incrementallyRenderItems
+    ? Math.min(staticRenderItemCount, renderItems.length)
+    : renderItems.length;
+  const staticRenderComplete = visibleRenderItemCount >= renderItems.length;
   const chipAnchoredTurns = useRef<Set<number>>(new Set());
   chipAnchoredTurns.current = new Set();
+
+  useEffect(() => {
+    if (!incrementallyRenderItems || staticRenderComplete) return;
+    const timer = window.setTimeout(() => {
+      setStaticRenderItemCount(count => Math.min(count + 1, renderItems.length));
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [incrementallyRenderItems, renderItems.length, staticRenderComplete, visibleRenderItemCount]);
 
   useEffect(() => {
     setExpandedTurns({});
@@ -551,8 +567,12 @@ export function ChatTimelineList({
   };
 
   return (
-    <div className="chat-timeline" data-testid="chat-panel-timeline">
-      {renderItems.map((item) => {
+    <div
+      className="chat-timeline"
+      data-testid="chat-panel-timeline"
+      data-share-image-render-state={incrementallyRenderItems ? (staticRenderComplete ? 'complete' : 'pending') : undefined}
+    >
+      {renderItems.slice(0, visibleRenderItemCount).map((item) => {
         if (item.type === 'message') {
           const meta = item.turnId >= 0 ? turnWorkMeta.get(item.turnId) : undefined;
           const turnFoldable = Boolean(meta?.completed && meta.hasWork && item.hideMeta);
