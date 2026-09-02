@@ -79,6 +79,17 @@ class _OutboundRegistryProbe:
         return {"dispatch_id": dispatch_id}
 
 
+class _OutboundSettingsProbe:
+    def __init__(self) -> None:
+        self.enabled = False
+
+    def load(self):
+        return {"allow_loopback_http": self.enabled}
+
+    def save(self, *, allow_loopback_http):
+        self.enabled = allow_loopback_http
+
+
 @pytest.mark.asyncio
 async def test_a2a_ingress_web_handlers_return_snapshots():
     channel = _WebChannelProbe()
@@ -202,6 +213,7 @@ def test_a2a_ingress_http_routes_map_to_rpc_methods():
 @pytest.mark.asyncio
 async def test_a2a_outbound_web_handlers_expose_management_facade():
     channel = _WebChannelProbe()
+    settings = _OutboundSettingsProbe()
     manager = A2AManager(
         _ChannelManagerProbe(),
         object(),
@@ -209,6 +221,7 @@ async def test_a2a_outbound_web_handlers_expose_management_facade():
         repository=_RepositoryProbe(),
         channel_factory=lambda config, router: _ChannelProbe(),
         outbound_registry=_OutboundRegistryProbe(),
+        outbound_settings_repository=settings,
     )
     _register_web_handlers(WebHandlersBindParams(channel=channel, a2a_manager=manager))
 
@@ -241,6 +254,13 @@ async def test_a2a_outbound_web_handlers_expose_management_facade():
         object(), "dispatch_get", {"dispatch_id": "dispatch-1"}, "session"
     )
 
+    await channel.methods["a2a.outbound.settings.get"](
+        object(), "settings-get", {}, "session"
+    )
+    await channel.methods["a2a.outbound.settings.update"](
+        object(), "settings-update", {"allow_loopback_http": True}, "session"
+    )
+
     assert channel.responses[0]["payload"]["discovery_id"] == "disc-1"
     assert channel.responses[1]["payload"]["agent_id"] == "agent-1"
     assert channel.responses[2]["payload"]["total"] == 0
@@ -250,11 +270,16 @@ async def test_a2a_outbound_web_handlers_expose_management_facade():
     assert channel.responses[6]["payload"]["accepted"] is False
     assert channel.responses[7]["payload"]["deleted"] is True
     assert channel.responses[8]["payload"]["dispatch_id"] == "dispatch-1"
+    assert channel.responses[9]["payload"] == {"allow_loopback_http": False}
+    assert channel.responses[10]["payload"] == {"allow_loopback_http": True}
+    assert settings.enabled is True
     assert all(item["ok"] for item in channel.responses)
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("params", [{"agent_id": "agent-1"}, {"agent_id": "agent-1", "accept": "false"}])
+@pytest.mark.parametrize(
+    "params", [{"agent_id": "agent-1"}, {"agent_id": "agent-1", "accept": "false"}]
+)
 async def test_a2a_outbound_confirm_revision_requires_explicit_boolean(params):
     channel = _WebChannelProbe()
     manager = A2AManager(
@@ -312,6 +337,8 @@ def test_a2a_outbound_http_routes_map_to_rpc_methods():
         (route.http_method, route.path): route.rpc_method for route in MAPPED_ROUTES
     }
 
+    assert routes[("GET", "/a2a/outbound/settings")] == "a2a.outbound.settings.get"
+    assert routes[("PATCH", "/a2a/outbound/settings")] == "a2a.outbound.settings.update"
     assert routes[("POST", "/a2a/outbound/discover")] == "a2a.outbound.discover"
     assert routes[("POST", "/a2a/outbound/agents")] == "a2a.outbound.register"
     assert routes[("GET", "/a2a/outbound/agents")] == "a2a.outbound.list"

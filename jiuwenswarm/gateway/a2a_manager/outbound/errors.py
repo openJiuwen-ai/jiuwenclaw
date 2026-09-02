@@ -24,6 +24,9 @@ class A2AOutboundErrorCode(str, Enum):
     DISPATCH_CONFLICT = "A2A_DISPATCH_CONFLICT"
     REMOTE_STATUS_UNKNOWN = "A2A_REMOTE_STATUS_UNKNOWN"
     OUTBOUND_BUSY = "A2A_OUTBOUND_BUSY"
+    TASK_INVALID = "A2A_OUTBOUND_TASK_INVALID"
+    MODE_INVALID = "A2A_OUTBOUND_MODE_INVALID"
+    MANAGER_UNAVAILABLE = "A2A_OUTBOUND_MANAGER_UNAVAILABLE"
     STORE_INVALID = "A2A_OUTBOUND_STORE_INVALID"
 
 
@@ -46,6 +49,9 @@ _SAFE_SUMMARIES: dict[A2AOutboundErrorCode, str] = {
     A2AOutboundErrorCode.DISPATCH_CONFLICT: "出站请求状态已发生变化。",
     A2AOutboundErrorCode.REMOTE_STATUS_UNKNOWN: "暂时无法确认第三方请求状态。",
     A2AOutboundErrorCode.OUTBOUND_BUSY: "A2A 出站服务当前繁忙。",
+    A2AOutboundErrorCode.TASK_INVALID: "A2A 出站任务文本无效。",
+    A2AOutboundErrorCode.MODE_INVALID: "A2A 出站派发模式无效。",
+    A2AOutboundErrorCode.MANAGER_UNAVAILABLE: "A2A 出站管理服务当前不可用。",
     A2AOutboundErrorCode.STORE_INVALID: "A2A 出站数据无效。",
 }
 

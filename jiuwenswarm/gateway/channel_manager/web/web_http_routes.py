@@ -85,6 +85,21 @@ _A2A_INGRESS_ROUTES: tuple[WebHttpMappedRoute, ...] = (
 
 _A2A_OUTBOUND_ROUTES: tuple[WebHttpMappedRoute, ...] = (
     WebHttpMappedRoute(
+        "GET",
+        "/a2a/outbound/settings",
+        "a2a.outbound.settings.get",
+        "a2a",
+        "读取 A2A 出站设置",
+    ),
+    WebHttpMappedRoute(
+        "PATCH",
+        "/a2a/outbound/settings",
+        "a2a.outbound.settings.update",
+        "a2a",
+        "更新 A2A 出站设置",
+        accept_body=True,
+    ),
+    WebHttpMappedRoute(
         "POST",
         "/a2a/outbound/discover",
         "a2a.outbound.discover",
