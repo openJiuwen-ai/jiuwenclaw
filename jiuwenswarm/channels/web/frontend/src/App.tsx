@@ -11,6 +11,7 @@ import { ChatPanel } from './components/ChatPanel';
 import { SessionSidebar } from './components/SessionSidebar';
 import { SkillPanel } from './components/SkillPanel';
 import { AgentManagementPanel } from './components/AgentManagementPanel';
+import { RsiPage } from './features/rsi/RsiPage';
 import { TeamPanel } from './components/TeamPanel';
 import { SessionsPanel } from './components/SessionsPanel';
 import CronPanel from './components/CronPanel';
@@ -2986,6 +2987,11 @@ function AppContent({
               </div>
             </div>
           </>
+        )}
+        {activeNav === 'experiments' && (
+          <div className="app-section">
+            <RsiPage />
+          </div>
         )}
         {activeNav === 'agents' && (
           <div className="app-section">

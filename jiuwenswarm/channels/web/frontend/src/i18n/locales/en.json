@@ -34,6 +34,7 @@
     "chat": "Chat",
     "work": "Tasks",
     "agent": "Agent",
+    "experiments": "Experiments",
     "teams": "Teams",
     "sessions": "Sessions",
     "cron": "Scheduled Tasks",
@@ -478,7 +479,11 @@
         "board": "Board view"
       },
       "metrics": {
-        "progress": "Progress"
+        "progress": "Progress",
+        "optimizationObject": "Optimization object",
+        "descInfo": "Description",
+        "viewDetail": "View details",
+        "artifactPreviewPlaceholder": "Artifact preview (placeholder until API ready)"
       },
       "columns": {
         "waiting": "Waiting",
@@ -3145,6 +3150,111 @@
       "failed": "Last run failed",
       "skipped": "Last run skipped",
       "cancelled": "Last run cancelled"
+    }
+  },
+  "rsi": {
+    "title": "Experiments",
+    "createExperiment": "Create Experiment",
+    "empty": {
+      "title": "No experiment tasks",
+      "hint": "We support creating Harness, paper, and program optimization experiments"
+    },
+    "list": {
+      "loading": "Loading…",
+      "error": "Failed to load experiments"
+    },
+    "createDialog": {
+      "title": "Create Experiment",
+      "nameLabel": "Experiment name",
+      "namePlaceholder": "Enter experiment name",
+      "typeLabel": "Experiment type",
+      "typeHarness": "Harness Optimization",
+      "typeArtifact": "Artifact Optimization",
+      "artifactSubtypeLabel": "Artifact subtype",
+      "artifactTypeLabel": "Artifact type",
+      "subtypePaper": "Paper",
+      "subtypeProgram": "Program",
+      "optimizerModelLabel": "Optimizer model",
+      "testerModelLabel": "Tester model",
+      "datasetLabel": "Evaluation set",
+      "datasetPlaceholder": "Please select or enter a local path, e.g., file://Users/jiuwen/evaluationset.csv",
+      "browse": "Browse",
+      "maxIterationsLabel": "Max iterations",
+      "searchWidthLabel": "Max search width",
+      "optimizationInstructionLabel": "Optimization instruction (optional; one of instruction/paper required)",
+      "optimizationInstructionPlaceholder": "Upload at least one of instruction or artifact",
+      "paperLabel": "Paper (optional; one of instruction/paper required)",
+      "paperPlaceholder": "Select paper file path",
+      "programLabel": "Program Path",
+      "programPlaceholder": "Select program file path",
+      "validate": "Validate",
+      "validating": "Validating…",
+      "valid": "Validated, {{count}} samples",
+      "invalid": "Validation failed",
+      "sampleUnknown": "Validated",
+      "modelPlaceholder": "Select model",
+      "freeModels": "Free models",
+      "customModels": "Custom models",
+      "submit": "Create",
+      "cancel": "Cancel",
+      "infoBar": "Upload at least one of instruction or artifact; program requires program file and run instruction.",
+      "validation": {
+        "nameRequired": "Please enter experiment name",
+        "datasetRequired": "Please select dataset file",
+        "optimizerRequired": "Please select optimizer model",
+        "testerRequired": "Please select tester model",
+        "paperOrInstruction": "Upload at least one of instruction or paper",
+        "programRequired": "Please select program file"
+      }
+    },
+    "configDialog": {
+      "title": "Configuration",
+      "readonly": "Read-only"
+    },
+    "detail": {
+      "optimizationResult": "Optimization result",
+      "bestArtifact": "Current best artifact",
+      "baselineScore": "Baseline score",
+      "usage": "Usage (tokens)",
+      "iterations": "iterations",
+      "evalCount": "Eval count",
+      "pruned": "Pruned",
+      "harnessProcess": "Harness Optimization Process",
+      "programProcess": "Program Optimization Process",
+      "runningStage": "Running",
+      "nodeHint": "Each node is a complete plugin combination; tags indicate components changed this round",
+      "estimatedCost": "Estimated cost: ¥{{cost}}",
+      "selectedNode": "Selected",
+      "inherit": "inherits",
+      "othersInherit": "others inherited",
+      "legendBestPath": "Best path",
+      "legendEvaluated": "Evaluated",
+      "legendPending": "Pending/Evaluating",
+      "legendPruned": "Pruned",
+      "statusCreated": "Created",
+      "statusQueued": "Queued",
+      "statusRunning": "Running",
+      "statusCompleted": "Completed",
+      "statusFailed": "Failed",
+      "statusPaused": "Paused",
+      "statusTerminated": "Terminated",
+      "actionConfig": "Configuration",
+      "actionPause": "Pause",
+      "actionResume": "Resume",
+      "actionStart": "Start training",
+      "actionInstall": "Install plugin",
+      "actionDownload": "Download",
+      "actionTerminate": "Terminate",
+      "tagType": "Type",
+      "tagStatus": "Status",
+      "tagMaxIterations": "Max iterations",
+      "tagMaxSearchWidth": "Max search width",
+      "tagCreatedAt": "Created",
+      "expandView": "Expand",
+      "locate": "Locate",
+      "evaluating": "Evaluating",
+      "candidate": "Candidate ",
+      "progress": "Progress"
     }
   }
 }
