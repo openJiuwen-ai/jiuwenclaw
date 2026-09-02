@@ -1,4 +1,4 @@
-import { forwardRef, useMemo } from 'react';
+import { forwardRef, useEffect, useMemo, useRef, useState } from 'react';
 import { applyStyle } from 'html-to-image/es/apply-style';
 import { cloneNode as cloneHtmlNode } from 'html-to-image/es/clone-node';
 import { embedImages } from 'html-to-image/es/embed-images';
@@ -24,11 +24,14 @@ import {
   SHARE_IMAGE_WIDTH,
   cloneShareImageTreeToSerializedBlocks,
   getShareImageOutputDimensions,
+  getShareImagePartOutputHeights,
   getShareImageTileSourceHeight,
   shouldIncludeShareImageCloneNode,
 } from './shareImageRaster';
+import { buildShareImageArtifact, type ShareImageExportArtifact } from './shareImageArchive';
 import { ShareImagePngEncoder } from './shareImagePngEncoder';
 import { PNG_SIGNATURE, buildPngChunk } from './streamingPng';
+import i18n from '../i18n';
 import './shareImageExport.css';
 
 export interface ShareImageMetadata {
@@ -56,7 +59,20 @@ const OPENJIUWEN_WEBSITE_URL = 'https://openjiuwen.com';
 const JIUWENSWARM_REPO_URL = 'https://gitcode.com/openJiuwen/jiuwenswarm';
 const TRANSPARENT_IMAGE_DATA_URL = 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==';
 
+function touchShareImageExportHeartbeat(): void {
+  const runnerWindow = window as Window & {
+    __SHARE_IMAGE_EXPORT_STATE?: { status?: string; heartbeat?: number };
+  };
+  const state = runnerWindow.__SHARE_IMAGE_EXPORT_STATE;
+  if (state?.status !== 'rendering') return;
+  runnerWindow.__SHARE_IMAGE_EXPORT_STATE = {
+    ...state,
+    heartbeat: (state.heartbeat ?? 0) + 1,
+  };
+}
+
 function yieldToBrowser(): Promise<void> {
+  touchShareImageExportHeartbeat();
   return new Promise(resolve => setTimeout(resolve, 0));
 }
 
@@ -589,13 +605,17 @@ async function rasterizeShareImage(
   height: number,
   backgroundColor: string,
   katexOverlays: ShareImageKaTeXOverlay[],
-): Promise<Blob> {
+): Promise<Blob[]> {
   if (width !== SHARE_IMAGE_WIDTH) {
     throw new Error('share_image_invalid_width');
   }
-  const [outputWidth, outputHeight] = getShareImageOutputDimensions(height);
+  const [outputWidth] = getShareImageOutputDimensions(height);
+  const partOutputHeights = getShareImagePartOutputHeights(height);
   const tileSourceHeight = getShareImageTileSourceHeight();
-  const encoder = new ShareImagePngEncoder(outputWidth, outputHeight);
+  const parts: Blob[] = [];
+  let partIndex = 0;
+  let appendedPartRows = 0;
+  let encoder: ShareImagePngEncoder | null = new ShareImagePngEncoder(outputWidth, partOutputHeights[0]);
   let preparedClone: PreparedShareImageClone | null = null;
   let pendingPngAppend: Promise<ShareImagePngAppendResult> | null = null;
 
@@ -641,13 +661,47 @@ async function rasterizeShareImage(
         // tile, while waiting here prevents a second RGBA buffer from being
         // read back before the worker has released the first one.
         await waitForShareImagePngAppend(pendingPngAppend);
+        pendingPngAppend = null;
         const rgba = context.getImageData(0, 0, outputWidth, renderedHeight).data;
-        pendingPngAppend = trackShareImagePngAppend(encoder.appendRgbaRows(rgba, renderedHeight));
+        const rowBytes = outputWidth * 4;
+        let tileRowOffset = 0;
+        while (tileRowOffset < renderedHeight) {
+          await waitForShareImagePngAppend(pendingPngAppend);
+          pendingPngAppend = null;
+          if (encoder === null) {
+            throw new Error('share_image_part_encoder_missing');
+          }
+          const partHeight = partOutputHeights[partIndex];
+          const rowCount = Math.min(renderedHeight - tileRowOffset, partHeight - appendedPartRows);
+          const byteOffset = tileRowOffset * rowBytes;
+          pendingPngAppend = trackShareImagePngAppend(encoder.appendRgbaRows(
+            rgba.subarray(byteOffset, byteOffset + rowCount * rowBytes),
+            rowCount,
+          ));
+          appendedPartRows += rowCount;
+          tileRowOffset += rowCount;
+
+          if (appendedPartRows === partHeight) {
+            await waitForShareImagePngAppend(pendingPngAppend);
+            pendingPngAppend = null;
+            // Worker transfers detach ArrayBuffers, so each part must own its
+            // metadata bytes instead of reusing the previous part's buffer.
+            parts.push(await encoder.finish([buildAigcITextChunk()]));
+            partIndex++;
+            appendedPartRows = 0;
+            encoder = partIndex < partOutputHeights.length
+              ? new ShareImagePngEncoder(outputWidth, partOutputHeights[partIndex])
+              : null;
+          }
+        }
         await nextFrame();
       }
       await waitForShareImagePngAppend(pendingPngAppend);
       pendingPngAppend = null;
-      return await encoder.finish([buildAigcITextChunk()]);
+      if (encoder !== null || parts.length !== partOutputHeights.length) {
+        throw new Error('share_image_parts_incomplete');
+      }
+      return parts;
     } finally {
       image.onload = null;
       image.onerror = null;
@@ -656,7 +710,7 @@ async function rasterizeShareImage(
       canvas.height = 0;
     }
   } catch (error) {
-    await encoder.abort(error);
+    if (encoder !== null) await encoder.abort(error);
     throw error;
   } finally {
     preparedClone?.dispose();
@@ -849,6 +903,7 @@ export const ShareImageDocument = forwardRef<HTMLDivElement, ShareImageDocumentP
 });
 
 function nextFrame(): Promise<void> {
+  touchShareImageExportHeartbeat();
   return new Promise(resolve => {
     requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
   });
@@ -1332,7 +1387,10 @@ async function waitForMermaidDiagrams(node: HTMLElement): Promise<void> {
   });
 }
 
-export async function exportShareImageNode(node: HTMLElement): Promise<Blob> {
+export async function exportShareImageNode(
+  node: HTMLElement,
+  filename = 'jiuwenswarm-share.png',
+): Promise<ShareImageExportArtifact> {
   await waitForShareImageDocumentRendering(node);
   await document.fonts?.ready;
   await nextFrame();
@@ -1362,7 +1420,7 @@ export async function exportShareImageNode(node: HTMLElement): Promise<Blob> {
       height,
       backgroundColor,
     };
-    return rasterizeShareImage(
+    const pngParts = await rasterizeShareImage(
       node,
       options,
       SHARE_IMAGE_WIDTH,
@@ -1370,11 +1428,114 @@ export async function exportShareImageNode(node: HTMLElement): Promise<Blob> {
       backgroundColor,
       katexOverlays,
     );
+    return buildShareImageArtifact(pngParts, filename, touchShareImageExportHeartbeat);
   } finally {
     restoreMermaidDiagrams();
     restoreImages();
     restoreKaTeXFormulaOverlays();
   }
+}
+
+type ShareImageExportRunnerState = {
+  status: 'loading_snapshot' | 'rendering' | 'ready' | 'error';
+  heartbeat?: number;
+  filename?: string;
+  error?: string;
+};
+
+type ShareImageExportRunnerWindow = Window & {
+  __SHARE_IMAGE_EXPORT_STATE?: ShareImageExportRunnerState;
+  __DOWNLOAD_SHARE_IMAGE__?: () => void;
+};
+
+interface ShareImageExportJobSnapshot {
+  filename?: string;
+  locale?: string;
+  snapshot?: ShareImageSnapshot;
+}
+
+function shareImageExportError(error: unknown): string {
+  return error instanceof Error && error.message ? error.message : 'share_export_render_failed';
+}
+
+/** Dedicated entrypoint used only by the server-owned headless export browser. */
+export function ShareImageExportRunner({ jobId }: { jobId: string }): JSX.Element {
+  const [snapshot, setSnapshot] = useState<ShareImageSnapshot | null>(null);
+  const filenameRef = useRef('jiuwenswarm-share.png');
+  const documentRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const runnerWindow = window as ShareImageExportRunnerWindow;
+    const abortController = new AbortController();
+    runnerWindow.__SHARE_IMAGE_EXPORT_STATE = { status: 'loading_snapshot' };
+    void (async () => {
+      try {
+        const response = await fetch(`/share-api/jobs/${encodeURIComponent(jobId)}/snapshot`, {
+          cache: 'no-store',
+          signal: abortController.signal,
+        });
+        if (!response.ok) {
+          throw new Error(`share_export_snapshot_http_${response.status}`);
+        }
+        const payload = await response.json() as ShareImageExportJobSnapshot;
+        if (!payload.snapshot) {
+          throw new Error('share_export_snapshot_missing');
+        }
+        if (payload.locale) {
+          await i18n.changeLanguage(payload.locale);
+        }
+        filenameRef.current = payload.filename || payload.snapshot.metadata?.filename || filenameRef.current;
+        setSnapshot(payload.snapshot);
+      } catch (error) {
+        if (abortController.signal.aborted) return;
+        runnerWindow.__SHARE_IMAGE_EXPORT_STATE = {
+          status: 'error',
+          error: shareImageExportError(error),
+        };
+      }
+    })();
+    return () => abortController.abort();
+  }, [jobId]);
+
+  useEffect(() => {
+    if (!snapshot) return;
+    const runnerWindow = window as ShareImageExportRunnerWindow;
+    let blobUrl = '';
+    let disposed = false;
+    runnerWindow.__SHARE_IMAGE_EXPORT_STATE = { status: 'rendering', heartbeat: 0 };
+    void (async () => {
+      try {
+        const node = documentRef.current;
+        if (!node) throw new Error('share_image_node_missing');
+        const artifact = await exportShareImageNode(node, filenameRef.current);
+        if (disposed) return;
+        blobUrl = URL.createObjectURL(artifact.blob);
+        runnerWindow.__DOWNLOAD_SHARE_IMAGE__ = () => {
+          const anchor = document.createElement('a');
+          anchor.href = blobUrl;
+          anchor.download = artifact.filename;
+          anchor.style.display = 'none';
+          document.body.appendChild(anchor);
+          anchor.click();
+          anchor.remove();
+        };
+        runnerWindow.__SHARE_IMAGE_EXPORT_STATE = { status: 'ready', filename: artifact.filename };
+      } catch (error) {
+        if (disposed) return;
+        runnerWindow.__SHARE_IMAGE_EXPORT_STATE = {
+          status: 'error',
+          error: shareImageExportError(error),
+        };
+      }
+    })();
+    return () => {
+      disposed = true;
+      runnerWindow.__DOWNLOAD_SHARE_IMAGE__ = undefined;
+      if (blobUrl) URL.revokeObjectURL(blobUrl);
+    };
+  }, [snapshot]);
+
+  return <ShareImageDocument ref={documentRef} snapshot={snapshot} />;
 }
 
 const AIGC_TEXT_ENCODER = new TextEncoder();

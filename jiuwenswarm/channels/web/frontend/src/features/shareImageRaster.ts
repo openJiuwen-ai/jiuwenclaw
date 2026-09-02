@@ -1,6 +1,7 @@
 export const SHARE_IMAGE_WIDTH = 750;
 export const SHARE_IMAGE_PIXEL_RATIO = 3;
 export const SHARE_IMAGE_TILE_WORKING_BYTE_LIMIT = 48 * 1024 * 1024;
+export const SHARE_IMAGE_MAX_PART_OUTPUT_HEIGHT = 192_000;
 export const SHARE_IMAGE_FLOW_CONTAINER_SELECTOR = '.chat-timeline, .share-image-group-list';
 export const SHARE_IMAGE_FLOW_BLOCK_SELECTOR = ['.chat-timeline > *', '.share-image-group-list > *', '.a2ui-message-content > *', '.chat-markdown > *'].join(
   ', ',
@@ -190,6 +191,17 @@ export function getShareImageOutputDimensions(sourceHeight: number): [number, nu
     throw new Error('share_image_invalid_source_height');
   }
   return [SHARE_IMAGE_WIDTH * SHARE_IMAGE_PIXEL_RATIO, sourceHeight * SHARE_IMAGE_PIXEL_RATIO];
+}
+
+export function getShareImagePartOutputHeights(sourceHeight: number): number[] {
+  const [, outputHeight] = getShareImageOutputDimensions(sourceHeight);
+  const partCount = Math.ceil(outputHeight / SHARE_IMAGE_MAX_PART_OUTPUT_HEIGHT);
+  const baseHeight = Math.floor(outputHeight / partCount);
+  const extraRows = outputHeight % partCount;
+  return Array.from(
+    { length: partCount },
+    (_, index) => baseHeight + (index < extraRows ? 1 : 0),
+  );
 }
 
 export function getShareImageTileSourceHeight(): number {

@@ -26,11 +26,6 @@ import {
   type SettingsModuleTarget,
 } from './features/settings/settingsNavigation';
 import { ConnectorMarketPanel } from './components/ConnectorMarket';
-import {
-  ShareImageDocument,
-  exportShareImageNode,
-  type ShareImageSnapshot,
-} from './features/shareImageExport';
 import type { CodeReviewTarget } from './features/code-mode/types';
 
 import { FEATURE_APP_UPDATER_UI } from './featureFlags';
@@ -124,12 +119,20 @@ import {
   buildA2UIClientEventContent,
   setA2UIActionHandler,
 } from './features/a2ui/actionBridge';
-import { saveBlob } from './utils/desktopSave';
+import { executeDesktopSave } from './utils/desktopSave';
 import { generateUuidV4 } from './utils/uuid';
 import { ApplicationPluginOutlet } from './applicationPlugins/ApplicationPluginOutlet';
 import { enabledApplicationPlugins } from './applicationPlugins/manifest';
 import { useApplicationPlugins } from './applicationPlugins/useApplicationPlugins';
 import type { ApplicationPluginNavKey } from './applicationPlugins/types';
+import {
+  findShareImageJobForSession,
+  forgetPendingShareImageJob,
+  readPendingShareImageJobId,
+  readShareImageJobResponse,
+  rememberPendingShareImageJob,
+  type ShareImageExportJobStatus,
+} from './features/shareImageJob';
 import {
   ModelSetupGuide,
   type ModelSetupGuideStep,
@@ -282,12 +285,47 @@ function ErrorFallback({ error }: { error: Error | null }) {
   );
 }
 
-async function saveShareImage(blob: Blob, filename: string): Promise<boolean> {
-  const outcome = await saveBlob(blob, filename);
-  if (outcome === 'failed') {
-    throw new Error('share_desktop_save_failed');
+const SHARE_IMAGE_EXPORT_POLL_MS = 500;
+
+async function saveShareImageJob(jobId: string, filename: string): Promise<boolean> {
+  const downloadUrl = `/share-api/jobs/${encodeURIComponent(jobId)}/download`;
+  const desktopDownload = window.pywebview?.api?.download_file;
+  if (desktopDownload) {
+    const outcome = await executeDesktopSave(() => desktopDownload(downloadUrl, filename));
+    if (outcome === 'failed') throw new Error('share_desktop_save_failed');
+    return outcome === 'saved';
   }
-  return outcome === 'saved';
+  if (!window.pywebview) {
+    const response = await fetch(downloadUrl, { method: 'HEAD', cache: 'no-store' });
+    if (!response.ok) {
+      throw new Error(`share_export_download_http_${response.status}`);
+    }
+    const anchor = document.createElement('a');
+    anchor.href = downloadUrl;
+    anchor.download = filename;
+    anchor.style.display = 'none';
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    return true;
+  }
+  throw new Error('share_desktop_download_unavailable');
+}
+
+async function waitForShareImageJob(
+  initialStatus: ShareImageExportJobStatus,
+  isCurrentMonitor: () => boolean,
+): Promise<ShareImageExportJobStatus | null> {
+  let status = initialStatus;
+  while (status.state === 'queued' || status.state === 'running') {
+    if (!isCurrentMonitor()) return null;
+    await new Promise(resolve => window.setTimeout(resolve, SHARE_IMAGE_EXPORT_POLL_MS));
+    status = await readShareImageJobResponse(await fetch(
+      `/share-api/jobs/${encodeURIComponent(status.job_id)}`,
+      { cache: 'no-store' },
+    ));
+  }
+  return isCurrentMonitor() ? status : null;
 }
 
 function AppContent({
@@ -318,8 +356,7 @@ function AppContent({
   const [initialDataLoaded, setInitialDataLoaded] = useState(false);
   const [restartModalOpen, setRestartModalOpen] = useState(false);
   const [restartSuccess, setRestartSuccess] = useState(false);
-  const [isExportingShare, setIsExportingShare] = useState(false);
-  const [shareExportSnapshot, setShareExportSnapshot] = useState<ShareImageSnapshot | null>(null);
+  const [exportingShareSessionIds, setExportingShareSessionIds] = useState<ReadonlySet<string>>(() => new Set());
   const [restartSeenDisconnect, setRestartSeenDisconnect] = useState(false);
   const [appliedWithoutRestart, setAppliedWithoutRestart] = useState(false);
   const [saveToastVisible, setSaveToastVisible] = useState(false);
@@ -441,9 +478,7 @@ function AppContent({
   /** 离开新建任务页后，仍未发送的临时会话可以被再次打开。 */
   const pendingNewConversationRef = useRef(route.kind === 'chat-new');
   const sessionIdsCreatedInThisPageRef = useRef(new Set<string>());
-  const shareExportRef = useRef<HTMLDivElement>(null);
-  const shareExportFilenameRef = useRef('jiuwenswarm-share.png');
-  const shareExportTokenRef = useRef(0);
+  const shareExportMonitorTokensRef = useRef(new Map<string, symbol>());
   const preserveSelectedProjectOnChatNewRef = useRef(false);
   const newConversationProjectRef = useRef<Pick<Session, 'project_id' | 'project_dir'> | null>(null);
   const newConversationPreviousSessionRef = useRef<PendingPreviousSession | null>(null);
@@ -2981,82 +3016,114 @@ function AppContent({
       });
   }, [request]);
 
-  const handleExportShare = useCallback(async () => {
-    const currentSessionId = sessionIdRef.current;
-    if (!currentSessionId || currentSessionId === NEW_CONVERSATION_ID || (isProcessing && !isPaused) || isExportingShare) {
-      return;
+  const setShareExportSessionActive = useCallback((targetSessionId: string, active: boolean) => {
+    setExportingShareSessionIds(current => {
+      const next = new Set(current);
+      if (active) next.add(targetSessionId);
+      else next.delete(targetSessionId);
+      return next;
+    });
+  }, []);
+
+  const monitorAndSaveShareImageJob = useCallback(async (
+    initialStatus: ShareImageExportJobStatus,
+    targetSessionId: string,
+    token: symbol,
+  ) => {
+    const status = await waitForShareImageJob(
+      initialStatus,
+      () => shareExportMonitorTokensRef.current.get(targetSessionId) === token,
+    );
+    if (status === null) return;
+    if (status.state === 'failed') {
+      forgetPendingShareImageJob(window.sessionStorage, targetSessionId, status.job_id);
+      throw new Error(status.error || 'share_export_job_failed');
     }
-    setIsExportingShare(true);
-    try {
-      const params = new URLSearchParams({
-        session_id: currentSessionId,
-      });
-      const response = await fetch(`/share-api/snapshot?${params.toString()}`, {
-        cache: 'no-store',
-      });
-      const contentType = response.headers.get('content-type') || '';
-      if (!response.ok) {
-        let detail = '';
-        try {
-          const payload = await response.json();
-          detail = typeof payload?.error === 'string' ? payload.error : '';
-        } catch {
-          detail = await response.text().catch(() => '');
-        }
-        throw new Error(detail || `HTTP ${response.status}`);
-      }
-      if (!contentType.includes('application/json')) {
-        throw new Error('share_snapshot_not_json');
-      }
-      const payload = await response.json() as {
-        filename?: string;
-        snapshot?: ShareImageSnapshot;
-      };
-      if (!payload.snapshot) {
-        throw new Error('missing_snapshot');
-      }
-      shareExportFilenameRef.current = payload.filename || payload.snapshot.metadata?.filename || 'jiuwenswarm-share.png';
-      setShareExportSnapshot(payload.snapshot);
-    } catch (error) {
-      console.error('Failed to export share image:', error);
-      window.alert(t('share.exportFailed'));
-      setIsExportingShare(false);
-      setShareExportSnapshot(null);
-    }
-  }, [isExportingShare, isPaused, isProcessing, t]);
+
+    const saved = await saveShareImageJob(status.job_id, status.filename.trim());
+    forgetPendingShareImageJob(window.sessionStorage, targetSessionId, status.job_id);
+    if (saved) showSaveToast();
+  }, [showSaveToast]);
 
   useEffect(() => {
-    if (!shareExportSnapshot) {
-      return;
-    }
-    const token = shareExportTokenRef.current + 1;
-    shareExportTokenRef.current = token;
+    const targetSessionId = sessionId;
+    if (!targetSessionId || targetSessionId === NEW_CONVERSATION_ID) return;
+    if (shareExportMonitorTokensRef.current.has(targetSessionId)) return;
 
     void (async () => {
+      const pendingJobId = readPendingShareImageJobId(window.sessionStorage, targetSessionId);
+      let status: ShareImageExportJobStatus | null;
       try {
-        const node = shareExportRef.current;
-        if (!node) {
-          throw new Error('share_image_node_missing');
-        }
-        const imageBlob = await exportShareImageNode(node);
-        if (shareExportTokenRef.current !== token) {
-          return;
-        }
-        const saved = await saveShareImage(imageBlob, shareExportFilenameRef.current);
-        if (saved) {
-          showSaveToast();
-        }
+        status = await findShareImageJobForSession(targetSessionId, window.sessionStorage);
       } catch (error) {
-        console.error('Failed to render share image:', error);
-        window.alert(t('share.exportFailed'));
+        console.error('Failed to query active share image export:', error);
+        if (pendingJobId !== null) window.alert(tRef.current('share.exportFailed'));
+        return;
+      }
+      if (status === null) return;
+      if (shareExportMonitorTokensRef.current.has(targetSessionId)) return;
+
+      const token = Symbol(targetSessionId);
+      shareExportMonitorTokensRef.current.set(targetSessionId, token);
+      setShareExportSessionActive(targetSessionId, true);
+      try {
+        await monitorAndSaveShareImageJob(
+          status,
+          targetSessionId,
+          token,
+        );
+      } catch (error) {
+        console.error('Failed to monitor share image export:', error);
+        window.alert(tRef.current('share.exportFailed'));
       } finally {
-        if (shareExportTokenRef.current === token) {
-          setIsExportingShare(false);
-          setShareExportSnapshot(null);
+        if (shareExportMonitorTokensRef.current.get(targetSessionId) === token) {
+          shareExportMonitorTokensRef.current.delete(targetSessionId);
+          setShareExportSessionActive(targetSessionId, false);
         }
       }
     })();
-  }, [shareExportSnapshot, showSaveToast, t]);
+  }, [monitorAndSaveShareImageJob, sessionId, setShareExportSessionActive]);
+
+  const handleExportShare = useCallback(async () => {
+    const currentSessionId = sessionIdRef.current;
+    if (
+      !currentSessionId
+      || currentSessionId === NEW_CONVERSATION_ID
+      || (isProcessing && !isPaused)
+      || shareExportMonitorTokensRef.current.has(currentSessionId)
+    ) {
+      return;
+    }
+    const token = Symbol(currentSessionId);
+    shareExportMonitorTokensRef.current.set(currentSessionId, token);
+    setShareExportSessionActive(currentSessionId, true);
+    try {
+      const createResponse = await fetch('/share-api/jobs', {
+        method: 'POST',
+        cache: 'no-store',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          session_id: currentSessionId,
+          locale: i18n.resolvedLanguage ?? i18n.language,
+        }),
+      });
+      const created = await readShareImageJobResponse(createResponse);
+      rememberPendingShareImageJob(window.sessionStorage, currentSessionId, created.job_id);
+      await monitorAndSaveShareImageJob(
+        created,
+        currentSessionId,
+        token,
+      );
+    } catch (error) {
+      console.error('Failed to export share image:', error);
+      window.alert(t('share.exportFailed'));
+    } finally {
+      if (shareExportMonitorTokensRef.current.get(currentSessionId) === token) {
+        shareExportMonitorTokensRef.current.delete(currentSessionId);
+        setShareExportSessionActive(currentSessionId, false);
+      }
+    }
+  }, [i18n.language, i18n.resolvedLanguage, isPaused, isProcessing, monitorAndSaveShareImageJob, setShareExportSessionActive, t]);
 
   const routeSessionMissing = routeSessionId !== null
     && initialDataLoaded
@@ -3069,6 +3136,7 @@ const showWorkspaceDivider = effectiveTeamAreaExpanded && !showConversationNotFo
   const activeApplicationPlugin = visibleApplicationPlugins.find(
     (plugin) => plugin.nav_key === activeNav,
   );
+  const isExportingShare = exportingShareSessionIds.has(sessionId);
 
   useEffect(() => {
     if (!showWorkspaceDivider) clearChatPanelResize();
@@ -3541,9 +3609,6 @@ const showWorkspaceDivider = effectiveTeamAreaExpanded && !showConversationNotFo
         onStatusChange={updateExternalCliInstallStatus}
       />
 
-      <div className="share-image-stage" aria-hidden="true" data-testid="app-share-image-stage">
-        <ShareImageDocument ref={shareExportRef} snapshot={shareExportSnapshot} />
-      </div>
     </div>
   );
 }
