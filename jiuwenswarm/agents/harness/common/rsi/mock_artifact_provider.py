@@ -92,8 +92,6 @@ class MockArtifactProvider:
         state = self._load_state(task_id)
         if state is None:
             return self._result(task_id, "failed", error_code="TASK_NOT_FOUND", error_message="task snapshot missing")
-        if state.get("status") not in {"running", "created"}:
-            return self._result(task_id, str(state.get("status") or "created"), final_node_id=state.get("best_node_id"))
         state["status"] = "paused"
         self._save_state(task_id, state)
         report = self._load_json(task_id, "mock_artifact_report.json")
@@ -202,8 +200,6 @@ class MockArtifactProvider:
         state = self._load_state(task_id)
         if state is None:
             return self._result(task_id, "failed", error_code="TASK_NOT_FOUND", error_message="task snapshot missing")
-        if state.get("status") in {"completed", "failed", "terminated"}:
-            return self._result(task_id, str(state["status"]), final_node_id=state.get("best_node_id"))
         state["status"] = "terminated"
         self._save_state(task_id, state)
         report = self._load_json(task_id, "mock_artifact_report.json") or {
@@ -598,8 +594,7 @@ class MockArtifactProvider:
             },
         )
 
-    @staticmethod
-    def _new_state(task_id: str, total_iterations: int) -> dict[str, Any]:
+    def _new_state(self, task_id: str, total_iterations: int) -> dict[str, Any]:
         return {
             "task_id": task_id,
             "status": "created",
@@ -626,7 +621,7 @@ class MockArtifactProvider:
         path = self._run_dir(task_id) / filename
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+        except (FileNotFoundError, OSError, json.JSONDecodeError):
             return None
         return data if isinstance(data, dict) else None
 
@@ -735,8 +730,8 @@ class MockArtifactProvider:
                 ),
             )
 
-    @staticmethod
     def _result(
+        self,
         task_id: str,
         status: str,
         *,
