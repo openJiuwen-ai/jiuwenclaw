@@ -47,21 +47,76 @@ class RsiEventConsumer:
         self._on_progress = on_progress
         self._on_tree_delta = on_tree_delta
 
-    async def on_engine_event(self, event: EngineEvent) -> None:
-        """事件入口（单消费者循环调用）。"""
-        if event.is_progress_metric:
+    async def on_engine_event(self, event: EngineEvent | Any) -> None:
+        """事件入口（同时兼容内部 dict 信封和 agent-core dataclass）。"""
+        provider_event_type = getattr(event, "event_type", None)
+        if provider_event_type == "status":
+            # TaskStore is the public status authority.  Provider status
+            # events are still useful for diagnostics, but updating the store
+            # here would race the worker's state machine and duplicate P1.
+            return
+        if provider_event_type == "progress":
+            usage = getattr(event, "usage", None)
+            self.projector.on_progress_metric(
+                self.task_id,
+                {
+                    "iteration": getattr(event, "iteration", 0),
+                    "total_iterations": getattr(event, "total_iterations", 0),
+                    "score": getattr(event, "score", None),
+                    "baseline": getattr(event, "baseline", None),
+                },
+            )
+            self.usage_recorder.record_cumulative(
+                self.task_id,
+                usage,
+                iteration=getattr(event, "iteration", None),
+            )
+            progress = self.projector.derive_progress(self.task_id)
+            usage_summary = self.usage_recorder.usage_summary(self.task_id)
+            if self._on_progress is not None:
+                await self._on_progress(
+                    self.task_id,
+                    _progress_push_payload(progress, usage_summary),
+                )
+            return
+        if provider_event_type == "node.stage":
+            stage = getattr(event, "stage", None)
+            stage_payload = dict(stage) if isinstance(stage, dict) else {}
+            payload = {
+                "node_ref": str(getattr(event, "node_ref", "") or ""),
+                "stage": stage_payload,
+            }
+            note = getattr(event, "note", None)
+            if note is not None:
+                payload["note"] = str(note)
+            node = self.projector.on_node_stage(self.task_id, payload)
+            if node is not None and self._on_tree_delta is not None:
+                await self._on_tree_delta(
+                    self.task_id,
+                    {"nodes": [node.to_dict()]},
+                )
+            return
+        if provider_event_type == "node":
+            node = self.projector.on_provider_node(self.task_id, getattr(event, "node", None))
+            if node is not None:
+                self._last_pushed_node_ids.add(node.node_id)
+                if self._on_tree_delta is not None:
+                    await self._on_tree_delta(self.task_id, {"nodes": [node.to_dict()]})
+            return
+        if getattr(event, "is_progress_metric", False):
             self.projector.on_progress_metric(self.task_id, event.payload)
             progress = self.projector.derive_progress(self.task_id)
             usage = self.usage_recorder.usage_summary(self.task_id)
-            if usage is not None:
-                progress["usage"] = usage
             if self._on_progress is not None:
-                await self._on_progress(self.task_id, progress)
+                await self._on_progress(
+                    self.task_id,
+                    _progress_push_payload(progress, usage),
+                )
             return
-        if event.is_progress_usage:
+        if getattr(event, "is_progress_usage", False):
             self.usage_recorder.record_engine_event(self.task_id, event.payload)
             return
-        if event.is_node_created:
+        if getattr(event, "is_node_created", False):
             payload = event.payload
             node_meta = payload.get("node") if isinstance(payload.get("node"), dict) else payload
             node_ref = str(node_meta.get("ref") or "") if isinstance(node_meta, dict) else ""
@@ -89,7 +144,7 @@ class RsiEventConsumer:
             if self._on_tree_delta is not None and delta.get("nodes"):
                 await self._on_tree_delta(self.task_id, delta)
             return
-        if event.is_node_stage:
+        if getattr(event, "is_node_stage", False):
             node = self.projector.on_node_stage(self.task_id, event.payload)
             if node is not None and self._on_tree_delta is not None:
                 await self._on_tree_delta(
@@ -97,7 +152,11 @@ class RsiEventConsumer:
                     {"nodes": [node.to_dict()]},
                 )
             return
-        logger.debug("[RSI] 未识别事件: %s/%s", event.family, event.kind)
+        logger.debug(
+            "[RSI] 未识别事件: %s/%s",
+            getattr(event, "family", ""),
+            getattr(event, "kind", ""),
+        )
 
     @staticmethod
     def _to_artifact_path(item: dict[str, Any]) -> Any:
@@ -125,6 +184,26 @@ async def consume_queue(
                 return
             await consumer.on_engine_event(event)
         except Exception:  # noqa: BLE001 - 单事件失败不终止消费者
-            logger.exception("[RSI] 事件消费失败: %s/%s", event.family, event.kind)
+            logger.exception(
+                "[RSI] 事件消费失败: %s",
+                getattr(event, "event_type", f"{getattr(event, 'family', '')}/{getattr(event, 'kind', '')}"),
+            )
         finally:
             queue.task_done()
+
+
+def _progress_push_payload(
+    progress: dict[str, Any],
+    usage: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Return the v0.3 nested payload and retain legacy flat fields."""
+
+    payload: dict[str, Any] = {
+        "progress": dict(progress),
+        # Older Harness consumers read iteration/score directly.  Keeping
+        # these aliases is harmless while the nested v0.3 shape is adopted.
+        **progress,
+    }
+    if usage is not None:
+        payload["usage"] = usage
+    return payload

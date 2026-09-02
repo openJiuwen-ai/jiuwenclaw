@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 from jiuwenswarm.agents.harness.common.rsi.adapter import RsiEngineAdapter, RsiEventSink
+from jiuwenswarm.agents.harness.common.rsi.artifact_adapter import ArtifactEngineAdapter
 from jiuwenswarm.agents.harness.common.rsi.context import RsiServiceContext, build_rsi_service_context
 from jiuwenswarm.agents.harness.common.rsi.errors import (
     RsiArtifactNotFound,
@@ -24,6 +25,7 @@ from jiuwenswarm.agents.harness.common.rsi.models import RsiTask, RsiTaskView, T
 
 __all__ = [
     "EngineEvent",
+    "ArtifactEngineAdapter",
     "RsiArtifactNotFound",
     "RsiBadRequest",
     "RsiDatasetInvalid",

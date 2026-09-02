@@ -188,6 +188,8 @@ class RsiTask:
             search_width=self.search_width,
             config=self.config,
             run_dir=self.run_dir,
+            optimization_instruction=self.optimization_instruction,
+            artifact_path=self.artifact_path,
         )
 
 
@@ -204,6 +206,10 @@ class RsiTaskView:
     search_width: int
     config: dict[str, Any]
     run_dir: str
+    # Keep the original public values available to adapters.  Defaults retain
+    # compatibility with older positional construction sites.
+    optimization_instruction: str | None = None
+    artifact_path: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

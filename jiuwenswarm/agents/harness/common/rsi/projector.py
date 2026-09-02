@@ -50,6 +50,7 @@ class RsiProjector:
                 score=baseline,
                 description=description,
             )
+            self._ref_index.setdefault(task_id, {})["root"] = _ROOT
             self._persist_locked(task_id)
 
     # -- 事件消费 --
@@ -86,6 +87,61 @@ class RsiProjector:
             self._ref_index.setdefault(task_id, {})[node_ref] = node_id
             self._persist_locked(task_id)
             return tree_node
+
+    def on_provider_node(self, task_id: str, node: Any) -> RsiTreeNode | None:
+        """Project an agent-core ``EventNode`` without renumbering its ID.
+
+        Artifact Providers persist a complete node and use that ID in their
+        report/tree/artifact references.  Keeping the ID intact is what lets
+        a tree push and a later tree query refer to the same node.
+        """
+        from jiuwenswarm.agents.harness.common.rsi.artifact_adapter import provider_node_to_dict
+
+        raw = provider_node_to_dict(node)
+        node_id = str(raw.get("node_id") or "")
+        if not node_id:
+            return None
+        changes = raw.get("changes")
+        tree_node = RsiTreeNode(
+            node_id=node_id,
+            iteration=_safe_int(raw.get("iteration")),
+            parent_id=str(raw["parent_id"]) if raw.get("parent_id") is not None else None,
+            type=str(raw.get("type") or "REJECTED").upper(),
+            adopted=bool(raw.get("adopted")),
+            score=_safe_float(raw.get("score")),
+            description=raw.get("description"),
+            snapshot_artifact_id=raw.get("snapshot_artifact_id"),
+            failure_reason=raw.get("failure_reason"),
+            failure_class=raw.get("failure_class"),
+            changes=[dict(item) for item in changes if isinstance(item, dict)] if isinstance(changes, list) else None,
+            extra=dict(raw.get("extra") or {}) if isinstance(raw.get("extra"), dict) else None,
+        )
+        with self._lock:
+            self._nodes.setdefault(task_id, {})[node_id] = tree_node
+            self._ref_index.setdefault(task_id, {})[node_id] = node_id
+            self._persist_locked(task_id)
+        return tree_node
+
+    def sync_provider_tree(self, task_id: str, tree: Any) -> dict[str, Any]:
+        """Replace the artifact projection from a Provider tree snapshot."""
+        from jiuwenswarm.agents.harness.common.rsi.artifact_adapter import provider_tree_to_web
+
+        raw = provider_tree_to_web(tree)
+        nodes: dict[str, RsiTreeNode] = {}
+        ref_index: dict[str, str] = {}
+        for item in raw.get("nodes", []):
+            node = self._tree_node_from_web(item)
+            if node is None:
+                continue
+            nodes[node.node_id] = node
+            ref_index[node.node_id] = node.node_id
+        with self._lock:
+            self._nodes[task_id] = nodes
+            self._ref_index[task_id] = ref_index
+            metric = self._metric.setdefault(task_id, {})
+            metric["iteration"] = _safe_int(raw.get("iteration"))
+            self._persist_locked(task_id)
+        return self.derive_tree(task_id)
 
     def persist_node_update(self, task_id: str, node: RsiTreeNode) -> None:
         """快照/描述等节点字段变更后回写落盘（单节点更新）。"""
@@ -202,6 +258,9 @@ class RsiProjector:
                     for item in raw_nodes
                     if isinstance(item, dict) and item.get("node_id")
                 }
+                self._ref_index[task_id] = {
+                    node_id: node_id for node_id in self._nodes[task_id]
+                }
             if isinstance(data, dict) and isinstance(data.get("metric"), dict):
                 self._metric[task_id] = dict(data["metric"])
             self._persist_locked(task_id)
@@ -228,6 +287,27 @@ class RsiProjector:
             return _ROOT if _ROOT in nodes else None
         mapped = self._ref_index.get(task_id, {}).get(str(parent_ref))
         return mapped if mapped in nodes else None
+
+    @staticmethod
+    def _tree_node_from_web(raw: dict[str, Any]) -> RsiTreeNode | None:
+        node_id = str(raw.get("node_id") or "")
+        if not node_id:
+            return None
+        changes = raw.get("changes")
+        return RsiTreeNode(
+            node_id=node_id,
+            iteration=_safe_int(raw.get("iteration")),
+            parent_id=str(raw["parent_id"]) if raw.get("parent_id") is not None else None,
+            type=str(raw.get("type") or "REJECTED").upper(),
+            adopted=bool(raw.get("adopted")),
+            score=_safe_float(raw.get("score")),
+            description=raw.get("description"),
+            snapshot_artifact_id=raw.get("snapshot_artifact_id"),
+            failure_reason=raw.get("failure_reason"),
+            failure_class=raw.get("failure_class"),
+            changes=[dict(item) for item in changes if isinstance(item, dict)] if isinstance(changes, list) else None,
+            extra=dict(raw.get("extra") or {}) if isinstance(raw.get("extra"), dict) else None,
+        )
 
     @staticmethod
     def _map_type(node: dict[str, Any]) -> str:

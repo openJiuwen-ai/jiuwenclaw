@@ -10561,9 +10561,23 @@ class AgentWebSocketServer:
         if self._rsi_handlers is not None:
             return self._rsi_handlers
         from jiuwenswarm.agents.harness.common.rsi import build_rsi_service_context
+        from jiuwenswarm.agents.harness.common.rsi.mock_artifact_provider import (
+            build_mock_artifact_adapters,
+        )
         from jiuwenswarm.server.rsi import RsiAgentServerHandlers
 
         context = build_rsi_service_context(None)
+        # Temporary service-layer seam: the concrete program/paper optimizers
+        # are owned by their respective teams.  Keep the AgentServer fully
+        # callable with deterministic Providers until those implementations
+        # are supplied; replacing this registration is the only integration
+        # point required later.
+        context.register_adapters(
+            build_mock_artifact_adapters(
+                context.tasks_root,
+                model_resolver=self._resolve_model,
+            )
+        )
         handlers = RsiAgentServerHandlers(
             context,
             send_push=self.send_push,

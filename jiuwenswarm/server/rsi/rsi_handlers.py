@@ -90,7 +90,12 @@ class RsiAgentServerHandlers:
     # -- I1–I13 --
 
     def _do_dataset_validate(self, params: dict[str, Any]) -> dict[str, Any]:
-        return self.context.dataset_service.validate(params)
+        return self.context.dataset_service.validate(
+            params,
+            adapter=self.context.adapter_for(
+                params.get("scenario"), params.get("artifact_type")
+            ),
+        )
 
     def _do_task_create(self, params: dict[str, Any]) -> dict[str, Any]:
         result = self.context.task_service.create(params)
@@ -107,6 +112,7 @@ class RsiAgentServerHandlers:
             projector=self.context.projector,
             usage_recorder=self.context.usage_recorder,
             artifact_service=self.context.artifact_service,
+            adapter=self.context.adapter_for_task(params.get("task_id")),
         )
 
     def _do_task_delete(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -125,16 +131,28 @@ class RsiAgentServerHandlers:
         return self.context.task_service.terminate(params, worker=self.context.worker)
 
     def _do_report_get(self, params: dict[str, Any]) -> dict[str, Any]:
-        return self.context.report_service.get(params)
+        return self.context.report_service.get(
+            params,
+            adapter=self.context.adapter_for_task(params.get("task_id")),
+        )
 
     def _do_usage_get(self, params: dict[str, Any]) -> dict[str, Any]:
-        return self.context.usage_service.get(params)
+        return self.context.usage_service.get(
+            params,
+            adapter=self.context.adapter_for_task(params.get("task_id")),
+        )
 
     def _do_artifact_download(self, params: dict[str, Any]) -> dict[str, Any]:
-        return self.context.artifact_download_service.locate(params)
+        return self.context.artifact_download_service.locate(
+            params,
+            adapter=self.context.adapter_for_task(params.get("task_id")),
+        )
 
     def _do_tree_get(self, params: dict[str, Any]) -> dict[str, Any]:
-        return self.context.tree_service.get(params)
+        return self.context.tree_service.get(
+            params,
+            adapter=self.context.adapter_for_task(params.get("task_id")),
+        )
 
     # -- 推送 --
 
@@ -146,6 +164,7 @@ class RsiAgentServerHandlers:
                     "task_id": task_id,
                     "old_status": old,
                     "new_status": new,
+                    "status": new,
                 },
             )
 

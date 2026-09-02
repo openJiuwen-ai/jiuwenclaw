@@ -5,8 +5,8 @@
   ``await adapter.run(request, on_event=sink)``；正常返回 → COMPLETED；异常 → FAILED。
 - 终态后 ``await q.join()`` 排空最后事件再关消费协程。
 - ``cancel(mode)`` / ``resume()``：中优先级（I7/I8/I9）接口已落位 + 状态机校验，
-  **协程取消/引擎衔接为 ⚠️外部/架构 TODO**（内部 v3 §4.2 注：pause↔引擎衔接为架构 TODO，
-  接口已为 ``resume(fingerprint_check)`` 预留校验参数）。
+  运行中的 artifact 任务会转发到 Provider 的 pause/terminate；
+  ``resume(fingerprint_check)`` 仍由具体 Provider 负责断点指纹校验。
 """
 
 from __future__ import annotations
@@ -15,7 +15,11 @@ import asyncio
 import logging
 from typing import Any
 
-from jiuwenswarm.agents.harness.common.rsi.errors import RsiTaskStateConflict
+from jiuwenswarm.agents.harness.common.rsi.errors import (
+    RsiDatasetInvalid,
+    RsiScenarioNotSupported,
+    RsiTaskStateConflict,
+)
 from jiuwenswarm.agents.harness.common.rsi.event_consumer import RsiEventConsumer, consume_queue
 from jiuwenswarm.agents.harness.common.rsi.events import EngineEvent
 from jiuwenswarm.agents.harness.common.rsi.models import TaskStatus
@@ -55,6 +59,8 @@ class RsiWorker:
         self._running_task_id: str | None = None
         self._run_task: asyncio.Task[Any] | None = None
         self._last_enqueued: str | None = None
+        self._resume_task_ids: set[str] = set()
+        self._control_tasks: dict[str, asyncio.Task[Any]] = {}
 
     # -- 队列 --
 
@@ -69,6 +75,7 @@ class RsiWorker:
         if task.status == TaskStatus.PAUSED.value:
             self._conflict(task_id, "PAUSED 任务请走 resume")
         if task.status == TaskStatus.QUEUED.value:
+            self._ensure_runner()
             return TaskStatus.QUEUED.value
         self.store.update_status(
             task_id,
@@ -84,20 +91,25 @@ class RsiWorker:
     # -- 取消 / 恢复（中优先级，接口落位） --
 
     def cancel(self, task_id: str, mode: str) -> str:
-        """``pause`` / ``terminate``。状态机部分完整实现（含排队中出队）；协程取消为 TODO。"""
+        """``pause`` / ``terminate`` and delegate running control to Provider."""
         mode = str(mode or "").lower()
         task = self.store.get(task_id)
+        adapter = self._adapter_for(task.scenario, task.artifact_type)
         if mode == "pause":
+            if task.scenario == "ARTIFACT" and (
+                adapter is None or not bool(getattr(adapter, "supports_pause", False))
+            ):
+                raise RsiScenarioNotSupported("当前产物场景不支持 pause")
             if task.status not in {TaskStatus.RUNNING.value, TaskStatus.QUEUED.value}:
                 self._conflict(task_id, f"状态 {task.status} 不可 pause")
             if task.status == TaskStatus.QUEUED.value:
                 self._dequeue_locked(task_id)
             else:
-                # RUNNING：引擎衔接（asyncio cancel + state 保留）为架构 TODO（内部 v3 §4.2）
-                logger.warning("[RSI] pause 引擎衔接 TODO: task=%s（协程取消未装配）", task_id)
-            return self.store.update_status(
+                self._schedule_provider_control(task_id, adapter, "pause")
+            result = self.store.update_status(
                 task_id, [task.status], TaskStatus.PAUSED.value, cause=f"cancel({mode})"
-            ).status
+            )
+            return result.status
         if mode == "terminate":
             if task.status not in {
                 TaskStatus.CREATED.value,
@@ -108,9 +120,12 @@ class RsiWorker:
                 self._conflict(task_id, f"状态 {task.status} 不可 terminate")
             if task.status == TaskStatus.QUEUED.value:
                 self._dequeue_locked(task_id)
-            return self.store.update_status(
+            elif task.status == TaskStatus.RUNNING.value and adapter is not None:
+                self._schedule_provider_control(task_id, adapter, "terminate")
+            result = self.store.update_status(
                 task_id, [task.status], TaskStatus.TERMINATED.value, cause=f"cancel({mode})"
-            ).status
+            )
+            return result.status
         self._conflict(task_id, f"未知 mode: {mode}")
 
     def resume(self, task_id: str, fingerprint_check: bool = True) -> str:
@@ -118,11 +133,17 @@ class RsiWorker:
         task = self.store.get(task_id)
         if task.status != TaskStatus.PAUSED.value:
             self._conflict(task_id, "仅 PAUSED 可 resume")
+        adapter = self._adapter_for(task.scenario, task.artifact_type)
+        if task.scenario == "ARTIFACT" and (
+            adapter is None or not bool(getattr(adapter, "supports_resume", False))
+        ):
+            raise RsiScenarioNotSupported("当前产物场景不支持 resume")
         if fingerprint_check:
             # 引擎侧 fingerprint 校验由 HarnessEngineAdapter.resume 落地（C2 ⚠️外部）；
             # 当前无引擎态 → 日志提示，不误报成功（真实校验在 resume 执行路径）
             logger.warning("[RSI] resume fingerprint 校验未装配（C2 ⚠️外部），task=%s", task_id)
         self.store.update_status(task_id, [TaskStatus.PAUSED.value], TaskStatus.QUEUED.value, cause="resume")
+        self._resume_task_ids.add(task_id)
         self._last_enqueued = task_id
         self._queue.put_nowait(task_id)
         self._ensure_runner()
@@ -152,16 +173,18 @@ class RsiWorker:
                     TaskStatus.RUNNING.value,
                     cause="worker.start",
                 )
-                await self._execute_task(task_id)
+                resume = task_id in self._resume_task_ids
+                self._resume_task_ids.discard(task_id)
+                await self._execute_task(task_id, resume=resume)
             except Exception:  # noqa: BLE001 - 单任务状态冲突/异常不拖垮 worker
                 logger.exception("[RSI] 任务执行异常 task=%s，跳过继续取下一个", task_id)
             finally:
                 self._running_task_id = None
                 self._queue.task_done()
 
-    async def _execute_task(self, task_id: str) -> None:
+    async def _execute_task(self, task_id: str, *, resume: bool = False) -> None:
         task_view = self.store.get_view(task_id)
-        adapter = self.adapters.get(task_view.scenario)
+        adapter = self._adapter_for(task_view.scenario, task_view.artifact_type)
         if adapter is None:
             self.store.update_status(
                 task_id, [TaskStatus.RUNNING.value], TaskStatus.FAILED.value,
@@ -182,16 +205,24 @@ class RsiWorker:
         consume_task = asyncio.create_task(consume_queue(queue, consumer))
         result: Any = None
         try:
-            request = adapter.build_request(task_view)
-            result = await adapter.run(request, on_event=_sink(queue))
-            self.store.update_status(
-                task_id, [TaskStatus.RUNNING.value], TaskStatus.COMPLETED.value, cause="worker.complete"
-            )
+            if task_view.scenario == "ARTIFACT" and hasattr(adapter, "validate_input"):
+                validation = adapter.validate_input(
+                    task_view.artifact_path or task_view.config.get("artifact_path"),
+                    scenario=task_view.scenario,
+                    artifact_type=task_view.artifact_type,
+                )
+                if not bool(getattr(validation, "valid", False)):
+                    errors = getattr(validation, "errors", None) or []
+                    raise RsiDatasetInvalid("Provider 输入校验失败", errors=errors)
+            request = adapter.build_request(task_view, resume=resume)
+            if resume:
+                result = await adapter.resume(request, on_event=_sink(queue))
+            else:
+                result = await adapter.run(request, on_event=_sink(queue))
+            self._apply_result_status(task_id, result)
         except Exception as exc:  # noqa: BLE001
             logger.exception("[RSI] 任务执行失败 task=%s: %s", task_id, exc)
-            self.store.update_status(
-                task_id, [TaskStatus.RUNNING.value], TaskStatus.FAILED.value, cause=str(exc)[:200]
-            )
+            self._mark_failed_if_running(task_id, str(exc)[:200])
         finally:
             try:
                 await queue.join()
@@ -203,6 +234,87 @@ class RsiWorker:
             except Exception:  # noqa: BLE001
                 logger.exception("[RSI] 事件消费协程退出异常 task=%s", task_id)
             self._persist_results(task_id, result)
+
+    def _adapter_for(self, scenario: str | None, artifact_type: str | None) -> Any:
+        scenario_key = str(scenario or "").strip().upper()
+        artifact_key = str(artifact_type or "").strip().upper()
+        candidates: list[str] = []
+        if scenario_key == "ARTIFACT":
+            if artifact_key:
+                candidates.extend(
+                    [
+                        f"ARTIFACT:{artifact_key}",
+                        f"artifact:{artifact_key.lower()}",
+                    ]
+                )
+            candidates.append("ARTIFACT")
+        elif scenario_key:
+            candidates.extend([scenario_key, scenario_key.lower()])
+        for key in candidates:
+            adapter = self.adapters.get(key)
+            if adapter is not None:
+                return adapter
+        return None
+
+    def _apply_result_status(self, task_id: str, result: Any) -> None:
+        raw_status = getattr(result, "status", None)
+        raw_status = getattr(raw_status, "value", raw_status)
+        status = str(raw_status or "completed").upper()
+        target = {
+            "COMPLETED": TaskStatus.COMPLETED.value,
+            "FAILED": TaskStatus.FAILED.value,
+            "PAUSED": TaskStatus.PAUSED.value,
+            "TERMINATED": TaskStatus.TERMINATED.value,
+        }.get(status)
+        if target is None:
+            target = TaskStatus.FAILED.value
+        current = self.store.get(task_id).status
+        if current != TaskStatus.RUNNING.value:
+            return
+        self.store.update_status(
+            task_id,
+            [TaskStatus.RUNNING.value],
+            target,
+            cause=f"provider.{status.lower()}",
+        )
+
+    def _mark_failed_if_running(self, task_id: str, cause: str) -> None:
+        try:
+            if self.store.get(task_id).status == TaskStatus.RUNNING.value:
+                self.store.update_status(
+                    task_id,
+                    [TaskStatus.RUNNING.value],
+                    TaskStatus.FAILED.value,
+                    cause=cause,
+                )
+        except RsiTaskStateConflict:
+            # A concurrent pause/terminate owns the final public state.
+            logger.debug("[RSI] task state changed while handling failure: %s", task_id)
+
+    def _schedule_provider_control(self, task_id: str, adapter: Any, mode: str) -> None:
+        method = getattr(adapter, mode, None)
+        if not callable(method):
+            raise RsiScenarioNotSupported(f"当前 Provider 不支持 {mode}")
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            logger.warning("[RSI] 无运行中事件循环，无法立即调用 Provider.%s task=%s", mode, task_id)
+            return
+        previous = self._control_tasks.get(task_id)
+        if previous is not None and not previous.done():
+            return
+        control_task = loop.create_task(method(task_id))
+        self._control_tasks[task_id] = control_task
+
+        def _control_done(done: asyncio.Task[Any]) -> None:
+            self._control_tasks.pop(task_id, None)
+            if done.cancelled():
+                return
+            exc = done.exception()
+            if exc is not None:
+                logger.warning("[RSI] Provider.%s failed task=%s: %s", mode, task_id, exc)
+
+        control_task.add_done_callback(_control_done)
 
     def _persist_results(self, task_id: str, result: Any) -> None:
         """引擎结果落盘（IterativeSingleHarnessResult 形状）→ task.json.config.results。
@@ -221,6 +333,11 @@ class RsiWorker:
                 "best_harness_refs_path",
                 "published_harness_refs_path",
                 "best_score",
+                "best_artifact_path",
+                "published_artifact_path",
+                "final_node_id",
+                "error_code",
+                "error_message",
             ):
                 value = getattr(result, key, None)
                 if value is not None:
