@@ -517,19 +517,14 @@ def create_permissions_config_repository(
     *,
     instance_id: str = "",
 ):
+    """permissions 仓库：仅 yaml 段（企业策略走 permissions_template 槽位，不再落 permissions_config 表）。"""
     from jiuwenswarm.gateway.config.permissions import (
-        DbBodySectionCodec,
         PermissionsConfigRepository,
         YamlSectionCodec,
     )
 
-    codec = (
-        DbBodySectionCodec()
-        if is_enterprise()
-        else YamlSectionCodec()
-    )
     return PermissionsConfigRepository(
-        store, codec, instance_id=instance_id
+        store, YamlSectionCodec(), instance_id=instance_id
     )
 
 

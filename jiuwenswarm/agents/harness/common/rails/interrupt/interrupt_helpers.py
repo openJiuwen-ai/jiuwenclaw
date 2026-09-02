@@ -82,6 +82,7 @@ def build_permission_rail(
     config: dict[str, Any],
     llm: Any = None,
     model_name: str | None = None,
+    permission_config: dict[str, Any] | None = None,
 ) -> Any | None:
     """Build openjiuwen PermissionInterruptRail for tool permission checks.
 
@@ -89,6 +90,8 @@ def build_permission_rail(
         config: Agent config dict containing permissions section
         llm: LLM instance for risk assessment
         model_name: Model name for risk assessment
+        permission_config: Optional Agent-level permissions body (enterprise template).
+            When omitted, falls back to effective/global permissions config.
 
     Returns:
         PermissionInterruptRail instance or None if disabled
@@ -109,12 +112,24 @@ def build_permission_rail(
     from jiuwenswarm.agents.harness.common.rails.permissions.config_loader import (
         get_base_permissions_config,
         get_effective_permissions_config,
+        merge_session_permissions_overlay,
     )
 
-    permission_config = get_effective_permissions_config()
+    if isinstance(permission_config, dict):
+        # Agent 模板 body：企业版仍叠加当前会话 overlay（若有）。
+        permission_config = (
+            merge_session_permissions_overlay(permission_config)
+            if is_enterprise()
+            else copy.deepcopy(permission_config)
+        )
+        config_source = "agent_template"
+    else:
+        permission_config = get_effective_permissions_config()
+        config_source = "effective"
     logger.info(
-        "[InterruptHelpers] build_permission_rail called: enabled=%s",
-        permission_config.get("enabled", False)
+        "[InterruptHelpers] build_permission_rail called: enabled=%s source=%s",
+        permission_config.get("enabled", False),
+        config_source,
     )
 
     if not permission_config.get("enabled", False):
@@ -398,6 +413,14 @@ def build_permission_rail(
             return ("reject", f"[PERMISSION_DENIED] 该工具未被授权 (owner_scopes: {owner_level})")
 
         def _get_permissions_snapshot():
+            # 企业版 Agent 模板 rail：工具校验跑在 DeepAgent supervisor Task
+            # （start_interaction 时 create_task），不会继承请求 Task 上的
+            # PERMISSIONS_AGENT_BASE；若这里再走 get_effective_permissions_config()
+            # 会回落 yaml（常为 enabled:false）并覆盖模板配置。
+            # 返回 None → 使用 _static_config（请求开头 _update_permission_rail
+            # 与 persist 的 update_config 会刷新它）。
+            if is_enterprise() and config_source == "agent_template":
+                return None
             return get_effective_permissions_config()
 
         host = ToolPermissionHost(

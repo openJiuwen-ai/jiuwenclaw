@@ -68,21 +68,6 @@ async def test_permissions_tool_and_rule_helpers() -> None:
 
 
 @pytest.mark.asyncio
-async def test_permissions_db_body_roundtrip() -> None:
-    store = InMemoryPersistentBackend()
-    repo = PermissionsConfigRepository(
-        store, DbBodySectionCodec(), instance_id=""
-    )
-    await repo.merge({"enabled": True})
-    document = await repo.get()
-    assert document is not None
-    assert document.body["enabled"] is True
-    rows = await store.list("permissions_config", limit=1)
-    assert rows
-    assert rows[0]["body"]["enabled"] is True
-
-
-@pytest.mark.asyncio
 async def test_logging_yaml_merge_levels() -> None:
     store = InMemoryPersistentBackend()
     repo = LoggingConfigRepository(store, YamlSectionCodec())
@@ -172,9 +157,10 @@ def test_factory_codec_selection(monkeypatch) -> None:
     monkeypatch.delenv("JIUWENSWARM_EDITION", raising=False)
     personal = create_permissions_config_repository(store)
     assert isinstance(personal._inner._codec, YamlSectionCodec)
+    # 企业版亦仅 yaml：实例级 permissions_config 表已移除，策略走 template 槽位
     monkeypatch.setenv("JIUWENSWARM_EDITION", "enterprise")
     enterprise = create_permissions_config_repository(store, instance_id="x")
-    assert isinstance(enterprise._inner._codec, DbBodySectionCodec)
+    assert isinstance(enterprise._inner._codec, YamlSectionCodec)
 
     monkeypatch.delenv("JIUWENSWARM_EDITION", raising=False)
     log_personal = create_logging_config_repository(store)

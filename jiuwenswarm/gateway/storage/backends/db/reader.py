@@ -18,7 +18,6 @@ from jiuwenswarm.common.utils import logger
 from jiuwenswarm.infrastructure.module_importer import import_manager_config_receiver_module
 
 _SAFE_IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-PERMISSIONS_CONFIG_TABLE = "permissions_config"
 
 # foundation ``list_records`` 默认 limit=100，此处取全部配置行。
 _LIST_LIMIT = 100_000
@@ -136,49 +135,9 @@ async def list_records(
         raise
 
 
-async def upsert_permissions_config(
-    body: dict[str, Any],
-    *,
-    source: str = "runtime_persist",
-) -> None:
-    """单例行 upsert ``permissions_config``（每网关独立 DB，无行级实例隔离）。"""
-    now = datetime.now(timezone.utc).isoformat()
-    body_json = json.dumps(body, ensure_ascii=False)
-
-    handler = await _handler()
-    rows = await handler.list_records(PERMISSIONS_CONFIG_TABLE, limit=1, offset=0)
-    if rows:
-        existing = row_to_dict(rows[0])
-        row_id = existing.get("id")
-        revision = int(existing.get("revision") or 1) + 1
-        await handler.update(
-            PERMISSIONS_CONFIG_TABLE,
-            {"id": row_id},
-            {
-                "body": body_json,
-                "source": source,
-                "revision": revision,
-                "updated_at": now,
-            },
-        )
-        return
-    await handler.create(
-        PERMISSIONS_CONFIG_TABLE,
-        {
-            "body": body_json,
-            "source": source,
-            "revision": 1,
-            "created_at": now,
-            "updated_at": now,
-        },
-    )
-
-
 __all__ = [
-    "PERMISSIONS_CONFIG_TABLE",
     "is_safe_ident",
     "list_records",
     "row_to_dict",
     "sort_by_order",
-    "upsert_permissions_config",
 ]
