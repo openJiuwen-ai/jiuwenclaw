@@ -2966,8 +2966,10 @@
       "message": "卸载后该插件将变为不可用状态，可以重新安装。"
     },
     "empty": {
-      "myMcp": "还没有已安装的MCP",
-      "myPlugin": "还没有已安装的插件",
+      "myMcp": "暂无我的 MCP",
+      "myPlugin": "暂无我的插件",
+      "mcp": "暂无可用的 MCP",
+      "plugin": "暂无可用的插件",
       "searchNoResult": "没有找到匹配的结果",
       "loadingPlugin": "加载插件中...",
       "loadingMcp": "加载MCP中...",
