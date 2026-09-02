@@ -585,6 +585,7 @@
   "chat": {
     "placeholder": "需要帮你做些什么？输入“/”快速引用技能及指令",
     "placeholderCompacting": "压缩进行中，暂时无法发送消息",
+    "placeholderAwaitingApproval": "请先处理上方待确认项",
     "placeholderProcessing": "处理中，输入新指令可中断...",
     "placeholderProcessingQueue": "处理中，输入新指令将加入等待队列...",
     "placeholderTeamMode": "需要帮你做些什么？输入“/”快速引用技能",
