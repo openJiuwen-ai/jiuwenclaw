@@ -819,8 +819,8 @@ export function pendingInputsBannerText(count: number): string {
 }
 
 /** Main-chat hint when human nodes are waiting for reply. */
-export function pendingHumanViewHint(): string {
-  return "h to view human inputs";
+export function pendingHumanViewHint(key: string | null = "alt+h"): string {
+  return key ? `${key} to view human inputs` : "use /swarmflows to view human inputs";
 }
 
 /** Count agents in a workflow run that are currently waiting for a human reply. */
