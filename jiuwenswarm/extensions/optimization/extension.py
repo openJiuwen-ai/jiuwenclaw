@@ -135,6 +135,7 @@ class PromptOptimizerExtension(BaseExtension):
         config = load_optimization_config()
 
         def load() -> dict[str, Any]:
+            task = self._active_task
             return {
                 "success": True,
                 "enabled": config.enabled,
@@ -143,7 +144,7 @@ class PromptOptimizerExtension(BaseExtension):
                 "memory_enabled": config.memory_enabled,
                 "memory_dir": str(config.resolved_memory_dir),
                 "run_log": read_run_log(default_run_log_path(config)),
-                "running": (task := self._active_task) is not None and not task.done(),
+                "running": task is not None and not task.done(),
             }
 
         return await asyncio.to_thread(load)
