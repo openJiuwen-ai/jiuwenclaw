@@ -63,6 +63,38 @@ def has_interrupt_resume_payload(params: Any) -> bool:
     return isinstance(answers, list) and bool(answers)
 
 
+def _has_active_skill_overlay() -> bool:
+    """当前 Skill 授权上下文是否存在 ACTIVE Grant（owner_scopes allow 回落判定）。
+
+    判定失败按存在处理（返回 True，强制回落 engine），不放宽权限。
+    """
+    try:
+        from jiuwenswarm.agents.harness.common.rails.permissions.config_loader import (
+            get_effective_permissions_config,
+        )
+        from openjiuwen.harness.security.skill_authorization import (
+            get_skill_authorization_context,
+            get_skill_grant_store,
+            is_skill_authorization_enabled,
+        )
+
+        if not is_skill_authorization_enabled(get_effective_permissions_config()):
+            return False
+        authz = get_skill_authorization_context()
+        if authz is None or not authz.session_id or not authz.agent_scope_id:
+            return False
+        return (
+            get_skill_grant_store().get_active(authz.session_id, authz.agent_scope_id)
+            is not None
+        )
+    except Exception:  # noqa: BLE001 — 不确定时不允许绕过引擎
+        logger.warning(
+            "[InterruptHelpers] active Skill lookup failed; owner allow falls through to engine",
+            exc_info=True,
+        )
+        return True
+
+
 def is_interrupt_resume_payload(params: Any) -> bool:
     if not has_interrupt_resume_payload(params):
         return False
@@ -409,6 +441,9 @@ def build_permission_rail(
             if owner_level is None:
                 return None
             if owner_level == "allow":
+                # 有 ACTIVE Skill overlay 时强制走 engine，避免 owner allow 绕过 overlay 收紧。
+                if _has_active_skill_overlay():
+                    return None
                 return ("approve",)
             return ("reject", f"[PERMISSION_DENIED] 该工具未被授权 (owner_scopes: {owner_level})")
 
@@ -432,8 +467,24 @@ def build_permission_rail(
             permission_scene_hook=_permission_scene_hook,
         )
 
-        # skill_turbo 启用时使用子类，定制 skill_acceleration_exec 审批消息
+        # Skill 动态授权协调：默认权限 Rail 叠加 gate-handled 短路
+        # （skill_tool/skill_complete 由 SkillAuthorizationRail 专属裁决，避免重复弹卡）。
         rail_cls = PermissionInterruptRail
+        try:
+            from jiuwenswarm.agents.harness.common.rails.permissions.skill_authorization_permission_rail import (
+                SkillAuthorizationPermissionRail,
+            )
+
+            rail_cls = SkillAuthorizationPermissionRail
+        except Exception:
+            logger.debug(
+                "[InterruptHelpers] SkillAuthorizationPermissionRail switch failed, "
+                "fallback to PermissionInterruptRail",
+                exc_info=True,
+            )
+
+        # skill_turbo 启用时使用子类，定制 skill_acceleration_exec 审批消息
+        # （SkillTurboPermissionRail 继承 SkillAuthorizationPermissionRail，两种定制叠加）
         try:
             from jiuwenswarm.common.config import get_config as _get_cfg
             _cfg = _get_cfg()
@@ -668,6 +719,16 @@ def convert_interactions_to_ask_user_question(state_outputs: list) -> dict | Non
             "questions": [question_data],
             "source": source,
         }
+        # Skill 动态授权审批卡：随事件顶层透传给前端结构化渲染（契约键冻结）。
+        payload_schema = _read_value_field(value_obj, "payload_schema", None)
+        if isinstance(payload_schema, dict):
+            from openjiuwen.harness.security.skill_authorization import (
+                SKILL_APPROVAL_CARD_EXTENSION_KEY,
+            )
+
+            card = payload_schema.get(SKILL_APPROVAL_CARD_EXTENSION_KEY)
+            if isinstance(card, dict):
+                payload[SKILL_APPROVAL_CARD_EXTENSION_KEY] = card
         if (
             source == "confirm_interrupt"
             and tool_name == "exit_plan_mode"

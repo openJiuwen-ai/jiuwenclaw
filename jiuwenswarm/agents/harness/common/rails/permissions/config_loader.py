@@ -327,6 +327,7 @@ def apply_permissions_config_payload(payload: dict[str, Any] | None) -> dict[str
     实例级 ``permissions_config`` 表已移除；payload 仅用于显式注入 body 或回落 yaml。
     不清理各会话 runtime overlay。
     """
+    old_effective = copy.deepcopy(_cached_permissions) if _cached_permissions is not None else None
     clear_permissions_config_cache()
 
     if not payload or payload.get("op") == "delete":
@@ -338,6 +339,19 @@ def apply_permissions_config_payload(payload: dict[str, Any] | None) -> dict[str
     else:
         effective = _load_permissions_from_yaml()
         _set_cache(effective, "yaml")
+
+    # Skill 动态授权联动：功能开关运行中关闭时清空全部 Grant；普通热更新不清。
+    try:
+        from openjiuwen.harness.security.skill_authorization import (
+            sync_grants_on_permissions_reload,
+        )
+
+        sync_grants_on_permissions_reload(old_effective, effective)
+    except Exception:  # noqa: BLE001 — Grant 同步失败不掩盖配置热更新结果
+        logger.warning(
+            "[permissions_config] skill_authorization grant sync failed",
+            exc_info=True,
+        )
 
     return copy.deepcopy(effective)
 
@@ -386,6 +400,7 @@ def persist_permissions_mutate(
     else:
         permissions = copy.deepcopy(permissions)
 
+    old_permissions = copy.deepcopy(permissions)
     mutate_fn(permissions)
 
     if is_enterprise():
@@ -397,6 +412,21 @@ def persist_permissions_mutate(
         )
     else:
         _persist_permissions_to_yaml(permissions)
+
+    # Skill 动态授权联动：功能开关运行中关闭时清空全部 Grant；普通热更新不清。
+    # 所有 base 写路径（permissions_config_rpc / 权限 Rail 永久记住）都汇聚于此，
+    # 只有这里能同时拿到变更前后的配置快照。
+    try:
+        from openjiuwen.harness.security.skill_authorization import (
+            sync_grants_on_permissions_reload,
+        )
+
+        sync_grants_on_permissions_reload(old_permissions, permissions)
+    except Exception:  # noqa: BLE001 — Grant 同步失败不掩盖配置变更结果
+        logger.warning(
+            "[permissions_config] skill_authorization grant sync failed",
+            exc_info=True,
+        )
 
     return permissions
 
