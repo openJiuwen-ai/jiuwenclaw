@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib.util
+import inspect
 import json
 import sys
 from pathlib import Path
@@ -465,6 +466,68 @@ def test_chat_completions_sse(app_with_mock):
     assert "event: chat.final" in text
     dispatch.assert_called()
     assert dispatch.await_args.kwargs["method"] == "chat.send"
+
+
+def test_chat_completions_sse_stays_open_after_dispatch_returns(app_with_mock):
+    """Enterprise HTTP chat.send: dispatch returns when the Agent stream is only
+    started. The SSE outbound must stay registered so later chat.delta/final
+    still reach the browser (old done-callback closed it → accepted then EOF).
+    """
+    web_http_app = sys.modules["jw_web_http_app_under_test"]
+
+    class _Channel:
+        async def unregister_request_outbound(self, outbound):
+            close = getattr(outbound, "close", None)
+            if not callable(close):
+                return
+            result = close()
+            if inspect.isawaitable(result):
+                await result
+
+    _, dispatch = app_with_mock
+    app = web_http_app.create_web_http_app(_Channel())
+
+    async def _disp(*args, **kwargs):
+        rid = kwargs.get("request_id") or "r"
+        peer = outbound_mod.HttpSseOutbound(session_id="sess_1")
+        peer.accept_frame({
+            "type": "res",
+            "id": rid,
+            "ok": True,
+            "payload": {"accepted": True},
+        })
+
+        async def _emit_after_dispatch_returns() -> None:
+            await asyncio.sleep(0.05)
+            if peer.closed:
+                return
+            peer.accept_frame({
+                "type": "event",
+                "event": "chat.delta",
+                "payload": {"content": "hi"},
+            })
+            peer.accept_frame({
+                "type": "event",
+                "event": "chat.final",
+                "payload": {"content": "hi"},
+            })
+
+        asyncio.create_task(_emit_after_dispatch_returns())
+        return peer, rid, "sess_1"
+
+    dispatch.side_effect = _disp
+    client = TestClient(app)
+    with client.stream(
+        "POST",
+        "/api/v1/chat/completions",
+        json={"session_id": "sess_1", "query": "hello"},
+        headers={"Accept": "text/event-stream", "X-Request-Id": "r"},
+    ) as resp:
+        assert resp.status_code == 200
+        text = "".join(resp.iter_text())
+    assert "event: web.response" in text
+    assert "event: chat.delta" in text
+    assert "event: chat.final" in text
 
 
 def test_chat_send_compat_path(app_with_mock):

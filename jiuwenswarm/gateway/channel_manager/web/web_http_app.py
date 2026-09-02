@@ -354,6 +354,31 @@ def _sse_pack(request_id: str, event: str, data: Any) -> str:
     return f"id: {request_id}\nevent: {event}\ndata: {payload}\n\n"
 
 
+def _schedule_abandoned_outbound_cleanup(
+    channel: Any,
+    task: "asyncio.Future[Any]",
+) -> None:
+    """PG 回退后 dispatch 仍在后台跑时，完成后注销其 outbound，避免注册表泄漏。
+
+    只在真正放弃接管 outbound 时调用。chat.send / history.get 的 dispatch 会在
+    后台流启动后立刻返回；若在 await 前挂 done-callback，callback 会把仍在
+    投递 SSE 的 outbound 关掉（秒回 accepted 后立即 EOF）。
+    """
+
+    def _cleanup(done: "asyncio.Future[Any]") -> None:
+        if done.cancelled() or done.exception() is not None:
+            return
+        try:
+            abandoned = done.result()[0]
+        except Exception:  # noqa: BLE001
+            return
+        if abandoned is None:
+            return
+        asyncio.ensure_future(channel.unregister_request_outbound(abandoned))
+
+    task.add_done_callback(_cleanup)
+
+
 def create_web_http_app(channel: Any) -> FastAPI:
     """Build FastAPI app bound to an existing ``WebChannel`` instance."""
     app = FastAPI(
@@ -596,7 +621,6 @@ async def _history_json(
     """Collect history.message SSE frames into a REST envelope."""
     outbound = None
     req_id = request.headers.get("x-request-id") or uuid.uuid4().hex
-    outbound_adopted = False
     try:
         dispatch_task = asyncio.ensure_future(dispatch_http_request(
             channel,
@@ -608,33 +632,13 @@ async def _history_json(
             use_sse=True,
             client_host=_request_client_host(request),
         ))
-
-        def _cleanup_abandoned(task: "asyncio.Future[Any]") -> None:
-            # 派发超时后 PG 回退提前返回：dispatch_task 仍在后台跑（可能正在拉起
-            # 会话 pod），完成后注销其 outbound，避免常驻注册表泄漏。
-            # 正常路径（outbound 已被本协程接管）由 finally 统一注销，这里跳过，
-            # 否则会把仍在投递帧的 outbound 关掉。
-            if outbound_adopted:
-                return
-            if task.cancelled() or task.exception() is not None:
-                return
-            try:
-                abandoned = task.result()[0]
-            except Exception:  # noqa: BLE001
-                return
-            if abandoned is None:
-                return
-            asyncio.ensure_future(
-                channel.unregister_request_outbound(abandoned),
-            )
-
-        dispatch_task.add_done_callback(_cleanup_abandoned)
         done, _ = await asyncio.wait(
             {dispatch_task}, timeout=_HISTORY_FIRST_FRAME_TIMEOUT,
         )
         if dispatch_task not in done:
             page = await _history_page_from_pg(request, params)
             if page is not None:
+                _schedule_abandoned_outbound_cleanup(channel, dispatch_task)
                 return JSONResponse(
                     {
                         "request_id": req_id,
@@ -645,7 +649,6 @@ async def _history_json(
                     headers=_response_headers(req_id, "history.get"),
                 )
         outbound, rid, _sid = await dispatch_task
-        outbound_adopted = True
         messages: list[Any] = []
         total_pages: Any = None
         page_idx: Any = params.get("page_idx", 1)
@@ -857,7 +860,6 @@ async def _stream(
 
     async def gen() -> AsyncIterator[str]:
         outbound = None
-        outbound_adopted = False
         try:
             dispatch_task = asyncio.ensure_future(dispatch_http_request(
                 channel,
@@ -870,26 +872,6 @@ async def _stream(
                 client_host=_request_client_host(request),
             ))
 
-            def _cleanup_abandoned(task: "asyncio.Future[Any]") -> None:
-                # PG 回退后派发任务仍在后台跑（可能正在拉起会话 pod）：
-                # 完成后把它的 outbound 注销掉，避免常驻注册表泄漏。
-                # 正常路径（outbound 已被本协程接管）由 finally 统一注销，这里跳过。
-                if outbound_adopted:
-                    return
-                if task.cancelled() or task.exception() is not None:
-                    return
-                try:
-                    abandoned = task.result()[0]
-                except Exception:  # noqa: BLE001
-                    return
-                if abandoned is None:
-                    return
-                asyncio.ensure_future(
-                    channel.unregister_request_outbound(abandoned),
-                )
-
-            dispatch_task.add_done_callback(_cleanup_abandoned)
-
             rid = req_id
             pending_first: dict[str, Any] | None = None
             if method == "history.get":
@@ -901,16 +883,14 @@ async def _stream(
                     # remote(PG) 模式下直接回退 PG 合成历史页，避免客户端无限挂起。
                     page = await _history_page_from_pg(request, params)
                     if page is not None:
+                        _schedule_abandoned_outbound_cleanup(channel, dispatch_task)
                         for sse in _history_page_sse_frames(rid, page):
                             yield sse
                         return
                 # PG 不可用：保持原行为，继续等派发完成
-                if not outbound_adopted:
-                    outbound, rid, _sid = await dispatch_task
-                    outbound_adopted = True
+                outbound, rid, _sid = await dispatch_task
             else:
                 outbound, rid, _sid = await dispatch_task
-                outbound_adopted = True
             frame_iter = outbound.iter_sse_frames(
                 rid,
                 timeout=resolve_web_http_sse_timeout(),
