@@ -1531,7 +1531,7 @@ class AgentWebSocketServer:
             # Gateway 进程退出/端口关闭时，必须先取消各 session 内流式生产者（SessionManager）
             # 并中止 DeepAgent 内层循环；否则仅等待 _handle_message 任务结束会一直阻塞到任务自然完成。
             try:
-                await self._agent_manager.cancel_all_inflight_work(
+                await self._execution_runtime().cancel_all_inflight_work(
                     reason=f"[gateway ws closed {remote}] ",
                     exclude_session_ids=(
                         self._heartbeat_runtime.execution.active_session_ids()
@@ -2573,11 +2573,20 @@ class AgentWebSocketServer:
                 sequence=0,
             )
 
-        for event in await runtime.invoke(
-            request,
-            trigger_hook=False,
-            on_control_event=_send_control_event,
-        ):
+        if request.req_method == ReqMethod.CHAT_ANSWER:
+            events = await runtime.answer_interaction(
+                request,
+                trigger_hook=False,
+                on_control_event=_send_control_event,
+            )
+        else:
+            events = await runtime.invoke(
+                request,
+                trigger_hook=False,
+                on_control_event=_send_control_event,
+            )
+
+        for event in events:
             await self._send_runtime_event(
                 ws,
                 event,
@@ -4321,6 +4330,10 @@ class AgentWebSocketServer:
                             await self._execution_runtime().cleanup_session(
                                 channel_id=channel_id or "",
                                 session_id=target,
+                                # Product deletion is transactional beyond
+                                # Runtime draining.  Preserve plan state until
+                                # the later delete commit succeeds.
+                                reset_plan_state=False,
                             )
 
                             from jiuwenswarm.server.runtime.session.kv_cache.kv_cache_product_hooks import (

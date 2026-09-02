@@ -228,6 +228,19 @@ class PortableRuntime:
             )
         ]
 
+    async def answer_interaction(
+        self,
+        request: AgentRequest,
+        *,
+        trigger_hook: bool = True,
+        on_control_event: Any = None,
+    ) -> list[SimpleNamespace]:
+        return await self.invoke(
+            request,
+            trigger_hook=trigger_hook,
+            on_control_event=on_control_event,
+        )
+
     async def cancel_request(
         self,
         request: AgentRequest,
@@ -237,6 +250,17 @@ class PortableRuntime:
         del allow_create
         assert self.agent_manager.agent is not None
         return await self.agent_manager.agent.process_message(request)
+
+    async def cancel_all_inflight_work(
+        self,
+        reason: str,
+        *,
+        exclude_session_ids: set[str] | tuple[str, ...] | None = None,
+    ) -> None:
+        await self.agent_manager.cancel_all_inflight_work(
+            reason,
+            exclude_session_ids=exclude_session_ids,
+        )
 
     async def cleanup_session(self, *, channel_id: str, session_id: str) -> bool:
         return await self.agent_manager.cleanup_session_runtime(
@@ -773,8 +797,8 @@ async def test_physical_disconnect_keeps_ack_only_and_cleanup_order(
         trace.append("capabilities.clear")
 
     async def cancel_all_inflight_work(
-        *,
         reason: str,
+        *,
         exclude_session_ids: tuple[str, ...],
     ) -> None:
         assert "gateway ws closed" in reason

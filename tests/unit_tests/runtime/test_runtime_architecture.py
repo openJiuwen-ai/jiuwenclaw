@@ -192,7 +192,11 @@ def test_agentserver_injects_runtime_manager_into_teammate_daemon() -> None:
 def test_agentserver_session_lifecycle_uses_runtime_public_api() -> None:
     source = PROJECT_ROOT / "jiuwenswarm" / "server" / "agent_ws_server.py"
     tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
-    forbidden = {"create_session", "cleanup_session_runtime"}
+    forbidden = {
+        "cancel_all_inflight_work",
+        "cleanup_session_runtime",
+        "create_session",
+    }
     violations: list[str] = []
 
     for node in ast.walk(tree):

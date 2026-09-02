@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING, Any
 from jiuwenswarm.server.runtime.agent_manager import AgentManager
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Awaitable, Callable
+    from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
 
     from jiuwenswarm.common.schema.agent import AgentRequest, AgentResponse
     from jiuwenswarm.runtime.events import RuntimeEvent
@@ -380,6 +380,27 @@ class AgentRuntime:
             allow_create=allow_create,
         )
 
+    async def cancel_all_inflight_work(
+        self,
+        reason: str = "[runtime cancel all] ",
+        *,
+        exclude_session_ids: Iterable[str] | None = None,
+    ) -> None:
+        """Cancel all existing Runtime work for a lost service host.
+
+        A Gateway-to-AgentServer WebSocket represents the remote service host,
+        not an individual end-user channel.  Preserve the established global
+        disconnect semantics while keeping AgentManager ownership behind the
+        Runtime public boundary.  This cleanup path intentionally does not
+        start Runtime dependencies.
+        """
+        if self._closed:
+            raise RuntimeStateError("runtime is already closed")
+        await self._agent_manager.cancel_all_inflight_work(
+            reason,
+            exclude_session_ids=exclude_session_ids,
+        )
+
     async def invoke(
         self,
         request: AgentRequest,
@@ -568,13 +589,20 @@ class AgentRuntime:
     async def answer_interaction(
         self,
         request: AgentRequest,
+        *,
+        trigger_hook: bool = True,
+        on_control_event: Callable[[RuntimeEvent], Awaitable[None]] | None = None,
     ) -> list[RuntimeEvent]:
         """Answer a paused Runtime interaction through the existing Agent."""
         from jiuwenswarm.common.schema.message import ReqMethod
 
         if request.req_method != ReqMethod.CHAT_ANSWER:
             raise ValueError("interaction answer must use ReqMethod.CHAT_ANSWER")
-        return await self.invoke(request)
+        return await self.invoke(
+            request,
+            trigger_hook=trigger_hook,
+            on_control_event=on_control_event,
+        )
 
     async def stream(
         self,
@@ -807,13 +835,25 @@ class AgentRuntime:
                 metadata=request.metadata,
             )
 
-    async def cleanup_session(self, *, channel_id: str, session_id: str) -> bool:
+    async def cleanup_session(
+        self,
+        *,
+        channel_id: str,
+        session_id: str,
+        reset_plan_state: bool = True,
+    ) -> bool:
         """Release in-memory resources owned by one Runtime session.
 
         Session cleanup only touches the manager that already exists from
         ``__init__``.  Keep it available while the first ``start`` is still in
         progress so an AgentServer disconnect never has to bypass this public
         API or start new Runtime dependencies merely to release stale state.
+
+        ``reset_plan_state=False`` supports the existing transactional
+        ``session.delete`` flow: Runtime work is drained first, while plan
+        state remains available for rollback until all downstream deletion
+        steps have committed.  Ordinary disconnect and process-CLI cleanup use
+        the default and release both resources together.
         """
         if self._closed:
             raise RuntimeStateError("runtime is already closed")
@@ -821,7 +861,8 @@ class AgentRuntime:
             channel_id=channel_id,
             session_id=session_id,
         )
-        self._plan_controller.reset_session(session_id)
+        if reset_plan_state:
+            self._plan_controller.reset_session(session_id)
         return cleaned
 
     async def close(self) -> None:

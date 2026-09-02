@@ -3105,6 +3105,9 @@ async def test_handle_session_delete_drains_runtime_before_kvc_and_checkpoint_cl
         return None
 
     server.set_agent_manager_for_test(RuntimeManager())
+    plan_controller = server._execution_runtime().plan_controller
+    plan_controller.active_sessions.add("sess-agent-drain")
+    plan_controller.exited_sessions.add("sess-agent-drain")
     monkeypatch.setattr(
         agent_ws_server_module,
         "encode_agent_response_for_wire",
@@ -3136,21 +3139,29 @@ async def test_handle_session_delete_drains_runtime_before_kvc_and_checkpoint_cl
         params={"session_id": "sess-agent-drain"},
     )
 
-    await server.handle_session_delete_for_test(fake_ws, request, asyncio.Lock())
+    try:
+        await server.handle_session_delete_for_test(fake_ws, request, asyncio.Lock())
 
-    assert events == [
-        ("runtime", "bench-channel", "sess-agent-drain"),
-        ("evict", "bench-channel", "sess-agent-drain"),
-        ("release", None, "sess-agent-drain"),
-    ]
-    assert not session_dir.exists()
-    assert fake_ws.sent[0]["ok"] is True
+        assert events == [
+            ("runtime", "bench-channel", "sess-agent-drain"),
+            ("evict", "bench-channel", "sess-agent-drain"),
+            ("release", None, "sess-agent-drain"),
+        ]
+        assert "sess-agent-drain" not in plan_controller.active_sessions
+        assert "sess-agent-drain" not in plan_controller.exited_sessions
+        assert not session_dir.exists()
+        assert fake_ws.sent[0]["ok"] is True
+    finally:
+        plan_controller.active_sessions.discard("sess-agent-drain")
+        plan_controller.exited_sessions.discard("sess-agent-drain")
 
 
 @pytest.mark.asyncio
-async def test_handle_session_delete_keeps_state_when_runtime_drain_fails(
+@pytest.mark.parametrize("failure_stage", ["runtime", "evict", "release"])
+async def test_handle_session_delete_keeps_state_when_cleanup_fails(
     monkeypatch,
     tmp_path,
+    failure_stage,
 ):
     server = AgentWebSocketServerHarness()
     fake_ws = FakeWebSocket()
@@ -3161,19 +3172,31 @@ async def test_handle_session_delete_keeps_state_when_runtime_drain_fails(
     release_calls = []
 
     class BusyRuntimeManager:
+        def get_agent_nowait(self, *args, **kwargs):
+            return None
+
         async def cleanup_session_runtime(self, *, channel_id="", session_id: str):
-            raise RuntimeError("session runtime is still active")
+            if failure_stage == "runtime":
+                raise RuntimeError("session runtime is still active")
+            return True
 
     async def fake_evict_plan_session(**kwargs):
         evict_calls.append(kwargs)
+        if failure_stage == "evict":
+            raise RuntimeError("plan eviction failed")
 
     async def fake_release(session_id: str):
         release_calls.append(session_id)
+        if failure_stage == "release":
+            raise RuntimeError("runner release failed")
 
     async def fake_ensure_persistent_checkpointer():
         return None
 
     server.set_agent_manager_for_test(BusyRuntimeManager())
+    plan_controller = server._execution_runtime().plan_controller
+    plan_controller.active_sessions.add("sess-agent-busy")
+    plan_controller.exited_sessions.add("sess-agent-busy")
     monkeypatch.setattr(
         agent_ws_server_module,
         "encode_agent_response_for_wire",
@@ -3205,10 +3228,17 @@ async def test_handle_session_delete_keeps_state_when_runtime_drain_fails(
         params={"session_id": "sess-agent-busy"},
     )
 
-    await server.handle_session_delete_for_test(fake_ws, request, asyncio.Lock())
+    try:
+        await server.handle_session_delete_for_test(fake_ws, request, asyncio.Lock())
 
-    assert evict_calls == []
-    assert release_calls == []
+        assert "sess-agent-busy" in plan_controller.active_sessions
+        assert "sess-agent-busy" in plan_controller.exited_sessions
+    finally:
+        plan_controller.active_sessions.discard("sess-agent-busy")
+        plan_controller.exited_sessions.discard("sess-agent-busy")
+
+    assert bool(evict_calls) is (failure_stage in {"evict", "release"})
+    assert bool(release_calls) is (failure_stage == "release")
     assert session_dir.exists()
     assert trajectory_session_accepts_records("sess-agent-busy") is True
     assert fake_ws.sent == [
