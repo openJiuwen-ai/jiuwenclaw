@@ -25,10 +25,24 @@ API_PREFIX = "/api/v1"
 PORT_SCAN_RANGE = 10
 PORT_SCAN_STEP = 1000
 
-#: 企业版北向允许的 Skill 方法白名单（与 Gateway ``invoke.py`` 的
-#: ``_ENTERPRISE_SKILL_ALLOWED`` 保持一致）。企业版暂不开放 skills.toggle /
-#: install / uninstall 等写操作，仅只读列表/详情开放。
-_ENTERPRISE_SKILL_ALLOWED = frozenset({"skills.list", "skills.get", "skills.enterprise.list"})
+#: 企业版北向允许的 Skill 方法白名单（必须与 Gateway ``invoke.py`` 的
+#: ``_ENTERPRISE_SKILL_ALLOWED`` 保持一致）。企业版经 SPI 开放只读列表/详情
+#: 与用户自装/卸载/更新写操作；技能卸载走 ``skills.enterprise.uninstall``。
+_ENTERPRISE_SKILL_ALLOWED = frozenset({
+    "skills.list",
+    "skills.get",
+    "skills.toggle",
+    "skills.source.providers",
+    "skills.source.search",
+    "skills.source.install",
+    "skills.updates.check",
+    "skills.update",
+    "skills.enterprise.list",
+    "skills.enterprise.install",
+    "skills.enterprise.uninstall",
+    "skills.enterprise.source.providers",
+    "skills.enterprise.source.search",
+})
 
 
 def _is_enterprise_skill_forbidden(method: str) -> bool:

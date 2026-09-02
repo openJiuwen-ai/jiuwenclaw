@@ -1910,6 +1910,7 @@
       "install": "Install",
       "replaceConfirm": "A skill named \"{{name}}\" is already installed. Continuing will uninstall the current version and replace it with the selected one. Continue?",
       "installing": "Installing…",
+      "updating": "Updating…",
       "updatedAt": "Updated {{date}}",
       "configTitle": "Configure",
       "configDescription": "Enter the CLI Token from the ClawHub platform to access the ClawHub skill library.",

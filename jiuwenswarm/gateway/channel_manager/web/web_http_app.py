@@ -1027,9 +1027,11 @@ async def _stream(
 def _coerce_query_value(raw: str) -> Any:
     text = str(raw).strip()
     lowered = text.lower()
-    if lowered in {"true", "1", "yes"}:
+    # 布尔只认显式字面量；``1``/``0`` 不归入布尔——它们更可能是页码/数量等数值
+    # （如 ``page=1``），交给下面 isdigit() 转 int，避免被截胡成 True/False。
+    if lowered in {"true", "yes"}:
         return True
-    if lowered in {"false", "0", "no"}:
+    if lowered in {"false", "no"}:
         return False
     try:
         if text.isdigit() or (text.startswith("-") and text[1:].isdigit()):
