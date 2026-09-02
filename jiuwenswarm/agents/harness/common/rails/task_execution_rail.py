@@ -35,6 +35,9 @@ from jiuwenswarm.common.utils import logger
 _ACTIVE_TASK_ID: ContextVar[str | None] = ContextVar(
     "active_task_id", default=None
 )
+SKILL_TURBO_OUTER_TODO_ACTIVE_EXTRA_KEY = (
+    "_jiuwenswarm_skill_turbo_outer_todo_active"
+)
 
 
 def get_current_task_id() -> str | None:
@@ -970,6 +973,13 @@ class TaskExecutionRail(DeepAgentRail):
                 self._tool_start_times[tool_call_id] = time.time()
 
         self._bind_context_to_in_progress_task()
+        if tool_name == "skill_acceleration_exec":
+            # Rail callbacks and the tool body may run in copied Contexts.
+            # Export only display ownership; this does not affect tool
+            # registration, selection, or execution.
+            ctx.extra[SKILL_TURBO_OUTER_TODO_ACTIVE_EXTRA_KEY] = (
+                _ACTIVE_TASK_ID.get() is not None
+            )
 
     async def after_tool_call(self, ctx: AgentCallbackContext) -> None:
         if not isinstance(ctx.inputs, ToolCallInputs):
