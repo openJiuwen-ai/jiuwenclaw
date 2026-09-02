@@ -1240,11 +1240,11 @@ def _handle_one_request(  # pylint: disable=huawei-too-many-arguments
                     conn, header, restricted_token, workspace, stdin_bytes,
                 )
             elif req_type == "write_file":
-                _handle_write_file_request(conn, header, conn)
+                _handle_write_file_request(conn, header, conn, workspace)
             elif req_type == "read_file":
-                _handle_read_file_request(conn, header)
+                _handle_read_file_request(conn, header, workspace)
             elif req_type == "list_dir":
-                _handle_list_dir_request(conn, header)
+                _handle_list_dir_request(conn, header, workspace)
             else:
                 _send_error_response(conn, f"unknown request type: {req_type!r}")
         finally:
@@ -1732,6 +1732,9 @@ def _handle_exec_request(stream, header, restricted_token, workspace, stdin_byte
         # 逃逸 Job (close_job 杀不到). 完全消除需改 CREATE_SUSPENDED+assign+resume,
         # 改动 child 起动时序影响面大, 暂不取; 当前实现已实质性改善 (旧版完全不
         # 杀孙进程).
+        # 评审跟踪项 (#6): AI 评审指出竞态窗口, 已确认与上方注释同一已知取舍;
+        # 未来重构 child 启动时序时统一改三步 (SUSPENDED→assign→ResumeThread),
+        # 与第一跳 runner (第 498 行) 启动方式对齐.
         if exec_job_handle:
             try:
                 win_job.assign_process_by_pid(exec_job_handle, pid)
@@ -1922,12 +1925,31 @@ def _handle_exec_request(stream, header, restricted_token, workspace, stdin_byte
             exec_job_handle = 0
 
 
-def _handle_write_file_request(stream, header, stdin) -> None:
+def _resolve_within_workspace(path: str, workspace: str) -> str:
+    """校验 path 规范化后位于 workspace 根目录内, 拒绝路径穿越.
+
+    返回规范化后的绝对路径 (供后续 open/os.walk 使用). workspace 自身也做
+    realpath 规范化以避免符号链接/相对路径绕过前缀校验.
+    """
+    if not path:
+        raise PermissionError("empty path")
+    ws_real = os.path.realpath(workspace)
+    # real_path 解析符号链接 + .. + . → 绝对路径, 与 ws_real 同基准比较.
+    real_path = os.path.realpath(path)
+    # realpath("D:/a/b") 可能丢尾分隔符; 用 os.path.commonpath 做目录前缀比较
+    # 比 startswith 更准 (避免 "D:/a-evil" 误匹配 "D:/a").
+    if os.path.commonpath([ws_real, real_path]) != ws_real:
+        raise PermissionError(f"path outside workspace: {path}")
+    return real_path
+
+
+def _handle_write_file_request(stream, header, stdin, workspace) -> None:
     path = header.get("path", "")
     size = int(header.get("content_size", 0))
     mkdir_parents = bool(header.get("mkdir_parents", True))
     mode = header.get("mode")
     try:
+        path = _resolve_within_workspace(path, workspace)
         content = recv_frame(stdin, MAX_FILE_BYTES) if size > 0 else b""
         if size and len(content) != size:
             raise ConnectionError(
@@ -1949,9 +1971,10 @@ def _handle_write_file_request(stream, header, stdin) -> None:
         _send_error_response(stream, str(exc))
 
 
-def _handle_read_file_request(stream, header) -> None:
+def _handle_read_file_request(stream, header, workspace) -> None:
     path = header.get("path", "")
     try:
+        path = _resolve_within_workspace(path, workspace)
         with open(path, "rb") as fh:
             content = fh.read(MAX_FILE_BYTES)
         _send_response(stream, {
@@ -1967,12 +1990,13 @@ def _handle_read_file_request(stream, header) -> None:
         _send_error_response(stream, str(exc))
 
 
-def _handle_list_dir_request(stream, header) -> None:
+def _handle_list_dir_request(stream, header, workspace) -> None:
     path = header.get("path", "")
     recursive = bool(header.get("recursive", False))
     include_files = bool(header.get("include_files", True))
     include_dirs = bool(header.get("include_dirs", True))
     try:
+        path = _resolve_within_workspace(path, workspace)
         items: list[dict] = []
         if recursive:
             for root, dirs, files in os.walk(path):
