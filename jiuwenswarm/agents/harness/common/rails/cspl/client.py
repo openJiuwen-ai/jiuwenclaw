@@ -27,7 +27,8 @@ class CsplConfig:
     api_key: str = ""
     extra_user_id: str = ""
     skill_id: str = "skill-scope"
-    request_from: str = "openclaw"
+    # skill/execute 来源标识（2026-09-02 起与桌面 skill 代理/计费上报同口径 xiaoyiWork）
+    request_from: str = "xiaoyiWork"
     package_name: str = "com.huawei.hag"
     text_source: str = "question"
     timeout_ms: int = 5000
@@ -49,7 +50,7 @@ class CsplConfig:
             api_key=str(data.get("api_key") or "").strip(),
             extra_user_id=str(data.get("extra_user_id") or "").strip(),
             skill_id=str(data.get("skill_id") or "skill-scope"),
-            request_from=str(data.get("request_from") or "openclaw"),
+            request_from=str(data.get("request_from") or "xiaoyiWork"),
             package_name=str(data.get("package_name") or "com.huawei.hag"),
             text_source=str(data.get("text_source") or "question"),
             timeout_ms=int(data.get("timeout_ms") or 5000),

@@ -57,14 +57,13 @@ def test_xiaoyi_exporter_emits_only_approved_trace_headers() -> None:
 
 
 def test_trace_aware_model_keeps_caller_explicit_trace_header() -> None:
-    """调用方显式携带 x-hag-trace-id 时不覆盖、不改写（计费终态虚拟调用等；
-    与 model-proxy hasTraceId 语义一致）。"""
+    """调用方显式携带 x-hag-trace-id 时不覆盖、不改写（与 model-proxy hasTraceId 语义一致）。"""
     token = set_current_invocation_context(_invocation())
     try:
-        kwargs, begin_core = _trace_model(XiaoyiTraceHeaderExporter())._with_trace_headers(
+        kwargs = _trace_model(XiaoyiTraceHeaderExporter())._with_trace_headers(
             {
                 "custom_headers": {
-                    "x-hag-trace-id": "xiaoyi-work-end-root&19&abc&0",
+                    "x-hag-trace-id": "explicit-trace",
                     "x-request-id": "keep",
                 }
             }
@@ -72,10 +71,25 @@ def test_trace_aware_model_keeps_caller_explicit_trace_header() -> None:
     finally:
         reset_current_invocation_context(token)
 
-    assert begin_core is None
     assert kwargs["custom_headers"] == {
-        "x-hag-trace-id": "xiaoyi-work-end-root&19&abc&0",
+        "x-hag-trace-id": "explicit-trace",
         "x-request-id": "keep",
+    }
+
+
+def test_trace_aware_model_injects_bare_core_trace_header() -> None:
+    """注入的 x-hag-trace-id = 裸核心段（2026-09-02 起无 xiaoyi-work-* 前缀，
+    与 task/status/update 计费上报完全同值；无 begin/middle 标记分流）。"""
+    token = set_current_invocation_context(_invocation())
+    try:
+        kwargs = _trace_model(XiaoyiTraceHeaderExporter())._with_trace_headers({})
+    finally:
+        reset_current_invocation_context(token)
+
+    assert kwargs["custom_headers"] == {
+        "x-hag-trace-id": "root&19&abc&0",
+        "x-session-id": "root",
+        "x-interaction-id": "19",
     }
 
 
@@ -99,14 +113,13 @@ def test_trace_aware_model_uses_only_injected_exporters() -> None:
         )
     )
     try:
-        kwargs, begin_core = _trace_model(Exporter())._with_trace_headers(
+        kwargs = _trace_model(Exporter())._with_trace_headers(
             {"custom_headers": {"x-request-id": "keep"}}
         )
     finally:
         reset_current_invocation_context(token)
 
-    # 自定义 exporter 未导出 x-hag-trace-id：无 core 可标记，不上报 begin
-    assert begin_core is None
+    # 自定义 exporter 未导出 x-hag-trace-id：原样合并不补 trace 头
     assert kwargs["custom_headers"] == {
         "x-example-trace": "trusted",
         "x-request-id": "keep",

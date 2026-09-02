@@ -166,11 +166,9 @@ from jiuwenswarm.common.stage_timer import StageTimer
 from jiuwenswarm.common.tool_ownership import mark_stateless, register_tool, unregister_tool
 from jiuwenswarm.server.hooks.user_hook_rail import UserHookRail
 from jiuwenswarm.common.invocation_context.model_trace import TraceAwareModel
-from jiuwenswarm.common.invocation_context.billing_trace import (
-    billing_marker_enabled,
-    has_begun,
-    schedule_marker_call,
-    terminal_trace_id,
+from jiuwenswarm.common.billing_client import (
+    report_new as billing_report_new,
+    report_terminal as billing_report_terminal,
 )
 from jiuwenswarm.server.xiaoyi_invocation import get_xiaoyi_trace_header_exporters
 from jiuwenswarm.agents.harness.common.rails.permissions.owner_scopes import (
@@ -401,8 +399,65 @@ def get_runtime_tool_session_id() -> str | None:
 
 logger = logging.getLogger(__name__)
 
-# 临时计费标记（docs/billing-trace-marker-design.md）：终态虚拟模型调用经
-# billing_trace.schedule_marker_call 派发（begin 同机制，挂点在 TraceAwareModel）。
+# xiaoyi 渠道计费上报（common/billing_client.py）：NEW 在一轮 query 实际开跑前
+# 派发（team/auto_harness/goal/slash 早退分支不触发），终态在流式/非流式 finally
+# 收口派发；上报经 np://claw-billing 管道由桌面主进程拼接鉴权转发 fulfillment
+#（task/status/update），trace 与本轮模型调用的 x-hag-trace-id 同值（裸核心段）。
+
+
+def _maybe_report_xiaoyi_billing_new(request: Any, query: str, invocation: Any) -> None:
+    """xiaoyi 渠道一轮 query 的 NEW 上报（fire-and-forget；每 core 只发一次，
+    HITL 续跑同 core 不重复）。非 xiaoyi 渠道（桌面/cron 由桌面侧计费）静默跳过。
+    计费永不影响会话主路径（任何异常仅记日志）。
+    """
+    try:
+        channel_id = str(getattr(request, "channel_id", "") or "").strip().lower()
+        metadata = request.metadata if isinstance(request.metadata, dict) else {}
+        is_xiaoyi = (
+            channel_id == "xiaoyi"
+            or bool(metadata.get("xiaoyi_session_id"))
+            or bool(metadata.get("xiaoyi_task_id"))
+        )
+        if not is_xiaoyi:
+            return
+        trace = getattr(invocation, "trace", None)
+        core = getattr(trace, "trace_id", None) if trace is not None else None
+        if not core:
+            return
+        billing_report_new(str(query or ""), str(core))
+    except Exception:  # noqa: BLE001
+        logger.debug("[billing] NEW 上报派发失败", exc_info=True)
+
+
+def _report_xiaoyi_billing_terminal(
+    invocation: Any,
+    *,
+    failed: bool,
+    hitl_pending: bool,
+) -> None:
+    """xiaoyi 渠道计费的终态上报（FINISH/FAILED；fire-and-forget，不阻塞流收口）。
+
+    守卫：HITL 挂起（等用户输入，语义未终结）跳过——续跑复用同 task_id（同 core），
+    终态在续跑收口时发出；未上报过 NEW 的轮次（非 xiaoyi 渠道/早退/被禁用）
+    由 billing_client.report_terminal 的登记守卫拦截，不发 orphan 终态。
+    用户停止/中止（CancelledError）按既有计费语义视为正常完成（FINISH）。
+    """
+    try:
+        if hitl_pending:
+            return
+        trace = getattr(invocation, "trace", None)
+        core = getattr(trace, "trace_id", None) if trace is not None else None
+        if not core:
+            return
+        billing_report_terminal(
+            str(core),
+            session_id=str(getattr(trace, "conversation_id", "") or ""),
+            interaction_id=str(getattr(trace, "interaction_id", "") or ""),
+            ok=not failed,
+        )
+    except Exception:  # noqa: BLE001 - 计费永不影响会话主路径
+        logger.debug("[billing] 终态上报派发失败", exc_info=True)
+
 
 _PERSISTENT_CHECKPOINTER_LOCK: asyncio.Lock | None = None
 _PERSISTENT_CHECKPOINTER_LOCK_LOOP: asyncio.AbstractEventLoop | None = None
@@ -9181,6 +9236,11 @@ class JiuWenSwarmDeepAdapter(ExpertCapabilityMixin):
         error_text: str | None = None
         interaction_stream = None
         interaction_stream_abort = True
+        # 计费终态判定标记：异常抛出路径置真（终端错误帧由 error_text 兜底判定）
+        _billing_failed = False
+        # invocation 在 try 内（build_invocation_context 处）才赋值；finally 的计费
+        # 终态上报需要它——提前置 None 防 UnboundLocalError 掩盖原始异常
+        invocation: Any = None
         # 诊断：记录非流式聚合时见过的 chunk 类型分布（排查「执行完成但未返回结果内容」）
         _chunk_type_counts: dict[str, int] = {}
         try:
@@ -9216,6 +9276,8 @@ class JiuWenSwarmDeepAdapter(ExpertCapabilityMixin):
             )
             invocation = build_invocation_context(request)
             inputs = attach_invocation_context(inputs, invocation)
+            # xiaoyi 渠道计费：NEW 上报（模型调用之前；slash/goal 早退已在上方 return）
+            _maybe_report_xiaoyi_billing_new(request, query, invocation)
             logger.info(
                 "[INVOCATION_CTX] ATTACHED invocation_id=%s request_id=%s "
                 "session_id=%s channel_id=%s asyncio_task_id=%s path=non_stream",
@@ -9324,9 +9386,17 @@ class JiuWenSwarmDeepAdapter(ExpertCapabilityMixin):
             )
             raise
         except Exception as e:
+            _billing_failed = True
             logger.error("[JiuWenSwarmDeepAdapter] Agent 任务执行异常: %s", e)
             raise
         finally:
+            # xiaoyi 渠道计费：上报终态 FINISH/FAILED（非流式同语义；
+            # CancelledError 按正常完成 FINISH；终端错误帧经 error_text 判定）。
+            _report_xiaoyi_billing_terminal(
+                invocation,
+                failed=_billing_failed or bool(error_text),
+                hitl_pending=False,
+            )
             close_agent_run_span(_run_span, session_id=session_id)
             if image_files_token is not None:
                 from jiuwenswarm.agents.harness.common.prompt.user_prompt_builder import (
@@ -9775,8 +9845,11 @@ class JiuWenSwarmDeepAdapter(ExpertCapabilityMixin):
         _debug_trace_token = None  # reset token for the ContextVar-bound logger
         interaction_stream = None
         interaction_stream_abort = True
-        # 临时计费标记：本轮是否已判定异常终态（task_failed/answer error/异常抛出）
+        # 计费终态判定标记：本轮是否已判定异常终态（task_failed/answer error/异常抛出）
         _billing_failed = False
+        # xiaoyi 渠道计费：NEW 上报（模型调用之前；team/auto_harness/goal/slash
+        # 早退分支已在上方 return，不会走到这里——NEW 只在实际开跑时发出）
+        _maybe_report_xiaoyi_billing_new(request, query, invocation)
         try:
             await self._update_runtime_config(
                 self._RuntimeConfig(
@@ -10465,12 +10538,13 @@ class JiuWenSwarmDeepAdapter(ExpertCapabilityMixin):
                 is_complete=False,
             )
         finally:
-            # 临时计费标记（docs/billing-trace-marker-design.md）：一轮 query 收口，
-            # 按终态补发一次虚拟模型调用（xiaoyi-work-end-/failed- 前缀）。
+            # xiaoyi 渠道计费（common/billing_client.py）：一轮 query 收口，
+            # 上报终态 FINISH/FAILED（经 np://claw-billing 管道由桌面主进程转发
+            # fulfillment task/status/update）。
             # HITL 挂起等用户输入（ask_user 已发出）不判终态——续跑复用同
             # interaction_id/task_id（同 core），终态在续跑收口时发出。
-            # 用户停止/中止（CancelledError）按既有计费语义视为正常完成（END）。
-            self._fire_billing_terminal_marker(
+            # 用户停止/中止（CancelledError）按既有计费语义视为正常完成（FINISH）。
+            _report_xiaoyi_billing_terminal(
                 invocation,
                 failed=_billing_failed,
                 hitl_pending=bool(emitted_ask_user_request_ids),
@@ -10657,41 +10731,6 @@ class JiuWenSwarmDeepAdapter(ExpertCapabilityMixin):
             return "answer_error", str(chunk.get("output") or "task failed")
 
         return None
-
-    def _fire_billing_terminal_marker(
-        self,
-        invocation: Any,
-        *,
-        failed: bool,
-        hitl_pending: bool,
-    ) -> None:
-        """临时计费标记的终态触发（fire-and-forget，不阻塞流收口）。
-
-        一轮 query 语义收口时，追加一次虚拟模型调用（system/user 均为
-        "please only reply NO_REPLY"）携带 xiaoyi-work-end-/failed- 前缀的
-        x-hag-trace-id——jiuwen 无法预知哪次模型调用是最后一次，用这次额外
-        调用让计费方从模型网关日志感知对话终态（覆盖本地对话与 xiaoyi 渠道
-        两场景：两者都经本适配器的流式 dispatch）。
-
-        守卫：HITL 挂起（等用户输入，语义未终结）跳过；本轮无模型调用
-        （has_begun 为假——slash/早退路径）不发 orphan end。
-        """
-        try:
-            if hitl_pending or not billing_marker_enabled():
-                return
-            trace = getattr(invocation, "trace", None)
-            core = getattr(trace, "trace_id", None) if trace is not None else None
-            if not core or not has_begun(core):
-                return
-            if self._model is None:
-                logger.warning("[billing-trace] 终态标记跳过：model 实例不可用")
-                return
-            terminal = terminal_trace_id(core, ok=not failed)
-            if not schedule_marker_call(self._model, terminal):
-                logger.warning("[billing-trace] 终态标记派发失败: %s", terminal)
-        except Exception:
-            # 计费标记永不影响会话主路径
-            logger.debug("[billing-trace] 终态标记派发失败", exc_info=True)
 
     @staticmethod
     def _parse_stream_chunk(
