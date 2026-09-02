@@ -235,6 +235,7 @@ async function waitForShareImageDocumentRendering(node: HTMLElement): Promise<vo
         // the next one, bounding a single layout task without approximating
         // any element height or changing the final document topology.
         void node.scrollHeight;
+        touchShareImageExportHeartbeat();
         if (!hasPendingTimeline()) {
           observer.disconnect();
           resolve();
