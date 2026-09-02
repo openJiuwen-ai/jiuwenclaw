@@ -786,7 +786,7 @@ class WebWsTransport(BaseWsChannel):
                                 ws_set.add(w)
 
             if not ws_set and msg.session_id:
-                ws_set |= self.peers_for_session_ws(msg.session_id)
+                ws_set |= self._peers_for_session(msg.session_id)
 
             if not ws_set:
                 logger.debug(
@@ -873,7 +873,7 @@ class WebWsTransport(BaseWsChannel):
                     getattr(msg, "id", ""),
                 )
                 return
-            ws_set |= self.peers_for_session_ws(msg.session_id)
+            ws_set |= self._peers_for_session(msg.session_id)
         if not ws_set:
             logger.debug(
                 "[WebChannel] session_id=%s has no connected ws, dropping msg id=%s ws_id=%s",
