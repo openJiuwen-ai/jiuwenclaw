@@ -102,6 +102,9 @@ class A2AOutboundRegistry:
         self._registration_lock = asyncio.Lock()
         self._agent_operation_locks = KeyedLockPool()
 
+    def set_allow_loopback_http(self, enabled: bool) -> None:
+        self._discovery.set_allow_loopback_http(enabled)
+
     async def discover(self, url: str, card_path: str | None = None) -> dict[str, Any]:
         card = await self._discovery.discover(url, card_path)
         now = self._now()
@@ -411,6 +414,29 @@ class A2AOutboundRegistry:
         if item is None:
             raise A2AOutboundError(A2AOutboundErrorCode.DISPATCH_NOT_FOUND)
         return item.to_record()
+
+    async def list_dispatches(self, *, limit: int = 200) -> dict[str, Any]:
+        normalized_limit = max(1, min(int(limit), 200))
+        records = await self._repository.list_dispatches(limit=normalized_limit)
+        total = await self._repository.count_dispatches()
+        items = []
+        for item in records:
+            items.append(
+                {
+                    "dispatch_id": item.dispatch_id,
+                    "agent_id": item.agent_id,
+                    "mode": item.mode.value,
+                    "status": item.status.value,
+                    "remote_task_id": item.remote_task_id,
+                    "created_at": item.created_at,
+                    "updated_at": item.updated_at,
+                    "accepted_at": item.accepted_at,
+                    "finished_at": item.finished_at,
+                    "error_code": item.error_code,
+                    "error_summary": item.error_summary,
+                }
+            )
+        return {"items": items, "total": total}
 
     async def _require_agent(self, agent_id: str) -> A2AOutboundAgent:
         item = await self._repository.get_agent(str(agent_id or "").strip())

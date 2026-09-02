@@ -10,6 +10,7 @@ import {
   WsEvent,
 } from '../types';
 import { getGatewayHttpBase } from '../utils/env';
+import { isEnterprise } from '../edition';
 import i18n from '../i18n';
 import { buildRuntimeIdentityHeaders } from './runtimeScope';
 import { PauseBufferHook, PAUSABLE_STREAM_EVENTS } from './webClient';
@@ -93,7 +94,7 @@ const ROUTES: Record<string, RouteRow> = {
   'skills.import_local': { verb: 'POST', path: '/skills/actions/import-local', kind: 'unary' },
   'skills.source.providers': { verb: 'GET', path: '/skills/sources', kind: 'unary' },
   'skills.source.search': { verb: 'GET', path: '/skills/sources/search', kind: 'unary' },
-  'skills.source.install': { verb: 'POST', path: '/skills/sources/install', kind: 'unary' },
+  'skills.source.install': { verb: 'POST', path: '/skills/sources/actions/install', kind: 'unary' },
   'skills.updates.check': { verb: 'GET', path: '/skills/updates', kind: 'unary' },
   'skills.update': { verb: 'POST', path: '/skills/actions/update', kind: 'unary' },
   'skills.teamskillshub.info': { verb: 'GET', path: '/skills/teamskillshub', kind: 'unary' },
@@ -102,7 +103,7 @@ const ROUTES: Record<string, RouteRow> = {
   'skills.retrieval.index_build': { verb: 'POST', path: '/skills/retrieval/actions/index-build', kind: 'unary' },
   'skills.retrieval.index_cancel': { verb: 'POST', path: '/skills/retrieval/actions/index-cancel', kind: 'unary' },
   'skills.enterprise.list': { verb: 'GET', path: '/skills/enterprise', kind: 'unary' },
-  'skills.enterprise.install': { verb: 'POST', path: '/skills/enterprise/install', kind: 'unary' },
+  'skills.enterprise.install': { verb: 'POST', path: '/skills/enterprise/actions/install', kind: 'unary' },
   'skills.enterprise.uninstall': { verb: 'POST', path: '/skills/enterprise/actions/uninstall', kind: 'unary' },
   'skills.marketplace.list': { verb: 'GET', path: '/skills/marketplace', kind: 'unary' },
   'skills.marketplace.add': { verb: 'POST', path: '/skills/marketplace', kind: 'unary' },
@@ -367,7 +368,8 @@ function payloadFromData(
 
 function extractSseRequestId(
   raw: Record<string, unknown> | null,
-  payload: Record<string, unknown>
+  payload: Record<string, unknown>,
+  frameId?: string
 ): string | undefined {
   if (raw) {
     const top = typeof raw.request_id === 'string' ? raw.request_id : undefined;
@@ -376,7 +378,9 @@ function extractSseRequestId(
   const inner = typeof payload.request_id === 'string' ? payload.request_id : undefined;
   if (inner) return inner;
   const rid = typeof payload.rid === 'string' ? payload.rid : undefined;
-  return rid;
+  if (rid) return rid;
+  const id = typeof frameId === 'string' ? frameId.trim() : '';
+  return id || undefined;
 }
 
 export function sseFrameToWsEvent(frame: SseFrame): WsEvent | null {
@@ -388,7 +392,13 @@ export function sseFrameToWsEvent(frame: SseFrame): WsEvent | null {
   if (!eventName) {
     return null;
   }
-  const requestId = extractSseRequestId(raw, payload);
+  // SSE 标准 id 字段承载 Gateway 生成的 request_id；HTTP 模式下 data
+  // 往往不重复携带该字段，必须保留它才能恢复 WS 帧的请求关联语义。
+  const requestId = extractSseRequestId(
+    raw,
+    payload,
+    isEnterprise() ? frame.id : undefined
+  );
   return {
     type: 'event',
     event: eventName,
@@ -434,8 +444,21 @@ function isSseContentType(contentType: string | null | undefined): boolean {
   return Boolean(contentType && contentType.toLowerCase().includes('text/event-stream'));
 }
 
-function isChatSseTerminal(eventName: string): boolean {
-  return eventName === 'chat.final' || eventName === 'chat.error';
+function isChatSseTerminal(event: WsEvent): boolean {
+  if (event.event === 'chat.error') {
+    return true;
+  }
+  // 仅企业版使用任务级 SSE 生命周期：chat.final 只是回复段结束，
+  // 必须继续读到 processing_status(false)，避免工具状态停在 pending。
+  // 个人版保持原有 chat.final 即结束的协议，避免改变个人版行为。
+  if (!isEnterprise()) {
+    return event.event === 'chat.final';
+  }
+  return (
+    event.event === 'chat.processing_status' &&
+    isRecord(event.payload) &&
+    event.payload.is_processing === false
+  );
 }
 
 /**
@@ -833,7 +856,7 @@ export class WebHttpClient {
             continue;
           }
           this.dispatchEvent(event);
-          if (kind === 'sse' && isChatSseTerminal(event.event)) {
+          if (kind === 'sse' && isChatSseTerminal(event)) {
             await reader.cancel().catch(() => undefined);
             return;
           }

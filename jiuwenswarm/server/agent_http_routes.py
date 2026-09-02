@@ -269,12 +269,40 @@ ROUTES: list[RouteSpec] = [
         ReqMethod.SKILLS_TEAMSKILLS_HUB_DELETE.value,
     ),
     RouteSpec(
+        "GET", "/skills/sources", ReqMethod.SKILLS_SOURCE_PROVIDERS.value
+    ),
+    RouteSpec(
+        "GET", "/skills/sources/search", ReqMethod.SKILLS_SOURCE_SEARCH.value
+    ),
+    RouteSpec(
+        "POST", "/skills/sources/install", ReqMethod.SKILLS_SOURCE_INSTALL.value, 201
+    ),
+    RouteSpec(
+        "GET", "/skills/updates", ReqMethod.SKILLS_UPDATES_CHECK.value
+    ),
+    RouteSpec(
+        "POST", "/skills/actions/update", ReqMethod.SKILLS_UPDATE.value
+    ),
+    RouteSpec(
+        "GET", "/skills/enterprise", ReqMethod.SKILLS_ENTERPRISE_LIST.value
+    ),
+    RouteSpec(
         "POST", "/skills/enterprise/install", ReqMethod.SKILLS_ENTERPRISE_INSTALL.value, 201
     ),
     RouteSpec(
         "POST",
         "/skills/enterprise/actions/uninstall",
         ReqMethod.SKILLS_ENTERPRISE_UNINSTALL.value,
+    ),
+    RouteSpec(
+        "GET",
+        "/skills/enterprise/sources",
+        ReqMethod.SKILLS_ENTERPRISE_SOURCE_PROVIDERS.value,
+    ),
+    RouteSpec(
+        "GET",
+        "/skills/enterprise/sources/search",
+        ReqMethod.SKILLS_ENTERPRISE_SOURCE_SEARCH.value,
     ),
     RouteSpec("GET", "/skills/{name}", ReqMethod.SKILLS_GET.value),
     RouteSpec("DELETE", "/skills/{name}", ReqMethod.SKILLS_UNINSTALL.value),
@@ -601,6 +629,11 @@ def _register_special_routes(app: Any, server: AgentHTTPServer) -> None:
         qp = request.query_params
         session_filter = qp.get("session_id") or ctx.session_id
         channel_filter = qp.get("channel_id")
+        # 信任边界假设：此头仅由内部 Gateway 设置，可被伪造；若端点可能暴露给
+        # 不受信任客户端，需改用 mTLS/共享密钥等强验证。
+        reverse_rpc_capable = (
+            request.headers.get("x-jiuwen-push-consumer") == "gateway"
+        )
 
         registry = get_push_registry()
         sink = SSESink()
@@ -620,7 +653,11 @@ def _register_special_routes(app: Any, server: AgentHTTPServer) -> None:
             # 填满 maxsize 后，`PushRegistry.push` 每次扇到它都要等满超时才注销 ——
             # 进程级推送被一个早已消失的客户端拖累。
             registry.register(
-                subscriber_id, sink, session_id=session_filter, channel_id=channel_filter
+                subscriber_id,
+                sink,
+                session_id=session_filter,
+                channel_id=channel_filter,
+                reverse_rpc_capable=reverse_rpc_capable,
             )
             try:
                 while True:

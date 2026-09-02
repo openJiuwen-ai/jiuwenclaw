@@ -35,6 +35,7 @@ from jiuwenswarm.common.e2a.agent_compat import e2a_to_agent_request
 from jiuwenswarm.common.e2a.constants import (
     E2A_CANCEL_SOURCE_CLIENT_DISCONNECT,
     E2A_INTERNAL_CANCEL_SOURCE_KEY,
+    E2A_RESPONSE_KIND_ACP_OUTPUT_REQUEST,
     E2A_WIRE_INTERNAL_METADATA_KEYS,
 )
 from jiuwenswarm.common.e2a.gateway_normalize import (
@@ -315,6 +316,8 @@ class AgentWebSocketServer:
         self._ping_interval = ping_interval
         self._ping_timeout = ping_timeout
         self._server: Any = None
+        # 事件循环饥饿观测（非保活）：测量 sleep(1) 唤醒延迟，便于对齐 pong 超时。
+        self._loop_lag_task: asyncio.Task[None] | None = None
         # send_push的推送订阅者统一由PushRegistry持有，本类不持有当前连接；
         # WS侧以每连接唯一id：``make_ws_push_subscriber_id(ws)``注册。
         # key是``_ws_capabilities_key``返回的str(id(ws))，与RequestContext.connection_id
@@ -340,6 +343,11 @@ class AgentWebSocketServer:
         self._proactive_engine: Any = None
         get_acp_output_manager().set_send_push_callback(
             lambda msg: asyncio.create_task(self.send_push(msg))
+        )
+        get_push_registry().set_reverse_rpc_owner_lost_callback(
+            lambda: get_acp_output_manager().fail_pending_requests(
+                RuntimeError("Gateway reverse RPC connection lost")
+            )
         )
 
     def set_proactive_engine(self, engine: Any) -> None:
@@ -499,6 +507,55 @@ class AgentWebSocketServer:
         # startup_mode 决定要不要自动把 jiuwenbox 子进程也拉起来。失败不阻塞
         # 启动 (用户依然可以在 TUI 里跑 /sandbox enable 重试)。
         await self._bootstrap_internal_jiuwenbox()
+        self._start_loop_lag_monitor()
+
+    def _start_loop_lag_monitor(self) -> None:
+        """启动事件循环 lag 观测 task（验收用，不主动断连/不发应用心跳）。"""
+        if self._loop_lag_task is not None and not self._loop_lag_task.done():
+            return
+        self._loop_lag_task = asyncio.create_task(
+            self._loop_lag_monitor(),
+            name="ws-loop-lag-monitor",
+        )
+
+    async def _loop_lag_monitor(self) -> None:
+        """每隔约 1s 测量预期唤醒 vs 实际唤醒延迟。
+
+        lag > 1.0s → WARNING；lag > 5.0s → ERROR。仅观测，不干预连接。
+        """
+        interval_s = 1.0
+        while True:
+            started = time.monotonic()
+            await asyncio.sleep(interval_s)
+            lag_s = time.monotonic() - started - interval_s
+            if lag_s <= 1.0:
+                continue
+            lag_ms = lag_s * 1000.0
+            if lag_s > 5.0:
+                logger.error(
+                    "[AgentWebSocketServer] event loop lag high lag_ms=%.0f",
+                    lag_ms,
+                )
+            else:
+                logger.warning(
+                    "[AgentWebSocketServer] event loop lag elevated lag_ms=%.0f",
+                    lag_ms,
+                )
+
+        # 事件循环停摆探针 + 主线程栈采样器：用于定位「同步处理占住事件循环
+        # 数秒导致网关 ping/pong 超时、任务被一刀切取消」类问题（见
+        # ``jiuwenswarm/server/event_loop_monitor.py`` 模块 docstring）。
+        # 幂等挂载；失败仅告警，绝不影响服务启动。
+        try:
+            from jiuwenswarm.server.event_loop_monitor import (
+                ensure_event_loop_monitor,
+            )
+
+            await ensure_event_loop_monitor()
+        except Exception:
+            logger.exception(
+                "[AgentWebSocketServer] 事件循环监控装载失败（已忽略）"
+            )
 
     async def _bootstrap_internal_jiuwenbox(self) -> None:
         """启动时按 ``config.yaml::sandbox`` 自动拉起 jiuwenbox 子进程。
@@ -733,6 +790,9 @@ class AgentWebSocketServer:
         warmup = _startup_warmup_task
         _startup_warmup_task = None
         await _cancel_warmup_task(warmup, "startup warmup")
+        lag_task = self._loop_lag_task
+        self._loop_lag_task = None
+        await _cancel_warmup_task(lag_task, "loop lag monitor")
         had_server = self._server is not None
         if had_server:
             self._server.close()
@@ -772,6 +832,7 @@ class AgentWebSocketServer:
             push_subscriber_id,
             _GatewayWSPushSink(ws, send_lock),
             drop_on_stall=False,
+            reverse_rpc_capable=True,
         )
 
         # 触发身份获取（写入当前连接 context；无 provider 时身份为 null，连接继续）。
@@ -1128,7 +1189,13 @@ class AgentWebSocketServer:
             应用此返回值判定成败，勿再把「仅打了 warning」当成发送成功。
         """
         registry = get_push_registry()
-        if registry.subscriber_count() == 0:
+        response_kind = str(msg.get("response_kind") or "").strip()
+        is_reverse_rpc = response_kind == E2A_RESPONSE_KIND_ACP_OUTPUT_REQUEST
+        if (
+            not registry.reverse_rpc_ready()
+            if is_reverse_rpc
+            else registry.subscriber_count() == 0
+        ):
             # 一个去处都没有：保持原有告警与早退（连 wire 都不构造）。
             logger.warning(
                 "[AgentWebSocketServer] send_push 失败: 无活跃 Gateway 连接 "
@@ -1147,7 +1214,11 @@ class AgentWebSocketServer:
             logger.warning("[AgentWebSocketServer] send_push 失败: %s", e)
             return 0
 
-        delivered = await registry.push(wire)
+        delivered = (
+            await registry.push_reverse_rpc(wire)
+            if is_reverse_rpc
+            else await registry.push(wire)
+        )
 
         if delivered == 0:
             # 两种情况都会落到这里：内容过大被降级成错误帧（sink 返回 False），
@@ -1159,7 +1230,6 @@ class AgentWebSocketServer:
             )
             return 0
 
-        response_kind = str(msg.get("response_kind") or "").strip()
         if response_kind:
             logger.info(
                 "[AgentWebSocketServer] send_push response_kind wire sent: "

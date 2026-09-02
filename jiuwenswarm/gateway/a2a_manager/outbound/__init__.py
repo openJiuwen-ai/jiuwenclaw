@@ -2,6 +2,7 @@
 
 from .credentials import A2AOutboundCredentialStore
 from .discovery import A2AOutboundDiscoveryService, DiscoveredCard
+from .dispatcher import A2AOutboundDispatcher
 from .errors import A2AOutboundError, A2AOutboundErrorCode, safe_error_summary
 from .models import (
     A2ACompatibleInterface,
@@ -29,6 +30,7 @@ __all__ = [
     "A2AOutboundAvailability",
     "A2AOutboundCredentialStore",
     "A2AOutboundDiscoveryService",
+    "A2AOutboundDispatcher",
     "A2AOutboundRegistry",
     "A2AOutboundDiscovery",
     "A2AOutboundDispatch",

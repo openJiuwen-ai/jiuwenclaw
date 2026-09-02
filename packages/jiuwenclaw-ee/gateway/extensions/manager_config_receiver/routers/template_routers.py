@@ -13,6 +13,7 @@ from ..core.template.embedding_template import EmbeddingTemplateService
 from ..core.template.extension_config_template import ExtensionConfigTemplateService
 from ..core.template.mcp_template import McpTemplateService
 from ..core.template.model_template import ModelTemplateService
+from ..core.template.permissions_template import PermissionsTemplateService
 from ..core.template.skill_whitelist_template import SkillWhitelistTemplateService
 from ..schemas.common_schemas import ResponseModel
 from ..schemas.sync_schemas import SyncEnvelopeOnlyBody, make_sync_body
@@ -27,6 +28,8 @@ from ..schemas.template_schemas import (
     ModelTemplateUpdateRequest,
     McpTemplateCreateRequest,
     McpTemplateUpdateRequest,
+    PermissionsTemplateCreateRequest,
+    PermissionsTemplateUpdateRequest,
     SkillWhitelistTemplateCreateRequest,
     SkillWhitelistTemplateUpdateRequest,
 )
@@ -152,6 +155,13 @@ _add_template_crud(
     "skill_whitelist",
     SkillWhitelistTemplateCreateRequest,
     SkillWhitelistTemplateUpdateRequest,
+)
+_add_template_crud(
+    "/permissions-templates",
+    PermissionsTemplateService,
+    "permissions",
+    PermissionsTemplateCreateRequest,
+    PermissionsTemplateUpdateRequest,
 )
 _add_template_crud(
     "/mcp-templates",

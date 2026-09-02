@@ -671,6 +671,11 @@ _FORWARD_REQ_METHODS = frozenset({
     "skills.teamskillshub.install",
     "skills.teamskillshub.publish",
     "skills.teamskillshub.delete",
+    "skills.source.providers",
+    "skills.source.search",
+    "skills.source.install",
+    "skills.updates.check",
+    "skills.update",
     "skills.retrieval.status",
     "skills.retrieval.index_build",
     "skills.retrieval.index_cancel",
@@ -682,8 +687,11 @@ _FORWARD_REQ_METHODS = frozenset({
     "skills.evolution.archives",
     "skills.evolution.rollback",
     "skills.evolution.rebuild",
+    "skills.enterprise.list",
     "skills.enterprise.install",
     "skills.enterprise.uninstall",
+    "skills.enterprise.source.providers",
+    "skills.enterprise.source.search",
     "symphony.build_score",
     "symphony.pause_build",
     "symphony.score_status",
@@ -775,6 +783,11 @@ _FORWARD_NO_LOCAL_HANDLER_METHODS = frozenset({
     "skills.teamskillshub.install",
     "skills.teamskillshub.publish",
     "skills.teamskillshub.delete",
+    "skills.source.providers",
+    "skills.source.search",
+    "skills.source.install",
+    "skills.updates.check",
+    "skills.update",
     "skills.retrieval.status",
     "skills.retrieval.index_build",
     "skills.retrieval.index_cancel",
@@ -786,8 +799,11 @@ _FORWARD_NO_LOCAL_HANDLER_METHODS = frozenset({
     "skills.evolution.archives",
     "skills.evolution.rollback",
     "skills.evolution.rebuild",
+    "skills.enterprise.list",
     "skills.enterprise.install",
     "skills.enterprise.uninstall",
+    "skills.enterprise.source.providers",
+    "skills.enterprise.source.search",
     "symphony.build_score",
     "symphony.pause_build",
     "symphony.score_status",
@@ -1778,6 +1794,28 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             ),
         )
 
+    async def _a2a_outbound_settings_get(ws, req_id, params, session_id):
+        await _send_a2a_outbound(ws, req_id, a2a_manager.outbound_get_settings)
+
+    async def _a2a_outbound_settings_update(ws, req_id, params, session_id):
+        enabled = params.get("allow_loopback_http")
+        if not isinstance(enabled, bool):
+            await channel.send_response(
+                ws,
+                req_id,
+                ok=False,
+                error="allow_loopback_http must be a boolean",
+                code="A2A_CONFIG_INVALID",
+            )
+            return
+        await _send_a2a_outbound(
+            ws,
+            req_id,
+            lambda: a2a_manager.outbound_update_settings(
+                allow_loopback_http=enabled
+            ),
+        )
+
     async def _a2a_outbound_register(ws, req_id, params, session_id):
         await _send_a2a_outbound(
             ws, req_id, lambda: a2a_manager.outbound_register(dict(params))
@@ -1841,6 +1879,27 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             lambda: a2a_manager.outbound_dispatch_get(str(params.get("dispatch_id") or "")),
         )
 
+    async def _a2a_outbound_dispatch_list(ws, req_id, params, session_id):
+        try:
+            limit = int(params.get("limit", 200))
+        except (TypeError, ValueError):
+            await channel.send_response(
+                ws,
+                req_id,
+                ok=False,
+                error="limit must be an integer",
+                code="A2A_OUTBOUND_STORE_INVALID",
+            )
+            return
+        limit = max(1, min(limit, 200))
+        await _send_a2a_outbound(
+            ws,
+            req_id,
+            lambda: a2a_manager.outbound_dispatch_list(limit=limit),
+        )
+
+    channel.register_method("a2a.outbound.settings.get", _a2a_outbound_settings_get)
+    channel.register_method("a2a.outbound.settings.update", _a2a_outbound_settings_update)
     channel.register_method("a2a.outbound.discover", _a2a_outbound_discover)
     channel.register_method("a2a.outbound.register", _a2a_outbound_register)
     channel.register_method("a2a.outbound.list", _a2a_outbound_list)
@@ -1851,6 +1910,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         "a2a.outbound.confirm_revision", _a2a_outbound_confirm_revision
     )
     channel.register_method("a2a.outbound.delete", _a2a_outbound_delete)
+    channel.register_method("a2a.outbound.dispatch.list", _a2a_outbound_dispatch_list)
     channel.register_method("a2a.outbound.dispatch.get", _a2a_outbound_dispatch_get)
 
     from jiuwenswarm.common.schema.message import Message, EventType
@@ -6902,46 +6962,6 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
     channel.register_method("cron.job.toggle", _cron_job_toggle)
     channel.register_method("cron.job.preview", _cron_job_preview)
     channel.register_method("cron.job.run_now", _cron_job_run_now)
-
-    async def _skills_enterprise_list(ws, req_id, params, session_id):
-        """Gateway 只读 DB：按最终 service_id+agent_id 列出已装成功行."""
-        from jiuwenswarm.agents.harness.common.installed_skill import (
-            list_installed_skills_for_gateway,
-            resolve_final_tenant_ids,
-        )
-        from jiuwenswarm.gateway.cron.enterprise_gate import extract_routing_triple
-
-        if not isinstance(params, dict):
-            await channel.send_response(ws, req_id, ok=False, error="params must be object", code="BAD_REQUEST")
-            return
-        g, b, u = extract_routing_triple(params)
-        try:
-            service_id, agent_id = resolve_final_tenant_ids(
-                group_id=g,
-                bot_id=b,
-                user_id=u,
-                service_id=params.get("service_id"),
-                agent_id=params.get("agent_id"),
-            )
-            skills = await list_installed_skills_for_gateway(
-                service_id=service_id,
-                agent_id=agent_id,
-            )
-            await channel.send_response(
-                ws,
-                req_id,
-                ok=True,
-                payload={
-                    "skills": skills,
-                    "service_id": service_id,
-                    "agent_id": agent_id,
-                },
-            )
-        except Exception as e:  # noqa: BLE001
-            logger.exception("[skills.enterprise.list] %s", e)
-            await channel.send_response(ws, req_id, ok=False, error=str(e), code="INTERNAL_ERROR")
-
-    channel.register_method("skills.enterprise.list", _skills_enterprise_list)
 
     # 数字分身 — permissions.owner_scopes：仅 Web 网关直连 config（不经 E2A / config_rpc）。
     # 其余 permissions.*（tools / rules / approval_overrides）走 _forward_permissions_to_agent。

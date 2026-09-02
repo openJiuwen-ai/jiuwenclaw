@@ -2090,23 +2090,21 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
                 </button>
               )}
               </div>
-              {(marketplaceSubTab !== "swarmskills" || !readOnly) && (
-                <div className="flex-1">
-                  <input
-                    type="text"
-                    value={search}
-                    onChange={(e) => setSearch(e.target.value)}
-                    placeholder={
-                      marketplaceSubTab === "builtin"
-                        ? t("skills.searchPlaceholder")
-                        : marketplaceSubTab === "swarmskills"
-                        ? t("skills.swarmskills.searchPlaceholder")
-                        : t("skills.onlineSearch.searchPlaceholder")
-                    }
-                    className="w-full px-3 py-1.5 rounded-lg text-sm bg-secondary border border-border text-text placeholder:text-text-muted"
-                  />
-                </div>
-              )}
+              <div className="flex-1">
+                <input
+                  type="text"
+                  value={search}
+                  onChange={(e) => setSearch(e.target.value)}
+                  placeholder={
+                    marketplaceSubTab === "builtin"
+                      ? t("skills.searchPlaceholder")
+                      : marketplaceSubTab === "swarmskills"
+                      ? t("skills.swarmskills.searchPlaceholder")
+                      : t("skills.onlineSearch.searchPlaceholder")
+                  }
+                  className="w-full px-3 py-1.5 rounded-lg text-sm bg-secondary border border-border text-text placeholder:text-text-muted"
+                />
+              </div>
             </div>
 
             <div className={`mt-4 flex-1 min-h-0 overflow-y-auto ${viewMode === "grid" && marketplaceSubTab === "builtin" ? "flex flex-wrap gap-4 content-start" : "space-y-3"}`}>
@@ -2215,6 +2213,7 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
                     <EnterpriseSkillSourcePanel
                       sessionId={sessionId}
                       viewMode={viewMode}
+                      externalSearchQuery={debouncedSearch}
                       onInstalled={() => {
                         void fetchSkills();
                       }}

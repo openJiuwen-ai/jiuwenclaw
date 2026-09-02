@@ -85,6 +85,21 @@ _A2A_INGRESS_ROUTES: tuple[WebHttpMappedRoute, ...] = (
 
 _A2A_OUTBOUND_ROUTES: tuple[WebHttpMappedRoute, ...] = (
     WebHttpMappedRoute(
+        "GET",
+        "/a2a/outbound/settings",
+        "a2a.outbound.settings.get",
+        "a2a",
+        "读取 A2A 出站设置",
+    ),
+    WebHttpMappedRoute(
+        "PATCH",
+        "/a2a/outbound/settings",
+        "a2a.outbound.settings.update",
+        "a2a",
+        "更新 A2A 出站设置",
+        accept_body=True,
+    ),
+    WebHttpMappedRoute(
         "POST",
         "/a2a/outbound/discover",
         "a2a.outbound.discover",
@@ -150,6 +165,14 @@ _A2A_OUTBOUND_ROUTES: tuple[WebHttpMappedRoute, ...] = (
         "a2a",
         "删除第三方 A2A Agent 注册项",
         path_to_param={"agent_id": "agent_id"},
+    ),
+    WebHttpMappedRoute(
+        "GET",
+        "/a2a/outbound/dispatches",
+        "a2a.outbound.dispatch.list",
+        "a2a",
+        "列出 A2A 出站派发处理历史",
+        query_keys=("limit",),
     ),
     WebHttpMappedRoute(
         "GET",
@@ -442,6 +465,64 @@ _SKILLS_ROUTES: tuple[WebHttpMappedRoute, ...] = (
     WebHttpMappedRoute(
         "POST", "/skills/teamskillshub/actions/delete", "skills.teamskillshub.delete",
         "skills", "删除 TeamSkills Hub 版本",
+        accept_body=True,
+        bind_session_param=True,
+    ),
+    WebHttpMappedRoute(
+        "GET", "/skills/sources", "skills.source.providers",
+        "skills", "列出已配置技能源",
+        query_keys=_TENANT_QUERY + _SKILL_SESSION_QUERY,
+        bind_session_param=True,
+    ),
+    WebHttpMappedRoute(
+        "GET", "/skills/sources/search", "skills.source.search",
+        "skills", "搜索技能源",
+        query_keys=("source_id", "q", "page", "page_size") + _TENANT_QUERY + _SKILL_SESSION_QUERY,
+        bind_session_param=True,
+    ),
+    WebHttpMappedRoute(
+        "POST", "/skills/sources/actions/search", "skills.source.search",
+        "skills", "搜索技能源（含扩展筛选）",
+        query_keys=_TENANT_QUERY,
+        accept_body=True,
+        bind_session_param=True,
+    ),
+    WebHttpMappedRoute(
+        "POST", "/skills/sources/actions/install", "skills.source.install",
+        "skills", "从技能源安装精确版本",
+        query_keys=_TENANT_QUERY,
+        accept_body=True,
+        bind_session_param=True,
+    ),
+    WebHttpMappedRoute(
+        "GET", "/skills/updates", "skills.updates.check",
+        "skills", "检查已安装技能更新",
+        query_keys=("source_id",) + _TENANT_QUERY + _SKILL_SESSION_QUERY,
+        bind_session_param=True,
+    ),
+    WebHttpMappedRoute(
+        "POST", "/skills/actions/update", "skills.update",
+        "skills", "更新已安装技能",
+        query_keys=_TENANT_QUERY,
+        accept_body=True,
+        bind_session_param=True,
+    ),
+    WebHttpMappedRoute(
+        "GET", "/skills/enterprise/sources", "skills.enterprise.source.providers",
+        "skills", "列出企业技能源",
+        query_keys=_TENANT_QUERY + _SKILL_SESSION_QUERY,
+        bind_session_param=True,
+    ),
+    WebHttpMappedRoute(
+        "GET", "/skills/enterprise/sources/search", "skills.enterprise.source.search",
+        "skills", "搜索企业技能源",
+        query_keys=("source_id", "q", "page", "page_size") + _TENANT_QUERY + _SKILL_SESSION_QUERY,
+        bind_session_param=True,
+    ),
+    WebHttpMappedRoute(
+        "POST", "/skills/enterprise/sources/actions/search", "skills.enterprise.source.search",
+        "skills", "搜索企业技能源（含扩展筛选）",
+        query_keys=_TENANT_QUERY,
         accept_body=True,
         bind_session_param=True,
     ),

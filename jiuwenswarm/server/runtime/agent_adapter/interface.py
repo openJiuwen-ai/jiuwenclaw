@@ -593,6 +593,11 @@ _SKILL_ROUTES: dict[ReqMethod, str] = {
     ReqMethod.SKILLS_TEAMSKILLS_HUB_INSTALL: "handle_skills_team_skills_hub_install",
     ReqMethod.SKILLS_TEAMSKILLS_HUB_PUBLISH: "handle_skills_team_skills_hub_publish",
     ReqMethod.SKILLS_TEAMSKILLS_HUB_DELETE: "handle_skills_team_skills_hub_delete",
+    ReqMethod.SKILLS_SOURCE_PROVIDERS: "handle_skills_source_providers",
+    ReqMethod.SKILLS_SOURCE_SEARCH: "handle_skills_source_search",
+    ReqMethod.SKILLS_SOURCE_INSTALL: "handle_skills_source_install",
+    ReqMethod.SKILLS_UPDATES_CHECK: "handle_skills_updates_check",
+    ReqMethod.SKILLS_UPDATE: "handle_skills_update",
     ReqMethod.SKILLS_RETRIEVAL_STATUS: "handle_skills_retrieval_status",
     ReqMethod.SKILLS_RETRIEVAL_INDEX_BUILD: "handle_skills_retrieval_index_build",
     ReqMethod.SKILLS_RETRIEVAL_INDEX_CANCEL: "handle_skills_retrieval_index_cancel",
@@ -604,6 +609,8 @@ _SKILL_ROUTES: dict[ReqMethod, str] = {
     ReqMethod.SKILLS_ENTERPRISE_LIST: "handle_skills_enterprise_list",
     ReqMethod.SKILLS_ENTERPRISE_INSTALL: "handle_skills_web_install",
     ReqMethod.SKILLS_ENTERPRISE_UNINSTALL: "handle_skills_web_uninstall",
+    ReqMethod.SKILLS_ENTERPRISE_SOURCE_PROVIDERS: "handle_skills_source_providers",
+    ReqMethod.SKILLS_ENTERPRISE_SOURCE_SEARCH: "handle_skills_source_search",
 }
 
 # Evolution version RPCs (archives/rollback/rebuild) are handled by DeepAdapter.
@@ -620,6 +627,18 @@ _SKILLS_WEB_HANDLERS: frozenset[str] = frozenset(
     {
         "handle_skills_web_install",
         "handle_skills_web_uninstall",
+    }
+)
+
+_SKILL_SOURCE_POLICY_ROUTES: frozenset[ReqMethod] = frozenset(
+    {
+        ReqMethod.SKILLS_SOURCE_PROVIDERS,
+        ReqMethod.SKILLS_SOURCE_SEARCH,
+        ReqMethod.SKILLS_SOURCE_INSTALL,
+        ReqMethod.SKILLS_UPDATES_CHECK,
+        ReqMethod.SKILLS_UPDATE,
+        ReqMethod.SKILLS_ENTERPRISE_SOURCE_PROVIDERS,
+        ReqMethod.SKILLS_ENTERPRISE_SOURCE_SEARCH,
     }
 )
 
@@ -1952,6 +1971,11 @@ class JiuWenSwarm:
         handler_name = _SKILL_ROUTES[request.req_method]
         handler = getattr(self._skill_manager, handler_name)
         try:
+            if is_enterprise() and request.req_method in _SKILL_SOURCE_POLICY_ROUTES:
+                adapter = self._ensure_adapter(mode=self._adapter_mode_for_request(request))
+                prepare_sources = getattr(adapter, "prepare_skill_source_config", None)
+                if callable(prepare_sources):
+                    await prepare_sources(request)
             params = dict(request.params) if isinstance(request.params, dict) else {}
             if handler_name in _SKILLS_WEB_HANDLERS and is_enterprise():
                 if self._service_id and not str(params.get("service_id") or "").strip():
@@ -1966,6 +1990,8 @@ class JiuWenSwarm:
                 "handle_skills_skillnet_install",
                 "handle_skills_clawhub_download",
                 "handle_skills_team_skills_hub_install",
+                "handle_skills_source_install",
+                "handle_skills_update",
             ]
             _enterprise_web_handler = handler_name in _SKILLS_WEB_HANDLERS
             if handler_name == "handle_skills_skillnet_install" and payload.get("pending"):

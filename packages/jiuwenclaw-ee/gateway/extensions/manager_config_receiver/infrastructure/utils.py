@@ -61,6 +61,7 @@ KNOWN_SLOT_KEYS = frozenset({
     "skill_whitelist",
     "extension_config",
     "mcp",
+    "permissions",
 })
 
 

@@ -14,6 +14,9 @@ from jiuwenswarm.gateway.a2a_manager.outbound import (
     A2ADiscoveredAgent,
     A2AOutboundCredentialStore,
     A2AOutboundDiscoveryService,
+    A2AOutboundDispatch,
+    A2AOutboundDispatchMode,
+    A2AOutboundDispatchStatus,
     A2AOutboundError,
     A2AOutboundErrorCode,
     A2AOutboundRegistry,
@@ -38,6 +41,58 @@ class _SecretProbe:
 
     def delete(self, key: str) -> None:
         self.values.pop(key, None)
+
+
+@pytest.mark.asyncio
+async def test_dispatch_history_exposes_metadata_without_result_body() -> None:
+    registry, repository, _ = _registry()
+    await repository.create_dispatch(
+        A2AOutboundDispatch(
+            dispatch_id="disp-1",
+            agent_id="agent-1",
+            agent_revision=1,
+            mode=A2AOutboundDispatchMode.SYNC,
+            status=A2AOutboundDispatchStatus.COMPLETED,
+            request_message_id="msg-1",
+            source_session_id="session-1",
+            created_at="2026-08-27T01:00:00Z",
+            updated_at="2026-08-27T01:00:01Z",
+            finished_at="2026-08-27T01:00:01Z",
+            result={"text": "private response"},
+        )
+    )
+
+    history = await registry.list_dispatches(limit=200)
+
+    assert history["total"] == 1
+    assert history["items"][0]["dispatch_id"] == "disp-1"
+    assert history["items"][0]["updated_at"] == "2026-08-27T01:00:01Z"
+    assert "result" not in history["items"][0]
+
+
+@pytest.mark.asyncio
+async def test_dispatch_history_total_counts_records_beyond_page_limit() -> None:
+    registry, repository, _ = _registry()
+    for index in range(2):
+        stamp = f"2026-08-27T01:00:0{index}Z"
+        await repository.create_dispatch(
+            A2AOutboundDispatch(
+                dispatch_id=f"disp-{index}",
+                agent_id="agent-1",
+                agent_revision=1,
+                mode=A2AOutboundDispatchMode.ASYNC,
+                status=A2AOutboundDispatchStatus.TIMED_OUT,
+                request_message_id=f"msg-{index}",
+                source_session_id="session-1",
+                created_at=stamp,
+                updated_at=stamp,
+            )
+        )
+
+    history = await registry.list_dispatches(limit=1)
+
+    assert len(history["items"]) == 1
+    assert history["total"] == 2
 
 
 class _FailingUpdateRepository(A2AOutboundRepository):

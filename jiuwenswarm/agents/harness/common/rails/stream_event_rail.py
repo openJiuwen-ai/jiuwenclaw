@@ -50,6 +50,9 @@ from jiuwenswarm.agents.harness.common.rails.read_file_validation import (
     is_read_file_tool,
     normalize_read_file_tool_outcome,
 )
+from jiuwenswarm.agents.harness.common.rails.task_execution_rail import (
+    SKILL_TURBO_OUTER_TODO_ACTIVE_EXTRA_KEY,
+)
 from jiuwenswarm.common.tool_display import (
     build_tool_display_name,
     extract_call_goal,
@@ -304,6 +307,7 @@ _SKILL_TURBO_METADATA_TOKEN_EXTRA_KEY = "_jiuwenswarm_skill_turbo_metadata_token
 _SKILL_TURBO_WORKSPACE_TOKEN_EXTRA_KEY = "_jiuwenswarm_skill_turbo_workspace_token"
 _SKILL_TURBO_INTERACTIVE_ASK_TOKEN_EXTRA_KEY = "_jiuwenswarm_skill_turbo_interactive_ask_token"
 _SKILL_TURBO_RESUME_ANSWERS_TOKEN_EXTRA_KEY = "_jiuwenswarm_skill_turbo_resume_answers_token"
+_SKILL_TURBO_OUTER_TODO_TOKEN_EXTRA_KEY = "_jiuwenswarm_skill_turbo_outer_todo_token"
 _SUBAGENT_PARENT_SESSION_TOKEN_EXTRA_KEY = "_jiuwenswarm_subagent_parent_session_token"
 
 
@@ -357,6 +361,29 @@ def _reset_skill_turbo_resume_answers_token(ctx: AgentCallbackContext) -> None:
             reset_skill_turbo_resume_answers,
         )
         reset_skill_turbo_resume_answers(token)
+
+
+def _reset_skill_turbo_outer_todo_token(ctx: AgentCallbackContext) -> None:
+    """Restore the display-ownership binding for this tool call."""
+    token = ctx.extra.pop(_SKILL_TURBO_OUTER_TODO_TOKEN_EXTRA_KEY, None)
+    if token is not None:
+        from jiuwenswarm.server.runtime.skill_turbo.skill_turbo_tools import (
+            reset_skill_turbo_outer_todo_active,
+        )
+        reset_skill_turbo_outer_todo_active(token)
+
+
+def _bind_skill_turbo_outer_todo_token(ctx: AgentCallbackContext) -> None:
+    """Rebind outer-todo display ownership into the tool context."""
+    active = ctx.extra.get(SKILL_TURBO_OUTER_TODO_ACTIVE_EXTRA_KEY)
+    if not isinstance(active, bool):
+        return
+    from jiuwenswarm.server.runtime.skill_turbo.skill_turbo_tools import (
+        set_skill_turbo_outer_todo_active,
+    )
+    ctx.extra[_SKILL_TURBO_OUTER_TODO_TOKEN_EXTRA_KEY] = (
+        set_skill_turbo_outer_todo_active(active)
+    )
 
 
 def _reset_subagent_parent_session_token(ctx: AgentCallbackContext) -> None:
@@ -964,6 +991,7 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
         _reset_skill_turbo_workspace_token(ctx)
         _reset_skill_turbo_interactive_ask_token(ctx)
         _reset_skill_turbo_resume_answers_token(ctx)
+        _reset_skill_turbo_outer_todo_token(ctx)
         _reset_subagent_parent_session_token(ctx)
 
     # ------------------------------------------------------------------
@@ -1226,6 +1254,8 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
                     exc_info=True,
                 )
 
+        _bind_skill_turbo_outer_todo_token(ctx)
+
         # SkillTurbo request metadata ContextVar 转绑：
         # 请求任务里 set_current_request_metadata 的绑定无法传播到本工具执行上下文，
         # 这里用 rail 上保存的副本重新绑定，供 skill_turbo 工具读取 session_id 等。
@@ -1292,6 +1322,7 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
     async def after_tool_call(self, ctx: AgentCallbackContext) -> None:
         _reset_subagent_parent_session_token(ctx)
         _reset_skill_turbo_resume_answers_token(ctx)
+        _reset_skill_turbo_outer_todo_token(ctx)
 
         session = ctx.session
         if session is None or not isinstance(ctx.inputs, ToolCallInputs):
@@ -1410,6 +1441,7 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
         _reset_skill_turbo_workspace_token(ctx)
         _reset_skill_turbo_interactive_ask_token(ctx)
         _reset_skill_turbo_resume_answers_token(ctx)
+        _reset_skill_turbo_outer_todo_token(ctx)
         _reset_subagent_parent_session_token(ctx)
         if ctx.context is not None:
             logger.info("[StreamEventRail] Attempting context repair after model exception")

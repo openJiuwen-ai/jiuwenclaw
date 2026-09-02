@@ -28,7 +28,21 @@ _ENTERPRISE_BLOCKED_EXACT = frozenset({
     "updater.upgrade", "updater.reset_source", "updater.set_conf",
 })
 _ENTERPRISE_BLOCKED_PREFIXES = ("agents.", "teams.", "extensions.", "plugins.")
-_ENTERPRISE_SKILL_ALLOWED = frozenset({"skills.list", "skills.get", "skills.enterprise.list"})
+_ENTERPRISE_SKILL_ALLOWED = frozenset({
+    "skills.list",
+    "skills.get",
+    "skills.toggle",
+    "skills.source.providers",
+    "skills.source.search",
+    "skills.source.install",
+    "skills.updates.check",
+    "skills.update",
+    "skills.enterprise.list",
+    "skills.enterprise.install",
+    "skills.enterprise.uninstall",
+    "skills.enterprise.source.providers",
+    "skills.enterprise.source.search",
+})
 
 
 def is_enterprise_write_forbidden(method: str) -> bool:

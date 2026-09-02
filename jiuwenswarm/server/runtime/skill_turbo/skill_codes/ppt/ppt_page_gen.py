@@ -29,6 +29,28 @@ _CHART_CANDIDATE_TYPES = {"data", "comparison", "technology", "trend"}
 # P8.2：只读校验 / 单页 fix 硬超时，避免 read_file 或 bash 挂死拖死 gather。
 _P82_READ_TIMEOUT_SECONDS = 60.0
 _P82_FIX_ONE_TIMEOUT_SECONDS = 360.0
+# P8.1：HTML 后处理（regex/DOM 校验）并发上限，避免多页 LLM 同时返回后在主 loop
+# 上堆积同步 CPU 后处理导致协议 ping 饿死。页级 LLM 流式保持 asyncio.gather 全并发，
+# 由 Executor 层 llm_concurrency_limit（若配置）单独限 LLM。
+# skill_code 受 PlanCodeValidator 约束（禁 os 等），不可读环境变量；调参请改此常量。
+_P8_1_POSTPROCESS_CONCURRENCY = 8
+
+_postprocess_sem: asyncio.Semaphore | None = None
+
+
+def _get_postprocess_sem() -> asyncio.Semaphore:
+    """懒初始化后处理 Semaphore，避免 import 时绑定错误 event loop。"""
+    global _postprocess_sem
+    if _postprocess_sem is None:
+        _postprocess_sem = asyncio.Semaphore(_P8_1_POSTPROCESS_CONCURRENCY)
+    return _postprocess_sem
+
+
+async def _run_postprocess(fn: Callable[..., Any], /, *args: Any, **kwargs: Any) -> Any:
+    """在线程池执行同步后处理，并用 Semaphore 限制同时 in-flight 的后处理路数。"""
+    async with _get_postprocess_sem():
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, lambda: fn(*args, **kwargs))
 
 
 def _extract_designer_section(
@@ -4079,6 +4101,187 @@ class PageGenContext:
     outline_full: str = ""  # outline.md 全文（agenda 核对章节页码用）
 
 
+def _postprocess_generated_html(raw_html: str, ctx: PageGenContext) -> tuple[str, str, str]:
+    """LLM 全文生成后的同步 HTML 校验/修复（移出事件循环执行）。"""
+    html = _strip_html_fence(raw_html or "")
+    if not _is_valid_html(html):
+        logger.warning("[P8.1] 页面 %d HTML 校验失败", ctx.page_num)
+        return "", html, "invalid_html"
+    html = _replace_placeholder_headings(html, ctx.outline_page)
+    html = _apply_visible_page_number_policy(
+        html,
+        user_query=ctx.user_query,
+        page_number=ctx.page_num,
+        total_pages=ctx.total_pages,
+        style_id=ctx.style_id,
+    )
+    html = _fix_echarts_svg_renderer(html)
+    html = _strip_unsupported_fullpage_overlays(html)
+    html = _strip_chart_header_unit(html)
+    html = _fix_chart_scaffold_activation(html)
+    html = _fix_chart_height_chain(html)
+    if not _validate_slide_dom(html):
+        logger.warning("[P8.1] 页面 %d DOM 结构校验失败", ctx.page_num)
+        return "", html, "invalid_dom"
+    if not _validate_chart_height_chain(html):
+        logger.warning("[P8.1] 页面 %d 图表容器高度链校验失败", ctx.page_num)
+        return "", html, "invalid_chart_height_chain"
+    if not _validate_chart_mount_references(html):
+        logger.warning(
+            "[P8.1] 页面 %d 图表容器 id 与 getElementById 不一致",
+            ctx.page_num,
+        )
+        return "", html, "chart_mount_id_mismatch"
+    return html, "", ""
+
+
+def _postprocess_content_template_fill(
+    raw_html: str,
+    *,
+    seed_html: str,
+    ctx: PageGenContext,
+) -> tuple[str, str, str]:
+    """内容页填槽后的同步校验/修复（移出事件循环执行）。"""
+    html = _strip_html_fence(raw_html or "")
+    html = _replace_placeholder_headings(html, ctx.outline_page)
+    html = _apply_visible_page_number_policy(
+        html,
+        user_query=ctx.user_query,
+        page_number=ctx.page_num,
+        total_pages=ctx.total_pages,
+        style_id=ctx.style_id,
+    )
+    html = _fix_echarts_svg_renderer(html)
+    html = _strip_unsupported_fullpage_overlays(html)
+    html = _strip_chart_header_unit(html)
+    html = _fix_chart_scaffold_activation(html)
+    html = _fix_chart_height_chain(html)
+    if ctx.style_id == "custom":
+        ok, reason = _validate_custom_content_template_fill_output(seed_html, html)
+    else:
+        ok, reason = _validate_content_template_fill_output(seed_html, html)
+    if (
+        ctx.style_id != "custom"
+        and not ok
+        and reason in _REPAIRABLE_CONTENT_TEMPLATE_REASONS
+    ):
+        repaired = _repair_content_template_chrome(seed_html, html)
+        if repaired:
+            repaired = _fix_echarts_svg_renderer(repaired)
+            repaired = _strip_unsupported_fullpage_overlays(repaired)
+            repaired = _strip_chart_header_unit(repaired)
+            repaired = _fix_chart_scaffold_activation(repaired)
+            repaired = _fix_chart_height_chain(repaired)
+            ok_repaired, reason_repaired = _validate_content_template_fill_output(
+                seed_html,
+                repaired,
+            )
+            if ok_repaired:
+                logger.info(
+                    "[P8.1] repaired=content_template_chrome page=%d style=%s "
+                    "from_reason=%s",
+                    ctx.page_num,
+                    ctx.style_id,
+                    reason,
+                )
+                return repaired, "", ""
+            logger.warning(
+                "[P8.1] 内容页 chrome 自动修复后仍失败 page=%d style=%s "
+                "from_reason=%s repair_reason=%s",
+                ctx.page_num,
+                ctx.style_id,
+                reason,
+                reason_repaired,
+            )
+    if not ok:
+        logger.warning(
+            "[P8.1] 内容页填槽校验失败 page=%d style=%s reason=%s",
+            ctx.page_num,
+            ctx.style_id,
+            reason,
+        )
+        return "", html, reason
+    logger.info(
+        "[P8.1] 内容页官方模板填槽完成 page=%d style=%s",
+        ctx.page_num,
+        ctx.style_id,
+    )
+    return html, "", ""
+
+
+def _postprocess_structural_template_fill(
+    raw_html: str,
+    *,
+    seed_html: str,
+    page_type: str,
+    ctx: PageGenContext,
+) -> str:
+    """结构页填槽后的同步校验/修复（移出事件循环执行）。"""
+    html = _strip_html_fence(raw_html or "")
+    if not _is_valid_html(html):
+        logger.warning(
+            "[P8.1] 结构页填槽 HTML 校验失败 page=%d type=%s",
+            ctx.page_num,
+            page_type,
+        )
+        return ""
+    if _has_unfilled_placeholders(html):
+        logger.warning(
+            "[P8.1] 结构页填槽残留占位符 page=%d type=%s placeholders=%s",
+            ctx.page_num,
+            page_type,
+            _UNFILLED_PLACEHOLDER_RE.findall(html)[:8],
+        )
+        return ""
+    if not _structural_chrome_matches_seed(seed_html, html):
+        logger.warning(
+            "[P8.1] 结构页 chrome 偏离 seed（违规修改或流式输出损坏）"
+            " page=%d type=%s seed_head_len=%d filled_head_len=%d"
+            " -> 尝试 chrome 自动修复",
+            ctx.page_num,
+            page_type,
+            len(_head_chrome_signature(seed_html)),
+            len(_head_chrome_signature(html)),
+        )
+        repaired = _repair_structural_page_chrome(seed_html, html)
+        if repaired and _structural_chrome_matches_seed(seed_html, repaired):
+            logger.info(
+                "[P8.1] 结构页 chrome 自动修复成功 page=%d type=%s",
+                ctx.page_num,
+                page_type,
+            )
+            html = repaired
+        else:
+            logger.warning(
+                "[P8.1] 结构页 chrome 自动修复失败 page=%d type=%s",
+                ctx.page_num,
+                page_type,
+            )
+            return ""
+
+    html = _apply_visible_page_number_policy(
+        html,
+        user_query=ctx.user_query,
+        page_number=ctx.page_num,
+        total_pages=ctx.total_pages,
+        style_id=ctx.style_id,
+    )
+    if not _validate_slide_dom(html):
+        logger.warning(
+            "[P8.1] 结构页 DOM 校验失败 page=%d type=%s",
+            ctx.page_num,
+            page_type,
+        )
+        return ""
+    logger.info(
+        "[P8.1] 结构页官方模板填槽完成 page=%d style=%s type=%s",
+        ctx.page_num,
+        ctx.style_id,
+        page_type,
+    )
+    return html
+
+
 class PrepareNode(PlanNode):
     """P8.0 — 读取素材并按页拆分，产出共享只读数据供 per-page worker 复用。"""
 
@@ -4311,6 +4514,11 @@ class PageWorkerNode(DisableThinkingMixin, PlanNode):
             }
 
         total_pages = int(inputs.get("total_pages") or max(all_pages))
+        logger.info(
+            "[P8.1] per-page 并发生成 pages=%d postprocess_concurrency=%d",
+            len(all_pages),
+            _P8_1_POSTPROCESS_CONCURRENCY,
+        )
 
         tasks = [
             self._run_page_pipeline(
@@ -4772,74 +4980,13 @@ class PageWorkerNode(DisableThinkingMixin, PlanNode):
             )
             return ""
 
-        html = _strip_html_fence(result or "")
-        if not _is_valid_html(html):
-            logger.warning(
-                "[P8.1] 结构页填槽 HTML 校验失败 page=%d type=%s",
-                ctx.page_num,
-                page_type,
-            )
-            return ""
-        if _has_unfilled_placeholders(html):
-            logger.warning(
-                "[P8.1] 结构页填槽残留占位符 page=%d type=%s placeholders=%s",
-                ctx.page_num,
-                page_type,
-                _UNFILLED_PLACEHOLDER_RE.findall(html)[:8],
-            )
-            return ""
-        if not _structural_chrome_matches_seed(seed_html, html):
-            logger.warning(
-                "[P8.1] 结构页 chrome 偏离 seed（违规修改或流式输出损坏）"
-                " page=%d type=%s seed_head_len=%d filled_head_len=%d"
-                " -> 尝试 chrome 自动修复",
-                ctx.page_num,
-                page_type,
-                len(_head_chrome_signature(seed_html)),
-                len(_head_chrome_signature(html)),
-            )
-            # 尝试从 seed 恢复 chrome，保留 LLM 填入的 body 内容。
-            # 结构页无 <main>/<footer>，不能用 _repair_content_template_chrome
-            #（它依赖 main_inner 提取），改用 _repair_structural_chrome：
-            # 从 filled 的 <body> 提取 slide 内容，替换 seed 的 {{PAGE_TITLE}}/
-            # {{PAGE_CONTENT}} 等占位符。
-            repaired = _repair_structural_page_chrome(seed_html, html)
-            if repaired and _structural_chrome_matches_seed(seed_html, repaired):
-                logger.info(
-                    "[P8.1] 结构页 chrome 自动修复成功 page=%d type=%s",
-                    ctx.page_num,
-                    page_type,
-                )
-                html = repaired
-            else:
-                logger.warning(
-                    "[P8.1] 结构页 chrome 自动修复失败 page=%d type=%s",
-                    ctx.page_num,
-                    page_type,
-                )
-                return ""
-
-        html = _apply_visible_page_number_policy(
-            html,
-            user_query=ctx.user_query,
-            page_number=ctx.page_num,
-            total_pages=ctx.total_pages,
-            style_id=ctx.style_id,
+        return await _run_postprocess(
+            _postprocess_structural_template_fill,
+            result or "",
+            seed_html=seed_html,
+            page_type=page_type,
+            ctx=ctx,
         )
-        if not _validate_slide_dom(html):
-            logger.warning(
-                "[P8.1] 结构页 DOM 校验失败 page=%d type=%s",
-                ctx.page_num,
-                page_type,
-            )
-            return ""
-        logger.info(
-            "[P8.1] 结构页官方模板填槽完成 page=%d style=%s type=%s",
-            ctx.page_num,
-            ctx.style_id,
-            page_type,
-        )
-        return html
 
     async def _generate_content_template_fill(
         self, ctx: PageGenContext, *, rewrite_hint: str = ""
@@ -4909,71 +5056,12 @@ class PageWorkerNode(DisableThinkingMixin, PlanNode):
             logger.warning("[P8.1] 内容页填槽 LLM 失败 page=%d: %s", ctx.page_num, e)
             return "", "", "llm_failed"
 
-        html = _strip_html_fence(result or "")
-        html = _replace_placeholder_headings(html, ctx.outline_page)
-        html = _apply_visible_page_number_policy(
-            html,
-            user_query=ctx.user_query,
-            page_number=ctx.page_num,
-            total_pages=ctx.total_pages,
-            style_id=ctx.style_id,
+        return await _run_postprocess(
+            _postprocess_content_template_fill,
+            result or "",
+            seed_html=seed_html,
+            ctx=ctx,
         )
-        html = _fix_echarts_svg_renderer(html)
-        html = _strip_unsupported_fullpage_overlays(html)
-        html = _strip_chart_header_unit(html)
-        html = _fix_chart_scaffold_activation(html)
-        html = _fix_chart_height_chain(html)
-        if ctx.style_id == "custom":
-            ok, reason = _validate_custom_content_template_fill_output(seed_html, html)
-        else:
-            ok, reason = _validate_content_template_fill_output(seed_html, html)
-        if (
-            ctx.style_id != "custom"
-            and not ok
-            and reason in _REPAIRABLE_CONTENT_TEMPLATE_REASONS
-        ):
-            repaired = _repair_content_template_chrome(seed_html, html)
-            if repaired:
-                repaired = _fix_echarts_svg_renderer(repaired)
-                repaired = _strip_unsupported_fullpage_overlays(repaired)
-                repaired = _strip_chart_header_unit(repaired)
-                repaired = _fix_chart_scaffold_activation(repaired)
-                repaired = _fix_chart_height_chain(repaired)
-                ok_repaired, reason_repaired = _validate_content_template_fill_output(
-                    seed_html,
-                    repaired,
-                )
-                if ok_repaired:
-                    logger.info(
-                        "[P8.1] repaired=content_template_chrome page=%d style=%s "
-                        "from_reason=%s",
-                        ctx.page_num,
-                        ctx.style_id,
-                        reason,
-                    )
-                    return repaired, "", ""
-                logger.warning(
-                    "[P8.1] 内容页 chrome 自动修复后仍失败 page=%d style=%s "
-                    "from_reason=%s repair_reason=%s",
-                    ctx.page_num,
-                    ctx.style_id,
-                    reason,
-                    reason_repaired,
-                )
-        if not ok:
-            logger.warning(
-                "[P8.1] 内容页填槽校验失败 page=%d style=%s reason=%s",
-                ctx.page_num,
-                ctx.style_id,
-                reason,
-            )
-            return "", html, reason
-        logger.info(
-            "[P8.1] 内容页官方模板填槽完成 page=%d style=%s",
-            ctx.page_num,
-            ctx.style_id,
-        )
-        return html, "", ""
 
     async def _generate_one(
         self, ctx: PageGenContext, *, rewrite_hint: str = "", original_html: str = ""
@@ -5017,37 +5105,9 @@ class PageWorkerNode(DisableThinkingMixin, PlanNode):
                 raise
             logger.warning("[P8.1] 页面 %d 生成 LLM 失败: %s", ctx.page_num, e)
             return "", "", "llm_failed"
-        html = _strip_html_fence(result or "")
-        if not _is_valid_html(html):
-            logger.warning("[P8.1] 页面 %d HTML 校验失败", ctx.page_num)
-            return "", html, "invalid_html"
-        # 后置校验：替换「第X页」标题占位符为 outline 中的实际标题
-        html = _replace_placeholder_headings(html, ctx.outline_page)
-        html = _apply_visible_page_number_policy(
-            html,
-            user_query=ctx.user_query,
-            page_number=ctx.page_num,
-            total_pages=ctx.total_pages,
-            style_id=ctx.style_id,
+        return await _run_postprocess(
+            _postprocess_generated_html, result or "", ctx
         )
-        html = _fix_echarts_svg_renderer(html)
-        html = _strip_unsupported_fullpage_overlays(html)
-        html = _strip_chart_header_unit(html)
-        html = _fix_chart_scaffold_activation(html)
-        html = _fix_chart_height_chain(html)
-        if not _validate_slide_dom(html):
-            logger.warning("[P8.1] 页面 %d DOM 结构校验失败", ctx.page_num)
-            return "", html, "invalid_dom"
-        if not _validate_chart_height_chain(html):
-            logger.warning("[P8.1] 页面 %d 图表容器高度链校验失败", ctx.page_num)
-            return "", html, "invalid_chart_height_chain"
-        if not _validate_chart_mount_references(html):
-            logger.warning(
-                "[P8.1] 页面 %d 图表容器 id 与 getElementById 不一致",
-                ctx.page_num,
-            )
-            return "", html, "chart_mount_id_mismatch"
-        return html, "", ""
 
     async def _write_file(self, path: str, content: str) -> bool:
         if not self.has_tool("write_file"):
@@ -5055,6 +5115,8 @@ class PageWorkerNode(DisableThinkingMixin, PlanNode):
             return False
         try:
             await self.call_tool("write_file", file_path=path, content=content)
+            # 让出事件循环，保证 WebSocket 协议 ping/pong 能被调度。
+            await asyncio.sleep(0)
             return True
         except Exception as e:
             if isinstance(e, AbortError):
@@ -5870,7 +5932,9 @@ class PPTPageGenNode(PlanNode):
                         )
                         for p in failed_pages
                     ]
-                    retry_results = await asyncio.gather(*retry_tasks, return_exceptions=True)
+                    retry_results = await asyncio.gather(
+                        *retry_tasks, return_exceptions=True
+                    )
                     for p, r in zip(failed_pages, retry_results):
                         if isinstance(r, Exception) or not r:
                             logger.warning("[P8-TP] 页面 %d 恢复失败", p)
@@ -5951,6 +6015,8 @@ class PPTPageGenNode(PlanNode):
             return False
         try:
             await self.call_tool("write_file", file_path=path, content=content)
+            # 让出事件循环，保证 WebSocket 协议 ping/pong 能被调度。
+            await asyncio.sleep(0)
             return True
         except Exception as e:
             if isinstance(e, AbortError):

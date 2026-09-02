@@ -30,15 +30,6 @@ class TaskMemoryUpsertRequest(BaseModel):
     summary_algo: str | None = Field(default=None, max_length=64)
 
 
-class PermissionsConfigUpsertRequest(BaseModel):
-    """对齐 Manager ``PermissionsConfigUpsertRequest``。"""
-
-    body: dict[str, Any] = Field(
-        ...,
-        description="完整 permissions 段，结构与 config.yaml::permissions 一致",
-    )
-
-
 class MemoryConfigUpsertRequest(BaseModel):
     """对齐 Manager ``MemoryConfigUpsertRequest``。"""
 

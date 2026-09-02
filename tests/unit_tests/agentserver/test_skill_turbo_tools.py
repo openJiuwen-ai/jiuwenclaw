@@ -9,7 +9,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from jiuwenswarm.server.runtime.skill_turbo.plan_node import AbortError
-from jiuwenswarm.server.runtime.skill_turbo.skill_turbo_tools import skill_turbo
+from jiuwenswarm.server.runtime.skill_turbo.skill_turbo_tools import (
+    _without_inner_task_routing,
+    reset_skill_turbo_outer_todo_active,
+    set_skill_turbo_outer_todo_active,
+    skill_turbo,
+)
 
 _QUERY = "做一份关于黄仁勋GTC讲话的PPT"
 
@@ -38,7 +43,22 @@ def _skill_turbo_runtime():
 
 
 def test_skill_acceleration_exec_defers_timeout_to_pipeline() -> None:
+    assert skill_turbo.card.name == "skill_acceleration_exec"
     assert skill_turbo.card.properties["resilience"]["timeout_s"] is None
+
+
+def test_without_inner_task_routing_preserves_stage_content() -> None:
+    payload = {
+        "event_type": "chat.delta",
+        "content": "开始执行 Stage 2: 意图分类（2/14）",
+        "task_id": "task_6d61d336",
+    }
+
+    cleaned = _without_inner_task_routing(payload)
+
+    assert "task_id" not in cleaned
+    assert cleaned["content"] == payload["content"]
+    assert payload["task_id"] == "task_6d61d336"
 
 
 @pytest.mark.asyncio
@@ -431,3 +451,105 @@ async def test_not_handled_clears_resume_ctx(_skill_turbo_runtime) -> None:
     assert result.get("success") is False
     clear_ctx.assert_awaited_once_with(turbo_session)
     turbo_session.post_run.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("outer_todo_active", "expected_event_types"),
+    [
+        (True, ["chat.delta", "chat.usage_metadata"]),
+        (False, ["task.update", "chat.delta", "chat.usage_metadata"]),
+    ],
+)
+async def test_outer_todo_hides_inner_tasks_without_hiding_stage_messages(
+    _skill_turbo_runtime,
+    outer_todo_active: bool,
+    expected_event_types: list[str],
+) -> None:
+    adapter, _turbo_session = _skill_turbo_runtime
+    parent_session = SimpleNamespace(
+        write_stream=AsyncMock(),
+        get_session_id=lambda: "sess-1",
+    )
+
+    async def stream(*_args, **_kwargs):
+        yield SimpleNamespace(
+            payload={
+                "event_type": "task.update",
+                "tasks": [{
+                    "task_id": "task_deadbeef",
+                    "task_content": "Stage 1: 流水线初始化",
+                    "status": "in_progress",
+                }],
+            }
+        )
+        yield SimpleNamespace(
+            payload={
+                "event_type": "chat.delta",
+                "content": "开始执行 Stage 1: 流水线初始化（1/14）\n",
+                "task_id": "task_deadbeef",
+            }
+        )
+        yield SimpleNamespace(
+            payload={
+                "event_type": "chat.usage_metadata",
+                "metadata": {"plan_name": "p1_intent_classify"},
+                "task_id": "task_6d61d336",
+            }
+        )
+
+    turbo = _fake_turbo()
+    turbo.run_stream = MagicMock(side_effect=stream)
+    token = set_skill_turbo_outer_todo_active(outer_todo_active)
+    try:
+        with (
+            patch(
+                "jiuwenswarm.server.runtime.skill_turbo.skill_turbo_tools.get_current_skill_turbo_adapter",
+                return_value=adapter,
+            ),
+            patch(
+                "jiuwenswarm.server.runtime.skill_turbo.skill_turbo_tools.get_current_task_id",
+                return_value=None,
+            ),
+            patch(
+                "jiuwenswarm.server.runtime.skill_turbo.skill_turbo_tools.get_skill_turbo_resume_answers",
+                return_value=None,
+            ),
+            patch(
+                "jiuwenswarm.server.runtime.skill_turbo.skill_turbo_tools.get_current_request_metadata",
+                return_value={},
+            ),
+            patch(
+                "jiuwenswarm.agents.harness.common.tools.subagent_executor.get_subagent_parent_session",
+                return_value=parent_session,
+            ),
+            patch(
+                "jiuwenswarm.agents.harness.common.tools.subagent_executor.context_vars.get_effective_request_workspace_dir",
+                return_value=None,
+            ),
+            patch(
+                "jiuwenswarm.server.runtime.skill_turbo.agent.SkillTurbo",
+                return_value=turbo,
+            ),
+        ):
+            result = await skill_turbo.invoke({"query": _QUERY})
+    finally:
+        reset_skill_turbo_outer_todo_active(token)
+
+    assert result.get("success") is True
+    forwarded = [
+        call.args[0].payload
+        for call in parent_session.write_stream.await_args_list
+    ]
+    assert [
+        payload["event_type"] for payload in forwarded
+    ] == expected_event_types
+    delta = next(
+        payload for payload in forwarded
+        if payload["event_type"] == "chat.delta"
+    )
+    assert "Stage 1: 流水线初始化" in delta["content"]
+    if outer_todo_active:
+        assert all("task_id" not in payload for payload in forwarded)
+    else:
+        assert forwarded[0]["tasks"][0]["task_id"] == "task_deadbeef"

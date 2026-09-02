@@ -60,6 +60,8 @@ type UpdateStatus = {
 interface EnterpriseSkillSourcePanelProps {
   sessionId: string;
   viewMode?: 'list' | 'grid';
+  /** 外层搜索框传入的关键词；提供时隐藏面板内置搜索框，关键词变化自动搜索 */
+  externalSearchQuery?: string;
   onInstalled?: (skillName: string) => void | Promise<void>;
 }
 
@@ -80,7 +82,7 @@ function labelText(label: { name?: string } | string | undefined): string {
   return label.name || '';
 }
 
-export function EnterpriseSkillSourcePanel({ sessionId, viewMode = 'list', onInstalled }: EnterpriseSkillSourcePanelProps) {
+export function EnterpriseSkillSourcePanel({ sessionId, viewMode = 'list', externalSearchQuery, onInstalled }: EnterpriseSkillSourcePanelProps) {
   const { t } = useTranslation();
   const [sources, setSources] = useState<SourceDescriptor[]>([]);
   const [sourceId, setSourceId] = useState('');
@@ -188,9 +190,24 @@ export function EnterpriseSkillSourcePanel({ sessionId, viewMode = 'list', onIns
       setPage(1);
       void runSearch(1);
     }
-    // 仅 sourceId 变化时触发；query 变化由搜索按钮/回车触发
+    // sourceId 变化时触发；内部模式 query 变化由搜索按钮/回车触发，外部模式由下面 query effect 触发
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sourceId]);
+
+  const isExternalQuery = externalSearchQuery !== undefined;
+
+  // 外层搜索框驱动：同步关键词（与个人版 TeamSkillsHubModal 嵌入模式一致）
+  useEffect(() => {
+    if (isExternalQuery) setQuery(externalSearchQuery);
+  }, [externalSearchQuery, isExternalQuery]);
+
+  // 外部模式下关键词变化自动搜索（外层输入已做防抖）
+  useEffect(() => {
+    if (!isExternalQuery || !sourceId) return;
+    setPage(1);
+    void runSearch(1);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [query, isExternalQuery]);
 
   const handleInstall = useCallback(
     async (item: SkillCandidate, force = false) => {
@@ -398,38 +415,44 @@ export function EnterpriseSkillSourcePanel({ sessionId, viewMode = 'list', onIns
         </div>
       )}
 
-      <div className="flex items-center gap-2">
-        {sources.length > 1 && (
-          <select
-            value={sourceId}
-            onChange={e => setSourceId(e.target.value)}
-            className="px-2 py-1.5 rounded-lg text-sm bg-secondary border border-border text-text"
-          >
-            {sources.map(s => (
-              <option key={s.source_id} value={s.source_id}>
-                {s.display_name || s.source_id}
-              </option>
-            ))}
-          </select>
-        )}
-        <input
-          value={query}
-          onChange={e => setQuery(e.target.value)}
-          onKeyDown={e => e.key === 'Enter' && void runSearch(1)}
-          placeholder={t('skills.source.searchPlaceholder')}
-          className="flex-1 min-w-0 px-3 py-1.5 rounded-lg text-sm bg-secondary border border-border text-text placeholder:text-text-muted"
-        />
-        <button
-          type="button"
-          onClick={() => void runSearch(1)}
-          disabled={loadState === 'loading' || !sourceId}
-          className={`px-4 py-1.5 rounded-2xl text-sm border border-gray-400 hover:border-gray-600 hover:bg-secondary/50 ${
-            loadState === 'loading' || !sourceId ? 'text-text-muted cursor-not-allowed' : 'text-text'
-          }`}
-        >
-          {loadState === 'loading' ? t('common.loading') : t('skills.teamskillshub.search')}
-        </button>
-      </div>
+      {(sources.length > 1 || !isExternalQuery) && (
+        <div className="flex items-center gap-2">
+          {sources.length > 1 && (
+            <select
+              value={sourceId}
+              onChange={e => setSourceId(e.target.value)}
+              className="px-2 py-1.5 rounded-lg text-sm bg-secondary border border-border text-text"
+            >
+              {sources.map(s => (
+                <option key={s.source_id} value={s.source_id}>
+                  {s.display_name || s.source_id}
+                </option>
+              ))}
+            </select>
+          )}
+          {!isExternalQuery && (
+            <>
+              <input
+                value={query}
+                onChange={e => setQuery(e.target.value)}
+                onKeyDown={e => e.key === 'Enter' && void runSearch(1)}
+                placeholder={t('skills.source.searchPlaceholder')}
+                className="flex-1 min-w-0 px-3 py-1.5 rounded-lg text-sm bg-secondary border border-border text-text placeholder:text-text-muted"
+              />
+              <button
+                type="button"
+                onClick={() => void runSearch(1)}
+                disabled={loadState === 'loading' || !sourceId}
+                className={`px-4 py-1.5 rounded-2xl text-sm border border-gray-400 hover:border-gray-600 hover:bg-secondary/50 ${
+                  loadState === 'loading' || !sourceId ? 'text-text-muted cursor-not-allowed' : 'text-text'
+                }`}
+              >
+                {loadState === 'loading' ? t('common.loading') : t('skills.teamskillshub.search')}
+              </button>
+            </>
+          )}
+        </div>
+      )}
 
       {loadState === 'loading' && <div className="flex items-center justify-center flex-1 text-text-muted">{t('common.loading')}</div>}
       {loadState === 'error' && <div className="mt-4 text-sm text-text-muted">{t('skills.source.errors.searchFailed')}</div>}

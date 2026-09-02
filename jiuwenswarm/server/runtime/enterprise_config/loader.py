@@ -48,6 +48,8 @@ def _apply_slot_entities(
         result.extension_config = entities
     elif slot == TemplateRefSlot.MCP:
         result.mcp = entities
+    elif slot == TemplateRefSlot.PERMISSIONS:
+        result.permissions = entities
 
 
 def _any_requested_slot_loaded(
@@ -64,6 +66,8 @@ def _any_requested_slot_loaded(
         if slot == TemplateRefSlot.EXTENSION_CONFIG and result.extension_config:
             return True
         if slot == TemplateRefSlot.MCP and result.mcp is not None:
+            return True
+        if slot == TemplateRefSlot.PERMISSIONS and result.permissions:
             return True
     return False
 

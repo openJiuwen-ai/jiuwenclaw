@@ -13,17 +13,6 @@ from jiuwenswarm.gateway.storage.backends.db import reader as _db_reader
 
 from .schemas import SLOT_ENTITY_TABLE, TemplateRefSlot
 
-PERMISSIONS_CONFIG_TABLE = _db_reader.PERMISSIONS_CONFIG_TABLE
-
-
-async def upsert_permissions_config(
-    body: dict[str, Any],
-    *,
-    source: str = "runtime_persist",
-) -> None:
-    """单例行 upsert ``permissions_config``。"""
-    await _db_reader.upsert_permissions_config(body, source=source)
-
 
 async def fetch_template_by_slot(
     slot: str,
@@ -60,8 +49,6 @@ async def list_records(
 
 
 __all__ = (
-    "PERMISSIONS_CONFIG_TABLE",
     "fetch_template_by_slot",
     "list_records",
-    "upsert_permissions_config",
 )
