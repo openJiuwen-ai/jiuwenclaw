@@ -35,7 +35,7 @@ _VERB_BY_TOOL: dict[str, str] = {
     "web_search": "联网搜索", "web_free_search": "联网搜索", "free_search": "联网搜索",
     "web_paid_search": "联网搜索", "paid_search": "联网搜索",
     "web_fetch": "抓取", "web_fetch_webpage": "抓取", "fetch": "抓取", "fetch_webpage": "抓取",
-    "run_command": "执行", "run": "执行", "bash": "执行", "shell": "执行", "sh": "执行",
+    "run_command": "执行", "run": "执行", "bash": "执行", "shell": "执行", "sh": "执行", "powershell": "执行",
     "exec": "执行", "exec_command": "执行", "execute_bash": "执行", "command": "执行",
     "sandbox_run_command": "执行",
     "run_python": "运行代码", "python": "运行代码", "execute_python": "运行代码",
