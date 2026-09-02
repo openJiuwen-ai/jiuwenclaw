@@ -785,6 +785,7 @@ def _apply_resolved_mode_to_request(
         request.params["mode"] = resolved.canonical_mode
     return resolved.manager_mode, resolved.sub_mode
 
+
 def _payload_to_request(data: dict[str, Any]) -> AgentRequest:
     """将 Gateway 发送的 JSON 载荷解析为 AgentRequest."""
     req_method = data.get("req_method")
