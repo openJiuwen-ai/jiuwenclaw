@@ -325,7 +325,8 @@ async def trigger_main_agent(
             # 送达判定收紧：循环跑完且未产 chat.error 且确实拿到话术正文（final/delta）
             # 且推送未失败。缺任何一条 = 未真正送达（LLM 失败/0 token/推送异常），
             # 不计 delivered → 不写 history、不占 cooldown，避免空记录 + 误占 24h 冷却位。
-            if not had_chat_error and not push_failed and (final_content or "".join(delta_parts)):
+            phrasing_text = final_content or "".join(delta_parts)
+            if phrasing_text and not had_chat_error and not push_failed:
                 delivered = True
             elif had_chat_error:
                 logger.info("[ProactiveEngine] not delivered (main agent chat.error, no phrasing text)")
