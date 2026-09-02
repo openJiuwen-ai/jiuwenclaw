@@ -6,6 +6,14 @@ from openjiuwen.core.single_agent.rail.base import ToolCallInputs
 from openjiuwen.harness.rails.interrupt.ask_user_rail import AskUserRequest
 from jiuwenswarm.agents.harness.common.rails.stream_event_rail import (
     JiuSwarmStreamEventRail,
+    _bind_skill_turbo_outer_todo_token,
+    _reset_skill_turbo_outer_todo_token,
+)
+from jiuwenswarm.agents.harness.common.rails.task_execution_rail import (
+    SKILL_TURBO_OUTER_TODO_ACTIVE_EXTRA_KEY,
+)
+from jiuwenswarm.server.runtime.skill_turbo.skill_turbo_tools import (
+    get_skill_turbo_outer_todo_active,
 )
 
 
@@ -48,6 +56,23 @@ class _TestRail(JiuSwarmStreamEventRail):
 
     async def emit_context_usage(self, ctx):
         await self._emit_context_usage(ctx)
+
+
+@pytest.mark.parametrize("active", [True, False])
+def test_outer_todo_display_ownership_rebinds_into_tool_context(
+    active: bool,
+) -> None:
+    ctx = SimpleNamespace(
+        extra={SKILL_TURBO_OUTER_TODO_ACTIVE_EXTRA_KEY: active}
+    )
+
+    _bind_skill_turbo_outer_todo_token(ctx)
+    try:
+        assert get_skill_turbo_outer_todo_active() is active
+    finally:
+        _reset_skill_turbo_outer_todo_token(ctx)
+
+    assert get_skill_turbo_outer_todo_active() is None
 
 
 @pytest.mark.asyncio
