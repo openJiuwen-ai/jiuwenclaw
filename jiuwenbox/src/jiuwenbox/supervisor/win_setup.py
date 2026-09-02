@@ -531,7 +531,7 @@ def _save_sandbox_user_password(password: str) -> None:
             raise RuntimeError(
                 "pywin32 缺失, 无法存储沙箱用户密码 (DPAPI 加密依赖 pywin32, "
                 "pywin32 为 jbx-sandbox 必需依赖)",
-            )
+            ) from None
 
 
 def _create_sandbox_user(password: str, *, retries: int = 1) -> bool:
@@ -1062,7 +1062,7 @@ def _uac_shell_execute_target(payload_exe: str, payload_args: list[str]) -> tupl
     return uac_py, _quote_arg(launcher)
 
 
-def _elevate_and_run_install(
+def _elevate_and_run_install(  # noqa: PLR0913 - 安装提权参数各有用途, 封装 dataclass 反降可读性
     force: bool = False,
     preinstall_paths: list[str] | None = None,
     proxy_port_start: int = const.DEFAULT_PROXY_PORT_RANGE_START,
@@ -1293,7 +1293,7 @@ PREINSTALL_JOIN_TIMEOUT_SECONDS = 120.0  # noqa: N816 - Win32 常量
 # ---------------------------------------------------------------------------
 # 公开 API.
 # ---------------------------------------------------------------------------
-def install(
+def install(  # noqa: PLR0913 - 安装 API 参数各有用途, 封装 dataclass 反降可读性
     force: bool = False,
     preinstall_paths: list[str] | None = None,
     proxy_port_start: int = const.DEFAULT_PROXY_PORT_RANGE_START,
@@ -1743,7 +1743,12 @@ def ensure_acl_policy_paths_authorized(
     need_elevate: set[str] = set()
     skipped: list[str] = []
     for p in new_acl_paths:
-        if "{{" in p or (p.startswith("%") and "%" in p[1:] and not os.path.exists(p)):
+        # 拆分布尔条件避免单 if 4 表达式 (G.CTL.03): 占位符或未展开环境变量.
+        is_placeholder = "{{" in p
+        is_unexpanded_env = (
+            p.startswith("%") and "%" in p[1:] and not os.path.exists(p)
+        )
+        if is_placeholder or is_unexpanded_env:
             skipped.append(p)
             continue
         if _path_owned_by_current_user(p):
