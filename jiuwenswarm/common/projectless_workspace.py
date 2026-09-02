@@ -150,7 +150,7 @@ def get_projectless_task_workspace(
     back to the current local date.
     """
     tasks_dir = get_projectless_tasks_dir()
-    root = _allocate_task_workspace(
+    root = allocate_task_workspace(
         tasks_dir,
         registry_dir=None,
         session_id=session_id,
@@ -167,7 +167,7 @@ def get_projectless_task_workspace(
     )
 
 
-def _allocate_task_workspace(
+def allocate_task_workspace(
     tasks_dir: Path,
     *,
     registry_dir: Path | None,
@@ -201,7 +201,7 @@ def _allocate_task_workspace(
         The resolved task root directory (created or reused).
     """
     tasks_dir = tasks_dir.resolve()
-    safe_session = _slugify(session_id, fallback="default")
+    safe_session = slugify(session_id, fallback="default")
     registered_root = _read_registered_root(tasks_dir, safe_session, registry_dir)
     if registered_root is None:
         task_date = _get_session_task_date(session_id) or _local_today()
@@ -318,7 +318,7 @@ def _coerce_timestamp(value: object) -> float | None:
     return timestamp if timestamp > 0 and math.isfinite(timestamp) else None
 
 
-def _slugify(
+def slugify(
     value: str | None, *, fallback: str, reserved_prefix: str = "task"
 ) -> str:
     """Reduce a free-form value to a stable, filesystem-safe name fragment.

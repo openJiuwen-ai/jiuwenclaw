@@ -33,8 +33,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from jiuwenswarm.common.projectless_workspace import (
-    _allocate_task_workspace,
-    _slugify,
+    allocate_task_workspace,
+    slugify,
 )
 
 
@@ -96,7 +96,7 @@ def get_team_artifact_workspace(
     """
     artifacts_dir = get_team_artifacts_dir(team_ws_root)
     registry_dir = artifacts_dir / _REGISTRY_SUBDIR
-    root = _allocate_task_workspace(
+    root = allocate_task_workspace(
         artifacts_dir,
         registry_dir=registry_dir,
         session_id=session_id,
@@ -126,7 +126,7 @@ def resolve_member_work_dir(
     Returns:
         The created/reused per-member working directory.
     """
-    safe_member = _slugify(
+    safe_member = slugify(
         member_name,
         fallback="default",
         reserved_prefix="member",
