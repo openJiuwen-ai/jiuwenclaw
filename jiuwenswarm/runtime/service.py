@@ -484,6 +484,7 @@ class AgentRuntime:
                     channel_id=channel_id,
                     session_id=request.session_id,
                     error=exc,
+                    metadata=request.metadata,
                 )
             )
         finally:
@@ -803,6 +804,7 @@ class AgentRuntime:
                 channel_id=channel_id,
                 session_id=request.session_id,
                 error=error,
+                metadata=request.metadata,
             )
 
     async def cleanup_session(self, *, channel_id: str, session_id: str) -> bool:
