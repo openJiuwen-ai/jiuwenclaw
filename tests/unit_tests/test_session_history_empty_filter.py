@@ -224,28 +224,30 @@ def test_append_history_tool_result_empty_payload_skipped(tmp_path, monkeypatch)
 
 def test_dedup_records_last_wins_keeps_distinct_bubbles():
     """多气泡：同 id 但 bubble_seq 不同的 chat.final 各泡保留；
-    同泡快照重写仍 last-wins（语义不变）。"""
+    同泡快照按内容前缀语义收敛（草稿是终稿前缀才丢弃）。"""
     records = [
         {"id": "r1:assistant", "event_type": "chat.final", "content": "泡0草稿", "bubble_seq": 0},
-        {"id": "r1:assistant", "event_type": "chat.final", "content": "泡0完整", "bubble_seq": 0},
+        {"id": "r1:assistant", "event_type": "chat.final", "content": "泡0草稿补充", "bubble_seq": 0},
         {"id": "r1:assistant", "event_type": "chat.final", "content": "泡1", "bubble_seq": 1},
         {"id": "r1:assistant", "event_type": "chat.final", "content": "泡2", "bubble_seq": 2},
     ]
     out = session_history._dedup_records_last_wins(records)
     contents = [r["content"] for r in out]
-    assert contents == ["泡0完整", "泡1", "泡2"]
+    assert contents == ["泡0草稿补充", "泡1", "泡2"]
 
 
 def test_dedup_records_last_wins_legacy_records_without_bubble_seq_unchanged():
-    """存量无 bubble_seq 的同 id chat.final 仍 last-wins。"""
+    """存量无 bubble_seq 的同 id chat.final：独立正文段（非终稿前缀）保留——
+    穿插时间线重建依赖中间正文段；前缀快照仍收敛为终稿。"""
     records = [
         {"id": "r1:assistant", "event_type": "chat.final", "content": "草稿"},
-        {"id": "r1:assistant", "event_type": "chat.final", "content": "完整"},
+        {"id": "r1:assistant", "event_type": "chat.final", "content": "草稿补充"},
+        {"id": "r1:assistant", "event_type": "chat.final", "content": "独立段"},
         {"id": "r1:assistant", "event_type": "chat.tool_result", "content": "工具"},
     ]
     out = session_history._dedup_records_last_wins(records)
     contents = [r["content"] for r in out]
-    assert contents == ["完整", "工具"]
+    assert contents == ["草稿补充", "独立段", "工具"]
 
 
 # ===========================================================================

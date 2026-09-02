@@ -130,7 +130,7 @@ def create_adapter(sdk: str | None = None, *, mode: str = "agent") -> AgentAdapt
         sdk: SDK name, if None will resolve from environment.
         mode: Instance mode, "agent" (default), "code", or "design".
             ``design`` 派生自 ``code``（复用 CodeAdapter 的实例化路径与 rails/tools
-            装配），仅 system prompt 与 invoke 工具注册按 design 切换，因此这里
+            装配，含 invoke），仅 system prompt 按 design 切换，因此这里
             返回 CodeAdapter；下游 ``create_instance`` 按 ``mode`` 值区分二者。
 
     Returns:

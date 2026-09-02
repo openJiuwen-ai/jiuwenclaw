@@ -923,8 +923,8 @@ class JiuWenSwarm:
 
         Web 请求（显式携带 ``work_mode``）由 ``work_mode`` 决定 profile：
         ``code`` / ``design`` 走 CodeAdapter（design 派生自 code，复用其 rails/tools
-        装配与 CodeAdapter 实例化路径，仅 system prompt 与 invoke 工具注册按 design
-        切换），``work`` 走 DeepAdapter。TUI 等历史客户端不带 ``work_mode``，继续按
+        装配与 CodeAdapter 实例化路径，仅 system prompt 按 design 切换），
+        ``work`` 走 DeepAdapter。TUI 等历史客户端不带 ``work_mode``，继续按
         完整 mode 串判定，行为不变。
         """
         params = request.params if isinstance(request.params, dict) else {}

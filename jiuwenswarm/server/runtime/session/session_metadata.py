@@ -725,6 +725,10 @@ def sync_session_request_metadata(
     explicit_mode_provided: bool = False,
     explicit_model_provided: bool = False,
     work_mode: str | None = None,
+    xiaoyi_session_id: str | None = None,
+    xiaoyi_task_id: str | None = None,
+    xiaoyi_conversation_id: str | None = None,
+    xiaoyi_root_session_id: str | None = None,
 ) -> str | None:
     """校验请求带来的参数与磁盘 metadata.json 是否需要更新，并按字段语义写入。
 
@@ -805,6 +809,10 @@ def sync_session_request_metadata(
             "pin_order": 0,
             "status": "idle",
             "work_mode": resolved_work_mode,
+            "xiaoyi_session_id": xiaoyi_session_id or "",
+            "xiaoyi_task_id": xiaoyi_task_id or "",
+            "xiaoyi_conversation_id": xiaoyi_conversation_id or "",
+            "xiaoyi_root_session_id": xiaoyi_root_session_id or "",
         }
         effective_project_dir = project_dir or None
     else:
@@ -853,6 +861,17 @@ def sync_session_request_metadata(
             metadata["mode"] = mode
         if channel_id is not None:
             metadata["channel_id"] = channel_id
+        # xiaoyi 平台回发寻址（物理回发地址/任务 id/逻辑会话 id）：覆盖式——
+        # 手机每条消息都带最新值；桌面续轮不带（None）则保持磁盘值，渠道回发
+        # 始终能命中物理回发地址，不会兜底出新的 sessionId（手机侧新建会话）。
+        for key, value in (
+            ("xiaoyi_session_id", xiaoyi_session_id),
+            ("xiaoyi_task_id", xiaoyi_task_id),
+            ("xiaoyi_conversation_id", xiaoyi_conversation_id),
+            ("xiaoyi_root_session_id", xiaoyi_root_session_id),
+        ):
+            if value is not None and str(value).strip():
+                metadata[key] = str(value).strip()
         # last_message_at：仅 chat 轮次刷新。语义为「agent 最后输出时间」，
         # 只读 RPC 无 agent 输出，不应刷新——否则只读查询会把历史会话的排序时间
         # 刷新成「现在」，导致旧会话被置顶。

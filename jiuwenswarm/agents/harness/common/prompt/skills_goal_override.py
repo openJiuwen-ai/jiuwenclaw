@@ -105,16 +105,16 @@ Prefer the skills and tools below; call `skill_tool` to retrieve the full `SKILL
     - PDF 综合处理技能，处理文档生成、编辑、安全与解析。 适用情形： 1. 创建与排版：从零生成报告、提案、简历等 PDF，或对现有文档重新排版美化； 2. 表单与水印：自动填写 PDF 表单字段，或添加文字/图片水印（如打水印、标机密）； 3. 页面管理：合并多个 PDF，或拆分、提取指定页码； 4. 安全控制：为 PDF 添加密码（加密）或移除密码（解密）； 5. 内容提取：从 PDF 中提取纯文本或导出表格数据。 只要用户诉求涉及生成、排版、美化、转换、拼接、拆分 PDF，或处理水印、表单、密码，必须触发本技能。
 
 12. Image Generation (`seedream-image-gen`)
-    - Usage rule: call `skill_tool` to load `seedream-image-gen` and follow its SKILL.md, then call `invoke`. Deliver the image file, never stop after writing only a prompt or script.
+    - Usage rule: call `skill_tool` to load `seedream-image-gen` and follow its SKILL.md. Deliver the image file, never stop after writing only a prompt or script.
 
 13. Video Generation (`seedance-video-gen`)
-    - Usage rule: call `skill_tool` to load `seedance-video-gen` and follow its SKILL.md, then call `invoke`. Deliver the mp4, never a storyboard markdown.
+    - Usage rule: call `skill_tool` to load `seedance-video-gen` and follow its SKILL.md. Deliver the video file, never a storyboard markdown.
 
 14. Music Generation (`music-generation`)
-    - Usage rule: call `skill_tool` to load `music-generation` and follow its SKILL.md, then call `invoke`. Deliver the audio file.
+    - Usage rule: call `skill_tool` to load `music-generation` and follow its SKILL.md. Deliver the audio file.
 
 15. Image Understanding (`xiaoyi-image-understanding`)
-    - Usage rule: call `skill_tool` to load `xiaoyi-image-understanding` and follow its SKILL.md, then call `invoke`.
+    - Usage rule: call `skill_tool` to load `xiaoyi-image-understanding` and follow its SKILL.md.
 """
 
 _STATIC_BLOCK_CN = """## 技能
@@ -162,16 +162,16 @@ _STATIC_BLOCK_CN = """## 技能
      - PDF 综合处理技能，处理文档生成、编辑、安全与解析。 适用情形： 1. 创建与排版：从零生成报告、提案、简历等 PDF，或对现有文档重新排版美化； 2. 表单与水印：自动填写 PDF 表单字段，或添加文字/图片水印（如打水印、标机密）； 3. 页面管理：合并多个 PDF，或拆分、提取指定页码； 4. 安全控制：为 PDF 添加密码（加密）或移除密码（解密）； 5. 内容提取：从 PDF 中提取纯文本或导出表格数据。 只要用户诉求涉及生成、排版、美化、转换、拼接、拆分 PDF，或处理水印、表单、密码，必须触发本技能。
 
 12. 图像生成（`seedream-image-gen`）
-     - 使用规则：先 `skill_tool` 加载 `seedream-image-gen` 并按其 SKILL.md 填写，再调用 `invoke`。交付图像文件，不要只写 prompt 或脚本就停下。
+     - 使用规则：先 `skill_tool` 加载 `seedream-image-gen` 并严格按其 SKILL.md 填写。交付图像文件，不要只写 prompt 或脚本就停下。
 
 13. 视频生成（`seedance-video-gen`）
-     - 使用规则：先 `skill_tool` 加载 `seedance-video-gen` 并按其 SKILL.md 填写，再调用 `invoke`。交付 mp4，绝非分镜 markdown。
+     - 使用规则：先 `skill_tool` 加载 `seedance-video-gen` 并严格按其 SKILL.md 填写。交付视频文件，绝非分镜 markdown。
 
 14. 音乐生成（`music-generation`）
-     - 使用规则：先 `skill_tool` 加载 `music-generation` 并按其 SKILL.md 填写，再调用 `invoke`。交付音频文件。
+     - 使用规则：先 `skill_tool` 加载 `music-generation` 并严格按其 SKILL.md 填写。交付音频文件。
 
 15. 图像理解（`xiaoyi-image-understanding`）
-     - 使用规则：先 `skill_tool` 加载 `xiaoyi-image-understanding` 并按其 SKILL.md 填写，再调用 `invoke`。
+     - 使用规则：先 `skill_tool` 加载 `xiaoyi-image-understanding` 并严格按其 SKILL.md 填写。
 """
 
 _STATIC_BLOCK: Dict[str, str] = {"cn": _STATIC_BLOCK_CN, "en": _STATIC_BLOCK_EN}

@@ -71,6 +71,17 @@ def _git_bash_candidates() -> list[Path]:
 
 
 def _available_git_bash() -> Optional[str]:
+    # Packaged runtimes must never silently switch to a host Git Bash.
+    if (os.environ.get("CLAW_RUNTIME_SOURCE") or "").strip().lower() == "managed":
+        for env_name in ("CLAW_GIT_BASH_EXE", "GIT_BASH"):
+            env_value = os.environ.get(env_name)
+            if not env_value:
+                continue
+            return _existing_executable(
+                Path(os.path.expandvars(env_value.strip('"'))).expanduser()
+            )
+        return None
+
     for candidate in _git_bash_candidates():
         executable = _existing_executable(candidate)
         if executable:

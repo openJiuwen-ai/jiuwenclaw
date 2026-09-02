@@ -225,7 +225,7 @@ async def _dispatch_invoke(
 
 
 def _build_invoke_tool_card() -> ToolCard:
-    """Build invoke ToolCard from the current-zone catalog (env may change per process)."""
+    """Build invoke ToolCard; zone sentence comes from AGENT_RUNTIME_MCP_RUN."""
     return ToolCard(
         id="jiuwenswarm_invoke_tool",
         name="invoke",

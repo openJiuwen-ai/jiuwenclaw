@@ -619,9 +619,7 @@ def _install_default_builtin_skills(
 ) -> None:
     """安装默认的内置技能到用户技能目录.
 
-    默认安装的技能：
-    - skill-creator: 技能创建助手
-    - swarmskill-creator: Swarm技能创建助手
+    产品预置 skill 由桌面 SkillSync 落盘；框架名单已空，本函数空转。
 
     Args:
         builtin_dir: 内置技能目录路径
@@ -629,14 +627,10 @@ def _install_default_builtin_skills(
         overwrite: 是否覆盖已存在的技能
         cumulative_diff: 累积的文件变更追踪结果
     """
-    # 定义默认安装的技能列表
-    default_skills = [
-        "xiaoyi-web-search",
-        "find-skills",
-        "xiaoyi-doc-convert",
-        "xiaoyi-pdf",
-        "xiaoyi-ppt",
-    ]
+    # 产品九份预置由 claw_desktop SkillSync 写入用户 skills；此处不再预装。
+    default_skills: list[str] = []
+    if not default_skills:
+        return
 
     if not builtin_dir.exists() or not builtin_dir.is_dir():
         logger.warning(f"内置技能目录不存在，跳过默认技能安装: {builtin_dir}")
@@ -683,19 +677,12 @@ def _install_default_builtin_skills(
 def ensure_builtin_skills_installed() -> None:
     """每次启动时检查并补装缺失的内置技能（幂等）。
 
-    与 prepare_workspace 不同，此函数不依赖 config.yaml 是否存在，
-    专门用于解决升级后内置技能不补装的问题。
-
-    只补装 default_skills 中指定的技能，不扫描全部内置技能。
+    与 prepare_workspace 不同，此函数不依赖 config.yaml 是否存在。
+    产品预置由桌面 SkillSync 在 spawn 前写入；名单为空时空转。
     """
-    # 默认预装的技能列表
-    default_skills = [
-        "xiaoyi-web-search",
-        "find-skills",
-        "xiaoyi-doc-convert",
-        "xiaoyi-pdf",
-        "xiaoyi-ppt",
-    ]
+    default_skills: list[str] = []
+    if not default_skills:
+        return
 
     builtin_dir = get_builtin_skills_dir()
     if not builtin_dir.exists() or not builtin_dir.is_dir():

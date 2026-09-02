@@ -88,3 +88,30 @@ def test_chat_error_records_are_restorable():
     assert not _is_restorable_history_record(
         {"role": "assistant", "event_type": "chat.delta", "content": "流式中间帧"}
     )
+
+
+def test_load_history_records_keeps_independent_final_segments(tmp_path, monkeypatch):
+    """同 id 的独立正文段（非终稿前缀）读侧全部保留——穿插时间线重建依赖
+    中间正文段（多次尝试各自的正文）；累计快照仍收敛为终稿，重试同稿不重复。"""
+    monkeypatch.setattr(session_history, "get_agent_sessions_dir", lambda: tmp_path)
+    session_id = "sess_segments"
+    session_dir = tmp_path / session_id
+    session_dir.mkdir(parents=True)
+    records = [
+        {"id": "r1:user", "role": "user", "content": "问题", "timestamp": 1.0},
+        {"id": "r1:assistant", "role": "assistant", "content": "第一步完成", "event_type": "chat.final", "timestamp": 2.0},
+        {"id": "r1:assistant", "role": "assistant", "content": "", "event_type": "chat.tool_call", "timestamp": 2.5},
+        {"id": "r1:assistant", "role": "assistant", "content": "第一步完成", "event_type": "chat.final", "timestamp": 2.7},
+        {"id": "r1:assistant", "role": "assistant", "content": "第二步完成", "event_type": "chat.final", "timestamp": 3.0},
+        {"id": "r1:assistant", "role": "assistant", "content": "最终报告", "event_type": "chat.final", "timestamp": 4.0},
+    ]
+    (session_dir / "history.jsonl").write_text(
+        "\n".join(json.dumps(r, ensure_ascii=False) for r in records) + "\n",
+        encoding="utf-8",
+    )
+
+    loaded = session_history.load_history_records(session_id)
+
+    finals = [r["content"] for r in loaded if r.get("event_type") == "chat.final"]
+    # 独立正文段全部保留（重试同稿去重一条），工具记录不受影响
+    assert finals == ["第一步完成", "第二步完成", "最终报告"]

@@ -2091,6 +2091,44 @@ async def process_team_message_stream(
 # StreamController 的重试间隔为数秒级），30s 覆盖典型回退且不至于让用户等太久。
 _LEADER_ROUND_DEATH_PROBE_SEC = 30.0
 
+# 主理人死亡但成员仍在工作时不补终态：成员回报会经 mailbox 唤醒主理人续跑，
+# 收尾由恢复后的正常路径负责，探针按窗口续探。上限兜底成员永忙（卡死）
+# 导致轮次永不收尾——超时后仍补终态解锁前端输入。
+_LEADER_ROUND_DEATH_PROBE_MAX_EXTENSIONS = 20
+# 续探判定"成员仍在工作"的执行中状态（MemberStatus.busy 之外的旁证）
+_MEMBER_IN_FLIGHT_EXEC_STATUSES = frozenset({"starting", "running", "completing"})
+
+
+async def _count_in_flight_members(channel_id: str | None, session_id: str) -> int:
+    """统计仍有在途工作的成员数（status=busy 或执行状态进行中）。
+
+    快照不可用按 0 处理——退化方向是维持旧行为（补终态），不会更糟。
+    （get_team_snapshot 的 members 已剔除 leader，见 team_monitor_handler。）
+    """
+    try:
+        tm = get_team_manager(channel_id)
+        monitor_handler = tm.get_monitor_handler(session_id)
+        if monitor_handler is None:
+            return 0
+        snapshot = await monitor_handler.get_team_snapshot()
+        if not snapshot:
+            return 0
+        count = 0
+        for m in snapshot.get("members", []):
+            if (
+                m.get("status") == "busy"
+                or m.get("execution_status") in _MEMBER_IN_FLIGHT_EXEC_STATUSES
+            ):
+                count += 1
+        return count
+    except Exception:
+        logger.debug(
+            "[TeamHelpers] count in-flight members failed: session_id=%s",
+            session_id,
+            exc_info=True,
+        )
+        return 0
+
 
 def _schedule_leader_round_death_probe(
         channel_id: str | None,
@@ -2101,6 +2139,7 @@ def _schedule_leader_round_death_probe(
         liveness: Any,
         completion_signals: Any,
         previous: asyncio.Task | None,
+        on_fired: Any = None,
 ) -> asyncio.Task:
     """（重新）调度 leader 轮死亡探针，返回新任务供调用方持有/取消。
 
@@ -2108,9 +2147,16 @@ def _schedule_leader_round_death_probe(
     回合实际死亡且无任何终态帧——探针在这个窗口补发 processing_status 终态。
     三个保险：流已终结则不补（正常收尾路径负责）；窗口内有产出则不补（已恢复）；
     窗口内已有回合收尾信号则不补（防误杀已完成回合）。
+    第四个判定：探针醒来时仍有成员在途工作（busy/执行中）则不补——成员回报
+    会经 mailbox 唤醒主理人续跑，此时补失败终态会让前端解锁输入、把用户追问
+    steer 进仍在运行的团队（语义错位），且唤醒轮内容会被前端锁进已死 run
+    （error 终态不被迟到 delta 点亮）。改为广播一条等待警告（chat.error 在前端
+    映射为非终态横幅）并按窗口续探，直到成员全部落定或达到续探上限。
 
     liveness / completion_signals: 零参数可调用，分别返回主流已消费 chunk 数与
     已广播的回合收尾信号数（每次错误以最新值为基线）。
+    on_fired: 探针实际补发终态后的零参数回调（清除本轮错误史标记，
+    防长寿命流的后续轮次误带前一轮的陈旧错误）。
     """
     if previous is not None and not previous.done():
         previous.cancel()
@@ -2118,44 +2164,82 @@ def _schedule_leader_round_death_probe(
     async def _probe() -> None:
         baseline_chunks = liveness()
         baseline_signals = completion_signals()
-        try:
-            await asyncio.sleep(_LEADER_ROUND_DEATH_PROBE_SEC)
-        except asyncio.CancelledError:
-            return
-        try:
-            tm = get_team_manager(channel_id)
-            if not tm.has_stream_task(session_id):
+        extensions = 0
+        waiting_warned = False
+        while True:
+            try:
+                await asyncio.sleep(_LEADER_ROUND_DEATH_PROBE_SEC)
+            except asyncio.CancelledError:
                 return
-            if liveness() != baseline_chunks or completion_signals() != baseline_signals:
+            try:
+                tm = get_team_manager(channel_id)
+                if not tm.has_stream_task(session_id):
+                    return
+                if liveness() != baseline_chunks or completion_signals() != baseline_signals:
+                    return
+                # 仍有成员在途工作：回合不算死，广播等待警告（仅首次）并续探
+                in_flight = await _count_in_flight_members(channel_id, session_id)
+                if in_flight > 0 and extensions < _LEADER_ROUND_DEATH_PROBE_MAX_EXTENSIONS:
+                    extensions += 1
+                    if not waiting_warned:
+                        waiting_warned = True
+                        await _broadcast_event(
+                            channel_id,
+                            session_id,
+                            {
+                                "event_type": "chat.error",
+                                "session_id": session_id,
+                                "rid": round_id,
+                                "error": (
+                                    "主理人模型调用中断，团队仍在运行"
+                                    f"（{in_flight} 名成员工作中），成员回报后将自动继续"
+                                ),
+                            },
+                        )
+                    logger.info(
+                        "[TeamHelpers] leader round dead but members in flight, "
+                        "probe extended: channel_id=%s session_id=%s round_id=%s "
+                        "in_flight=%s extension=%s/%s",
+                        _resolve_channel_id(channel_id),
+                        session_id,
+                        round_id,
+                        in_flight,
+                        extensions,
+                        _LEADER_ROUND_DEATH_PROBE_MAX_EXTENSIONS,
+                    )
+                    continue
+                logger.warning(
+                    "[TeamHelpers] leader round presumed dead after model error: "
+                    "channel_id=%s session_id=%s round_id=%s idle=%.0fs",
+                    _resolve_channel_id(channel_id),
+                    session_id,
+                    round_id,
+                    _LEADER_ROUND_DEATH_PROBE_SEC,
+                )
+                await _broadcast_event(
+                    channel_id,
+                    session_id,
+                    {
+                        "event_type": "chat.processing_status",
+                        "session_id": session_id,
+                        "rid": round_id,
+                        "is_processing": False,
+                        "is_complete": True,
+                        "error": error_text.strip() or "Leader round did not recover after model error",
+                    },
+                )
+                if callable(on_fired):
+                    on_fired()
                 return
-            logger.warning(
-                "[TeamHelpers] leader round presumed dead after model error: "
-                "channel_id=%s session_id=%s round_id=%s idle=%.0fs",
-                _resolve_channel_id(channel_id),
-                session_id,
-                round_id,
-                _LEADER_ROUND_DEATH_PROBE_SEC,
-            )
-            await _broadcast_event(
-                channel_id,
-                session_id,
-                {
-                    "event_type": "chat.processing_status",
-                    "session_id": session_id,
-                    "rid": round_id,
-                    "is_processing": False,
-                    "is_complete": True,
-                    "error": error_text.strip() or "Leader round did not recover after model error",
-                },
-            )
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            logger.debug(
-                "[TeamHelpers] leader round death probe failed: session_id=%s",
-                session_id,
-                exc_info=True,
-            )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.debug(
+                    "[TeamHelpers] leader round death probe failed: session_id=%s",
+                    session_id,
+                    exc_info=True,
+                )
+                return
 
     return asyncio.create_task(_probe(), name=f"leader-death-probe-{session_id}")
 
@@ -2173,6 +2257,12 @@ async def _consume_stream_with_query(
     _envs = envs or {}
     hide_dm: bool = bool(_envs.get("hide_dm", False))
     received_chunks = 0
+    # 探针活性计数只数 leader 帧：成员帧（含成员的死讯 chat.error）
+    # 与 leader 错误同流到达会污染 received_chunks 基线，导致"leader 耗尽 + 成员
+    # 接连死亡"时探针误判"窗口内有活动"自我放弃，回合零终态帧、前端误标已完成。
+    # leader 的任何帧（delta/final/tool_call/reasoning 等）都算活性，长工具静默
+    # 不误杀（工具执行期本就无帧，与原语义一致）。
+    leader_activity_chunks = 0
     first_model_output_at: float | None = None
     emitted_ask_user_request_ids: set[str] = set()
     # 本轮 leader 累计正文（合成 chat.final 的兜底内容；leader final 落定即重置，
@@ -2205,6 +2295,17 @@ async def _consume_stream_with_query(
     # 本流已广播的回合收尾信号数（processing_status is_complete=true 等）：
     # 探针据此判断"错误之后回合已正常收尾"，避免迟到误杀已完成回合
     completion_signals = 0
+    # 本轮未恢复的 leader 模型错误史：team.completed 的收尾转换
+    # 对错误无感知（零成员/零任务时 is_team_completed 空虚成立，leader 重试
+    # 耗尽后立刻触发），不带 error 的 processing_status 会让前端把失败回合
+    # 记成"已完成"（还反过来抑制死亡探针）。leader chat.error 时记录；
+    # leader 产出实质正文（delta/final 非空）视为恢复并清除；收尾帧转换时
+    # 仍挂着则携带 error 字段，让回合以失败收场。
+    round_unrecovered_error: str | None = None
+
+    def _clear_round_unrecovered_error() -> None:
+        nonlocal round_unrecovered_error
+        round_unrecovered_error = None
     # Reset the team-events flag at the start of a new round so chat.final
     # can correctly determine whether the team is active.
     tm_ = get_team_manager(channel_id)
@@ -2301,15 +2402,29 @@ async def _consume_stream_with_query(
             # _is_leader_output returns True.
             if _team_hide_teammate_enabled() and not is_leader:
                 continue
-            # agent-core 自愈重试的可见化提示帧（llm_output + payload.retrying）：
-            # 不进业务流——不广播、不计入 leader_round_text/成员输出，防
-            # "[Retry N/10] ..." 文本污染合成 final 与成员子聊天框
+            # agent-core 自愈重试的提示帧（llm_output + payload.retrying）：
+            # 不进文本业务流（防 "[Retry N/10]" 文本污染合成 final 与成员子聊天框），
+            # 但也不整条丢弃——改广播为独立的 chat.retry_status 事件（带结构化
+            # attempt/max_attempts），前端回合头显示轻量重试状态（
+            # 重试风暴期间前端零交代，用户只见"正在生成"）。
             _raw_payload = getattr(chunk, "payload", None)
             if (
                 getattr(chunk, "type", None) == "llm_output"
                 and isinstance(_raw_payload, dict)
                 and _raw_payload.get("retrying")
             ):
+                await _broadcast_event(
+                    channel_id,
+                    session_id,
+                    {
+                        "event_type": "chat.retry_status",
+                        "session_id": session_id,
+                        "rid": round_id,
+                        "attempt": _raw_payload.get("attempt"),
+                        "max_attempts": _raw_payload.get("max_attempts"),
+                        "error": str(_raw_payload.get("content") or "").strip(),
+                    },
+                )
                 continue
             parsed = parse_stream_chunk(chunk)
             # leader 轮末 task_completion（携带该轮答案全文）被 parse 丢弃，
@@ -2372,12 +2487,22 @@ async def _consume_stream_with_query(
                     # 成员工具事件归因落盘（成员视图工具活动跨刷新恢复）
                     _persist_member_tool_event(channel_id, session_id, parsed)
                 elif is_leader:
+                    # 探针活性计数：leader 任何帧都算活性
+                    leader_activity_chunks += 1
                     # 标记 role=leader，使 _build_logical_targets() 走 godview 兜底
                     # （leader 不在 _ROLE_FANOUT 中，落到 [godview]）。
                     parsed["role"] = TeamRole.LEADER.value
                     # 累计本轮 leader 正文（task_completion 合成 chat.final 的兜底内容）
                     if parsed.get("event_type") == "chat.delta":
                         leader_round_text += str(parsed.get("content") or "")
+                    # leader 产出实质正文 = 此前的模型错误已恢复，
+                    # 清除未恢复错误史（注意 chat.error 后补的空 chat.final 无正文，
+                    # 不会误清）
+                    if (
+                        parsed.get("event_type") in ("chat.delta", "chat.final")
+                        and str(parsed.get("content") or "").strip()
+                    ):
+                        round_unrecovered_error = None
                     # 多气泡：leader 的 reasoning 打当轮泡序号——
                     # 思考先于发言到达，前端按 seq 把思考归到"紧接着的发言卡"
                     if parsed.get("event_type") == "chat.reasoning":
@@ -2462,31 +2587,62 @@ async def _consume_stream_with_query(
                             "rid": round_id,
                             "is_processing": False,
                             "is_complete": True,
+                            # 投递失败已广播 chat.error，收尾帧必须
+                            # 带 error，否则前端把失败回合记成"已完成"
+                            "error": error_msg,
                         },
                     )
+                    round_unrecovered_error = None
                     completion_signals += 1
                     continue
                 elif parsed.get("event_type") == "team.completed":
                     # Team completed this round — broadcast a single
                     # round-complete signal that also carries team stats.
-                    await _broadcast_event(
-                        channel_id,
-                        session_id,
-                        {
-                            "event_type": "chat.processing_status",
-                            "session_id": session_id,
-                            "rid": round_id,
-                            "is_processing": False,
-                            "is_complete": True,
-                            "member_count": parsed.get("member_count"),
-                            "task_count": parsed.get("task_count"),
-                        },
-                    )
+                    completion_event = {
+                        "event_type": "chat.processing_status",
+                        "session_id": session_id,
+                        "rid": round_id,
+                        "is_processing": False,
+                        "is_complete": True,
+                        "member_count": parsed.get("member_count"),
+                        "task_count": parsed.get("task_count"),
+                    }
+                    # 收尾帧携带本轮错误史——leader 重试耗尽后
+                    # （零成员/零任务时 team.completed 空虚成立）不把失败回合
+                    # 标成正常完成；leader 恢复产出后该标记已清除，不受影响
+                    if round_unrecovered_error:
+                        completion_event["error"] = round_unrecovered_error
+                    round_unrecovered_error = None
+                    await _broadcast_event(channel_id, session_id, completion_event)
                     completion_signals += 1
                     continue
                 elif parsed.get("event_type") == "chat.error":
                     await _broadcast_event(channel_id, session_id, parsed)
+                    # 团队轮内故障落盘。chat.error 在团队模式是非终态警告
+                    # （此前只广播不落盘，重启后"本轮曾出错"留痕蒸发）；extra.warning
+                    # 供前端与终态错误（整轮判失败）区分；成员错误附 member_name 归因。
+                    append_history_record(
+                        session_id=session_id,
+                        request_id=f"{round_id}-error-{int(time.time() * 1000)}",
+                        channel_id=_resolve_channel_id(channel_id),
+                        role="assistant",
+                        event_type="chat.error",
+                        content=str(parsed.get("error") or ""),
+                        timestamp=time.time(),
+                        extra={
+                            "warning": True,
+                            **(
+                                {"member_name": str(parsed.get("member_name"))}
+                                if parsed.get("member_name")
+                                else {}
+                            ),
+                        },
+                        mode="team",
+                    )
                     if is_leader:
+                        # 记录本轮未恢复的 leader 模型错误史，
+                        # 供 team.completed 等收尾帧携带（根治"重试耗尽却记已完成"）
+                        round_unrecovered_error = str(parsed.get("error") or "")
                         await _broadcast_event(
                             channel_id,
                             session_id,
@@ -2505,9 +2661,10 @@ async def _consume_stream_with_query(
                             session_id,
                             round_id,
                             error_text=str(parsed.get("error") or ""),
-                            liveness=lambda: received_chunks,
+                            liveness=lambda: leader_activity_chunks,
                             completion_signals=lambda: completion_signals,
                             previous=death_probe_task,
+                            on_fired=_clear_round_unrecovered_error,
                         )
                     continue
                 # chat.final: if team events (team.member / team.task /
