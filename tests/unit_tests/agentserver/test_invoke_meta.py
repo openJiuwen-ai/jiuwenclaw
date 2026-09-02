@@ -1091,7 +1091,8 @@ def test_design_system_prompt_points_at_skills_not_catalog():
     assert "skill_tool" in prompt
     assert "ppt-creation" in prompt
     assert "分镜" in prompt
-    assert "invoke" in prompt.lower() or "`invoke`" in prompt
+    assert "then call `invoke`" not in prompt
+    assert "to call `invoke`" not in prompt
     assert "`image-generation`" not in prompt
     assert "PluginSkillExecTool" not in prompt
     assert "seedanceMiniTask" not in prompt
