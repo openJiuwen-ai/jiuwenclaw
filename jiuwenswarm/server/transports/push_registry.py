@@ -141,10 +141,8 @@ class PushRegistry:
 
         ``drop_on_stall`` 的含义见 :class:`_Subscriber` —— WS 侧必须传 ``False``。
 
-        ``reverse_rpc_capable=True`` 会让此订阅者成为反向 RPC owner，接管本应
-        发给 Gateway 的 A2A 派发响应，并可能驱逐前一个 owner。调用方目前仅凭
-        请求头（不受信任的输入）判定该值——本方法信任调用方已在边界处做过
-        校验；不要在暴露给外部客户端的端点上无条件传入 ``True``。
+        ``reverse_rpc_capable=True`` 使此订阅者成为反向 RPC owner；调用方需
+        自行确保该标记来自可信来源。
         """
         replacing_rpc_owner = self._reverse_rpc_owner_id == subscriber_id
         self._subscribers[subscriber_id] = _Subscriber(

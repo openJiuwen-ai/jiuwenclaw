@@ -677,8 +677,7 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
         # normal/plan are single-Agent, while Team profiles are assembled by
         # the declarative swarm provider and must not register this rail twice.
         if normalized_sub_mode in {"normal", "plan"} and not is_enterprise():
-            # Appended (not inserted at a fixed index) so reordering the list
-            # above can't silently shift this rail to an unintended slot.
+            # Append, don't insert at a fixed index, to avoid silent misplacement.
             rail_infos.append(
                 _RailBuildInfo(
                     "_a2a_outbound_toolkit_rail",

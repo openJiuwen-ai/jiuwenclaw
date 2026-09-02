@@ -217,12 +217,7 @@ class A2AOutboundRepository:
         return [self._codec.dispatch_from_record(row) for row in rows]
 
     async def count_dispatches(self) -> int:
-        """Return the total matching record count without decoding rows.
-
-        ``PersistentStore`` has no dedicated count primitive, so this still
-        fetches every raw row, but it skips ``dispatch_from_record`` decoding
-        for records outside the caller's page, unlike ``list_dispatches``.
-        """
+        """Return the total matching record count, skipping row decoding."""
         rows = await self._store.list(
             A2A_OUTBOUND_DISPATCH_STORE_NAME,
             filters=self._codec.list_filters(),
