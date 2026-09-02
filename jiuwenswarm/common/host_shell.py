@@ -59,12 +59,17 @@ def host_bash_exe() -> str | None:
     """本机 Git bash，排除 WSL ``bash.exe``。"""
     if os.name != "nt":
         return "/bin/bash" if os.path.isfile("/bin/bash") else shutil.which("bash")
-    for key in ("GIT_BASH", "GIT_BASH_PATH", "JIUWENBOX_BASH_PATH"):
+    managed = (os.environ.get("CLAW_RUNTIME_SOURCE") or "").strip().lower() == "managed"
+    for key in ("CLAW_GIT_BASH_EXE", "GIT_BASH", "GIT_BASH_PATH", "JIUWENBOX_BASH_PATH"):
         raw = (os.environ.get(key) or "").strip().strip('"')
         if raw:
             path = Path(raw)
             if path.is_file() and not _is_wsl_bash_path(str(path)):
                 return str(path)
+            if managed and key in {"CLAW_GIT_BASH_EXE", "GIT_BASH"}:
+                return None
+    if managed:
+        return None
     candidates: list[Path] = []
     for root in (
         os.environ.get("ProgramFiles"),

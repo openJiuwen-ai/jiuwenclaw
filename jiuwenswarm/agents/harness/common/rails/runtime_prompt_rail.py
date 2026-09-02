@@ -79,6 +79,7 @@ class RuntimePromptRail(DeepAgentRail):
             self.system_prompt_builder.remove_section("directory_boundaries")
             self.system_prompt_builder.remove_section("tui_current_project_policy")
             self.system_prompt_builder.remove_section("trusted_dirs_policy")
+            self.system_prompt_builder.remove_section("runtime.binary_context")
         self._agent = None
         self.system_prompt_builder = None
         self.attachment_manager = None
@@ -315,6 +316,51 @@ class RuntimePromptRail(DeepAgentRail):
         os_version = f"{plat.system()} {plat.release()}"
         env_language = "cn" if not self._force_english and self._language == "cn" else "en"
         shell_env_prompt = build_shell_environment_prompt(env_language, os_type)
+
+        # ── Managed binary runtime paths ──
+        # Desktop packaged builds inject these values before spawning AgentServer.
+        # Keep this as a dynamic prompt attachment so upgrades/user data roots are
+        # reflected without hard-coding a machine-specific path in templates.
+        binary_vars = (
+            ("Python", "CLAW_PYTHON_EXE"),
+            ("Node.js", "CLAW_NODE_EXE"),
+            ("npm", "CLAW_NPM_CMD"),
+            ("npx", "CLAW_NPX_CMD"),
+            ("Git", "CLAW_GIT_EXE"),
+            ("Git Bash", "CLAW_GIT_BASH_EXE"),
+        )
+        binary_lines = []
+        for label, env_name in binary_vars:
+            value = (os.environ.get(env_name) or "").strip()
+            if value:
+                binary_lines.append(f"- {label}: `{value}`")
+        runtime_source = (os.environ.get("CLAW_RUNTIME_SOURCE") or "unknown").strip()
+        if env_language == "cn":
+            binary_content = (
+                "## 受管工具链\n\n"
+                f"- 来源：`{runtime_source}`\n"
+                + ("\n".join(binary_lines) if binary_lines else "- 未注入受管工具路径")
+                + "\n\n"
+                "使用规则：优先使用上面列出的绝对路径或对应的 `CLAW_*` 路径变量；"
+                "不要用本机的 python/node/npx/git 裸命令覆盖已提供的受管运行时。"
+            )
+        else:
+            binary_content = (
+                "## Managed Toolchain\n\n"
+                f"- Source: `{runtime_source}`\n"
+                + ("\n".join(binary_lines) if binary_lines else "- No managed runtime paths injected")
+                + "\n\n"
+                "Usage: prefer the absolute paths above or the corresponding `CLAW_*` path variables; "
+                "do not replace an injected managed runtime with bare python/node/npx/git commands."
+            )
+        await self._clear_prompt_attachment(ctx, section="runtime.binary_context")
+        await self._upsert_prompt_attachment(
+            ctx,
+            section="runtime.binary_context",
+            content=binary_content,
+            kind=PromptAttachmentKind.RUNTIME,
+            priority=95,
+        )
 
         # 沙箱权限提示词仅在 sandbox.enabled=True 时注入; 关闭沙箱时命令可自由访问
         # 全盘, 不应让 LLM 误以为工作区外一律无权限而在真实 PermissionError 上过早放弃.

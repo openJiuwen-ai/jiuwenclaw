@@ -469,7 +469,7 @@ def _is_wsl_bash_path(path: str) -> bool:
 
 def _git_bash_candidates() -> list[Path]:
     candidates: list[Path] = []
-    env_path = os.environ.get("GIT_BASH") or os.environ.get("GIT_BASH_PATH")
+    env_path = os.environ.get("CLAW_GIT_BASH_EXE") or os.environ.get("GIT_BASH") or os.environ.get("GIT_BASH_PATH")
     if env_path:
         candidates.append(Path(env_path))
 
@@ -491,6 +491,14 @@ def _git_bash_candidates() -> list[Path]:
 
 def _available_git_bash() -> str | None:
     if os.name != "nt":
+        return None
+    managed = (os.environ.get("CLAW_RUNTIME_SOURCE") or "").strip().lower() == "managed"
+    if managed:
+        for key in ("CLAW_GIT_BASH_EXE", "GIT_BASH"):
+            raw = (os.environ.get(key) or "").strip().strip('"')
+            if raw:
+                candidate = Path(raw)
+                return str(candidate) if candidate.is_file() and not _is_wsl_bash_path(str(candidate)) else None
         return None
     for candidate in _git_bash_candidates():
         if candidate.exists():

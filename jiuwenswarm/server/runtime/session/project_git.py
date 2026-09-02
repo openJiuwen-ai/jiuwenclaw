@@ -254,6 +254,14 @@ def _find_git_executable() -> str | None:
     """查找 git 可执行文件,找不到返回 ``None``。"""
     import shutil
 
+    configured = (os.environ.get("CLAW_GIT_EXE") or "").strip().strip('"')
+    if configured:
+        if os.path.isfile(configured):
+            return configured
+        # 发布版明确注入受管 Git 时，路径失效应暴露为运行时不可用，
+        # 不能静默切换到用户本机 Git，避免仓库状态/凭证混用。
+        if (os.environ.get("CLAW_RUNTIME_SOURCE") or "").strip().lower() == "managed":
+            return None
     return shutil.which("git")
 
 
