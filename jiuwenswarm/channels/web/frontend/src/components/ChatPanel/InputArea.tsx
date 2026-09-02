@@ -2798,6 +2798,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
           }}
           onPick={insertComposerToken}
           loading={slashCatalogLoading}
+          slashSkillsOnly={isTeamMode}
         />
       )}
       <div
@@ -3565,6 +3566,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
               }}
               onPick={insertComposerToken}
               loading={slashCatalogLoading}
+              slashSkillsOnly={isTeamMode}
               placement="below"
             />
           )}
@@ -3936,6 +3938,7 @@ function ComposerSuggestionMenu({
   onPointerHighlight,
   onPick,
   loading,
+  slashSkillsOnly,
   placement = 'above',
 }: {
   suggestion: ComposerSuggestionState;
@@ -3952,6 +3955,7 @@ function ComposerSuggestionMenu({
     slashTakesArgs?: boolean,
   ) => void;
   loading: boolean;
+  slashSkillsOnly: boolean;
   placement?: 'above' | 'below';
 }) {
   const isSlash = suggestion.kind === 'slash';
@@ -4033,8 +4037,12 @@ function ComposerSuggestionMenu({
           <div className="chat-composer-suggestion__empty" data-testid="chat-panel-composer-suggestion-empty">
             {isSlash
               ? loading
-                ? '正在加载指令与技能…'
-                : '没有匹配的指令或技能'
+                ? slashSkillsOnly
+                  ? '正在加载技能…'
+                  : '正在加载指令与技能…'
+                : slashSkillsOnly
+                  ? '没有匹配的技能'
+                  : '没有匹配的指令或技能'
               : t('chat.noTeamMembersAvailable')}
           </div>
         ) : items.map((item, index) => {
