@@ -50,6 +50,7 @@ import {
   RUNTIME_SCOPE_CHANGED_EVENT,
 } from '../services/runtimeScope';
 import { getWebTransport } from '../utils/env';
+import { isEnterprise } from '../edition';
 import { createStreamDeltaBatcher } from '../services/streamDeltaBatcher';
 import { createStreamDeltaStripper } from '../utils/toolProtocol';
 import { shouldHandleRequestEvent } from './requestEventFilter';
@@ -3277,6 +3278,11 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           useChatStore.getState().setThinking(sessionId, false);
           useChatStore.getState().clearSubtasks(sessionId);
           useChatStore.getState().stopStreaming(sessionId);
+          // 仅企业版 HTTP/SSE 迁移链路使用该实时兜底；个人版保持原有
+          // WebSocket/工具状态结算语义，避免改变个人版行为。
+          if (isEnterprise()) {
+            useChatStore.getState().settlePendingToolExecutions(sessionId);
+          }
           useChatStore.getState().settleHistoricalToolExecutions(sessionId);
 
           // 检查是否有等待的任务队列

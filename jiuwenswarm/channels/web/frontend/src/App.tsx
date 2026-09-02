@@ -2354,8 +2354,13 @@ function AppContent() {
             />
           </div>
         )}
-        {activeNav === 'history' && (
-          <div className="app-section">
+        {enterpriseMode && (
+          <div
+            className={`app-section ${activeNav === 'history' ? '' : 'hidden'}`}
+            aria-hidden={activeNav !== 'history'}
+          >
+            {/* 企业版历史页保持挂载，切换导航时不丢失已加载的会话列表和详情。
+                个人版不挂载该旁路历史组件，维持原有个人版行为。 */}
             <HistoryPanel />
           </div>
         )}
