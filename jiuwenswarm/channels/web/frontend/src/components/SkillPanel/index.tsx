@@ -18,6 +18,7 @@ import { SourceManagerModal } from "../../features/SourceManagerModal";
 import { SkillNetSearchModal } from "../../features/SkillNetSearchModal";
 import { ClawHubSearchModal } from "../../features/ClawHubSearchModal";
 import { TeamSkillsHubModal } from "../../features/TeamSkillsHubModal";
+import { parseConfigBoolean } from "../../features/settings/services/settingsContract";
 import { normalizeSkillNetUrl } from "../../utils/skillNetUrl";
 import { getSkillAvatar } from "../../utils/skillAvatar";
 import { computeMySkills, filterEnabledMySkills } from "../../utils/mySkills";
@@ -366,6 +367,9 @@ export function SkillPanel({
   const [symphonySaving, setSymphonySaving] = useState(false);
   const [symphonySaveError, setSymphonySaveError] = useState<string | null>(null);
   const [graphActionError, setGraphActionError] = useState<string | null>(null);
+  const [indexRecommendationVisible, setIndexRecommendationVisible] = useState(false);
+  const [indexRecommendationBuilding, setIndexRecommendationBuilding] = useState(false);
+  const indexRecommendationRequestRef = useRef(0);
   const [knowledgeTaskCount, setKnowledgeTaskCount] = useState(0);
   const [openMenuSkillName, setOpenMenuSkillName] = useState<string | null>(null);
 
@@ -671,7 +675,7 @@ export function SkillPanel({
         }>;
         detail?: string;
       }>("skills.online_search.search", withSession({
-       query,
+        q: query,
         limit: 50,
       }), { timeoutMs: 45000 });
 
@@ -1083,18 +1087,23 @@ export function SkillPanel({
     [withSession, fetchSkillDetail, showMessage]
   );
 
-  const startRetrievalIndexBuild = useCallback(async (force: boolean) => {
-    if (!isConnected) return;
+  const startRetrievalIndexBuild = useCallback(async (force: boolean, useDefaultProfile = false) => {
+    if (!isConnected) return false;
     try {
       const statusPayload = await webRequest<unknown>(
         "skills.retrieval.status",
-        withSession()
+        useDefaultProfile ? {} : withSession()
       );
       const status = parseSkillRetrievalStatus(statusPayload);
-      if (!canBuildSkillRetrievalIndex(status) || status.build_status === "running") return;
+      if (status.build_status === "running") return true;
+      if (!canBuildSkillRetrievalIndex(status)) return false;
+      const buildParams = {
+        force: force || status.index_exists,
+        source: "web",
+      };
       const payload = await webRequest<Record<string, unknown>>(
         "skills.retrieval.index_build",
-        withSession({ force: force || status.index_exists, source: "web" }),
+        useDefaultProfile ? buildParams : withSession(buildParams),
         { timeoutMs: 30_000 }
       );
       if (payload.success !== true) {
@@ -1104,11 +1113,73 @@ export function SkillPanel({
         throw new Error(t('skills.retrieval.statusIncompatible'));
       }
       showMessage('success', t('skills.retrieval.buildStarted'));
+      return true;
     } catch (error) {
       console.error('Failed to start Skill taxonomy build:', error);
       showMessage('error', error instanceof Error ? error.message : t('skills.retrieval.buildFailed'));
+      return false;
     }
   }, [isConnected, showMessage, t, withSession]);
+
+  useEffect(() => {
+    const requestRevision = ++indexRecommendationRequestRef.current;
+    if (!isActive || activeTab !== "graph" || !isConnected) {
+      setIndexRecommendationVisible(false);
+      return;
+    }
+
+    setIndexRecommendationVisible(false);
+    void (async () => {
+      try {
+        const config = await webRequest<Record<string, unknown>>("config.get");
+        if (requestRevision !== indexRecommendationRequestRef.current) return;
+        if (
+          !parseConfigBoolean(config.skill_retrieval_enabled)
+          || parseConfigBoolean(config.skill_retrieval_index_enabled)
+          || parseConfigBoolean(config.skill_retrieval_index_recommendation_shown)
+        ) {
+          return;
+        }
+
+        const status = parseSkillRetrievalStatus(
+          await webRequest<unknown>("skills.retrieval.status")
+        );
+        if (requestRevision !== indexRecommendationRequestRef.current || !status.index_recommended) return;
+
+        await webRequest("config.set", {
+          skill_retrieval_index_recommendation_shown: "true",
+        });
+        if (requestRevision === indexRecommendationRequestRef.current) {
+          setIndexRecommendationVisible(true);
+        }
+      } catch {
+        // The recommendation is advisory and must not affect the Skill graph.
+      }
+    })();
+  }, [activeTab, isActive, isConnected]);
+
+  const buildRecommendedIndex = useCallback(async () => {
+    if (indexRecommendationBuilding) return;
+    setIndexRecommendationBuilding(true);
+    try {
+      await webRequest("config.set", {
+        skill_retrieval_index_enabled: "true",
+      });
+      const started = await startRetrievalIndexBuild(false, true);
+      if (started) {
+        setIndexRecommendationVisible(false);
+      } else {
+        await webRequest("config.set", {
+          skill_retrieval_index_enabled: "false",
+        });
+      }
+    } catch (error) {
+      console.error('Failed to enable Skill taxonomy index:', error);
+      showMessage('error', t('skills.retrieval.buildFailed'));
+    } finally {
+      setIndexRecommendationBuilding(false);
+    }
+  }, [indexRecommendationBuilding, showMessage, startRetrievalIndexBuild, t]);
 
   // 当左边栏切换到技能页面时，或切换到"我的技能"页签时，调用 list 接口
   useEffect(() => {
@@ -2022,6 +2093,35 @@ export function SkillPanel({
 
         {activeTab === "graph" ? (
           <div data-testid="skill-panel-graph-view" className="mt-4 flex flex-1 min-h-0 flex-col gap-3">
+            {indexRecommendationVisible ? (
+              <div
+                className="flex flex-none flex-col gap-3 rounded-lg border border-warn bg-warn-subtle px-4 py-3"
+                data-testid="skill-index-recommendation"
+              >
+                <p className="whitespace-pre-line text-sm leading-6 text-text">
+                  {t('skills.retrieval.indexRecommended')}
+                </p>
+                <div className="flex justify-end gap-2">
+                  <button
+                    type="button"
+                    className="rounded-lg border border-border bg-panel px-4 py-2 text-sm text-text hover:bg-secondary/50 disabled:cursor-not-allowed disabled:opacity-60"
+                    disabled={indexRecommendationBuilding}
+                    onClick={() => setIndexRecommendationVisible(false)}
+                  >
+                    {t('skills.retrieval.recommendationDismiss')}
+                  </button>
+                  <button
+                    type="button"
+                    className="inline-flex items-center gap-2 rounded-lg bg-accent px-4 py-2 text-sm text-white hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-60"
+                    disabled={indexRecommendationBuilding}
+                    onClick={() => void buildRecommendedIndex()}
+                  >
+                    {indexRecommendationBuilding ? <Loader2 size={15} className="animate-spin" /> : null}
+                    {t('skills.retrieval.recommendationBuild')}
+                  </button>
+                </div>
+              </div>
+            ) : null}
             <div data-testid="skill-panel-graph-orchestration-card" className="flex flex-none flex-wrap items-center justify-between gap-4 rounded-lg border border-border bg-panel p-4">
               <div className="min-w-[240px] flex-1">
                 <div className="flex items-start gap-2">
