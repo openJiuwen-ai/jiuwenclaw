@@ -601,6 +601,10 @@ def _register_special_routes(app: Any, server: AgentHTTPServer) -> None:
         qp = request.query_params
         session_filter = qp.get("session_id") or ctx.session_id
         channel_filter = qp.get("channel_id")
+        # 信任边界假设：此头仅由内部 Gateway 调用方设置，本端点不对外网暴露。
+        # 客户端可伪造该头声称自己是 Gateway 并抢占反向 RPC owner；若此端点
+        # 可能被不受信任的客户端访问（反向代理配置错误等），需改用 mTLS /
+        # 共享密钥 / IP 白名单等机制做强验证。
         reverse_rpc_capable = (
             request.headers.get("x-jiuwen-push-consumer") == "gateway"
         )

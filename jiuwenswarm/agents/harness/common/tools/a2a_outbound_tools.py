@@ -20,6 +20,7 @@ from jiuwenswarm.gateway.a2a_manager.tool_rpc import (
 
 from .acp_output_tools import get_acp_output_manager
 
+
 class A2AOutboundToolBackend(Protocol):
     @property
     def ready(self) -> bool:

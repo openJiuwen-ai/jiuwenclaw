@@ -417,9 +417,10 @@ class A2AOutboundRegistry:
 
     async def list_dispatches(self, *, limit: int = 200) -> dict[str, Any]:
         normalized_limit = max(1, min(int(limit), 200))
-        records = await self._repository.list_dispatches()
+        records = await self._repository.list_dispatches(limit=normalized_limit)
+        total = await self._repository.count_dispatches()
         items = []
-        for item in records[:normalized_limit]:
+        for item in records:
             items.append(
                 {
                     "dispatch_id": item.dispatch_id,
@@ -435,7 +436,7 @@ class A2AOutboundRegistry:
                     "error_summary": item.error_summary,
                 }
             )
-        return {"items": items, "total": len(records)}
+        return {"items": items, "total": total}
 
     async def _require_agent(self, agent_id: str) -> A2AOutboundAgent:
         item = await self._repository.get_agent(str(agent_id or "").strip())
