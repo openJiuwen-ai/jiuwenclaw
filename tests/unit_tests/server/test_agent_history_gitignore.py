@@ -183,3 +183,74 @@ def test_git_diff_excludes_unignored_agent_history(tmp_path):
     assert diff is not None
     assert diff["stats"] == {"filesChanged": 1, "linesAdded": 1, "linesRemoved": 1}
     assert str(history_dir / "file_ops_jiuwenswarm_sess.json") not in diff["files"]
+
+
+def test_gitignore_probe_never_spawns_subprocess(tmp_path, monkeypatch):
+    """create_instance 卡死事故回归守护：git 探测必须为纯文件系统实现.
+
+    Windows 上 subprocess.run 超时 kill 后会无超时 communicate 等管道 EOF，
+    管道写端一旦被其他存活进程继承便永久悬挂。因此仓库探测禁止再引入
+    任何子进程调用。
+    """
+
+    def _forbidden(*args, **kwargs):  # pragma: no cover - 触发即失败
+        raise AssertionError("gitignore probe must not spawn subprocesses")
+
+    monkeypatch.setattr(subprocess, "run", _forbidden)
+    monkeypatch.setattr(subprocess, "Popen", _forbidden)
+
+    # 非仓库目录：静默返回
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    JiuWenSwarmDeepAdapter._ensure_project_gitignore_agent_history(str(plain))
+    assert not (plain / ".gitignore").exists()
+
+    # 有 .git 目录的仓库：正常写入（不依赖 git 可执行文件）
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+    JiuWenSwarmDeepAdapter._ensure_project_gitignore_agent_history(str(repo))
+    content = (repo / ".gitignore").read_text(encoding="utf-8")
+    assert ".agent_history/" in content
+
+
+def test_find_git_worktree_root_supports_worktree_file(tmp_path):
+    """worktree/submodule 的 .git 是文件不是目录，也必须识别."""
+    repo = tmp_path / "worktree"
+    nested = repo / "a" / "b"
+    nested.mkdir(parents=True)
+    (repo / ".git").write_text("gitdir: ../elsewhere\n", encoding="utf-8")
+
+    assert JiuWenSwarmDeepAdapter._find_git_worktree_root(str(nested)) == str(repo)
+    assert JiuWenSwarmDeepAdapter._find_git_worktree_root(str(tmp_path / "none")) is None
+
+
+@pytest.mark.asyncio
+async def test_gitignore_housekeeping_is_fire_and_forget(monkeypatch, tmp_path):
+    """后台调度不得阻塞调用方，异常也不得外抛."""
+    adapter = JiuWenSwarmDeepAdapter()
+    started = threading.Event()
+    release = threading.Event()
+
+    def _slow(_project_dir) -> None:
+        started.set()
+        assert release.wait(timeout=5)
+
+    monkeypatch.setattr(adapter, "_ensure_project_gitignore_agent_history", _slow)
+    adapter._schedule_project_gitignore_agent_history(str(tmp_path))
+    # 调度立即返回，任务在后台等待
+    await asyncio.wait_for(asyncio.to_thread(started.wait), timeout=1)
+    tasks = [t for t in adapter._housekeeping_tasks if not t.done()]
+    assert len(tasks) == 1
+
+    release.set()
+    await asyncio.wait_for(asyncio.gather(*tasks), timeout=1)
+
+    # 失败路径：housekeeping 抛错被吞掉，task 正常结束
+    def _boom(_project_dir) -> None:
+        raise RuntimeError("disk exploded")
+
+    monkeypatch.setattr(adapter, "_ensure_project_gitignore_agent_history", _boom)
+    adapter._schedule_project_gitignore_agent_history(str(tmp_path))
+    failing = [t for t in adapter._housekeeping_tasks if not t.done()]
+    await asyncio.wait_for(asyncio.gather(*failing), timeout=1)
+    assert all(t.exception() is None for t in failing)

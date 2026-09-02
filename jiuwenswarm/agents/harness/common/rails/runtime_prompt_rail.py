@@ -20,9 +20,14 @@ from openjiuwen.harness.prompts import PromptSection
 from openjiuwen.harness.prompts.prompt_attachment_manager import (
     PromptAttachmentKind,
 )
+from openjiuwen.harness.prompts.sections import SectionName
+from openjiuwen.harness.prompts.workspace_content.workspace_header import (
+    IMPORTANT_FILES,
+)
 
 from openjiuwen.harness.rails.base import DeepAgentRail
 from jiuwenswarm.agents.harness.common.prompt.shell_environment import build_shell_environment_prompt
+from jiuwenswarm.agents.harness.common.prompt.prompt_builder import _runtime_env_message_rules_text
 from jiuwenswarm.common.config import get_sandbox_runtime
 from jiuwenswarm.common.utils import (
     get_agent_workspace_dir,
@@ -74,6 +79,7 @@ class RuntimePromptRail(DeepAgentRail):
             self.system_prompt_builder.remove_section("directory_boundaries")
             self.system_prompt_builder.remove_section("tui_current_project_policy")
             self.system_prompt_builder.remove_section("trusted_dirs_policy")
+            self.system_prompt_builder.remove_section("runtime.binary_context")
         self._agent = None
         self.system_prompt_builder = None
         self.attachment_manager = None
@@ -311,6 +317,51 @@ class RuntimePromptRail(DeepAgentRail):
         env_language = "cn" if not self._force_english and self._language == "cn" else "en"
         shell_env_prompt = build_shell_environment_prompt(env_language, os_type)
 
+        # ── Managed binary runtime paths ──
+        # Desktop packaged builds inject these values before spawning AgentServer.
+        # Keep this as a dynamic prompt attachment so upgrades/user data roots are
+        # reflected without hard-coding a machine-specific path in templates.
+        binary_vars = (
+            ("Python", "CLAW_PYTHON_EXE"),
+            ("Node.js", "CLAW_NODE_EXE"),
+            ("npm", "CLAW_NPM_CMD"),
+            ("npx", "CLAW_NPX_CMD"),
+            ("Git", "CLAW_GIT_EXE"),
+            ("Git Bash", "CLAW_GIT_BASH_EXE"),
+        )
+        binary_lines = []
+        for label, env_name in binary_vars:
+            value = (os.environ.get(env_name) or "").strip()
+            if value:
+                binary_lines.append(f"- {label}: `{value}`")
+        runtime_source = (os.environ.get("CLAW_RUNTIME_SOURCE") or "unknown").strip()
+        if env_language == "cn":
+            binary_content = (
+                "## 受管工具链\n\n"
+                f"- 来源：`{runtime_source}`\n"
+                + ("\n".join(binary_lines) if binary_lines else "- 未注入受管工具路径")
+                + "\n\n"
+                "使用规则：优先使用上面列出的绝对路径或对应的 `CLAW_*` 路径变量；"
+                "不要用本机的 python/node/npx/git 裸命令覆盖已提供的受管运行时。"
+            )
+        else:
+            binary_content = (
+                "## Managed Toolchain\n\n"
+                f"- Source: `{runtime_source}`\n"
+                + ("\n".join(binary_lines) if binary_lines else "- No managed runtime paths injected")
+                + "\n\n"
+                "Usage: prefer the absolute paths above or the corresponding `CLAW_*` path variables; "
+                "do not replace an injected managed runtime with bare python/node/npx/git commands."
+            )
+        await self._clear_prompt_attachment(ctx, section="runtime.binary_context")
+        await self._upsert_prompt_attachment(
+            ctx,
+            section="runtime.binary_context",
+            content=binary_content,
+            kind=PromptAttachmentKind.RUNTIME,
+            priority=95,
+        )
+
         # 沙箱权限提示词仅在 sandbox.enabled=True 时注入; 关闭沙箱时命令可自由访问
         # 全盘, 不应让 LLM 误以为工作区外一律无权限而在真实 PermissionError 上过早放弃.
         sandbox_enabled = bool(get_sandbox_runtime().get("enabled"))
@@ -409,9 +460,15 @@ class RuntimePromptRail(DeepAgentRail):
                 "special characters that GBK cannot encode.\n"
                 "- If those characters are required, use a tool that explicitly supports UTF-8 or "
                 "configure UTF-8 encoding.\n\n"
-                "## Current Channel\n\n"
-                f"- Current channel: `{channel}`"
-            )
+            "## Current Channel\n\n"
+            f"- Current channel: `{channel}`"
+        )
+
+        # ── Input Instructions / Output Rules / Subagent Usage Rules ──
+        # Shared across office / code / design / team profiles. Appended after
+        # the CN/EN branch so both language paths receive the same content
+        # (English-only, mirroring the office/code/design all-English policy).
+        env_content += "\n\n" + _runtime_env_message_rules_text()
 
         self.system_prompt_builder.add_section(PromptSection(
             name="env",
@@ -458,12 +515,19 @@ class RuntimePromptRail(DeepAgentRail):
                 section="git_status",
             )
 
-        # ── Channel: directory and file-operation boundaries ──
-        # Remove both the consolidated section and legacy sections first so
-        # switching away from TUI/Web cannot leave stale directory guidance.
+        # ── Channel: directory and runtime context (consolidated, last) ──
+        # Merge what used to be separate sections — internal data dirs, workspace
+        # important files, working-directory strategy, runtime directory context —
+        # into ONE section placed at the very end (priority 96 > runtime.setting 95,
+        # env 89) so the static KV-cache prefix stays stable and all user/directory-
+        # dependent dynamic text lives together at the tail.
+        # Remove the consolidated section, legacy sections, and the openjiuwen
+        # WORKSPACE section first so switching channels cannot leave stale guidance
+        # and so the important-files table is not duplicated.
         self.system_prompt_builder.remove_section("directory_boundaries")
         self.system_prompt_builder.remove_section("tui_current_project_policy")
         self.system_prompt_builder.remove_section("trusted_dirs_policy")
+        self.system_prompt_builder.remove_section(SectionName.WORKSPACE)
         if self._channel in ("tui", "web", "desktop", "ws_client", "__cron__", "cron"):
             # This agent's own workspace. Team members each own one; without
             # it (single-agent runs) the process-wide agent workspace is the
@@ -482,27 +546,38 @@ class RuntimePromptRail(DeepAgentRail):
             # project directory shown to the model.
             prompt_project_dir = project_dir or runtime_cwd
 
-            if not self._force_english and self._language == "cn":
-                if has_project:
-                    project_path = project_dir
-                else:
-                    project_path = runtime_cwd
+            is_cn = not self._force_english and self._language == "cn"
+            lang_key = "cn" if is_cn else "en"
+            important_files = IMPORTANT_FILES.get(lang_key, IMPORTANT_FILES["cn"])
+            project_label = (
+                f"`{project_dir}`" if has_project
+                else ("未设置" if is_cn else "not set")
+            )
+
+            if is_cn:
                 directory_content = (
-                    "# 目录与文件操作边界\n\n"
-                    "## 项目目录\n\n"
-                    "### 项目目录说明\n\n"
+                    "# 目录与运行时上下文\n\n"
+                    "## 工作目录\n\n"
                     "- 项目目录是你当前的工作空间，"
-                    f"当前项目目录是：`{project_path}`\n\n"
-                    "### 项目目录规则\n\n"
+                    f"当前项目目录是：`{prompt_project_dir}`\n\n"
+                    f"{important_files}\n\n"
+                    "## 项目目录规则\n\n"
                     "- 用户任务中的相对路径必须相对于当前项目目录路径去解析。\n"
                     "- Bash 未显式传入 `workdir` 时，默认在当前项目目录执行。\n"
                     "- 用户已经提供明确路径时直接使用，不要重复询问。\n"
                     "- 只有任务确实需要操作某个项目、且现有上下文无法确定项目位置时，才询问项目路径。\n"
                     "- 用户明确指定保存位置时，优先使用用户指定位置；否则，项目代码、测试、配置、构建文件、项目文档、报告、导出文件、图片和数据文件等放在当前工作目录的合理位置。\n\n"
-                    "## JiuwenSwarm 内部目录\n\n"
-                    f"- 智能体内部数据目录：`{agent_workspace_dir}`\n"
-                    f"- JiuwenSwarm 启动配置目录：`{config_dir}`\n\n"
-                    "以下资源由 JiuwenSwarm 提供，路径相对于运行时给出的智能体内部数据目录：\n\n"
+                    "## xiaoyi work 内部数据目录\n\n"
+                    "xiaoyi work 使用独立的内部数据目录保存启动配置、Agent 身份、记忆、技能、待办和运行状态。"
+                    "这些内部数据目录不等于用户当前处理的项目目录，也不是用户任务中相对路径的默认含义。\n\n"
+                    "| 路径 | 类型 | 用途 | 操作建议 |\n"
+                    "|------|------|------|----------|\n"
+                    f"| `{config_dir}` | xiaoyi work 启动配置目录 | 保存 `config.yaml` 和 `.env` | 只有用户明确要求修改 xiaoyi work 自身配置时才访问 |\n"
+                    f"| `{agent_workspace_dir}` | Agent 内部数据目录 | 保存身份、记忆、技能、待办和运行状态 | 不要在其中搜索或运行用户项目文件 |\n"
+                    f"| `{agent_workspace_dir}/memory` | Agent 记忆目录 | 保存持久化记忆 | 将其视为 Agent 记忆的一部分 |\n"
+                    f"| `{agent_workspace_dir}/skills` | Agent 技能目录 | 保存和读取技能 | 可以读取和调用，不要作为项目目录使用 |\n"
+                    f"| `{agent_workspace_dir}/todo` | Agent 待办目录 | 保存任务和待办状态 | 用于任务状态管理 |\n\n"
+                    "以下资源由 xiaoyi work 提供，路径相对于运行时给出的智能体内部数据目录：\n\n"
                     "- `IDENTITY.md`：用户为智能体指定的身份信息。\n"
                     "- `skills/`：当前已安装并启用的技能。\n"
                     "- `todo/`：任务和待办状态。\n\n"
@@ -510,17 +585,22 @@ class RuntimePromptRail(DeepAgentRail):
                     "- 智能体内部数据目录只保存智能体自身数据，不是用户项目目录。\n"
                     "- 智能体身份、记忆、技能、待办和运行状态只能保存在对应的内部数据目录。\n"
                     f"- 技能执行产生的内部技能资产放在 `{agent_workspace_dir}/skills/{{skill_name}}/`。\n"
-                    "- JiuwenSwarm 启动配置目录不得用于保存普通任务产物。\n"
-                    "- 用户任务中的 `config/`、`memory/`、`skills/`、`todo/` 或 `workspace/` 不自动映射到 JiuwenSwarm 内部目录。"
+                    "- xiaoyi work 启动配置目录不得用于保存普通任务产物。\n"
+                    "- 用户任务中的 `config/`、`memory/`、`skills/`、`todo/` 或 `workspace/` 不自动映射到 xiaoyi work 内部目录。\n\n"
+                    "## 运行时目录上下文\n\n"
+                    f"- 当前项目目录：{project_label}\n"
+                    f"- 当前工作目录（cwd，也是 Bash 默认执行目录）：`{runtime_cwd}`\n"
+                    f"- Agent 内部数据目录：`{agent_workspace_dir}`\n"
+                    f"- xiaoyi work 启动配置目录：`{config_dir}`"
                 )
             else:
                 directory_content = (
-                    "# Directory and File-Operation Boundaries\n\n"
-                    "## Project Directory\n\n"
-                    "### Project Directory Description\n\n"
+                    "# Directory and Runtime Context\n\n"
+                    "## Working Directory\n\n"
                     "- The project directory is your current workspace; "
                     f"the current project directory is: `{prompt_project_dir}`\n\n"
-                    "### Project Directory Rules\n\n"
+                    f"{important_files}\n\n"
+                    "## Project Directory Rules\n\n"
                     "- Resolve relative paths in user tasks against the current project directory.\n"
                     "- When Bash is called without an explicit `workdir`, run it in the current project "
                     "directory.\n"
@@ -530,10 +610,19 @@ class RuntimePromptRail(DeepAgentRail):
                     "- Prefer a user-specified save location. Otherwise, place project code, tests, "
                     "configuration, build files, project documentation, reports, exports, images, and data "
                     "files in an appropriate location under the current working directory.\n\n"
-                    "## JiuwenSwarm Internal Directories\n\n"
-                    f"- Agent internal data directory: `{agent_workspace_dir}`\n"
-                    f"- JiuwenSwarm startup configuration directory: `{config_dir}`\n\n"
-                    "The following resources are provided by JiuwenSwarm. Their paths are relative to the "
+                    "## xiaoyi work Internal Data Directories\n\n"
+                    "xiaoyi work keeps its startup configuration, Agent identity, memory, skills, "
+                    "todos, and runtime state in dedicated internal data directories. These are not the "
+                    "same as the project directory the user is currently working on, nor are they the "
+                    "default meaning of relative paths in user tasks.\n\n"
+                    "| Path | Type | Purpose | Suggested use |\n"
+                    "|------|------|---------|---------------|\n"
+                    f"| `{config_dir}` | xiaoyi work startup config directory | stores `config.yaml` and `.env` | access only when the user explicitly asks to change xiaoyi work's own config |\n"
+                    f"| `{agent_workspace_dir}` | Agent internal data directory | stores identity, memory, skills, todos, runtime state | do not search or run user project files inside it |\n"
+                    f"| `{agent_workspace_dir}/memory` | Agent memory directory | stores persistent memory | treat as part of the Agent's memory |\n"
+                    f"| `{agent_workspace_dir}/skills` | Agent skills directory | stores and reads skills | may read and invoke; do not use as a project directory |\n"
+                    f"| `{agent_workspace_dir}/todo` | Agent todo directory | stores task and todo state | used for task state management |\n\n"
+                    "The following resources are provided by xiaoyi work. Their paths are relative to the "
                     "Agent internal data directory supplied at runtime:\n\n"
                     "- `IDENTITY.md`: identity information assigned to the Agent by the user.\n"
                     "- `skills/`: currently installed and enabled skills.\n"
@@ -545,9 +634,14 @@ class RuntimePromptRail(DeepAgentRail):
                     "corresponding internal data directories.\n"
                     f"- Internal skill assets produced by skill execution belong in "
                     f"`{agent_workspace_dir}/skills/{{skill_name}}/`.\n"
-                    "- Do not use the JiuwenSwarm startup configuration directory for ordinary task deliverables.\n"
+                    "- Do not use the xiaoyi work startup configuration directory for ordinary task deliverables.\n"
                     "- `config/`, `memory/`, `skills/`, `todo/`, or `workspace/` in a user task do not "
-                    "automatically refer to JiuwenSwarm internal directories."
+                    "automatically refer to xiaoyi work internal directories.\n\n"
+                    "## Runtime Directory Context\n\n"
+                    f"- Current project directory: {project_label}\n"
+                    f"- Current working directory (cwd, also the default Bash execution directory): `{runtime_cwd}`\n"
+                    f"- Agent internal data directory: `{agent_workspace_dir}`\n"
+                    f"- xiaoyi work startup configuration directory: `{config_dir}`"
                 )
             trusted_dirs = [
                 path for path in self._existing_dirs(self._trusted_dirs)
@@ -556,7 +650,7 @@ class RuntimePromptRail(DeepAgentRail):
             ]
             if trusted_dirs:
                 trusted_dirs_display = ", ".join(f"`{path}`" for path in trusted_dirs)
-                if not self._force_english and self._language == "cn":
+                if is_cn:
                     directory_content += (
                         "\n\n## 其他已授权目录\n\n"
                         f"- 可读写但不属于当前项目目录的其他目录：{trusted_dirs_display}\n"
@@ -571,7 +665,7 @@ class RuntimePromptRail(DeepAgentRail):
             self.system_prompt_builder.add_section(PromptSection(
                 name="directory_boundaries",
                 content={"cn": directory_content, "en": directory_content},
-                priority=89,
+                priority=96,
             ))
 
     async def _upsert_prompt_attachment(

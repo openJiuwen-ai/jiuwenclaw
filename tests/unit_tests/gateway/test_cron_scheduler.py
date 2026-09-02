@@ -110,6 +110,10 @@ class _TestableScheduler(CronSchedulerService):
         return await self._handle_event(ev)
 
     @property
+    def boot_time(self):
+        return self._boot_time
+
+    @property
     def jobs(self):
         return self._jobs
 
@@ -2007,6 +2011,29 @@ class TestUpdateJobA2aDeleteAfterRun:
     会让调度器在首次触发后把任务标记为过期并禁用。
     """
 
+class _Clock:
+    """可控时钟，供 now_fn 注入测试，避免依赖真实秒数导致边界抖动。"""
+
+    def __init__(self, t: float) -> None:
+        self.t = t
+
+    def __call__(self) -> float:
+        return self.t
+
+    def advance(self, seconds: float) -> None:
+        self.t += seconds
+
+
+class TestCrashRecoveryGraceWindow:
+    """crash_recovery_skip 仅在进程启动 grace 窗口内启用。
+
+    背景：运行期 reload（其他任务 update_job 改 cron_jobs.json mtime 触发
+    _check_store_changed → reload → _events.clear()）会抹掉尚未到点/刚到点
+    的合法 wake 事件。重排时"existing is None + wake 刚过去"被误判为崩溃
+    残留而丢弃，导致一次性任务被静默吞掉。修复后用 _boot_time grace 窗口
+    区分真崩溃与运行期 reload。
+    """
+
     @staticmethod
     def _make_controller(tmp_path):
         from types import SimpleNamespace
@@ -2082,3 +2109,38 @@ class TestUpdateJobA2aDeleteAfterRun:
         stored = await store.get_job(job.id)
         assert stored is not None
         assert stored.delete_after_run is True
+
+
+class TestBootTimeReset:
+    """crash_recovery_skip 仅在进程启动 grace 窗口内启用。
+
+    背景：运行期 reload（其他任务 update_job 改 cron_jobs.json mtime 触发
+    _check_store_changed → reload → _events.clear()）会抹掉尚未到点/刚到点
+    的合法 wake 事件。重排时"existing is None + wake 刚过去"被误判为崩溃
+    残留而丢弃，导致一次性任务被静默吞掉。修复后用 _boot_time grace 窗口
+    区分真崩溃与运行期 reload。
+
+    下面的测试依赖 _boot_time/_crash_recovery_skipped_runs/grace 窗口机制，
+    以及 _TestableScheduler 的 boot_time / events 属性。
+    """
+
+    @pytest.fixture
+    def clock(self):
+        return _Clock(time.time())
+
+    @pytest.mark.asyncio
+    async def test_start_resets_boot_time(self, tmp_path):
+        """start() 应将 boot_time 重置为启动时刻，覆盖构造到启动之间的延迟。"""
+        store = CronJobStore(path=tmp_path / "cron_jobs.json")
+        clock = _Clock(1000.0)
+        svc = _TestableScheduler(
+            store=store,
+            agent_client=FakeAgentClient(),
+            message_handler=FakeMessageHandler(),
+            now_fn=clock,
+        )
+        assert svc.boot_time == 1000.0
+        clock.advance(500)
+        await svc.start()
+        assert svc.boot_time == 1500.0
+        await svc.stop()

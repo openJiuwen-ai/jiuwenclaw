@@ -251,6 +251,42 @@ def get_config():
     return config_base
 
 
+def is_file_operation_history_enabled(config: dict[str, Any] | None) -> bool:
+    """Return whether Agent-Core file operation history should remain enabled.
+
+    Missing configuration keeps the historical default (enabled) so existing
+    deployments retain their behavior after upgrading.  Only a real boolean is
+    accepted for the explicit setting; malformed values fail open to the
+    historical behavior instead of treating strings such as ``"false"`` as
+    booleans.
+    """
+    if not isinstance(config, dict):
+        logger.warning(
+            "Invalid config for file_operation_history; falling back to enabled=True"
+        )
+        return True
+
+    section = config.get("file_operation_history")
+    if section is None:
+        return True
+    if not isinstance(section, dict):
+        logger.warning(
+            "Invalid file_operation_history=%r; falling back to enabled=True",
+            section,
+        )
+        return True
+
+    enabled = section.get("enabled", True)
+    if not isinstance(enabled, bool):
+        logger.warning(
+            "Invalid file_operation_history.enabled=%r; falling back to enabled=True",
+            enabled,
+        )
+        return True
+
+    return enabled
+
+
 def get_config_raw():
     """读 config.yaml 原始内容（不解析环境变量），供局部更新后写回。"""
     return _read_with_retry(CONFIG_YAML_PATH)

@@ -1,6 +1,10 @@
 # 前端显示语言：zh（中文）/ en（英文），与 Web 界面语言切换同步
 preferred_language: zh
 
+# Agent-Core 文件操作历史开关；新安装默认关闭，未配置时由代码兼容回退为 true。
+file_operation_history:
+  enabled: false
+
 # 渐进式工具曝光（progressive tool loading）：
 # true：模型仅直接可见下面两个名单的工具，其余工具经 search_tools/load_tools 延迟发现。
 # always_visible = 始终直接可见（todo 工具优先级最高）；
@@ -11,6 +15,7 @@ progressive_tool_always_visible_tools:
   - todo_list
   - todo_get
   - todo_modify
+  - send_file_to_user
 progressive_tool_default_visible_tools:
   - read_file
   - write_file
@@ -381,10 +386,8 @@ agents:
   #   CLAW_XIAOYI_UID             — 握手 x-uid（优先）；否则 AGENT_RUNTIME_UID / 渠道 uid
   #   AGENT_RUNTIME_BASEURL       — agent_as_a_tool（可选）
   #   AGENT_RUNTIME_WS_TIMEOUT    — 插件等待超时秒数（缺省 120）
-  # 云端能力以白名单为准（禁止臆造 bundleName）：
-  #   生图  seedreamLite4Skill|SeedreamPro4Skill + bundleName=com.atomicservice.5765880207845681341
-  #   生视频 seedanceMiniTask|seedanceMiniTaskQuery + 同上；默认轮询到成片
-  #   图像理解 imageUnderStandStream + bundleName=xiaoyi
+  # 云端 functionName/bundleName 以已加载 skill 的 SKILL.md 当前区表为准（invoke 透传，不改写）。
+  # ToolCard 根据 AGENT_RUNTIME_MCP_RUN 提示现网或蓝绿。
   invoke_tool:
     enabled: true
 
@@ -737,6 +740,8 @@ cspl:
   scan_tool_output: true
 
 channels:
+  desktop:
+    send_file_allowed: true
   web:
     send_file_allowed: true
   feishu:

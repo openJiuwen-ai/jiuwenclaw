@@ -18,6 +18,7 @@ async def _run_agentserver_for_test(host: str, port: int) -> None:
 async def test_run_does_not_delete_agent_teams_directory(monkeypatch: pytest.MonkeyPatch) -> None:
     removed_paths: list[Path] = []
     server_events: list[str] = []
+    startup_events: list[str] = []
 
     class _FakeEvent:
         @staticmethod
@@ -45,7 +46,7 @@ async def test_run_does_not_delete_agent_teams_directory(monkeypatch: pytest.Mon
             self.registry = registry
 
         async def load_all_extensions(self) -> None:
-            return None
+            startup_events.append("extensions")
 
         @staticmethod
         def list_extensions() -> list[object]:
@@ -61,6 +62,14 @@ async def test_run_does_not_delete_agent_teams_directory(monkeypatch: pytest.Mon
 
     monkeypatch.setattr(app_agentserver.asyncio, "Event", _FakeEvent)
     monkeypatch.setattr("shutil.rmtree", _fake_rmtree)
+    monkeypatch.setattr(
+        "jiuwenswarm.common.config.get_config",
+        lambda: {"file_operation_history": {"enabled": False}},
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.file_operation_history_patch.configure_file_operation_history",
+        lambda config: startup_events.append(f"history:{config['file_operation_history']['enabled']}"),
+    )
     monkeypatch.setattr(
         "jiuwenswarm.agents.harness.team.remote_member_bootstrap.run_teammate_bootstrap_daemon",
         _fake_bootstrap_daemon,
@@ -85,4 +94,5 @@ async def test_run_does_not_delete_agent_teams_directory(monkeypatch: pytest.Mon
     await _run_agentserver_for_test("127.0.0.1", 18092)
 
     assert server_events == ["start", "stop"]
+    assert startup_events[:2] == ["history:False", "extensions"]
     assert removed_paths == []

@@ -1000,6 +1000,92 @@ def _drain_queue():
     _METADATA_QUEUE.join()
 
 
+class TestEmptySessionIdNoMkdir:
+    """空 id 或 "default" 占位符拒绝落盘：不得凭空 mkdir 出空的 default 会话目录。
+
+    回归保护：曾因空 session_id 兜底成 "default" 走进持久化路径，进程在
+    mkdir 后、异步 flush 前退出时残留空 default 目录，污染 session.list。
+    现在连上游已兜底成字面量 "default" 的也一并拒绝（"default" 绝非合法
+    会话 id——所有合法 id 由生成器带时间戳/随机后缀）。修复后：
+    init/update/set_delivery_context/increment_round 对这类 id 直接 return。
+    """
+
+    @staticmethod
+    @pytest.mark.parametrize("bad_sid", [None, "", "   ", "\t", "default"])
+    def test_update_empty_id_no_dir(sessions_dir, bad_sid):
+        from jiuwenswarm.server.runtime.session.session_metadata import (
+            update_session_metadata,
+        )
+
+        update_session_metadata(
+            session_id=bad_sid,
+            channel_id="web",
+            increment_message_count=True,
+            user_content="hello",
+        )
+        _drain_queue()
+        assert not (sessions_dir / "default").exists()
+        assert list(sessions_dir.iterdir()) == []
+
+    @staticmethod
+    @pytest.mark.parametrize("bad_sid", [None, "", "   ", "default"])
+    def test_init_empty_id_no_dir(sessions_dir, bad_sid):
+        from jiuwenswarm.server.runtime.session.session_metadata import (
+            init_session_metadata,
+        )
+
+        init_session_metadata(session_id=bad_sid, channel_id="web")
+        assert list(sessions_dir.iterdir()) == []
+
+    @staticmethod
+    @pytest.mark.parametrize("bad_sid", [None, "", "   ", "default"])
+    def test_set_delivery_context_empty_id_no_dir(sessions_dir, bad_sid):
+        from jiuwenswarm.server.runtime.session.session_metadata import (
+            set_session_delivery_context,
+        )
+
+        result = set_session_delivery_context(
+            session_id=bad_sid,
+            channel_id="web",
+            source_request_id="r1",
+            route_metadata=None,
+        )
+        _drain_queue()
+        assert result == {}
+        assert list(sessions_dir.iterdir()) == []
+
+    @staticmethod
+    @pytest.mark.parametrize("bad_sid", [None, "", "   ", "default"])
+    def test_increment_round_empty_id_no_dir(sessions_dir, bad_sid):
+        from jiuwenswarm.server.runtime.session.session_metadata import (
+            increment_session_round_count,
+        )
+
+        result = increment_session_round_count(bad_sid)
+        _drain_queue()
+        assert result == 0
+        assert list(sessions_dir.iterdir()) == []
+
+    @staticmethod
+    def test_update_valid_id_still_writes(sessions_dir):
+        """守卫不影响正常会话：非空 session_id 仍正常落盘。"""
+        from jiuwenswarm.server.runtime.session.session_metadata import (
+            get_session_metadata,
+            init_session_metadata,
+            update_session_metadata,
+        )
+
+        init_session_metadata(session_id="s-real", channel_id="web")
+        update_session_metadata(
+            session_id="s-real",
+            channel_id="web",
+            increment_message_count=True,
+        )
+        _drain_queue()
+        meta = get_session_metadata("s-real")
+        assert meta["message_count"] == 1
+
+
 class TestSyncSessionRequestMetadata:
     """sync_session_request_metadata：校验请求参数 vs 磁盘 metadata，按字段语义写入。"""
 

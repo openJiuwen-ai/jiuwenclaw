@@ -1793,29 +1793,32 @@ def install(
             ]
         else:
             paths_to_preinstall = []
-        # 对 ~/.office-claw 整树递归授 Read ACL: workspace/venv/.ms-playwright/业务产物都在其子树, jbx-sandbox 需读.
-        # 用 Path.home()/.office-claw (与 relay-claw 同算法), 不依赖 env/常量解析 (避免 env 缺 JIUWENCLAW_DATA_DIR 算错路径 → EPERM).
-        # 只 grant Read 不 grant Write (P0-3): 整树 Write 是跨沙箱互写/deny_write 失效/副本可篡改的根因, Write 由子树运行时单独精确授权.
-        # 递归 Read 让各沙箱能互相读 workspace — 单用户本地部署可接受, 跨沙箱写靠精确 grant 隔离.
-        # review #5: 递归 grant 移到 install 一次施加 (合成 SID + 真实 sandbox 用户 SID 各一份),
-        # 不再每次建沙箱补授 (旧版每次追加一份 ACE 致 DACL 膨胀). 真实 SID 也需读
-        # venv python/DLL (runner 第一跳用真实 SID, 合成 SID 的 ACE 对它不生效).
+        # 不再对 ~/.office-claw 整树预装读 ACL (该目录不做特殊授权).
+        # 旧版递归 grant 的根 ACE 在此清掉, 子对象继承 ACE 随根源头删除自动失效.
         try:
             from jiuwenbox.supervisor import win_acl as _wa, win_constants as _wc
-            _office_claw_root = str(Path.home() / ".office-claw")
-            os.makedirs(_office_claw_root, exist_ok=True)
-            # 递归 grant Read+Execute: 合成 SID + 真实 sandbox 用户 SID 各一份.
-            _wa.grant_ace(
-                _office_claw_root, synth_sid,
-                rights=_wc.ALLOW_READ_EXECUTE_RIGHTS, mode="ALLOW", recursive=True,
-            )
-            _wa.grant_ace(
-                _office_claw_root, sid,
-                rights=_wc.ALLOW_READ_EXECUTE_RIGHTS, mode="ALLOW", recursive=True,
-            )
-            logger.info("预装数据根递归 Read ACL: %s (Write 由运行时子树单独授权)", _office_claw_root)
         except Exception as exc:  # noqa: BLE001
-            logger.warning("预装数据根 ACL 失败 (非致命): %s", exc)
+            logger.warning("导入 win_acl 失败 (非致命): %s", exc)
+            _wa = None
+            _wc = None
+        if _wa is not None:
+            try:
+                _office_claw_root = str(Path.home() / ".office-claw")
+                if os.path.isdir(_office_claw_root):
+                    _wa.revoke_sandbox_acl(
+                        _office_claw_root, sandbox_user_sid=sid,
+                    )
+                    logger.info("已去掉 ~/.office-claw 特殊 ACL: %s", _office_claw_root)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("清理 ~/.office-claw ACL 失败 (非致命): %s", exc)
+
+        # 每次 exe 安装: 去掉主目录/Desktop 残留列出, 再授 claw-desktop 读写.
+        if _wa is not None:
+            try:
+                _wa.reconcile_install_acl(sid)
+                logger.info("已收敛宿主主目录与数据目录默认 ACL")
+            except Exception:  # noqa: BLE001
+                logger.warning("收敛宿主默认 ACL 失败 (非致命)", exc_info=True)
 
         # bundled-python 目录 (tools/python, tools/node 等) owner 可能是 Administrators,
         # 运行时 box-server 进程 (普通用户) 没有 WRITE_DAC, apply_sandbox_acl
@@ -1825,7 +1828,7 @@ def install(
         # 主线程合并授权的读 ACL 路径集: 打包目录同时 grant WRITE_DAC (当前用户)
         # 和 GENERIC_READ (沙箱用户), 后台预装线程对这些路径直接跳过, 省一遍重复递归.
         _merged_read_paths: set[str] = set()
-        if _current_user_sid:
+        if _current_user_sid and _wa is not None and _wc is not None:
             _bundled_dirs: list[str] = []
             _env_bundled = (os.environ.get("JIUWENBOX_BUNDLED_PYTHON") or "").strip()
             if _env_bundled:
@@ -1874,7 +1877,7 @@ def install(
 
         # 用户 policy 的 deny/allow 路径 (allow_read/deny_read/allow_write/deny_write)
         _acl_paths: list[str] = []
-        if _current_user_sid and policy_path:
+        if _current_user_sid and policy_path and _wa is not None and _wc is not None:
             try:
                 _acl_paths = _load_policy_acl_paths(policy_path)
             except Exception as exc:  # noqa: BLE001
@@ -2362,14 +2365,16 @@ def _install_rollback(steps_done: "set[str]") -> None:
 
 
 def _data_root_paths() -> list[str]:
-    """沙箱数据根路径 (apply 会 grant traverse, 不进差集清理)."""
+    """沙箱数据根路径 (apply 会 grant traverse, 不进差集清理).
+
+    不含 ~/.office-claw: 该目录不再特殊授权, 旧 ACE 应能被差集清理掉.
+    """
     try:
         from jiuwenbox.server.workspace import (
             JIUWENBOX_HOME,
             JIUWENCLAW_DATA_DIR_PATH,
-            OFFICE_CLAW_DATA_ROOT,
         )
-        return [str(p) for p in (OFFICE_CLAW_DATA_ROOT, JIUWENCLAW_DATA_DIR_PATH, JIUWENBOX_HOME) if p]
+        return [str(p) for p in (JIUWENCLAW_DATA_DIR_PATH, JIUWENBOX_HOME) if p]
     except Exception:  # noqa: BLE001
         return []
 

@@ -169,6 +169,7 @@ from jiuwenswarm.common.invocation_context.model_trace import TraceAwareModel
 from jiuwenswarm.common.invocation_context.billing_trace import (
     billing_marker_enabled,
     has_begun,
+    schedule_marker_call,
     terminal_trace_id,
 )
 from jiuwenswarm.server.xiaoyi_invocation import get_xiaoyi_trace_header_exporters
@@ -400,10 +401,8 @@ def get_runtime_tool_session_id() -> str | None:
 
 logger = logging.getLogger(__name__)
 
-# 临时计费标记（docs/billing-trace-marker-design.md）：终态虚拟模型调用的提示词与
-# fire-and-forget 任务集合（防 GC；任务自带 done_callback 移除）
-_BILLING_MARKER_PROMPT = "please only reply NO_REPLY"
-_BILLING_MARKER_TASKS: set[asyncio.Task] = set()
+# 临时计费标记（docs/billing-trace-marker-design.md）：终态虚拟模型调用经
+# billing_trace.schedule_marker_call 派发（begin 同机制，挂点在 TraceAwareModel）。
 
 _PERSISTENT_CHECKPOINTER_LOCK: asyncio.Lock | None = None
 _PERSISTENT_CHECKPOINTER_LOCK_LOOP: asyncio.AbstractEventLoop | None = None
@@ -1154,6 +1153,22 @@ class JiuWenSwarmDeepAdapter(ExpertCapabilityMixin):
         self._audio_tools: list[Any] = []
         self._instance_overrides: dict[str, Any] = {}
         self._is_session_scoped_adapter: bool = False
+        # Office (work) profile always uses English for system-prompt scaffolding
+        # (identity / safety / skills / task_execution / runtime / env sections),
+        # mirroring code mode. ``_runtime_language_override`` stays ``None`` in
+        # the main ``create_instance`` path so ``_resolve_runtime_language``
+        # returns ``"en"`` — this keeps ``system_prompt_builder.language`` (set
+        # via ``_update_prompt_for_mode``) English, which drives the SAFETY /
+        # skills / memory / subagent rails' en/cn branch selection. Only
+        # ``configure_team_member_agent`` overrides this per team member.
+        # User-visible rails/tools (StructuredAskUserRail / CircuitBreakerRail
+        # / WorkAgentModeRail / WebPaidSearchTool, etc.) read
+        # ``_resolve_output_language`` directly so their button labels / error
+        # messages / plan-mode notes follow ``preferred_language`` without
+        # touching scaffolding. ``preferred_language`` also governs the
+        # response Language section (see ``_resolve_output_language``).
+        self._runtime_language_override: str | None = None
+        self._force_english_runtime_prompt: bool = True
         self._parent_session_id: str | None = None
         # Root-adapter-only: its own DeepAgent is built on demand (see
         # ``ensure_instance``), so the chat path does not pay for an instance it
@@ -1216,6 +1231,7 @@ class JiuWenSwarmDeepAdapter(ExpertCapabilityMixin):
         self._dreaming_mode: str = "agent"
         self._send_file_toolkit: SendFileToolkit | None = None
         self._runtime_state_write_task: asyncio.Task[None] | None = None
+        self._housekeeping_tasks: set[asyncio.Task[None]] = set()
         self._send_html_card_toolkit: SendHtmlCardToolkit | None = None
 
     def _schedule_runtime_state_write(
@@ -2062,13 +2078,49 @@ class JiuWenSwarmDeepAdapter(ExpertCapabilityMixin):
 
     @staticmethod
     def _resolve_prompt_language() -> str:
-        """Resolve configured prompt language for builder input."""
-        config_base = get_config()
-        return str(config_base.get("preferred_language", "zh")).strip().lower()
+        """Office mode always uses English for system prompts.
+
+        Mirrors code mode: the system-prompt scaffolding (identity, safety,
+        skills, task_execution, runtime/env sections) is fixed English so the
+        monkey-patched ``safety_override`` / ``skills_goal_override`` sections
+        also render in English. The user-facing response language is governed
+        separately by :meth:`_resolve_output_language`.
+        """
+        return "en"
 
     def _resolve_runtime_language(self) -> str:
-        """Resolve normalized runtime language shared by rails and tools."""
-        return resolve_language(self._resolve_prompt_language())
+        """Resolve normalized runtime language shared by rails and tools.
+
+        Returns the per-session override if set, otherwise English (the office
+        profile default). ``_runtime_language_override`` is ``None`` in the
+        main ``create_instance`` path so this returns ``"en"`` — driven into
+        ``system_prompt_builder.language`` by ``_update_prompt_for_mode``,
+        which in turn selects the English branch of SAFETY / skills / memory /
+        subagent / context rails' cn/en content. Only
+        ``configure_team_member_agent`` overrides this per team member.
+
+        Note: user-visible rails/tools that produce directly user-facing UI
+        (button labels, error messages, plan-mode notes) read
+        ``_resolve_output_language`` directly instead, so they follow
+        ``preferred_language`` while scaffolding stays English.
+        """
+        return self._runtime_language_override or "en"
+
+    def _resolve_output_language(self) -> str:
+        """Resolve user-facing output language for the Language section and
+        runtime_state display.
+
+        Distinct from prompt/runtime language (always ``en`` in office mode):
+        reads ``config.yaml``'s ``preferred_language`` so the LLM can still be
+        instructed to respond in the user's chosen language even though the
+        system prompt itself is English. Mirrors code mode's
+        ``_resolve_output_language``.
+        """
+        config_base = get_config()
+        raw = str(config_base.get("preferred_language", "zh")).strip().lower()
+        if raw == "zh":
+            raw = "cn"
+        return resolve_language(raw)
 
     def _resolve_model_name(self) -> str:
         """Resolve current model name from model request config."""
@@ -2662,7 +2714,7 @@ class JiuWenSwarmDeepAdapter(ExpertCapabilityMixin):
         cfg = self._audio_model_config or AudioModelConfig()
         tools = list(
             create_audio_tools(
-                language=self._resolve_runtime_language(),
+                language=self._resolve_output_language(),
                 audio_model_config=cfg,
                 agent_id=agent_id,
             )
@@ -2935,7 +2987,7 @@ class JiuWenSwarmDeepAdapter(ExpertCapabilityMixin):
             registered=self._vision_tools_registered,
             enabled=self._vision_model_config is not None,
             create_fn=lambda: create_vision_tools(
-                language=self._resolve_runtime_language(),
+                language=self._resolve_output_language(),
                 vision_model_config=self._vision_model_config,
                 agent_id=agent_id,
             ),
@@ -2986,7 +3038,7 @@ class JiuWenSwarmDeepAdapter(ExpertCapabilityMixin):
             registered=self._paid_search_registered,
             enabled=is_paid_search_enabled(),
             create_fn=lambda: [
-                WebPaidSearchTool(language=self._resolve_runtime_language(), agent_id=agent_id)
+                WebPaidSearchTool(language=self._resolve_output_language(), agent_id=agent_id)
             ],
             warn_label="paid search tool",
         )
@@ -4425,7 +4477,7 @@ class JiuWenSwarmDeepAdapter(ExpertCapabilityMixin):
     def _build_structured_ask_user_rail(self) -> StructuredAskUserRail | None:
         """Build StructuredAskUserRail for agent mode clarification."""
         try:
-            return StructuredAskUserRail(language=self._resolve_runtime_language())
+            return StructuredAskUserRail(language=self._resolve_output_language())
         except Exception as exc:
             logger.warning("[JiuWenSwarmDeepAdapter] StructuredAskUserRail create failed: %s", exc)
             return None
@@ -4657,7 +4709,7 @@ class JiuWenSwarmDeepAdapter(ExpertCapabilityMixin):
                     "unknown_tool_threshold", defaults.unknown_tool_threshold
                 ),
             )
-            rail = CircuitBreakerRail(config, language=self._resolve_runtime_language())
+            rail = CircuitBreakerRail(config, language=self._resolve_output_language())
             logger.info("[JiuWenSwarmDeepAdapter] CircuitBreakerRail create success")
             return rail
         except Exception as exc:
@@ -4852,7 +4904,7 @@ class JiuWenSwarmDeepAdapter(ExpertCapabilityMixin):
                 WorkAgentModeRail,
             )
 
-            return WorkAgentModeRail(language=self._resolve_runtime_language())
+            return WorkAgentModeRail(language=self._resolve_output_language())
         except Exception as exc:
             logger.warning("[JiuWenSwarmDeepAdapter] WorkAgentModeRail create failed: %s", exc)
             return None
@@ -5248,7 +5300,7 @@ class JiuWenSwarmDeepAdapter(ExpertCapabilityMixin):
         # 付费搜索工具：有任意一个付费 key 就注册
         if is_paid_search_enabled():
             self._paid_search_tool = WebPaidSearchTool(
-                language=self._resolve_runtime_language(), agent_id=agent_id
+                language=self._resolve_output_language(), agent_id=agent_id
             )
             self._register_agent_owned_tool(self._paid_search_tool, agent_id)
             tool_cards.append(self._paid_search_tool.card)
@@ -5264,7 +5316,7 @@ class JiuWenSwarmDeepAdapter(ExpertCapabilityMixin):
         if self._vision_model_config is not None:
             try:
                 for tool in create_vision_tools(
-                    language=self._resolve_runtime_language(),
+                    language=self._resolve_output_language(),
                     vision_model_config=self._vision_model_config,
                     agent_id=agent_id,
                 ):
@@ -5665,10 +5717,10 @@ class JiuWenSwarmDeepAdapter(ExpertCapabilityMixin):
         initial_runtime_workspace = self._project_dir or str(
             get_default_project_session_workspace_dir()
         )
-        await asyncio.to_thread(
-            self._ensure_project_gitignore_agent_history,
-            initial_runtime_workspace,
-        )
+        # .gitignore housekeeping 挪后台：历史上这里同步 await 的 git 子进程
+        # 曾在 Windows 上悬挂，把 create_instance（乃至 warm pool 全局
+        # _initialization_lock）整体卡死；纯 housekeeping 不该阻塞会话创建。
+        self._schedule_project_gitignore_agent_history(initial_runtime_workspace)
         self._seed_runtime_cwd(initial_runtime_workspace, workspace=initial_runtime_workspace)
         setattr(self._instance, "_jiuwenswarm_project_dir", initial_runtime_workspace)
 
@@ -5695,26 +5747,65 @@ class JiuWenSwarmDeepAdapter(ExpertCapabilityMixin):
         # 动态加载用户自定义的 Rail 扩展
         await self.load_user_rails()
 
+    def _schedule_project_gitignore_agent_history(self, project_dir: str | None) -> None:
+        """后台执行 .gitignore housekeeping，绝不阻塞实例创建.
+
+        历史教训：该步骤曾在 create_instance 关键路径上 await 一个
+        ``git rev-parse`` 子进程；Windows 上 subprocess.run 超时 kill 后
+        会无超时 communicate 等管道 EOF，管道写端一旦被其他存活进程继承
+        便永久悬挂（stall-watchdog 多次抓到同一点位）。即使现已改为纯
+        文件系统实现，该逻辑仍是纯 housekeeping，不值得阻塞会话创建。
+        """
+        if not project_dir:
+            return
+
+        async def _run() -> None:
+            try:
+                await asyncio.to_thread(
+                    self._ensure_project_gitignore_agent_history, project_dir
+                )
+            except Exception as exc:  # housekeeping 失败绝不外抛
+                logger.warning(
+                    "[JiuWenSwarmDeepAdapter] background gitignore housekeeping failed: %s",
+                    exc,
+                )
+
+        task = asyncio.create_task(
+            _run(),
+            name=f"gitignore-agent-history-{str(project_dir)[-24:]}",
+        )
+        tasks = getattr(self, "_housekeeping_tasks", None)
+        if tasks is None:
+            tasks = self._housekeeping_tasks = set()
+        tasks.add(task)
+        task.add_done_callback(tasks.discard)
+
+    @staticmethod
+    def _find_git_worktree_root(project_dir: str) -> str | None:
+        """逐级向上找 .git，返回工作区根；找不到返回 None.
+
+        普通仓库 .git 是目录，worktree/submodule 里是文件，统一用 exists
+        判定。等价于 ``git rev-parse --show-toplevel`` 的桌面场景子集，
+        但不 spawn 任何子进程（根除管道悬挂类卡死）。
+        """
+        try:
+            start = Path(project_dir)
+        except (OSError, ValueError):
+            return None
+        for candidate in (start, *start.parents):
+            try:
+                if (candidate / ".git").exists():
+                    return str(candidate)
+            except OSError:
+                return None
+        return None
+
     @staticmethod
     def _ensure_project_gitignore_agent_history(project_dir: str | None) -> None:
         """Ensure JiuwenSwarm's file operation logs stay out of project git diffs."""
         if not project_dir:
             return
-        try:
-            repo_probe = subprocess.run(
-                ["git", "rev-parse", "--show-toplevel"],
-                cwd=project_dir,
-                capture_output=True,
-                text=True,
-                timeout=5,
-                check=False,
-            )
-        except (OSError, subprocess.SubprocessError):
-            return
-        if repo_probe.returncode != 0:
-            return
-
-        repo_root_text = repo_probe.stdout.strip()
+        repo_root_text = JiuWenSwarmDeepAdapter._find_git_worktree_root(project_dir)
         if not repo_root_text:
             return
         gitignore_path = Path(repo_root_text) / ".gitignore"
@@ -6617,7 +6708,11 @@ class JiuWenSwarmDeepAdapter(ExpertCapabilityMixin):
         stage_timer.mark("cwd_seed")
 
         if self._runtime_prompt_rail:
-            self._runtime_prompt_rail.set_language(resolved_language)
+            # Language section (response language) must follow the user's
+            # preferred language, not the office-mode "en" which only governs
+            # system-prompt scaffolding (time/runtime/env sections).
+            self._runtime_prompt_rail.set_language(self._resolve_output_language())
+            self._runtime_prompt_rail.set_force_english(self._force_english_runtime_prompt)
             self._runtime_prompt_rail.set_channel(resolved_channel)
             self._runtime_prompt_rail.set_trusted_dirs(
                 runtime_config.trusted_dirs if bind_request else None
@@ -6651,12 +6746,12 @@ class JiuWenSwarmDeepAdapter(ExpertCapabilityMixin):
                 )
         circuit_breaker_rail = getattr(self, "_circuit_breaker_rail", None)
         if circuit_breaker_rail is not None:
-            circuit_breaker_rail.set_language(resolved_language)
+            circuit_breaker_rail.set_language(self._resolve_output_language())
         stage_timer.mark("rail_setters")
 
         self._schedule_runtime_state_write(
             mode=runtime_config.mode,
-            language=resolved_language,
+            language=self._resolve_output_language(),
             channel=resolved_channel,
             session_id=runtime_config.session_id,
             project_dir=runtime_config.project_dir
@@ -9396,7 +9491,6 @@ class JiuWenSwarmDeepAdapter(ExpertCapabilityMixin):
                 inputs,
                 enable_read_image_multimodal=enable_read_image_multimodal,
             )
-            resolved_language = self._resolve_runtime_language()
             resolved_channel = str(cid or self._resolve_prompt_channel(session_id) or "web").strip() or "web"
             if self._runtime_prompt_rail:
                 self._runtime_prompt_rail.set_model_name(self._resolve_model_name())
@@ -9404,7 +9498,7 @@ class JiuWenSwarmDeepAdapter(ExpertCapabilityMixin):
                 self._runtime_prompt_rail.set_session_id(session_id)
             self._write_runtime_state(
                 mode=mode,
-                language=resolved_language,
+                language=self._resolve_output_language(),
                 channel=resolved_channel,
                 session_id=session_id,
                 project_dir=inputs.get("project_dir")
@@ -10581,42 +10675,11 @@ class JiuWenSwarmDeepAdapter(ExpertCapabilityMixin):
                 logger.warning("[billing-trace] 终态标记跳过：model 实例不可用")
                 return
             terminal = terminal_trace_id(core, ok=not failed)
-            task = asyncio.create_task(self._run_billing_marker_call(terminal))
-            _BILLING_MARKER_TASKS.add(task)
-            task.add_done_callback(_BILLING_MARKER_TASKS.discard)
+            if not schedule_marker_call(self._model, terminal):
+                logger.warning("[billing-trace] 终态标记派发失败: %s", terminal)
         except Exception:
             # 计费标记永不影响会话主路径
             logger.debug("[billing-trace] 终态标记派发失败", exc_info=True)
-
-    async def _run_billing_marker_call(self, terminal_trace: str) -> None:
-        """执行终态虚拟模型调用（显式 trace 头——TraceAwareModel 不覆盖不改写），失败重试 1 次。"""
-        from openjiuwen.core.foundation.llm.schema.message import (
-            SystemMessage,
-            UserMessage,
-        )
-
-        messages = [
-            SystemMessage(content=_BILLING_MARKER_PROMPT),
-            UserMessage(content=_BILLING_MARKER_PROMPT),
-        ]
-        for attempt in (1, 2):
-            try:
-                await self._model.invoke(
-                    messages,
-                    custom_headers={"x-hag-trace-id": terminal_trace},
-                )
-                logger.info("[billing-trace] 终态标记已上行: %s", terminal_trace)
-                return
-            except Exception as exc:
-                if attempt == 2:
-                    logger.warning(
-                        "[billing-trace] 终态标记上行失败（重试后仍失败）: %s trace=%s",
-                        exc,
-                        terminal_trace,
-                    )
-                else:
-                    logger.info("[billing-trace] 终态标记上行失败，重试一次: %s", exc)
-                    await asyncio.sleep(1)
 
     @staticmethod
     def _parse_stream_chunk(

@@ -619,9 +619,7 @@ def _install_default_builtin_skills(
 ) -> None:
     """安装默认的内置技能到用户技能目录.
 
-    默认安装的技能：
-    - skill-creator: 技能创建助手
-    - swarmskill-creator: Swarm技能创建助手
+    产品预置 skill 由桌面 SkillSync 落盘；框架名单已空，本函数空转。
 
     Args:
         builtin_dir: 内置技能目录路径
@@ -629,15 +627,10 @@ def _install_default_builtin_skills(
         overwrite: 是否覆盖已存在的技能
         cumulative_diff: 累积的文件变更追踪结果
     """
-    # 定义默认安装的技能列表
-    default_skills = [
-        "xiaoyi-web-search",
-        "aigc_marker",
-        "execution-validator-skill",
-        "secret-guardian",
-        "skill-scope",
-        "plugin-audit",
-    ]
+    # 产品九份预置由 claw_desktop SkillSync 写入用户 skills；此处不再预装。
+    default_skills: list[str] = []
+    if not default_skills:
+        return
 
     if not builtin_dir.exists() or not builtin_dir.is_dir():
         logger.warning(f"内置技能目录不存在，跳过默认技能安装: {builtin_dir}")
@@ -684,20 +677,12 @@ def _install_default_builtin_skills(
 def ensure_builtin_skills_installed() -> None:
     """每次启动时检查并补装缺失的内置技能（幂等）。
 
-    与 prepare_workspace 不同，此函数不依赖 config.yaml 是否存在，
-    专门用于解决升级后内置技能不补装的问题。
-
-    只补装 default_skills 中指定的技能，不扫描全部内置技能。
+    与 prepare_workspace 不同，此函数不依赖 config.yaml 是否存在。
+    产品预置由桌面 SkillSync 在 spawn 前写入；名单为空时空转。
     """
-    # 默认预装的技能列表
-    default_skills = [
-        "xiaoyi-web-search",
-        "aigc_marker",
-        "execution-validator-skill",
-        "secret-guardian",
-        "skill-scope",
-        "plugin-audit",
-    ]
+    default_skills: list[str] = []
+    if not default_skills:
+        return
 
     builtin_dir = get_builtin_skills_dir()
     if not builtin_dir.exists() or not builtin_dir.is_dir():
@@ -1807,6 +1792,24 @@ def get_builtin_skills_dir() -> Path:
 
 def get_agent_sessions_dir() -> Path:
     return get_agent_root_dir() / "sessions"
+
+
+# 空 id 或 "default" 不应落盘。空 id 意味着上游没有真实会话；"default" 是
+# 上游 ``or "default"`` 兜底产生的占位符，绝非合法会话 id（所有合法 id 都
+# 由生成器带时间戳/随机后缀，如 sess_xxx / web_xxx / cron_xxx / heartbeat_xxx）。
+# 这类 id 一旦落盘只会凭空 mkdir 出空的 default 会话目录，污染 session.list。
+# session_metadata 与 session_history 共用同口径判据，统一在此定义避免分叉。
+_NON_PERSISTABLE_SESSION_IDS = frozenset({"default"})
+
+
+def is_persistable_session_id(session_id: str) -> bool:
+    """Return False for session ids that must not be persisted to disk.
+
+    空 id 或 "default"（上游 ``or "default"`` 兜底占位符）拒绝落盘：
+    这类 id 不是真实会话，落盘只会凭空 mkdir 出空的 default 会话目录。
+    """
+    sid = (session_id or "").strip()
+    return bool(sid) and sid not in _NON_PERSISTABLE_SESSION_IDS
 
 
 # 当前 git 分支解析（带短 TTL 缓存），用于 /resume 按分支过滤会话。
