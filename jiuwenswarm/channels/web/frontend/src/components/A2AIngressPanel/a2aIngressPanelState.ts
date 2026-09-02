@@ -59,6 +59,40 @@ export interface A2AIngressHistory {
   total: number;
 }
 
+export type A2AOutboundDispatchStatus =
+  | 'created'
+  | 'submitting'
+  | 'accepted'
+  | 'working'
+  | 'completed'
+  | 'failed'
+  | 'canceled'
+  | 'rejected'
+  | 'input_required'
+  | 'auth_required'
+  | 'unknown'
+  | 'timed_out'
+  | 'dispatch_failed';
+
+export interface A2AOutboundDispatchRecord {
+  dispatch_id: string;
+  agent_id: string;
+  mode: 'sync' | 'async';
+  status: A2AOutboundDispatchStatus;
+  remote_task_id: string | null;
+  created_at: string;
+  updated_at: string;
+  accepted_at: string | null;
+  finished_at: string | null;
+  error_code: string | null;
+  error_summary: string | null;
+}
+
+export interface A2AOutboundDispatchHistory {
+  items: A2AOutboundDispatchRecord[];
+  total: number;
+}
+
 const DEFAULT_DRAFT: A2AIngressDraft = {
   host: '127.0.0.1',
   port: '19100',
@@ -137,6 +171,53 @@ export function normalizeA2AIngressHistory(value: unknown): A2AIngressHistory | 
       finished_at: typeof item.finished_at === 'number' ? item.finished_at : null,
       duration_ms: typeof item.duration_ms === 'number' ? item.duration_ms : null,
       error: typeof item.error === 'string' ? item.error : null,
+    });
+  }
+  return { items, total: asNumber(payload.total, items.length) };
+}
+
+export function normalizeA2AOutboundDispatchHistory(value: unknown): A2AOutboundDispatchHistory | null {
+  if (!value || typeof value !== 'object') return null;
+  const payload = value as Record<string, unknown>;
+  if (!Array.isArray(payload.items)) return null;
+  const statuses = new Set<A2AOutboundDispatchStatus>([
+    'created',
+    'submitting',
+    'accepted',
+    'working',
+    'completed',
+    'failed',
+    'canceled',
+    'rejected',
+    'input_required',
+    'auth_required',
+    'unknown',
+    'timed_out',
+    'dispatch_failed',
+  ]);
+  const items: A2AOutboundDispatchRecord[] = [];
+  for (const rawItem of payload.items) {
+    if (!rawItem || typeof rawItem !== 'object') continue;
+    const item = rawItem as Record<string, unknown>;
+    const dispatchId = asString(item.dispatch_id).trim();
+    const agentId = asString(item.agent_id).trim();
+    const mode = asString(item.mode);
+    const status = asString(item.status) as A2AOutboundDispatchStatus;
+    const createdAt = asString(item.created_at);
+    const updatedAt = asString(item.updated_at, createdAt);
+    if (!dispatchId || !agentId || !['sync', 'async'].includes(mode) || !statuses.has(status) || !createdAt) continue;
+    items.push({
+      dispatch_id: dispatchId,
+      agent_id: agentId,
+      mode: mode as 'sync' | 'async',
+      status,
+      remote_task_id: typeof item.remote_task_id === 'string' ? item.remote_task_id : null,
+      created_at: createdAt,
+      updated_at: updatedAt,
+      accepted_at: typeof item.accepted_at === 'string' ? item.accepted_at : null,
+      finished_at: typeof item.finished_at === 'string' ? item.finished_at : null,
+      error_code: typeof item.error_code === 'string' ? item.error_code : null,
+      error_summary: typeof item.error_summary === 'string' ? item.error_summary : null,
     });
   }
   return { items, total: asNumber(payload.total, items.length) };

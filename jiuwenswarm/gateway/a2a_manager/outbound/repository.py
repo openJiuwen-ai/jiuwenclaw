@@ -216,6 +216,14 @@ class A2AOutboundRepository:
         )
         return [self._codec.dispatch_from_record(row) for row in rows]
 
+    async def count_dispatches(self) -> int:
+        """Return the total matching record count, skipping row decoding."""
+        rows = await self._store.list(
+            A2A_OUTBOUND_DISPATCH_STORE_NAME,
+            filters=self._codec.list_filters(),
+        )
+        return len(rows)
+
     async def create_dispatch(
         self,
         dispatch: A2AOutboundDispatch,

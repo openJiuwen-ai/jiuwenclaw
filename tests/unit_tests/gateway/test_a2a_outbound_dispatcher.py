@@ -26,6 +26,7 @@ from jiuwenswarm.agents.harness.common.rails.a2a_outbound_toolkit_rail import (
 )
 from jiuwenswarm.agents.harness.common.tools.a2a_outbound_tools import (
     A2AOutboundToolkit,
+    GatewayA2AOutboundToolBackend,
 )
 from jiuwenswarm.agents.harness.common.tools.acp_output_tools import (
     get_acp_output_manager,
@@ -285,6 +286,7 @@ async def test_sync_dispatch_returns_normalized_final_message() -> None:
 @pytest.mark.asyncio
 async def test_real_http_stream_can_outlive_connect_timeout_within_sync_budget() -> None:
     served = asyncio.Event()
+    received_requests = []
 
     async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         try:
@@ -296,6 +298,7 @@ async def test_real_http_stream_can_outlive_connect_timeout_within_sync_budget()
                     content_length = int(line.split(":", 1)[1].strip())
                     break
             request = json.loads((await reader.readexactly(content_length)).decode())
+            received_requests.append(request)
             response = {
                 "jsonrpc": "2.0",
                 "id": request["id"],
@@ -369,6 +372,7 @@ async def test_real_http_stream_can_outlive_connect_timeout_within_sync_budget()
 
     assert result["status"] == "completed"
     assert result["result"]["text"] == "slow final"
+    assert received_requests[0]["params"]["configuration"]["returnImmediately"] is True
 
 
 @pytest.mark.asyncio
@@ -405,7 +409,40 @@ async def test_sync_dispatch_polls_an_accepted_task_to_terminal() -> None:
 
     assert result["status"] == "completed"
     assert result["result"]["text"] == "polled answer"
+    assert client.sent_requests[0][0].configuration.return_immediately is True
     assert len(client.get_requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_sync_dispatch_gets_prompt_rejection_before_terminal_wait() -> None:
+    class _UnavailableExecutorClient(_FakeClient):
+        async def send_message(self, request, *, context=None):
+            self.sent_requests.append((request, context))
+            if request.configuration.return_immediately:
+                raise RuntimeError("executor unavailable")
+            await asyncio.Event().wait()
+            yield  # pragma: no cover - keeps this an async generator
+
+    client = _UnavailableExecutorClient()
+    dispatcher, repository = await _dispatcher(client)
+    await repository.update_agent(
+        "agent-1",
+        lambda current: replace(current, sync_wait_seconds=1),
+    )
+
+    result = await asyncio.wait_for(
+        dispatcher.dispatch(
+            agent_id="agent-1",
+            task="do research",
+            mode="sync",
+            source_session_id="s1",
+        ),
+        timeout=0.2,
+    )
+
+    assert result["status"] == "dispatch_failed"
+    assert result["error_code"] == A2AOutboundErrorCode.DISPATCH_REJECTED.value
+    assert client.sent_requests[0][0].configuration.return_immediately is True
 
 
 @pytest.mark.asyncio
@@ -694,6 +731,67 @@ async def test_toolkit_missing_route_is_not_reported_as_remote_rejection() -> No
 
     assert result["ok"] is False
     assert result["error_code"] == A2AOutboundErrorCode.MANAGER_UNAVAILABLE.value
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("method", [A2A_TOOL_DISPATCH_TASK, A2A_TOOL_GET_DISPATCH])
+async def test_gateway_backend_leaves_operation_timeout_to_manager(
+    monkeypatch, method
+) -> None:
+    output_manager = get_acp_output_manager()
+    calls = []
+
+    async def send(method, params, **kwargs):
+        calls.append((method, params, kwargs))
+        return {"result": {"ok": True}}
+
+    monkeypatch.setattr(output_manager, "send_jsonrpc_request", send)
+    monkeypatch.setattr(
+        GatewayA2AOutboundToolBackend,
+        "ready",
+        property(lambda _self: True),
+    )
+
+    result = await GatewayA2AOutboundToolBackend().call(
+        method,
+        {"agent_id": "agent-1", "task": "work", "mode": "sync"},
+        session_id="s1",
+        channel_id="web",
+    )
+
+    assert result == {"ok": True}
+    assert calls[0][2]["timeout"] is None
+    assert calls[0][2]["cancel_method"] == A2A_TOOL_CANCEL_CALL
+
+
+@pytest.mark.asyncio
+async def test_reverse_rpc_owner_loss_fails_request_without_transport_deadline(
+    monkeypatch,
+) -> None:
+    manager = get_acp_output_manager()
+    manager.reset_state()
+
+    async def delivered(_wire):
+        return True
+
+    monkeypatch.setattr(manager, "_send_push_callback", delivered)
+    request = asyncio.create_task(
+        manager.send_jsonrpc_request(
+            A2A_TOOL_GET_DISPATCH,
+            {"dispatch_id": "disp-1"},
+            session_id="s1",
+            timeout=None,
+        )
+    )
+    try:
+        while manager.pending_count == 0:
+            await asyncio.sleep(0)
+        manager.fail_pending_requests(RuntimeError("owner lost"))
+        with pytest.raises(RuntimeError, match="owner lost"):
+            await request
+        assert manager.pending_count == 0
+    finally:
+        manager.reset_state()
 
 
 @pytest.mark.asyncio
