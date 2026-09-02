@@ -36,7 +36,7 @@ import type { CodeReviewTarget } from './features/code-mode/types';
 import { FEATURE_APP_UPDATER_UI } from './featureFlags';
 import {
   beginHistoryRestore,
-  fetchHistoryPage,
+  fetchHistoryCursorBatch,
   HISTORY_GET_METHOD,
   mergeHistoryToolReplayItems,
   recoverSubagentToolHistory,
@@ -44,9 +44,13 @@ import {
   type HistoryHarnessReplayItem,
   type HistorySubagentReplayItem,
   type HistoryToolReplayItem,
-  type FetchHistoryPageResult,
+  type FetchHistoryCursorBatchResult,
+  type HistoryRestoreFailure,
 } from './features/historyRestore';
-import { prefetchHistoryPages } from './features/historyPagination';
+import {
+  canApplyHistoryCursorBatch,
+  prefetchHistoryBatches,
+} from './features/historyPagination';
 import { isPlanWireMode } from './features/planMode/wireMode';
 import { queueOrAddGoalObjectiveMessage } from './features/goalPendingObjectiveBubble';
 import { LoginPage } from './features/auth/LoginPage';
@@ -178,10 +182,12 @@ function normalizeConfigBoolean(value: unknown): boolean {
 
 type MainNavKey = SidebarNavKey | 'connectorMarket' | ApplicationPluginNavKey;
 
-type LoadedHistoryPage = {
-  pageIdx: number;
-  totalPages: number;
-  result: FetchHistoryPageResult | null;
+type LoadedHistoryBatch = {
+  batchSeq: number;
+  requestCursor: string | null;
+  nextCursor: string | null;
+  hasMore: boolean;
+  result: FetchHistoryCursorBatchResult;
 };
 
 function getWorkContextForSession(sessionId: string): {
@@ -425,10 +431,12 @@ function AppContent({
   const subagentHistoryRestoreHandlesRef = useRef(new Map<string, HistoryRestoreHandle>());
   const subagentHistoryRestoreRevisionRef = useRef(new Map<string, string>());
   const subagentToolReplayBySessionRef = useRef(new Map<string, HistoryToolReplayItem[]>());
-  const historyPageHandlesRef = useRef(new Map<string, HistoryRestoreHandle>());
-  const historyPagePromisesRef = useRef(new Map<string, Promise<LoadedHistoryPage | null>>());
-  const historyPageCancelRef = useRef(new Map<string, () => void>());
+  const historyBatchHandlesRef = useRef(new Map<string, HistoryRestoreHandle>());
+  const historyBatchPromisesRef = useRef(new Map<string, Promise<LoadedHistoryBatch | null>>());
+  const historyBatchCancelRef = useRef(new Map<string, () => void>());
   const historyBackgroundPrefetchTokensRef = useRef(new Map<string, number>());
+  const historyCursorFailuresRef = useRef(new Map<string, HistoryRestoreFailure>());
+  const historyRevealTargetRef = useRef(new Map<string, number>());
   const creatingSessionRef = useRef(false);
   /** 离开新建任务页后，仍未发送的临时会话可以被再次打开。 */
   const pendingNewConversationRef = useRef(route.kind === 'chat-new');
@@ -465,7 +473,10 @@ function AppContent({
     // insertion below does.
     kvcPreparedInputSessionRef.current = null;
     setHistoryLoadingMore(false);
-    setHistoryPrepending(historyLoadingSessionsRef.current.has(sessionId));
+    // Background cursor prefetch does not mutate the published timeline.  Treating
+    // it as a visible prepend leaves a revisited Session unable to reveal batches
+    // that have already arrived, because the top-boundary gate stays disabled.
+    setHistoryPrepending(false);
   }, [sessionId]);
 
   useEffect(() => {
@@ -779,13 +790,15 @@ function AppContent({
         }
       }
       subagentToolReplayBySessionRef.current.delete(targetSid);
-      for (const [key, handle] of Array.from(historyPageHandlesRef.current.entries())) {
+      historyCursorFailuresRef.current.delete(targetSid);
+      historyRevealTargetRef.current.delete(targetSid);
+      for (const [key, handle] of Array.from(historyBatchHandlesRef.current.entries())) {
         if (!key.startsWith(`${targetSid}:`)) continue;
         handle.dispose();
-        historyPageHandlesRef.current.delete(key);
-        historyPagePromisesRef.current.delete(key);
-        historyPageCancelRef.current.get(key)?.();
-        historyPageCancelRef.current.delete(key);
+        historyBatchHandlesRef.current.delete(key);
+        historyBatchPromisesRef.current.delete(key);
+        historyBatchCancelRef.current.get(key)?.();
+        historyBatchCancelRef.current.delete(key);
       }
     };
 
@@ -797,7 +810,7 @@ function AppContent({
     for (const targetSid of new Set([
       ...historyRestoreHandlesRef.current.keys(),
       ...Array.from(subagentHistoryRestoreHandlesRef.current.keys(), (key) => key.split(':', 1)[0]),
-      ...Array.from(historyPageHandlesRef.current.keys(), (key) => key.split(':', 1)[0]),
+      ...Array.from(historyBatchHandlesRef.current.keys(), (key) => key.split(':', 1)[0]),
       ...historyLoadingSessionsRef.current,
     ])) {
       cancelSession(targetSid);
@@ -975,8 +988,8 @@ function AppContent({
       if (subagentHistoryRestoreRevisionRef.current.get(key) === revisionMarker) continue;
       if (subagentHistoryRestoreHandlesRef.current.has(key)) continue;
       subagentHistoryRestoreRevisionRef.current.set(key, revisionMarker);
-      const pageHandles = new Set<HistoryRestoreHandle>();
-      const pageSettlers = new Set<(page: LoadedHistoryPage | null) => void>();
+      const batchHandles = new Set<HistoryRestoreHandle>();
+      const batchSettlers = new Set<(batch: LoadedHistoryBatch | null) => void>();
       let disposed = false;
       const handle: HistoryRestoreHandle = {
         generation: 0,
@@ -984,73 +997,65 @@ function AppContent({
           if (disposed) return;
           disposed = true;
           useSubagentStore.getState().finishHistoryRestore(sid, subagentId);
-          for (const settlePending of pageSettlers) {
+          for (const settlePending of batchSettlers) {
             settlePending(null);
           }
-          pageSettlers.clear();
-          for (const pageHandle of pageHandles) {
-            pageHandle.dispose();
+          batchSettlers.clear();
+          for (const batchHandle of batchHandles) {
+            batchHandle.dispose();
           }
-          pageHandles.clear();
+          batchHandles.clear();
         },
       };
       subagentHistoryRestoreHandlesRef.current.set(key, handle);
       useSubagentStore.getState().beginHistoryRestore(sid, subagentId);
 
-      const fetchSubagentHistoryPage = (
-        pageIdx: number,
-        fallbackTotalPages: number,
-      ): Promise<LoadedHistoryPage | null> => new Promise((resolve) => {
+      const fetchSubagentHistoryBatch = (
+        cursor: string | null,
+        batchSeq: number,
+      ): Promise<LoadedHistoryBatch | null> => new Promise((resolve) => {
         if (disposed) {
           resolve(null);
           return;
         }
 
         let settled = false;
-        let pageHandle: HistoryRestoreHandle | null = null;
-        const settle = (page: LoadedHistoryPage | null) => {
+        let batchHandle: HistoryRestoreHandle | null = null;
+        const settle = (batch: LoadedHistoryBatch | null) => {
           if (settled) return;
           settled = true;
-          pageSettlers.delete(settle);
-          if (pageHandle) pageHandles.delete(pageHandle);
-          resolve(page);
+          batchSettlers.delete(settle);
+          if (batchHandle) batchHandles.delete(batchHandle);
+          resolve(batch);
         };
-        pageSettlers.add(settle);
+        batchSettlers.add(settle);
 
-        pageHandle = fetchHistoryPage({
+        batchHandle = fetchHistoryCursorBatch({
           sessionId: sid,
           subagentId,
-          pageIdx,
-          onReady: (result: FetchHistoryPageResult) => {
+          cursor,
+          onReady: (result) => {
             settle({
-              pageIdx,
-              totalPages: result.totalPages ?? fallbackTotalPages,
+              batchSeq,
+              requestCursor: result.cursor.requestCursor,
+              nextCursor: result.cursor.nextCursor,
+              hasMore: result.cursor.hasMore,
               result,
             });
           },
-          onEmpty: (totalPages) => {
-            if (pageIdx > 1) {
-              settle(null);
-              return;
-            }
-            settle({
-              pageIdx,
-              totalPages: totalPages ?? fallbackTotalPages,
-              result: null,
-            });
-          },
-          onTimeout: () => {
+          onFailure: () => {
             settle(null);
           },
           onError: (message) => console.warn('[subagent.history]', message),
         });
-        pageHandles.add(pageHandle);
+        batchHandles.add(batchHandle);
         void request(HISTORY_GET_METHOD, {
           session_id: sid,
           subagent_id: subagentId,
-          page_idx: pageIdx,
+          cursor,
+          limit: 50,
         }).catch((error) => {
-          pageHandle?.dispose();
+          batchHandle?.dispose();
           settle(null);
           console.warn('[subagent.history] request failed', error);
         });
@@ -1064,53 +1069,35 @@ function AppContent({
           }
         };
         let hasSubagentHistory = false;
-        const applyPage = (page: LoadedHistoryPage) => {
-          const items = page.result?.subagentReplay ?? [];
+        const applyBatch = (batch: LoadedHistoryBatch) => {
+          const items = batch.result.subagentReplay;
           if (items.length > 0) {
             hasSubagentHistory = true;
             applySubagentHistoryReplay(sid, items);
           }
         };
-        const hasSubagentFinal = () => {
-          const currentRuntime = useSubagentStore.getState().getRuntime(sid);
-          return Object.values(currentRuntime?.turnsBySubagentId[subagentId] ?? {})
-            .some(turn => turn.result?.source === 'transcript');
-        };
-
-        const firstPage = await fetchSubagentHistoryPage(1, 1);
-        if (disposed || !firstPage) {
+        const firstBatch = await fetchSubagentHistoryBatch(null, 1);
+        if (disposed || !firstBatch) {
           cleanup();
           return;
         }
-        applyPage(firstPage);
+        applyBatch(firstBatch);
 
-        const prefetchOutcome = await prefetchHistoryPages({
-          initialLoadedPages: 1,
-          initialTotalPages: firstPage.totalPages,
+        const prefetchOutcome = await prefetchHistoryBatches({
+          initialCursor: firstBatch.nextCursor,
+          initialHasMore: firstBatch.hasMore,
+          initialBatchSeq: 1,
           isCurrent: () => !disposed,
-          fetchPage: (pageIdx, totalPages) => fetchSubagentHistoryPage(pageIdx, totalPages),
-          applyPage,
+          fetchBatch: (nextCursor, nextBatchSeq) =>
+            fetchSubagentHistoryBatch(nextCursor, nextBatchSeq),
+          applyBatch,
           waitForNextPaint: async () => {},
         });
-        if (prefetchOutcome === 'completed' && firstPage.totalPages === 1 && !hasSubagentFinal()) {
-          const fallbackPage = await fetchSubagentHistoryPage(2, 2);
-          if (fallbackPage) {
-            applyPage(fallbackPage);
-            await prefetchHistoryPages({
-              initialLoadedPages: 2,
-              initialTotalPages: fallbackPage.totalPages,
-              isCurrent: () => !disposed,
-              fetchPage: (pageIdx, totalPages) => fetchSubagentHistoryPage(pageIdx, totalPages),
-              applyPage,
-              waitForNextPaint: async () => {},
-            });
-          }
-        }
         if (disposed || prefetchOutcome !== 'completed') {
           cleanup();
           return;
         }
-        if (!hasSubagentHistory && firstPage.result === null) {
+        if (!hasSubagentHistory) {
           useSubagentStore.getState().dropCachedSubagent(
             sid,
             subagentId,
@@ -1176,11 +1163,21 @@ function AppContent({
     restoreSubagentHistory(sid);
   }, [restoreSubagentHistory, setSingleAgentPanelActiveTab]);
 
-  const applyHistoryPageResult = useCallback((sid: string, result: FetchHistoryPageResult) => {
-    // 只 stamp 徽章：merge 完成卡只适合整页 replace（首次 history 恢复）。
-    // 这里若再 merge，localStorage 里的完成卡不在本页 messages 里就会被再次注入，
+  const applyHistoryBatchResult = useCallback((
+    sid: string,
+    result: FetchHistoryCursorBatchResult,
+    batchSeq: number,
+  ) => {
+    // 只 stamp 徽章：merge 完成卡只适合整批 replace（首次 history 恢复）。
+    // 这里若再 merge，localStorage 里的完成卡不在本批 messages 里就会被再次注入，
     // prepend 又不按 id 去重，导致完成卡重复。
-    prependMessages(sid, stampGoalObjectiveMessages(sid, result.messages));
+    prependMessages(
+      sid,
+      stampGoalObjectiveMessages(
+        sid,
+        result.messages.map((message) => ({ ...message, historyBatchSeq: batchSeq })),
+      ),
+    );
     if (result.contextUsageSnapshot) {
       useSessionStore.getState().receiveContextUsage(result.contextUsageSnapshot);
     }
@@ -1201,6 +1198,7 @@ function AppContent({
           {
             startedAt: item.at,
             agentTemplateName: readAgentTemplateName(item.payload),
+            historyBatchSeq: batchSeq,
           }
         );
       } else {
@@ -1279,124 +1277,171 @@ function AppContent({
         agentTemplateName: segment.agentTemplateName,
         // live 内存里的真实末帧时刻并入 replay，刷新重建后耗时终点不丢。
         updatedAt: segment.updatedAt,
+        historyBatchSeq: segment.historyBatchSeq,
       }));
-      store.restoreReasoningSegments(sid, [...result.reasoningReplay, ...currentItems]);
+      store.restoreReasoningSegments(sid, [
+        ...result.reasoningReplay.map((item) => ({ ...item, historyBatchSeq: batchSeq })),
+        ...currentItems,
+      ]);
     }
   }, [addToolCall, addToolResult, applyRecoveredSubagentToolHistory, applySubagentHistoryReplay, prependMessages, settleHistoricalToolExecutions]);
 
-  const fetchHistoryPageResult = useCallback(async (
+  const fetchHistoryBatch = useCallback(async (
     sid: string,
-    pageIdx: number,
-    fallbackTotalPages: number
-  ): Promise<LoadedHistoryPage | null> => {
-    const pageKey = `${sid}:${pageIdx}`;
-    const existingPromise = historyPagePromisesRef.current.get(pageKey);
+    cursor: string,
+    batchSeq: number,
+  ): Promise<LoadedHistoryBatch | null> => {
+    const batchKey = `${sid}:${cursor}`;
+    const existingPromise = historyBatchPromisesRef.current.get(batchKey);
     if (existingPromise) return existingPromise;
 
-    const promise = new Promise<LoadedHistoryPage | null>((resolve) => {
+    const promise = new Promise<LoadedHistoryBatch | null>((resolve) => {
       let settled = false;
       const settleCanceled = () => settle(null);
-      const settle = (page: LoadedHistoryPage | null) => {
+      const settle = (batch: LoadedHistoryBatch | null) => {
         if (settled) return;
         settled = true;
-        if (historyPageCancelRef.current.get(pageKey) === settleCanceled) {
-          historyPageCancelRef.current.delete(pageKey);
+        if (historyBatchCancelRef.current.get(batchKey) === settleCanceled) {
+          historyBatchCancelRef.current.delete(batchKey);
         }
-        historyPageHandlesRef.current.delete(pageKey);
-        historyPagePromisesRef.current.delete(pageKey);
-        resolve(page);
+        historyBatchHandlesRef.current.delete(batchKey);
+        historyBatchPromisesRef.current.delete(batchKey);
+        resolve(batch);
       };
-      historyPageCancelRef.current.set(pageKey, settleCanceled);
+      historyBatchCancelRef.current.set(batchKey, settleCanceled);
 
-      const pageHandle = fetchHistoryPage({
+      const batchHandle = fetchHistoryCursorBatch({
         sessionId: sid,
-        pageIdx,
+        cursor,
         onReady: (result) => {
-          const totalPages = result.totalPages ?? fallbackTotalPages;
-          settle({ pageIdx, totalPages, result });
+          historyCursorFailuresRef.current.delete(sid);
+          settle({
+            batchSeq,
+            requestCursor: result.cursor.requestCursor,
+            nextCursor: result.cursor.nextCursor,
+            hasMore: result.cursor.hasMore,
+            result,
+          });
         },
-        onEmpty: (emptyTotalPages) => {
-          if (pageIdx > 1) {
-            settle(null);
-            return;
-          }
-          const totalPages = emptyTotalPages ?? fallbackTotalPages;
-          settle({ pageIdx, totalPages, result: null });
+        onFailure: (failure) => {
+          historyCursorFailuresRef.current.set(sid, failure);
+          settle(null);
         },
-        onTimeout: () => settle(null),
         onError: (message) => {
-          console.warn('[history.page]', message);
+          console.warn('[history.cursor]', message);
         },
       });
-      historyPageHandlesRef.current.set(pageKey, pageHandle);
+      historyBatchHandlesRef.current.set(batchKey, batchHandle);
 
       void request(HISTORY_GET_METHOD, {
         session_id: sid,
-        page_idx: pageIdx,
+        cursor,
+        limit: 50,
       }).catch((error) => {
-        pageHandle.dispose();
-        if (historyPageHandlesRef.current.get(pageKey) === pageHandle) {
-          historyPageHandlesRef.current.delete(pageKey);
+        batchHandle.dispose();
+        if (historyBatchHandlesRef.current.get(batchKey) === batchHandle) {
+          historyBatchHandlesRef.current.delete(batchKey);
         }
         console.error('Failed to load older history:', error);
         settle(null);
       });
     });
-    historyPagePromisesRef.current.set(pageKey, promise);
+    historyBatchPromisesRef.current.set(batchKey, promise);
     return promise;
   }, [request]);
 
-  const applyLoadedHistoryPage = useCallback((sid: string, page: LoadedHistoryPage) => {
-    if (page.result) {
-      applyHistoryPageResult(sid, page.result);
+  const applyLoadedHistoryBatch = useCallback((
+    sid: string,
+    batch: LoadedHistoryBatch,
+  ): boolean => {
+    const runtime = useChatStore.getState().runtimes[sid];
+    const current = runtime?.historyPagerMeta;
+    if (!current || !canApplyHistoryCursorBatch(current, {
+      requestCursor: batch.requestCursor,
+      nextCursor: batch.nextCursor,
+      hasMore: batch.hasMore,
+      batchSeq: batch.batchSeq,
+      snapshotId: batch.result.cursor.snapshotId,
+      snapshotEnd: batch.result.cursor.snapshotEnd,
+    })) {
+      return false;
     }
-    setHistoryPagerMeta(sid, {
-      loadedPages: page.pageIdx,
-      totalPages: page.totalPages,
-    });
-  }, [applyHistoryPageResult, setHistoryPagerMeta]);
 
-  const startBackgroundHistoryPrefetch = useCallback((sid: string, initialLoadedPages: number, initialTotalPages: number) => {
-    if (initialLoadedPages >= initialTotalPages || historyLoadingSessionsRef.current.has(sid)) {
+    const revealTarget = historyRevealTargetRef.current.get(sid) ?? 0;
+    const shouldPublish = revealTarget >= batch.batchSeq;
+    if (shouldPublish && sessionIdRef.current === sid) {
+      setHistoryPrepending(true);
+    }
+    applyHistoryBatchResult(sid, batch.result, batch.batchSeq);
+    setHistoryPagerMeta(sid, {
+      nextCursor: batch.nextCursor,
+      hasMore: batch.hasMore,
+      snapshotId: current.snapshotId,
+      snapshotEnd: current.snapshotEnd,
+      loadedBatchSeq: batch.batchSeq,
+      publishedBatchSeq: shouldPublish ? batch.batchSeq : current.publishedBatchSeq,
+      historyComplete: !batch.hasMore,
+    });
+    if (shouldPublish) {
+      historyRevealTargetRef.current.delete(sid);
+      window.requestAnimationFrame(() => {
+        if (sessionIdRef.current === sid) {
+          setHistoryPrepending(false);
+          setHistoryLoadingMore(false);
+        }
+      });
+    }
+    return true;
+  }, [applyHistoryBatchResult, setHistoryPagerMeta]);
+
+  const startBackgroundHistoryPrefetch = useCallback((sid: string) => {
+    const initialMeta = useChatStore.getState().runtimes[sid]?.historyPagerMeta;
+    if (!initialMeta?.hasMore || !initialMeta.nextCursor || historyLoadingSessionsRef.current.has(sid)) {
       return;
     }
     const token = (historyBackgroundPrefetchTokensRef.current.get(sid) ?? 0) + 1;
     historyBackgroundPrefetchTokensRef.current.set(sid, token);
     historyLoadingSessionsRef.current.add(sid);
     setHistoryRetryAvailable(sid, false);
-    if (sessionIdRef.current === sid) {
-      setHistoryPrepending(true);
-    }
 
     void (async () => {
       try {
-        const outcome = await prefetchHistoryPages({
-          initialLoadedPages,
-          initialTotalPages,
+        const outcome = await prefetchHistoryBatches({
+          initialCursor: initialMeta.nextCursor,
+          initialHasMore: initialMeta.hasMore,
+          initialBatchSeq: initialMeta.loadedBatchSeq,
           isCurrent: () => token === historyBackgroundPrefetchTokensRef.current.get(sid),
-          fetchPage: (pageIdx, totalPages) =>
-            fetchHistoryPageResult(sid, pageIdx, totalPages),
-          applyPage: (page) => {
-            applyLoadedHistoryPage(sid, page);
-          },
+          fetchBatch: (cursor, batchSeq) =>
+            fetchHistoryBatch(sid, cursor, batchSeq),
+          applyBatch: (batch) => applyLoadedHistoryBatch(sid, batch),
           waitForNextPaint,
         });
         if (
           outcome === 'failed' &&
           token === historyBackgroundPrefetchTokensRef.current.get(sid)
         ) {
-          setHistoryRetryAvailable(sid, true);
+          const failure = historyCursorFailuresRef.current.get(sid);
+          if (failure?.code === 'HISTORY_SNAPSHOT_CHANGED') {
+            setHistoryPagerMeta(sid, null);
+            if (sessionIdRef.current === sid) {
+              setHistoryBootstrapKey((value) => value + 1);
+            }
+          } else {
+            setHistoryRetryAvailable(sid, true);
+            historyRevealTargetRef.current.delete(sid);
+            if (sessionIdRef.current === sid) {
+              setHistoryLoadingMore(false);
+              setHistoryPrepending(false);
+            }
+          }
         }
       } finally {
         historyLoadingSessionsRef.current.delete(sid);
-        if (sessionIdRef.current === sid) {
-          setHistoryPrepending(false);
-        }
       }
     })();
   }, [
-    applyLoadedHistoryPage,
-    fetchHistoryPageResult,
+    applyLoadedHistoryBatch,
+    fetchHistoryBatch,
     setHistoryRetryAvailable,
   ]);
 
@@ -1420,6 +1465,16 @@ function AppContent({
       });
       upsertSessionMetadata(session, { setCurrent: sessionIdRef.current === targetSessionId });
       useWorkspaceStore.getState().upsertSession(session);
+      // is_processing 由 Gateway 在 session.get_metadata 响应入队前读取当前
+      // session 的运行态并覆盖，不是磁盘 metadata 的历史值。刷新页面时用这条
+      // 明确状态恢复停止按钮；之后同一 WebSocket 上的 processing_status 事件
+      // 继续按发送顺序推进状态机。
+      if (typeof session.is_processing === 'boolean') {
+        setProcessing(targetSessionId, session.is_processing);
+        if (!session.is_processing) {
+          setThinking(targetSessionId, false);
+        }
+      }
       if (sessionIdRef.current === targetSessionId) {
         setMissingSessionId((current) => (current === targetSessionId ? null : current));
         // 同 handleRestoreSession：拿到后端 metadata 里的 model 后还原 selectedModelName，
@@ -1450,7 +1505,7 @@ function AppContent({
       }
       return null;
     }
-  }, [request, upsertSessionMetadata]);
+  }, [request, setProcessing, setThinking, upsertSessionMetadata]);
 
   // 获取服务端配置（通过 WS 方法）
   const fetchConfig = useCallback(async () => {
@@ -1824,11 +1879,7 @@ function AppContent({
         useSubagentStore.getState().removeRuntime(sessionId);
       } else {
         setLoadingHistory(sessionId, false);
-        startBackgroundHistoryPrefetch(
-          sessionId,
-          existingRuntime.historyPagerMeta.loadedPages,
-          existingRuntime.historyPagerMeta.totalPages
-        );
+        startBackgroundHistoryPrefetch(sessionId);
         return;
       }
     }
@@ -1892,7 +1943,7 @@ function AppContent({
     // 开始历史会话加载
     const restoreHandle = beginHistoryRestore({
       sessionId: sessionId,
-      onReady: (messages, totalPages) => {
+      onReady: (messages, cursorMeta) => {
         historyRestoreFromPanelHintRef.current = false;
         // "目标完成"回显消息纯前端合成，从未写进后端 session 历史，history.get 拉回来的
         // messages 里不会有它——按时间戳把本地持久化的记录补回去，见
@@ -1901,15 +1952,25 @@ function AppContent({
         // 见 stampGoalObjectiveMessages。
         replaceHistoryMessages(
           sessionId,
-          stampGoalObjectiveMessages(sessionId, mergePersistedGoalCompletionMessages(sessionId, messages))
+          stampGoalObjectiveMessages(
+            sessionId,
+            mergePersistedGoalCompletionMessages(
+              sessionId,
+              messages.map((message) => ({ ...message, historyBatchSeq: 1 })),
+            ),
+          )
         );
-        const restoredTotalPages = totalPages ?? 1;
         setHistoryPagerMeta(sessionId, {
-          loadedPages: 1,
-          totalPages: restoredTotalPages,
+          nextCursor: cursorMeta.nextCursor,
+          hasMore: cursorMeta.hasMore,
+          snapshotId: cursorMeta.snapshotId,
+          snapshotEnd: cursorMeta.snapshotEnd,
+          loadedBatchSeq: 1,
+          publishedBatchSeq: 1,
+          historyComplete: !cursorMeta.hasMore,
         });
         setLoadingHistory(sessionId, false);
-        startBackgroundHistoryPrefetch(sessionId, 1, restoredTotalPages);
+        startBackgroundHistoryPrefetch(sessionId);
         restoreWorkflowSnapshot(sessionId);
         queueMicrotask(() => {
           if (historyRestoreHandlesRef.current.get(sessionId) === restoreHandle) {
@@ -1920,12 +1981,16 @@ function AppContent({
       onContextUsage: (payload) => {
         useSessionStore.getState().receiveContextUsage(payload);
       },
-      onEmpty: (emptyTotalPages) => {
+      onEmpty: (cursorMeta) => {
         replaceHistoryMessages(sessionId, mergePersistedGoalCompletionMessages(sessionId, []));
-        const restoredTotalPages = emptyTotalPages ?? 1;
         setHistoryPagerMeta(sessionId, {
-          loadedPages: 1,
-          totalPages: restoredTotalPages,
+          nextCursor: cursorMeta.nextCursor,
+          hasMore: cursorMeta.hasMore,
+          snapshotId: cursorMeta.snapshotId,
+          snapshotEnd: cursorMeta.snapshotEnd,
+          loadedBatchSeq: 1,
+          publishedBatchSeq: 1,
+          historyComplete: !cursorMeta.hasMore,
         });
         if (historyRestoreFromPanelHintRef.current) {
           historyRestoreFromPanelHintRef.current = false;
@@ -1937,7 +2002,7 @@ function AppContent({
           });
         }
         setLoadingHistory(sessionId, false);
-        startBackgroundHistoryPrefetch(sessionId, 1, restoredTotalPages);
+        startBackgroundHistoryPrefetch(sessionId);
         restoreWorkflowSnapshot(sessionId);
         if (historyRestoreHandlesRef.current.get(sessionId) === restoreHandle) {
           historyRestoreHandlesRef.current.delete(sessionId);
@@ -1964,6 +2029,7 @@ function AppContent({
               {
                 startedAt: item.at,
                 agentTemplateName: readAgentTemplateName(item.payload),
+                historyBatchSeq: 1,
               }
             );
           } else {
@@ -2034,7 +2100,10 @@ function AppContent({
         applySubagentHistoryReplay(sessionId, items);
       },
       onReasoningReplay: (items) => {
-        restoreReasoningSegments(sessionId, items);
+        restoreReasoningSegments(
+          sessionId,
+          items.map((item) => ({ ...item, historyBatchSeq: 1 })),
+        );
       },
       onCompactionReplay: (info) => {
         // 回显「本轮完成上下文压缩 N 次」：恢复进 chatStore，渲染与实时事件同一处
@@ -2047,7 +2116,24 @@ function AppContent({
       },
       onError: (message) => {
         console.warn('[history.restore]', message);
+      },
+      onFailure: (failure) => {
+        historyRestoreFromPanelHintRef.current = false;
+        if (historyRestoreHandlesRef.current.get(sessionId) === restoreHandle) {
+          historyRestoreHandlesRef.current.delete(sessionId);
+        }
+        setHistoryPagerMeta(sessionId, null);
         setLoadingHistory(sessionId, false);
+        if (sessionIdRef.current === sessionId) {
+          clearMessages(sessionId);
+          addMessage(sessionId, {
+            id: `history-load-failed-${Date.now()}`,
+            role: 'system',
+            content: tRef.current('sessions.errors.restoreFailed', { sessionId }),
+            timestamp: new Date().toISOString(),
+          });
+        }
+        console.error('[history.restore]', failure.code, failure.message);
       },
     });
     historyRestoreHandlesRef.current.set(sessionId, restoreHandle);
@@ -2057,7 +2143,8 @@ function AppContent({
       try {
         await request(HISTORY_GET_METHOD, {
           session_id: sessionId,
-          page_idx: 1,
+          cursor: null,
+          limit: 50,
         });
       } catch (error) {
         historyRestoreFromPanelHintRef.current = false;
@@ -2069,9 +2156,7 @@ function AppContent({
         setHistoryPagerMeta(sessionId, null);
         console.error('Failed to load history:', error);
         setLoadingHistory(sessionId, false);
-        // 忽略 "invalid page_idx or session history not found" 错误，因为这是新会话的正常情况
-        const errorMessage = error instanceof Error ? error.message : String(error);
-        if (sessionIdRef.current === sessionId && !errorMessage.includes('invalid page_idx or session history not found')) {
+        if (sessionIdRef.current === sessionId) {
           clearMessages(sessionId);
           addMessage(sessionId, {
             id: `history-load-failed-${Date.now()}`,
@@ -2594,56 +2679,41 @@ function AppContent({
   }, [sendUserAnswer]);
 
   const handleLoadMoreHistory = useCallback(async () => {
-    if (!historyPagerMeta) return;
-    if (historyLoadingSessionsRef.current.has(sessionId) || historyPagerMeta.loadedPages >= historyPagerMeta.totalPages) return;
-
     const sid = sessionId;
-    const nextPage = historyPagerMeta.loadedPages + 1;
-    const fallbackTotal = historyPagerMeta.totalPages;
-    const prevToken = historyBackgroundPrefetchTokensRef.current.get(sid) ?? 0;
-    const token = prevToken + 1;
-    historyBackgroundPrefetchTokensRef.current.set(sid, token);
-    historyLoadingSessionsRef.current.add(sid);
+    const current = useChatStore.getState().runtimes[sid]?.historyPagerMeta;
+    if (!current || historyPrepending) return;
     setHistoryRetryAvailable(sid, false);
+    if (current.publishedBatchSeq < current.loadedBatchSeq) {
+      setHistoryPrepending(true);
+      setHistoryPagerMeta(sid, {
+        ...current,
+        publishedBatchSeq: current.publishedBatchSeq + 1,
+      });
+      await waitForNextPaint();
+      if (sessionIdRef.current === sid) setHistoryPrepending(false);
+      return;
+    }
+    if (!current.hasMore) return;
+
+    historyRevealTargetRef.current.set(sid, current.publishedBatchSeq + 1);
+    if (historyLoadingMore) return;
     setHistoryLoadingMore(true);
-    setLoadingHistory(sid, true);
-    let page: LoadedHistoryPage | null = null;
-    try {
-      page = await fetchHistoryPageResult(sid, nextPage, fallbackTotal);
-      if (
-        page &&
-        token === historyBackgroundPrefetchTokensRef.current.get(sid)
-      ) {
-        applyLoadedHistoryPage(sid, page);
-      }
-    } finally {
-      historyLoadingSessionsRef.current.delete(sid);
-      setHistoryLoadingMore(false);
-      setLoadingHistory(sid, false);
-    }
-    if (token !== historyBackgroundPrefetchTokensRef.current.get(sid)) {
-      return;
-    }
-    if (!page) {
-      setHistoryRetryAvailable(sid, true);
-      return;
-    }
-    startBackgroundHistoryPrefetch(sid, page.pageIdx, page.totalPages);
+    startBackgroundHistoryPrefetch(sid);
   }, [
-    applyLoadedHistoryPage,
-    fetchHistoryPageResult,
-    historyPagerMeta,
+    historyLoadingMore,
+    historyPrepending,
     sessionId,
     setHistoryRetryAvailable,
-    setLoadingHistory,
+    setHistoryPagerMeta,
     startBackgroundHistoryPrefetch,
   ]);
 
   const chatHistoryPager = useMemo(() => {
     if (!historyPagerMeta) return null;
     return {
-      loadedPages: historyPagerMeta.loadedPages,
-      totalPages: historyPagerMeta.totalPages,
+      loadedBatchSeq: historyPagerMeta.loadedBatchSeq,
+      publishedBatchSeq: historyPagerMeta.publishedBatchSeq,
+      hasMore: historyPagerMeta.hasMore,
       loadingMore: historyLoadingMore,
       prepending: historyPrepending,
       retryAvailable: historyRetrySessions.has(sessionId),
@@ -2664,7 +2734,10 @@ function AppContent({
       const previousMode =
         useSessionStore.getState().getRuntime(previousSessionId)?.mode ?? mode;
       const resolvedMode = targetMode ?? targetSession?.mode ?? previousMode;
-      disposeInFlightHistoryHandles(targetSessionId);
+      const targetHistory = useChatStore.getState().runtimes[targetSessionId]?.historyPagerMeta;
+      if (!targetHistory) {
+        disposeInFlightHistoryHandles(targetSessionId);
+      }
       if (previousSessionId && previousSessionId !== targetSessionId) {
         try {
           await request('session.switch', {
