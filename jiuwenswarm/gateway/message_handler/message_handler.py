@@ -712,11 +712,17 @@ class MessageHandler(ABC):
 
     async def _resolve_external_channel_session(self, msg: "Message") -> None:
         """Map A2A/SSH protocol IDs onto AgentServer-owned product Sessions."""
+        from jiuwenswarm.gateway.message_handler.external_conv_session import (
+            find_local_session_for_external_conv_id,
+        )
+
         channel_id = str(msg.channel_id or "").strip()
         external_id = str(msg.session_id or "").strip()
         # xiaoyi 的入站 msg.session_id 是稳定的 conversation_id（跨多轮不变），
         # 但并非 AgentServer 认识的 session id；这里按 (channel, conversation_id)
         # 分配并缓存 AgentServer session，让同一对话复用同一 session、历史不丢。
+        # 若 conversation_id 已是桌面 ReportConversations 的 conv_*（toLocalConvId），
+        # 优先挂回已有 desktop_*（或曾绑定该 conv 的会话），避免新建空 xiaoyi_* 丢上下文。
         if channel_id not in {"a2a", "ssh", "xiaoyi"} or not external_id:
             return
         key = (channel_id, external_id)
@@ -725,30 +731,43 @@ class MessageHandler(ABC):
             async with self._external_session_alias_lock:
                 resolved = self._external_session_aliases.get(key)
                 if resolved is None:
-                    logger.info(
-                        "[MessageHandler] 分配通道会话(session.create): channel=%s external=%s",
-                        channel_id,
-                        external_id,
-                    )
-                    raw_mode = str((msg.params or {}).get("mode") or "agent")
-                    try:
-                        mode = ChannelMode(raw_mode)
-                    except ValueError:
-                        mode = ChannelMode.AGENT
-                    resolved = await self._allocate_channel_session(
-                        msg, ChannelControlState(mode=mode)
-                    )
-                    self._external_session_aliases[key] = resolved
-                    logger.info(
-                        "[MessageHandler] 通道会话分配完成: channel=%s external=%s -> %s",
-                        channel_id,
-                        external_id,
-                        resolved,
-                    )
+                    reused = find_local_session_for_external_conv_id(external_id)
+                    if reused:
+                        resolved = reused
+                        self._external_session_aliases[key] = resolved
+                        logger.info(
+                            "[MessageHandler] 复用本机会话(conv 反查): channel=%s external=%s -> %s",
+                            channel_id,
+                            external_id,
+                            resolved,
+                        )
+                    else:
+                        logger.info(
+                            "[MessageHandler] 分配通道会话(session.create): channel=%s external=%s",
+                            channel_id,
+                            external_id,
+                        )
+                        raw_mode = str((msg.params or {}).get("mode") or "agent")
+                        try:
+                            mode = ChannelMode(raw_mode)
+                        except ValueError:
+                            mode = ChannelMode.AGENT
+                        resolved = await self._allocate_channel_session(
+                            msg, ChannelControlState(mode=mode)
+                        )
+                        self._external_session_aliases[key] = resolved
+                        logger.info(
+                            "[MessageHandler] 通道会话分配完成: channel=%s external=%s -> %s",
+                            channel_id,
+                            external_id,
+                            resolved,
+                        )
         metadata = dict(msg.metadata or {})
         metadata.setdefault("external_session_id", external_id)
         msg.metadata = metadata
         msg.session_id = resolved
+        if isinstance(msg.params, dict) and "session_id" in msg.params:
+            msg.params["session_id"] = resolved
 
     @staticmethod
     def _extract_identity_tuple(msg: "Message") -> tuple[str, str, str, str] | None:
@@ -2190,12 +2209,13 @@ class MessageHandler(ABC):
                 msg.session_id = sid
             else:
                 msg.session_id = None
-        elif state.session_id:
-            msg.session_id = state.session_id
         elif isinstance(msg.metadata, dict) and msg.metadata.get("external_session_id"):
             # 已由 _resolve_external_channel_session 映射到 AgentServer session
-            # （如 a2a/ssh/xiaoyi），不要覆盖，否则会把已分配的 session_id 清成 None。
+            # （如 a2a/ssh/xiaoyi，含 conv_* 反查复用 desktop_*），不要被
+            # channel default_session_id 覆盖，否则跨端续聊会丢上下文。
             pass
+        elif state.session_id:
+            msg.session_id = state.session_id
         else:
             msg.session_id = None
 
