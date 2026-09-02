@@ -38,7 +38,10 @@ export const simulatedAuthProvider: EnterpriseAuthProvider = {
   id: 'simulate',
   startupMessage: '【登录认证模拟调试模式已开启】使用默认用户、组织、组网和 Agent 候选值',
   isAuthenticated: () => true,
-  redirectToLogin: () => window.location.replace(entryPath()),
+  redirectToLogin: () => {
+    window.location.replace(entryPath());
+    return true;
+  },
   getCurrentUser: async () => buildSimulatedEnterpriseContext(window.location.search).user,
   listOrganizations: async () => buildSimulatedEnterpriseContext(window.location.search).orgs,
   listGateways: async () => buildSimulatedEnterpriseContext(window.location.search).gateways,

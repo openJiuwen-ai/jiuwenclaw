@@ -5,6 +5,7 @@ import type {
   EnterpriseUser,
 } from '../../services/enterpriseContext';
 import { EnterpriseAuthError, type EnterpriseAuthProvider } from '../types';
+import { isAuthEntryPath } from '../config';
 
 const ACCESS_KEY = 'openjiuwen_access_token';
 const REFRESH_KEY = 'openjiuwen_refresh_token';
@@ -66,7 +67,9 @@ export const managerAuthProvider: EnterpriseAuthProvider = {
   isAuthenticated: () => Boolean(accessToken()),
   redirectToLogin() {
     clearLogin();
+    if (isAuthEntryPath(window.location.pathname)) return false;
     window.location.replace('/auth');
+    return true;
   },
   getCurrentUser: () => requestJson<EnterpriseUser>('/idp/v1/auth/me'),
   async listOrganizations() {
