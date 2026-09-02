@@ -67,6 +67,9 @@ def _make_adapter(**state: object) -> JiuWenSwarmDeepAdapter:
     adapter = object.__new__(JiuWenSwarmDeepAdapter)
     adapter._is_session_scoped_adapter = True  # pylint: disable=protected-access
     adapter._parent_session_id = None  # pylint: disable=protected-access
+    # process_interrupt reads these; __init__ normally sets them.
+    adapter._task_planning_rail = None  # pylint: disable=protected-access
+    adapter._workspace_dir = ""  # pylint: disable=protected-access
     for name, value in state.items():
         setattr(adapter, name, value)
     return adapter
