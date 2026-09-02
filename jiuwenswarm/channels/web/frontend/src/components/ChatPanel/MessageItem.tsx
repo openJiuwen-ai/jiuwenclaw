@@ -27,6 +27,7 @@ import {
   WebError,
 } from '../../types';
 import { StreamingContent } from './StreamingContent';
+import { useAdaptiveTooltip } from '../../hooks/useAdaptiveTooltip';
 import { ToolCallDisplay } from './ToolCallDisplay';
 import { MediaRenderer, stripUploadDocumentBlocks } from './MediaRenderer';
 import { A2UIMessageContent } from '../../features/a2ui/A2UIMessageContent';
@@ -35,7 +36,7 @@ import { isQaSummaryContent } from '../InteractionSlot/qaSummary';
 import { GoalCompletedCard } from '../GoalBar/GoalCompletedCard';
 import { isGoalCompletedContent } from '../GoalBar/goalCompletedMessage';
 import { a2uiContentToText } from '../../features/a2ui/a2uiContent';
-import { onTtsStop, sanitizeTtsText } from '../../utils';
+import { formatTimestamp, onTtsStop, sanitizeTtsText } from '../../utils';
 import { useSpeechSynthesis } from '../../hooks';
 import clsx from 'clsx';
 import { MarkdownRenderer } from '../../components/MarkdownRenderer';
@@ -375,6 +376,7 @@ export const MessageItem = memo(function MessageItem({
     id,
     role,
     content,
+    timestamp,
     isStreaming,
     toolCall,
     toolResult,
@@ -394,6 +396,7 @@ export const MessageItem = memo(function MessageItem({
   const [isExpanded, setIsExpanded] = useState(false);
   const [copied, setCopied] = useState(false);
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  const { tooltip, handlers: tooltipHandlers } = useAdaptiveTooltip({ placement: 'top' });
 
   // TTS
   const { isSpeaking, speak, stop, isSupported: ttsSupported } = useSpeechSynthesis({
@@ -752,7 +755,7 @@ export const MessageItem = memo(function MessageItem({
     <div
     data-testid="chat-panel-message-row"
     className={clsx(
-      'flex animate-rise',
+      'message-row flex animate-rise',
       isUser ? 'justify-end' : 'justify-start',
       withAssistantAvatar && 'assistant-row',
       withAssistantAvatar && !showAvatar && 'assistant-row--no-avatar'
@@ -863,6 +866,8 @@ export const MessageItem = memo(function MessageItem({
               isUser ? 'justify-end' : 'justify-start'
             )}
           >
+            <span data-testid="chat-panel-message-timestamp">{formatTimestamp(timestamp)}</span>
+
             {isUser && isGoalObjectiveMessage && (
               <span className="inline-flex items-center gap-1 rounded-full bg-secondary px-2 py-0.5 text-xs text-text-muted" data-testid="chat-panel-message-goal-badge">
                 <Target className="w-3 h-3" strokeWidth={2} />
@@ -872,19 +877,15 @@ export const MessageItem = memo(function MessageItem({
 
             {showCopy && (
               <div className="relative" data-testid="chat-panel-message-copy">
-                {copied && (
-                  <span className="animate-fade-in absolute bottom-full left-1/2 -translate-x-1/2 mb-1.5 whitespace-nowrap rounded-md border border-border bg-card px-2 py-1 text-xs text-text shadow-md" data-testid="chat-panel-message-copied-tip">
-                    {t('chatUi.copied')}
-                  </span>
-                )}
                 <button
                   data-testid="chat-panel-message-copy-btn"
+                  data-tooltip={copied ? t('chatUi.copied') : t('chatUi.copyMessage')}
+                  {...tooltipHandlers}
                   onClick={handleCopy}
                   className={clsx(
-                    'p-1.5 rounded-md ',
+                    'p-1.5 rounded-md',
                     copied ? 'text-accent' : 'hover:text-accent hover:bg-secondary'
                   )}
-                  title={t('chatUi.copyMessage')}
                 >
                   {copied ? (
                     <Check className="w-4 h-4" strokeWidth={1.5} />
@@ -892,6 +893,7 @@ export const MessageItem = memo(function MessageItem({
                     <Copy className="w-4 h-4" strokeWidth={1.5} />
                   )}
                 </button>
+                {tooltip}
               </div>
             )}
 

@@ -1,5 +1,6 @@
 export { Button, type ButtonProps } from './Button/Button';
 export { CollapsibleText, type CollapsibleTextProps } from './CollapsibleText/CollapsibleText';
+export { InfoCard, type InfoCardProps } from './InfoCard/InfoCard';
 export { Input, type InputProps } from './Input/Input';
 export { Textarea, type TextareaProps } from './Textarea/Textarea';
 export { Select, type SelectOption, type SelectProps } from './Select/Select';

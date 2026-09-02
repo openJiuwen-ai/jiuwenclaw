@@ -400,7 +400,7 @@ function GroupChatMessage({ event }: { event: ParsedTeamEvent }) {
     <div className={`flex items-start gap-3 ${isUser ? 'justify-end' : ''}`}>
       {!isUser && <TeamMemberAvatar member={event.fromMember} className="h-8 w-8" />}
       <div className={`min-w-0 ${isUser ? 'max-w-[72%] text-right' : 'flex-1'}`}>
-        <div className="mb-1 text-base font-semibold text-text" data-testid="team-area-group-chat-message-sender">
+        <div className="pb-2 text-base font-semibold leading-7 text-text" data-testid="team-area-group-chat-message-sender">
           {displayName}
         </div>
         <div className={`text-sm leading-6 text-text ${isUser ? 'inline-block rounded-lg bg-accent-subtle px-3 py-2 text-left' : ''}`}>
