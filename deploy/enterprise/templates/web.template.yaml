@@ -38,6 +38,10 @@ spec:
               value: "<<JIUWENSWARM_EDITION>>"
             - name: LOGIN_AUTH_SIMULATE
               value: "<<APPLY_PATCH>>"
+            - name: USER_WEB_IDP_TARGET
+              value: "<<USER_WEB_IDP_TARGET>>"
+            - name: USER_WEB_MANAGER_TARGET
+              value: "<<USER_WEB_MANAGER_TARGET>>"
             - name: FRONTEND_PORT
               value: "<<WEB_HTTP_PORT>>"
             - name: WEB_TRANSPORT

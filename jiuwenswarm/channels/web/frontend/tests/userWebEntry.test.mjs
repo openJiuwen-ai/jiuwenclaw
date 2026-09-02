@@ -28,10 +28,7 @@ const {
   isDebugContext,
   orderedContextCandidates,
 } = await import('../node_modules/.cache/user-web-entry/EnterpriseEntry.mjs');
-const {
-  isAuthEntryPath,
-  parseLoginAuthSimulate,
-} = await import('../node_modules/.cache/user-web-entry/auth/config.js');
+const { parseLoginAuthSimulate } = await import('../node_modules/.cache/user-web-entry/auth/config.js');
 const { buildSimulatedEnterpriseContext } = await import('../node_modules/.cache/user-web-entry/auth/simulate/SimulatedAuthProvider.js');
 
 function renderEntry(edition, simulate = false) {
@@ -42,8 +39,8 @@ function renderEntry(edition, simulate = false) {
 
 function resetBrowserState() {
   values.clear();
-  window.location.pathname = '/';
   window.location.search = '';
+  window.location.pathname = '/';
 }
 
 test('personal edition renders the standalone User Web without enterprise authentication', () => {
@@ -74,6 +71,16 @@ test('enterprise edition loads and validates an authorized context before render
   assert.doesNotMatch(html, /user web content/);
 });
 
+test('enterprise edition shows login form on /auth instead of redirecting in a loop', () => {
+  resetBrowserState();
+  window.location.pathname = '/auth';
+  const html = renderEntry('enterprise');
+
+  assert.match(html, /用户登录/);
+  assert.doesNotMatch(html, /正在前往登录页/);
+  assert.doesNotMatch(html, /user web content/);
+});
+
 test('simulated enterprise login uses local defaults without an access token', () => {
   resetBrowserState();
   const context = buildSimulatedEnterpriseContext('');
@@ -99,12 +106,6 @@ test('LOGIN_AUTH_SIMULATE accepts only booleans and defaults to true', () => {
   assert.equal(parseLoginAuthSimulate('true'), true);
   assert.equal(parseLoginAuthSimulate(' FALSE '), false);
   assert.throws(() => parseLoginAuthSimulate('yes'), /期望 true 或 false/);
-});
-
-test('auth entry path guard stops User Web from redirecting /auth to itself', () => {
-  assert.equal(isAuthEntryPath('/auth'), true);
-  assert.equal(isAuthEntryPath('/auth/'), true);
-  assert.equal(isAuthEntryPath('/chat/'), false);
 });
 
 test('context candidates prefer URL values but retain every authorized combination', () => {

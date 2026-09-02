@@ -95,7 +95,7 @@ declare -A ARGS=(
 
 
 # ==== All available modules ====
-declare -ga ALL_MODULES=("NFS" "NFS-SC" "RABBITMQ" "MYSQL" "POSTGRESQL" "MINIO" "LOG" "JINA" "PROXY" "GATEWAY" "WEB" "MANAGER" "RUNTIME")
+declare -ga ALL_MODULES=("NFS" "NFS-SC" "RABBITMQ" "MYSQL" "POSTGRESQL" "MINIO" "LOG" "JINA" "PROXY" "GATEWAY" "MANAGER" "WEB" "RUNTIME")
 
 declare -ga MODULES=()
 

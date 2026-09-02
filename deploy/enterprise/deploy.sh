@@ -95,6 +95,7 @@ process_restart() {
 main() {
     read_env_from_file "${CUSTOM_ENV_FILE}" "DEPLOY_VARS"
     parse_args "$@"
+    apply_user_web_auth_defaults
     detect_os
     check_dependency
     process_${CMD}

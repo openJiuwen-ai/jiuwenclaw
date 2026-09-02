@@ -51,7 +51,12 @@ parse_args() {
 }
 
 process_modules() {
-    MODULES=("GATEWAY" "WEB" "RUNTIME")
+    if [[ "${DEPLOY_VARS["APPLY_PATCH"]}" == "false" ]]; then
+        # 正式企业用户登录依赖 Identity + Manager Server 下发组织和 Agent。
+        MODULES=("GATEWAY" "MANAGER" "WEB" "RUNTIME")
+    else
+        MODULES=("GATEWAY" "WEB" "RUNTIME")
+    fi
 }
 
 # Print help info and exit

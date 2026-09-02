@@ -9,8 +9,8 @@ export interface EnterpriseAuthProvider {
   readonly id: 'manager' | 'simulate';
   readonly startupMessage: string;
   isAuthenticated(): boolean;
-  /** Return false when the User Web itself has already fallen back to /auth. */
-  redirectToLogin(): boolean;
+  redirectToLogin(): void;
+  login(username: string, password: string): Promise<void>;
   getCurrentUser(): Promise<EnterpriseUser>;
   listOrganizations(): Promise<EnterpriseOrg[]>;
   listGateways(): Promise<EnterpriseGateway[]>;

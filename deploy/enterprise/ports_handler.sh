@@ -52,6 +52,17 @@ is_port_occupied() {
     fi
 }
 
+# True when this namespace already owns the NodePort (kubectl apply reuse).
+is_nodeport_owned_by_namespace() {
+    local port="$1"
+    local ns="${DEPLOY_VARS["NAMESPACE"]}"
+    if [ -z "${ns}" ] || [ -z "${port}" ]; then
+        return 1
+    fi
+    kubectl get svc -n "${ns}" -o jsonpath='{range .items[*].spec.ports[*]}{.nodePort}{"\n"}{end}' 2>/dev/null \
+        | grep -qx "${port}"
+}
+
 # =========== Allocate multiple available ports at once ==============
 # Usage: ensure_available_port "PORT_NAME_1" ["PORT_NAME_2" ...]
 # Function:
@@ -81,9 +92,14 @@ ensure_available_port() {
         if [ -n "${DEPLOY_VARS["${port_name}"]:-}" ]; then
             local port=${DEPLOY_VARS["${port_name}"]}
             if is_port_occupied "${port}"; then
-                error "[${port_name}] Port ${port} is occupied, please choose another one."
+                if is_nodeport_owned_by_namespace "${port}"; then
+                    info "Port ${port} already bound in namespace ${DEPLOY_VARS["NAMESPACE"]}, reuse for ${port_name}"
+                else
+                    error "[${port_name}] Port ${port} is occupied, please choose another one."
+                fi
+            else
+                info "Using pre-configured port ${port} for ${port_name}"
             fi
-            info "Using pre-configured port ${port} for ${port_name}"
             continue
         fi
 

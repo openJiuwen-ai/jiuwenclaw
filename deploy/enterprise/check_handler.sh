@@ -77,6 +77,28 @@ check_dependency(){
     check_if_root
 }
 
+apply_user_web_auth_defaults() {
+    local user_web_idp_defaulted="false"
+    local user_web_manager_defaulted="false"
+    if [[ -z "${DEPLOY_VARS["USER_WEB_IDP_TARGET"]:-}" ]]; then
+        DEPLOY_VARS["USER_WEB_IDP_TARGET"]="http://${DEPLOY_VARS["IDENTITY_NAME"]}:${DEPLOY_VARS["IDENTITY_REST_PORT"]}"
+        user_web_idp_defaulted="true"
+    fi
+    if [[ -z "${DEPLOY_VARS["USER_WEB_MANAGER_TARGET"]:-}" ]]; then
+        DEPLOY_VARS["USER_WEB_MANAGER_TARGET"]="http://${DEPLOY_VARS["MANAGER_SERVER_NAME"]}:${DEPLOY_VARS["MANAGER_REST_PORT"]}"
+        user_web_manager_defaulted="true"
+    fi
+    if [[ "${DEPLOY_VARS["APPLY_PATCH"]}" == "false" ]]; then
+        info "【正式身份认证模式】User Web 走 Identity/Manager 登录，配置仍由 Manager 下发"
+        if [[ "${user_web_idp_defaulted}" == "true" ]]; then
+            info "USER_WEB_IDP_TARGET 未配置，使用 ${DEPLOY_VARS["USER_WEB_IDP_TARGET"]}"
+        fi
+        if [[ "${user_web_manager_defaulted}" == "true" ]]; then
+            info "USER_WEB_MANAGER_TARGET 未配置，使用 ${DEPLOY_VARS["USER_WEB_MANAGER_TARGET"]}"
+        fi
+    fi
+}
+
 check_if_nfs_up() {
     # Check if external NFS server
     if [ -n "${DEPLOY_VARS["NFS_SERVER_ADDR"]:-}" ]; then
@@ -475,6 +497,14 @@ check_web_up_dependency(){
 
     if ! check_k8s_resource_exists "deployment" "${DEPLOY_VARS["GATEWAY_NAME"]}" "${DEPLOY_VARS["NAMESPACE"]}"; then
         error "GATEWAY is not deployed. Please deploy it first with: ./$(basename "$0") up gateway"
+    fi
+    if [[ "${DEPLOY_VARS["APPLY_PATCH"]}" == "false" ]]; then
+        if ! check_k8s_resource_exists "deployment" "${DEPLOY_VARS["IDENTITY_NAME"]}" "${DEPLOY_VARS["NAMESPACE"]}"; then
+            error "正式用户登录需要 Identity。请先执行: ./$(basename "$0") up manager -n ${DEPLOY_VARS["NAMESPACE"]}"
+        fi
+        if ! check_k8s_resource_exists "deployment" "${DEPLOY_VARS["MANAGER_SERVER_NAME"]}" "${DEPLOY_VARS["NAMESPACE"]}"; then
+            error "正式用户登录需要 Manager Server。请先执行: ./$(basename "$0") up manager -n ${DEPLOY_VARS["NAMESPACE"]}"
+        fi
     fi
 }
 

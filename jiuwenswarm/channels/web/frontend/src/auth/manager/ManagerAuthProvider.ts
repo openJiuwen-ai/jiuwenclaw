@@ -5,7 +5,6 @@ import type {
   EnterpriseUser,
 } from '../../services/enterpriseContext';
 import { EnterpriseAuthError, type EnterpriseAuthProvider } from '../types';
-import { isAuthEntryPath } from '../config';
 
 const ACCESS_KEY = 'openjiuwen_access_token';
 const REFRESH_KEY = 'openjiuwen_refresh_token';
@@ -51,6 +50,16 @@ async function requestJson<T>(path: string): Promise<T> {
   return body as T;
 }
 
+function persistTokens(access: string, refresh: string): void {
+  if (typeof localStorage !== 'undefined') {
+    localStorage.setItem(ACCESS_KEY, access);
+    localStorage.setItem(REFRESH_KEY, refresh);
+  }
+  if (typeof document !== 'undefined') {
+    document.cookie = `${ACCESS_KEY}=${access}; Path=/; SameSite=Strict`;
+  }
+}
+
 function clearLogin(): void {
   if (typeof localStorage !== 'undefined') {
     localStorage.removeItem(ACCESS_KEY);
@@ -67,9 +76,30 @@ export const managerAuthProvider: EnterpriseAuthProvider = {
   isAuthenticated: () => Boolean(accessToken()),
   redirectToLogin() {
     clearLogin();
-    if (isAuthEntryPath(window.location.pathname)) return false;
     window.location.replace('/auth');
-    return true;
+  },
+  async login(username: string, password: string) {
+    const response = await fetch('/idp/v1/auth/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ username, password }),
+    });
+    let body: unknown = null;
+    try {
+      body = await response.json();
+    } catch {
+      // HTTP status remains authoritative for non-JSON responses.
+    }
+    if (!response.ok) {
+      throw new EnterpriseAuthError(response.status, requestMessage(body, `HTTP ${response.status}`));
+    }
+    const payload = body && typeof body === 'object' ? body as Record<string, unknown> : {};
+    const access = typeof payload.access_token === 'string' ? payload.access_token : '';
+    const refresh = typeof payload.refresh_token === 'string' ? payload.refresh_token : '';
+    if (!access) {
+      throw new EnterpriseAuthError(response.status, '登录成功但未返回 access_token');
+    }
+    persistTokens(access, refresh);
   },
   getCurrentUser: () => requestJson<EnterpriseUser>('/idp/v1/auth/me'),
   async listOrganizations() {
