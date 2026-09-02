@@ -176,6 +176,7 @@ FEISHU_BOTS="
 - **minio**：Minio 存储服务模块
 - **log**：日志管理模块
 - **jina**：网页内容提取服务模块
+- **proxy**：模型 API 反向代理服务模块
 - **gateway**：Gateway 模块
 - **web**：Web 前端页面服务模块
 - **manager**：CLAW-Manager 管理模块
@@ -189,6 +190,7 @@ FEISHU_BOTS="
 ./deploy.sh [操作命令] minio        # 仅操作 MinIO 模块
 ./deploy.sh [操作命令] log          # 仅操作日志管理模块
 ./deploy.sh [操作命令] jina         # 仅操作网页内容提取服务模块
+./deploy.sh [操作命令] proxy        # 仅操作模型 API 反向代理模块
 ./deploy.sh [操作命令] gateway      # 仅操作 Gateway 模块
 ./deploy.sh [操作命令] web          # 仅操作 Web 模块
 ./deploy.sh [操作命令] manager      # 仅操作 Manager 模块
@@ -196,7 +198,7 @@ FEISHU_BOTS="
 
 **重要约束：**
 
-- **NFS / MySQL / PostgreSQL / Log / Jina：** 以上基础依赖模块全局仅支持单次部署，固定运行于 default 命名空间，部署命令自动忽略自定义命名空间参数。
+- **NFS / MySQL / PostgreSQL / MinIO / Log / Jina / Proxy：** 以上基础依赖模块全局仅支持单次部署，固定运行于 default 命名空间，部署命令自动忽略自定义命名空间参数。
 - **Redis：** 不作为独立模块部署，仅作为 Gateway、Runtime 的附属依赖。每个命名空间拥有独立的 Redis 实例（Deployment 名为 `jiuwenclaw-redis`），实现多业务实例间数据隔离。启动 Gateway 或 Runtime 等依赖 Redis 的业务模块时，部署工具会自动执行就绪检查：已配置外挂 Redis 则复用外部服务；否则复用同命名空间已有的内置 Redis；若同命名空间既无外挂 Redis 也无内置 Redis，则自动拉起一个内置 Redis 实例。
 - **Web / Gateway / Manager：** 业务服务模块需保持命名空间一致（为了环境隔离与日志运维，禁止使用default命令空间），否则服务间网络互通异常、功能不可用。
 
@@ -239,12 +241,12 @@ FEISHU_BOTS="
 ```
 
 **重要说明：**
-每当升级新版本服务时，对于**NFS、NFS-SC、MySQL、PostgreSQL、MinIO、Log、Jina** 等全局基础依赖组件应尽量保持不变，无需重复部署。**Redis** 已改为按命名空间独立部署、随业务实例隔离（不支持单独部署），升级业务模块时各命名空间下的 Redis 实例保持不变即可。仅需对业务服务**Gateway、Web、CLAW-Manager**进行版本替换：在旧版本部署目录中，依次卸载 业务模块；随后切换至新版本部署工具目录，启动对应新版业务模块。
+每当升级新版本服务时，对于**NFS、NFS-SC、MySQL、PostgreSQL、MinIO、Log、Jina、Proxy** 等全局基础依赖组件应尽量保持不变，无需重复部署。**Redis** 已改为按命名空间独立部署、随业务实例隔离（不支持单独部署），升级业务模块时各命名空间下的 Redis 实例保持不变即可。仅需对业务服务**Gateway、Web、CLAW-Manager**进行版本替换：在旧版本部署目录中，依次卸载 业务模块；随后切换至新版本部署工具目录，启动对应新版业务模块。
 
 ### 2.3 配置参数（选填）
 
 **参数说明：**
-- `-n`:  指定部署目标命名空间, 从而实现模块多实例隔离部署，不同命名空间的资源不冲突，默认值：`default`。需要注意的是：操作 NFS / MySQL / PostgreSQL / Log / Jina 等基础依赖模块时，该参数强制失效，固定部署于 `default` 命名空间；**Redis** 随业务模块按 `-n` 指定的命名空间自动部署（不支持单独部署）。
+- `-n`:  指定部署目标命名空间, 从而实现模块多实例隔离部署，不同命名空间的资源不冲突，默认值：`default`。需要注意的是：操作 NFS / MySQL / PostgreSQL / MinIO / Log / Jina / Proxy 等基础依赖模块时，该参数强制失效，固定部署于 `default` 命名空间；**Redis** 随业务模块按 `-n` 指定的命名空间自动部署（不支持单独部署）。
 - `--render-only`：只渲染模板输出文件至 conf 目录，不操作集群、不校验集群资源
 
 **参数使用示例：**
@@ -586,6 +588,32 @@ LOG_TO_FILE_ENABLED=false
 - **国内客户 + 高频国内网页抓取**（天气、12306、知乎、微博等）：首选**自建 Jina**，零限流 + 内网缓存提速最明显。
 - **国内客户 + 高频遇到 Cloudflare / JS 渲染重站点抓取失败**：用 **r.jinaai.cn** （建议配 token）。
 - **海外客户**：用 **r.jina.ai**（建议配 token）。
+
+### 3.6 部署 Proxy 反向代理服务（可选部署）
+
+当模型 API 服务（如 OpenAI 兼容接口）对来源 IP 做白名单限制，只放行集群中某节点的公网 IP，而 Pod 出口经 NAT 后源 IP 不在白名单内、无法直连模型时，可使用本模块在白名单节点上以 `hostNetwork` 模式部署一个 nginx 反向代理，由该节点的公网 IP 出口代理访问模型服务。本模块部署于 `default` 命名空间，集群内所有命名空间的 Pod 共用一份。
+
+#### 3.6.1 配置参数
+在 `.env.custom` 中配置以下参数：
+```
+# Proxy 反代监听端口
+PROXY_PORT="18080"
+
+# Proxy 反代的目标上游地址（比如说 模型的baseURL）
+PROXY_UPSTREAM=""
+
+```
+
+#### 3.6.2 服务部署命令
+```
+./deploy.sh up proxy          # 部署模型 API 反向代理模块（可选部署，固定 default 命名空间）
+```
+部署完成后，可以通过节点 IP 直连：`http://<节点 IP>:18080`
+
+随后在 `.env.custom` 中将 `API_BASE` 指向反代地址即可，例如：
+```
+API_BASE="http://<节点 IP>:18080/v1"
+```
 
 ## 4 部署JiuwenSwarm企业级服务
 

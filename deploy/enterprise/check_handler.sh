@@ -442,6 +442,10 @@ check_jina_up_dependency() {
     info "JINA module has no dependencies"
 }
 
+check_proxy_up_dependency() {
+    info "PROXY module has no dependencies"
+}
+
 check_gateway_up_dependency(){
     local jiuwenclaw_path="${DEPLOY_VARS["NFS_POD_PATH"]}/jiuwenclaw"
     local nfs_dname=${DEPLOY_VARS["NFS_NAME"]}
