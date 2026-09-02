@@ -27,7 +27,6 @@ render_agentserver_env_configmap() {
 
 create_agentserver_env_configmap() {
     local yaml_file="${CONFIG["AS_ENV_YAML_FILE"]}"
-    ensure_secret_configmap
     exec_cmd kubectl apply -f "${yaml_file}"
 }
 
