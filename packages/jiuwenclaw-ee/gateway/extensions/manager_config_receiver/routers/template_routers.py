@@ -11,6 +11,7 @@ from fastapi import APIRouter, HTTPException, Request
 from ..core.template.agent_template import AgentTemplateService
 from ..core.template.embedding_template import EmbeddingTemplateService
 from ..core.template.extension_config_template import ExtensionConfigTemplateService
+from ..core.template.mcp_template import McpTemplateService
 from ..core.template.model_template import ModelTemplateService
 from ..core.template.skill_whitelist_template import SkillWhitelistTemplateService
 from ..schemas.common_schemas import ResponseModel
@@ -24,6 +25,8 @@ from ..schemas.template_schemas import (
     ExtensionConfigTemplateUpdateRequest,
     ModelTemplateCreateRequest,
     ModelTemplateUpdateRequest,
+    McpTemplateCreateRequest,
+    McpTemplateUpdateRequest,
     SkillWhitelistTemplateCreateRequest,
     SkillWhitelistTemplateUpdateRequest,
 )
@@ -149,6 +152,13 @@ _add_template_crud(
     "skill_whitelist",
     SkillWhitelistTemplateCreateRequest,
     SkillWhitelistTemplateUpdateRequest,
+)
+_add_template_crud(
+    "/mcp-templates",
+    McpTemplateService,
+    "mcp",
+    McpTemplateCreateRequest,
+    McpTemplateUpdateRequest,
 )
 _add_template_crud(
     "/agent-templates",

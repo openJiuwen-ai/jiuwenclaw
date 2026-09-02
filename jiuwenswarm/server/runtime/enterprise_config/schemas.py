@@ -17,6 +17,7 @@ class TemplateRefSlot(StrEnum):
     EMBEDDING_MODEL = "embedding_model"
     SKILL_WHITELIST = "skill_whitelist"
     EXTENSION_CONFIG = "extension_config"
+    MCP = "mcp"
 
 
 SLOT_ENTITY_TABLE: dict[TemplateRefSlot, str] = {
@@ -27,6 +28,7 @@ SLOT_ENTITY_TABLE: dict[TemplateRefSlot, str] = {
     TemplateRefSlot.EMBEDDING_MODEL: "embedding_template",
     TemplateRefSlot.SKILL_WHITELIST: "skill_whitelist_template",
     TemplateRefSlot.EXTENSION_CONFIG: "extension_config_template",
+    TemplateRefSlot.MCP: "mcp_template",
 }
 
 MODEL_SLOT_KEYS = frozenset({
@@ -41,6 +43,7 @@ DEFAULT_AGENT_LOAD_SLOTS = frozenset({
     TemplateRefSlot.EMBEDDING_MODEL,
     TemplateRefSlot.SKILL_WHITELIST,
     TemplateRefSlot.EXTENSION_CONFIG,
+    TemplateRefSlot.MCP,
 })
 
 
@@ -93,6 +96,7 @@ class EffectiveEnterpriseConfig:
     embedding: list[dict[str, Any]] | None = None
     skill_whitelist: list[dict[str, Any]] | None = None
     extension_config: list[dict[str, Any]] | None = None
+    mcp: list[dict[str, Any]] | None = None
     service_id: str | None = None
     agent_id: str | None = None
     workspace_dir: str | None = None
@@ -111,6 +115,7 @@ class EffectiveEnterpriseConfig:
             "embedding": self.embedding,
             "skill_whitelist": self.skill_whitelist,
             "extension_config": self.extension_config,
+            "mcp": self.mcp,
             "service_id": self.service_id,
             "agent_id": self.agent_id,
             "workspace_dir": self.workspace_dir,

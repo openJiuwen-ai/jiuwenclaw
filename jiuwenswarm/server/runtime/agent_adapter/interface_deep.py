@@ -4437,6 +4437,13 @@ class JiuWenSwarmDeepAdapter:
         """若已加载 ``_enterprise_config``，将其模型槽位覆盖到 config 快照上。"""
         if self._enterprise_config is None:
             clear_embed_config_db_cache()
+            # 企业版未拉到策略时仍清空本地 MCP，与禁止 /mcp 一致
+            if is_enterprise():
+                from jiuwenswarm.server.runtime.enterprise_config.apply_mcp import (
+                    clear_local_mcp_servers,
+                )
+
+                return clear_local_mcp_servers(config_base)
             return config_base
         from jiuwenswarm.server.runtime.enterprise_config.apply_models import (
             apply_enterprise_models_to_config,
@@ -4454,7 +4461,57 @@ class JiuWenSwarmDeepAdapter:
                 "[JiuWenSwarmDeepAdapter] using enterprise model config: slots=%s",
                 list(self._enterprise_config.models),
             )
+        return self._merge_enterprise_mcp_into_config(merged)
+
+    def _merge_enterprise_mcp_into_config(
+        self, config_base: dict[str, Any]
+    ) -> dict[str, Any]:
+        """企业版用管理端 MCP 整表替换本地 ``mcp.servers``（无槽位则清空）。"""
+        from jiuwenswarm.server.runtime.enterprise_config.apply_mcp import (
+            apply_enterprise_mcp_to_config,
+            clear_local_mcp_servers,
+        )
+
+        if not is_enterprise():
+            return config_base
+        if self._enterprise_config is None:
+            return clear_local_mcp_servers(config_base)
+
+        merged, applied = apply_enterprise_mcp_to_config(
+            config_base, self._enterprise_config
+        )
+        if applied:
+            logger.info(
+                "[JiuWenSwarmDeepAdapter] using enterprise MCP config: count=%s",
+                len(getattr(self._enterprise_config, "mcp", None) or []),
+            )
         return merged
+
+    async def _refresh_enterprise_config_for_reload(self) -> None:
+        """reload 前用缓存路由上下文重新拉取 Gateway DB 中的企业配置。"""
+        if not is_enterprise():
+            return
+        cached = self._enterprise_config
+        if cached is None:
+            return
+        routing = getattr(cached, "routing", None)
+        if routing is None:
+            return
+        try:
+            from jiuwenswarm.common.schema.agent import AgentRequest, ReqMethod
+
+            request = AgentRequest(
+                request_id="enterprise-config-refresh",
+                channel_id="default",
+                req_method=ReqMethod.AGENT_RELOAD_CONFIG,
+                params=routing.as_dict(),
+            )
+            await self._load_enterprise_config(request)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "[JiuWenSwarmDeepAdapter] refresh enterprise config on reload failed: %s",
+                exc,
+            )
 
     async def _load_enterprise_config(self, request: AgentRequest) -> None:
         """按当前请求的 ``params`` 从 Gateway DB 加载生效企业策略到 ``self._enterprise_config``。"""
@@ -8471,6 +8528,7 @@ class JiuWenSwarmDeepAdapter:
         clear_config_cache()
         clear_embed_config_db_cache()
         clear_memory_config_db_cache()
+        await self._refresh_enterprise_config_for_reload()
         # 清 MemoryRail 实际使用的 openjiuwen lite INDEX_CACHE（而非仓内并行实现的那份），
         # 并 close 旧实例（db 连接 / watchdog observer / 定时任务），使下次
         # init_memory_manager_async 用最新 embedding_config 创建新 manager + 新 provider。

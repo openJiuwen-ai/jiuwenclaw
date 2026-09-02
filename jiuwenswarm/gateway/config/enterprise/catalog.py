@@ -29,6 +29,7 @@ ENTERPRISE_RECORD_SPECS: dict[str, EnterpriseRecordSpec] = {
     "embedding_template": EnterpriseRecordSpec(key_fields=("template_id",)),
     "extension_config_template": EnterpriseRecordSpec(key_fields=("template_id",)),
     "skill_whitelist_template": EnterpriseRecordSpec(key_fields=("template_id",)),
+    "mcp_template": EnterpriseRecordSpec(key_fields=("template_id",)),
     "agent_template": EnterpriseRecordSpec(key_fields=("template_id",)),
     "instance_agent_resource": EnterpriseRecordSpec(key_fields=("resource_id",)),
     "log_masking_rule": EnterpriseRecordSpec(key_fields=("rule_id",)),
