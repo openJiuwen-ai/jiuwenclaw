@@ -4881,6 +4881,18 @@ class JiuWenSwarmDeepAdapter(ExpertCapabilityMixin):
             logger.warning("%s Failed to attach ObservabilityRail: %s", log_prefix, exc)
         stage_timer.mark("observability_rail")
 
+        # MCP 工具 project_id 自动注入 rail：从 session 元数据获取 project_id，
+        # 在 MCP 工具调用前自动注入到 tool_args，确保 MCP server 拿到正确的隔离键。
+        # MCP stdio server 是长驻进程，环境变量无法动态切换，此 rail 解决了
+        # 用户在不同 project 间切换时 project_id 跟不上的问题。
+        try:
+            from jiuwenswarm.server.hooks.mcp_project_id_rail import McpProjectIdRail
+
+            rails_list.append(McpProjectIdRail())
+        except Exception as exc:
+            logger.warning("%s Failed to attach McpProjectIdRail: %s", log_prefix, exc)
+        stage_timer.mark("mcp_project_id_rail")
+
         total_ms = stage_timer.total_ms()
         log_rail_build = _stage_breakdown_logger(total_ms, _SLOW_RAIL_BUILD_MS)
         log_rail_build(
