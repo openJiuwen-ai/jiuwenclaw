@@ -695,10 +695,14 @@ def sync_team_identity_metadata(
         )
         return
 
+    # 不再持久化 mode：这里历史上写死 mode="team"，会把 chat 轮次刚落盘的
+    # team.work.plan / team.work.normal 盖回光杆 "team"，制造 session.plan_status
+    # 等按 metadata.mode 判定 plan 的读取方读到误报 false 的空窗。会话的真实
+    # mode 由 sync_session_request_metadata / append_history_record 按每轮请求
+    # 维护，这里只负责 team 身份（team_name）。
     update_session_metadata(
         session_id=session_id,
         channel_id=_resolve_channel_id(channel_id),
-        mode=mode,
         team_name=ready_team_name,
     )
 
