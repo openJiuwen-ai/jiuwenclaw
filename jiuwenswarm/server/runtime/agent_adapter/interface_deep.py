@@ -389,6 +389,7 @@ from jiuwenswarm.server.runtime.agent_adapter.sysop_builder import (
 from jiuwenswarm.server.runtime.agent_adapter.user_turn import TEAM_USER_TURN_KEY, UserTurn
 from jiuwenswarm.agents.harness.common.auto_harness.service import _HARNESS_PACKAGES_FILE
 from jiuwenswarm.agents.harness.common.plugins.rail_manager import get_rail_manager
+from jiuwenswarm.gateway import CRON_CHANNEL_ID, HEALTH_CHECK_CHANNEL_ID
 from jiuwenswarm.gateway.cron import CronTargetChannel
 from jiuwenswarm.common.schema.agent import AgentRequest, AgentResponse, AgentResponseChunk
 from jiuwenswarm.common.schema.message import ReqMethod
@@ -8761,7 +8762,7 @@ class JiuWenSwarmDeepAdapter:
                 sessions drive the scheduler themselves and get no cron tools.
         """
         if session_id is not None and session_id.startswith(
-            ("heartbeat", "health_check", "cron")
+            ("heartbeat", HEALTH_CHECK_CHANNEL_ID, CRON_CHANNEL_ID)
         ):
             return
         language = self._resolve_runtime_language()
