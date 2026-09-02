@@ -690,6 +690,12 @@ def _sync_chat_request_metadata(
             sync_session_request_metadata,
         )
 
+        # xiaoyi 平台回发寻址随会话落盘（手机消息带值 → 覆盖；桌面续轮不带 → 保持）
+        request_metadata = request.metadata if isinstance(request.metadata, dict) else {}
+        xiaoyi_session_id = request_metadata.get("xiaoyi_session_id") or None
+        xiaoyi_task_id = request_metadata.get("xiaoyi_task_id") or None
+        xiaoyi_conversation_id = request_metadata.get("xiaoyi_conversation_id") or None
+        xiaoyi_root_session_id = request_metadata.get("xiaoyi_root_session_id") or None
         return sync_session_request_metadata(
             session_id=session_id,
             channel_id=request.channel_id or None,
@@ -705,10 +711,52 @@ def _sync_chat_request_metadata(
             explicit_mode_provided=explicit_mode_provided,
             explicit_model_provided=explicit_model_provided,
             work_mode=params.get("work_mode"),
+            xiaoyi_session_id=xiaoyi_session_id,
+            xiaoyi_task_id=xiaoyi_task_id,
+            xiaoyi_conversation_id=xiaoyi_conversation_id,
+            xiaoyi_root_session_id=xiaoyi_root_session_id,
         )
     except (OSError, ValueError) as exc:
         logger.warning("[AgentWebSocketServer] 同步 chat 请求元数据失败: %s", exc)
         return project_dir
+
+
+_XIAOYI_ROUTING_METADATA_KEYS = (
+    "xiaoyi_session_id",       # 顶层 sessionId（物理回发地址）
+    "xiaoyi_task_id",          # 手机任务 id（回发 taskId 复用任务气泡）
+    "xiaoyi_conversation_id",  # 逻辑会话 id
+    "xiaoyi_root_session_id",  # 根回发兜底
+)
+
+
+def _inject_session_xiaoyi_routing(request: AgentRequest) -> None:
+    """从会话级持久化恢复 xiaoyi 平台回发寻址字段并注入 request.metadata。
+
+    桌面端在手机发起的话题里续发消息时，请求本身不带 xiaoyi 元数据；渠道回发
+    （xiaoyi_connect._extract_platform_receive_info）在 metadata 缺失时兜底拿
+    桌面消息 id 当 sessionId → 手机侧会新建会话。注入后回发走物理回发地址。
+    """
+    request_metadata = request.metadata
+    if not isinstance(request_metadata, dict):
+        request_metadata = {}
+        request.metadata = request_metadata
+    if request_metadata.get("xiaoyi_session_id"):
+        return
+    session_id = (request.session_id or "").strip()
+    if not session_id:
+        return
+    try:
+        from jiuwenswarm.server.runtime.session.session_metadata import get_session_metadata
+
+        metadata = get_session_metadata(session_id, cache_bust=True)
+    except Exception:
+        return
+    if not isinstance(metadata, dict):
+        return
+    for key in _XIAOYI_ROUTING_METADATA_KEYS:
+        value = metadata.get(key)
+        if isinstance(value, str) and value.strip():
+            request_metadata.setdefault(key, value.strip())
 
 
 def _harness_error_code(exc: BaseException) -> str:
@@ -3206,6 +3254,11 @@ class AgentWebSocketServer:
             build_device_context_from_request(request)
         )
         agent_request_token = set_current_agent_request(request)
+        # 桌面端在手机发起的话题里续发消息：请求不带 xiaoyi 平台元数据，从会话级
+        # 持久化恢复物理回发地址等字段注入 request.metadata——渠道回发走正常寻址，
+        # 否则 _extract_platform_receive_info 兜底拿桌面消息 id 当 sessionId，
+        # 手机侧会新建会话。
+        _inject_session_xiaoyi_routing(request)
         try:
             async for chunk in agent.process_message_stream(request):
                 chunk_count += 1
@@ -3249,15 +3302,21 @@ class AgentWebSocketServer:
                             wire=wire,
                         )
                     )
-                # 诊断：打印前 3 个和每 50 个 chunk 的发送情况
-                if chunk_count <= 3 or chunk_count % 50 == 0:
-                    _pl = getattr(chunk, "payload", None) or {}
-                    _et = _pl.get("event_type", "") if isinstance(_pl, dict) else ""
+                # 诊断：全量打印 chunk 载荷（E2A 帧内容排查，经桌面端 stderr 转发进 app.log）。
+                # chat.reasoning/chat.delta 是高频增量帧：只打印 is_complete=True 的
+                # （增量帧全部 is_complete=False，即不打印，避免淹没其它帧）；
+                # 其余事件（tool_call/tool_result/todo/usage/error/final 等）全量打印。
+                _pl = getattr(chunk, "payload", None) or {}
+                _et = _pl.get("event_type", "") if isinstance(_pl, dict) else ""
+                _is_complete = bool(getattr(chunk, "is_complete", False))
+                if not (_et in ("chat.reasoning", "chat.delta") and not _is_complete):
+                    _pl_repr = repr(_pl)
+                    if len(_pl_repr) > 8000:
+                        _pl_repr = _pl_repr[:8000] + f"…(truncated {len(_pl_repr)})"
                     logger.info(
-                        "[AgentWebSocketServer] chunk sent: request_id=%s seq=%s"
-                        " event_type=%s wire_keys=%s",
-                        request.request_id, chunk_count - 1, _et,
-                        list(wire.keys())[:10] if isinstance(wire, dict) else "non-dict",
+                        "[AgentWebSocketServer] chunk payload: request_id=%s seq=%s"
+                        " event_type=%s is_complete=%s payload=%s",
+                        request.request_id, chunk_count - 1, _et, _is_complete, _pl_repr,
                     )
                 try:
                     async with send_lock:
