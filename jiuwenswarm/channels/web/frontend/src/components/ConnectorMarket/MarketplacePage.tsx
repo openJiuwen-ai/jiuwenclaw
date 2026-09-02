@@ -381,6 +381,14 @@ export function MarketplacePage({
   // 对应 store 的 isLoading 短暂置 true，10s 静默轮询不影响它（见两个 store 的 loadList 实现），
   // 用它区分空态文案该显示"加载中"还是"没有找到匹配的结果"。
   const activeIsLoading = activeKindForEmpty === 'mcp' ? connectorIsLoading : pluginIsLoading;
+  // 空状态文案分两种：有搜索词/状态筛选/分类筛选时列表为空 = "没有找到匹配的结果"；什么都没筛
+  // 却为空才是真的 "这里还没有内容"（"我的"下 = 还没创建/添加过，与安装/连接状态无关；"广场"
+  // 下 = 后端没返回可用项）。加载态分支同理按 topTab/myKind 区分，两者逻辑保持一致。
+  const activeCategoryForEmpty = activeKindForEmpty === 'mcp' ? category : pluginCategory;
+  const hasEmptyNarrowing =
+    query.trim() !== '' ||
+    statusFilter !== 'all' ||
+    (topTab !== 'my' && activeCategoryForEmpty !== 'all');
 
   // 切换 tab/子筛选/分类/状态筛选/搜索词都会让 activeList 变成一份新列表，统一重置回第1页，
   // 避免停留在一个对新列表来说已经越界的页码上看到空白（同款处理见 CronPanel/index.tsx 的
@@ -646,9 +654,17 @@ export function MarketplacePage({
                       ? 'connectorMarket.empty.loadingMcp'
                       : 'connectorMarket.empty.loadingPlugin',
                 )
-              : topTab === 'my'
-                ? t(myKind === 'mcp' ? 'connectorMarket.empty.myMcp' : 'connectorMarket.empty.myPlugin')
-                : t('connectorMarket.empty.searchNoResult')}
+              : hasEmptyNarrowing
+                ? t('connectorMarket.empty.searchNoResult')
+                : t(
+                    topTab === 'my'
+                      ? myKind === 'mcp'
+                        ? 'connectorMarket.empty.myMcp'
+                        : 'connectorMarket.empty.myPlugin'
+                      : topTab === 'mcp'
+                        ? 'connectorMarket.empty.mcp'
+                        : 'connectorMarket.empty.plugin',
+                  )}
           </div>
         )}
       </div>

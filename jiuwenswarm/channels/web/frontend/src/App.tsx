@@ -2136,12 +2136,17 @@ function AppContent({
     // 返回尚未发送的新建任务时，恢复该临时会话自己的模式和模型；真正开始一个新任务时，
     // 仍固定使用配置的默认模型，不继承当前正式会话手动切换过的模型。
     // 默认模型列表尚未加载完成时兜底沿用当前会话的模型，避免新会话没有模型可用。
-    const { mode: nextMode, selectedModelName } = resolveNewConversationEntrySettings(
+    const resolvedEntrySettings = resolveNewConversationEntrySettings(
       targetMode,
       useSessionStore.getState().defaultModelName,
       currentRuntime?.selectedModelName ?? null,
       shouldRestorePendingNewConversation ? pendingNewRuntime : null,
     );
+    // 扩展页"使用插件/使用 MCP/试试这样用"等入口传 forceMode:'agent'——插件/MCP 不支持集群
+    // 模式，无论当前会话是什么模式、也无论有没有未发送的集群模式草稿，跳转会话都要回到单
+    // agent 模式（bug003）。
+    const nextMode = options.forceMode ?? resolvedEntrySettings.mode;
+    const { selectedModelName } = resolvedEntrySettings;
     const selectedProject = options.project ?? useWorkspaceStore.getState().selectedProject;
     const projectDir = resolveNewConversationProjectDir(
       options.preserveProject,
@@ -3268,15 +3273,17 @@ const showWorkspaceDivider = effectiveTeamAreaExpanded && !showConversationNotFo
                 },
               }))}
               onUseExample={(initialInputValue, mcpName) =>
-                requestSessionNavigation('new', { initialInputValue, initialEnabledMcps: [mcpName] })
+                requestSessionNavigation('new', { initialInputValue, initialEnabledMcps: [mcpName], forceMode: 'agent' })
               }
               onUsePluginExample={(initialInputValue, pluginId) =>
-                requestSessionNavigation('new', { initialInputValue, initialEnabledPlugins: [pluginId] })
+                requestSessionNavigation('new', { initialInputValue, initialEnabledPlugins: [pluginId], forceMode: 'agent' })
               }
               onUseExtension={({ kind, id }) =>
                 requestSessionNavigation(
                   'new',
-                  kind === 'plugin' ? { initialEnabledPlugins: [id] } : { initialEnabledMcps: [id] },
+                  kind === 'plugin'
+                    ? { initialEnabledPlugins: [id], forceMode: 'agent' }
+                    : { initialEnabledMcps: [id], forceMode: 'agent' },
                 )
               }
             />
