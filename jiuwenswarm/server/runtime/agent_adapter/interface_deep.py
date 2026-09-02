@@ -10454,21 +10454,15 @@ class JiuWenSwarmDeepAdapter(ExpertCapabilityMixin):
             await self._prepare_rewind_session_for_next_invoke(
                 session_id, reason="stream_error",
             )
-            error_code, error_message = self._extract_stream_error_code_message(exc)
-            error_payload: dict[str, Any] = {
-                "event_type": "chat.error",
-                "error": error_message or str(exc),
-                "error_type": type(exc).__name__,
-            }
-            if error_code:
-                error_payload["code"] = error_code
-            if error_message:
-                error_payload["message"] = error_message
             yield AgentResponseChunk(
                 request_id=rid,
                 channel_id=cid,
-                payload=error_payload,
-                is_complete=True,
+                payload={
+                    "event_type": "chat.error",
+                    "error": str(exc),
+                    "error_type": type(exc).__name__,
+                },
+                is_complete=False,
             )
         finally:
             # 临时计费标记（docs/billing-trace-marker-design.md）：一轮 query 收口，
@@ -10698,48 +10692,6 @@ class JiuWenSwarmDeepAdapter(ExpertCapabilityMixin):
         except Exception:
             # 计费标记永不影响会话主路径
             logger.debug("[billing-trace] 终态标记派发失败", exc_info=True)
-
-    @staticmethod
-    def _extract_stream_error_code_message(
-        exc: BaseException,
-    ) -> tuple[str | None, str | None]:
-        """从模型/上游异常中尽量还原业务错误码和错误消息。
-
-        openjiuwen 的 OpenAI 客户端会把原始 APIStatusError 包进
-        ``BaseError``（cause/``__cause__`` 保留原始异常）。这里按
-        ``error_code/code``、``error_message/message``、``body.error``
-        的顺序递归提取，供 E2A 层透传给前端。
-        """
-
-        def _pick(obj: Any, names: tuple[str, ...]) -> str | None:
-            for name in names:
-                value = getattr(obj, name, None)
-                if isinstance(value, str) and value.strip():
-                    return value.strip()
-            return None
-
-        code = _pick(exc, ("error_code", "code"))
-        message = _pick(exc, ("error_message", "message"))
-
-        body = getattr(exc, "body", None)
-        if isinstance(body, dict):
-            inner = body.get("error")
-            if not isinstance(inner, dict):
-                inner = body
-            code = code or _pick(inner, ("code", "error_code"))
-            message = message or _pick(inner, ("message", "error_message"))
-
-        cause = getattr(exc, "cause", None)
-        if cause is None:
-            cause = getattr(exc, "__cause__", None)
-        if cause is not None and cause is not exc:
-            cause_code, cause_message = (
-                JiuWenSwarmDeepAdapter._extract_stream_error_code_message(cause)
-            )
-            code = code or cause_code
-            message = message or cause_message
-
-        return code, message
 
     @staticmethod
     def _parse_stream_chunk(
