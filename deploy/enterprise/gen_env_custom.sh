@@ -137,10 +137,6 @@ MODEL_NAME=""
 API_BASE=""
 API_KEY=""
 
-EMBED_MODEL=""
-EMBED_API_BASE=""
-EMBED_API_KEY=""
-FEISHU_BOTS="
 "
 
 # Please configure an available pipy source

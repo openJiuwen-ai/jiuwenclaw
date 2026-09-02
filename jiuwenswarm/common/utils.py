@@ -1,4 +1,4 @@
-from jiuwenswarm.common.local_env_config import is_enterprise
+from jiuwenswarm.edition import is_enterprise
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
 """Path management for JiuWenSwarm.
@@ -1300,26 +1300,29 @@ def prepare_workspace(
     if not template_agent_dir.is_dir():
         raise RuntimeError(f"resources template missing agent dir: {template_agent_dir}")
 
-    # ----- .env: copy from template to config/.env -----
-    env_template_src_candidates = [
-        resources_dir / ".env.template",
-        package_root / ".env.template",
-    ]
-    env_template_src = next((p for p in env_template_src_candidates if p.exists()), None)
-    if not env_template_src:
-        raise RuntimeError(
-            "env template source not found; tried: "
-            + ", ".join(str(p) for p in env_template_src_candidates)
-        )
-    env_dest = workspace_dir / "config" / ".env"
-    if overwrite or not env_dest.exists():
-        with TrackCopyDiff(
-            dest=env_dest,
-            is_file=True,
-            cumulative=cumulative_diff,
-            overwrite=overwrite,
-        ):
-            shutil.copy2(env_template_src, env_dest)
+    # ----- .env: copy from template to config/.env（仅个人版） -----
+    # 企业版环境变量由部署侧注入（K8s envFrom），不产生也不读取 config/.env
+    # （运行时守卫见 dotenv_early.load_dotenv_runtime）。
+    if not is_enterprise():
+        env_template_src_candidates = [
+            resources_dir / ".env.template",
+            package_root / ".env.template",
+        ]
+        env_template_src = next((p for p in env_template_src_candidates if p.exists()), None)
+        if not env_template_src:
+            raise RuntimeError(
+                "env template source not found; tried: "
+                + ", ".join(str(p) for p in env_template_src_candidates)
+            )
+        env_dest = workspace_dir / "config" / ".env"
+        if overwrite or not env_dest.exists():
+            with TrackCopyDiff(
+                dest=env_dest,
+                is_file=True,
+                cumulative=cumulative_diff,
+                overwrite=overwrite,
+            ):
+                shutil.copy2(env_template_src, env_dest)
 
     # ----- copy runtime dirs (multi-tenant layout) -----
     service_root = get_service_root_dir()

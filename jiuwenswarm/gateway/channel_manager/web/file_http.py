@@ -9,7 +9,7 @@ and signs a download token (3-A); no POST to Web Pod.
 """
 
 from __future__ import annotations
-from jiuwenswarm.common.local_env_config import is_enterprise
+from jiuwenswarm.edition import is_enterprise
 
 import json
 import logging

@@ -126,7 +126,6 @@ declare -A DEPLOY_VARS=(
     ["ENABLE_EXTERNAL_PVC"]="false"
     ["ENABLE_EXTERNAL_RABBITMQ"]="false"
     ["ENABLE_EXTERNAL_REDIS"]="false"
-    ["JIUWENSWARM_EDITION"]="enterprise"
     ["USER_WEB_IDP_TARGET"]=""
     ["USER_WEB_MANAGER_TARGET"]=""
     ["FLUENT_BIT_NAME"]="fluent-bit"

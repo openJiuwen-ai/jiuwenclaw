@@ -35,7 +35,7 @@ spec:
             - name: FRONTEND_HOST
               value: "0.0.0.0"
             - name: JIUWENSWARM_EDITION
-              value: "<<JIUWENSWARM_EDITION>>"
+              value: "enterprise"
             - name: LOGIN_AUTH_SIMULATE
               value: "<<APPLY_PATCH>>"
             - name: FRONTEND_PORT
@@ -66,7 +66,6 @@ spec:
               value: "<<WEB_DB_NAME>>"
             - name: TZ
               value: "<<TIMEZONE>>"
-            # 对象存储（与 Gateway 一致）；OBS_SECRET_KEY 来自上方 secretRef
             - name: OBS_URL
               value: "<<OBS_URL>>"
             - name: OBS_ACCESS_KEY

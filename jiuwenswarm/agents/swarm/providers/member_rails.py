@@ -48,6 +48,7 @@ from jiuwenswarm.agents.harness.common.rails.skill_retrieval_prompt_rail import 
 from jiuwenswarm.agents.harness.common.rails.symphony import (
     SymphonyOrchestrationRail,
 )
+from jiuwenswarm.edition import is_enterprise
 from jiuwenswarm.agents.harness.team.rails.team_skill_storage_policy_rail import (
     TeamSkillStoragePolicyRail,
 )
@@ -180,8 +181,6 @@ def _build_a2a_outbound_toolkit_rail(
     context: SwarmBuildContext,
 ) -> A2AOutboundToolkitRail | None:
     """Build the shared A2A rail with a route stable across member tasks."""
-    from jiuwenswarm.common.local_env_config import is_enterprise
-
     if is_enterprise():
         return None
     inp = A2AOutboundToolkitInput.resolve(params, context)

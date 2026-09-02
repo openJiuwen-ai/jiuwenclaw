@@ -13,6 +13,7 @@ from typing import Any
 from jiuwenswarm.common.request_ext import attach_to_metadata as _ext_attach
 from jiuwenswarm.common.request_ext import build_ext_from_source as _ext_build
 from jiuwenswarm.common.schema.message import Message
+from jiuwenswarm.edition import is_enterprise
 from jiuwenswarm.gateway.channel_manager.web.invoke import dispatch_web_request as invoke_web_request
 from jiuwenswarm.gateway.channel_manager.web.outbound import (
     HttpJsonOutbound,
@@ -53,8 +54,6 @@ def _trust_client_tenant_headers(client_host: str | None) -> bool:
     # 企业用户面通过 NodePort/Web Pod 访问时，客户端地址不是回环地址。
     # 企业版的身份边界由上游认证和 ``is_enterprise()`` 控制，必须把选中的
     # user/group/bot 透传给 Runtime 路由；个人版继续只信任本机请求。
-    from jiuwenswarm.common.utils import is_enterprise
-
     if is_enterprise():
         return True
     host = str(client_host or "").strip().lower()

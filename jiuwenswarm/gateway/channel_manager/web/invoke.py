@@ -13,6 +13,7 @@ from jiuwenswarm.common.request_identity import (
     web_routing_identity,
 )
 from jiuwenswarm.common.schema.message import Message
+from jiuwenswarm.edition import is_enterprise
 
 logger = logging.getLogger(__name__)
 
@@ -47,8 +48,6 @@ _ENTERPRISE_SKILL_ALLOWED = frozenset({
 
 def is_enterprise_write_forbidden(method: str) -> bool:
     """Central guard shared by WS and HTTP; Cron and locale remain user-writable."""
-    from jiuwenswarm.common.utils import is_enterprise
-
     if not is_enterprise():
         return False
     if method in _ENTERPRISE_BLOCKED_EXACT or method.startswith(_ENTERPRISE_BLOCKED_PREFIXES):

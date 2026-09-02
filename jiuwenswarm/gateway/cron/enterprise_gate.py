@@ -9,7 +9,7 @@ import os
 from collections.abc import Mapping
 from typing import Any
 
-from jiuwenswarm.common.local_env_config import is_enterprise
+from jiuwenswarm.edition import is_enterprise
 from jiuwenswarm.deployment_mode import MODE_DISTRIBUTED, normalize_deployment_mode
 
 logger = logging.getLogger(__name__)

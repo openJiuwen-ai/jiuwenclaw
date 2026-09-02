@@ -5,11 +5,6 @@ gen_web_file() {
     local template_file="${CONFIG["WEB_TEMPLATE_FILE"]}"
     local file="${CONFIG["WEB_FILE"]}"
 
-    # 内置 MinIO 时 .env 的 OBS_URL 可能为空；模板占位符需要可达 endpoint
-    if [ -z "${DEPLOY_VARS["OBS_URL"]:-}" ] || [ "${DEPLOY_VARS["ENABLE_EXTERNAL_OBS"]}" != "true" ]; then
-        DEPLOY_VARS["OBS_URL"]="${DEPLOY_VARS["MINIO_NAME"]}-headless.default:9000"
-    fi
-
     render_config_template "${template_file}" "${file}" "DEPLOY_VARS"
 
     if [ "${DEPLOY_VARS["DB_TYPE"]}" == "postgresql" ]; then

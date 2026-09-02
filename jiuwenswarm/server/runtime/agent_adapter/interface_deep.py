@@ -359,8 +359,8 @@ from jiuwenswarm.server.runtime.agent_adapter.evolution_slash import (
 )
 from jiuwenswarm.server.runtime.agent_adapter import evolution_version as evolution_version_ctl
 from jiuwenswarm.server.utils.stream_utils import parse_ask_user_question_payload
+from jiuwenswarm.edition import is_enterprise
 from jiuwenswarm.common.local_env_config import (
-    is_enterprise,
     bind_agent_env_ns,
     bind_task_env_overlay,
     build_effective_env_overlay,

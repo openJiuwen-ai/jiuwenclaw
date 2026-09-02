@@ -47,7 +47,7 @@ kubectl get nodes
 在`部署节点`执行以下操作，下载并解压官方部署工具安装包，工具下载地址：
 
 ```
-https://openjiuwen-ci.obs.cn-north-4.myhuaweicloud.com/JiuwenSwarm/JiuwenSwarm/JiuwenSwarm_deployTool_<VERSION>_<ARCH>.zip
+https://openjiuwen-ci.obs.cn-north-4.myhuaweicloud.com/jiuwenclaw/JiuwenClaw/product/JiuwenClaw_deployTool_<VERSION>_<ARCH>_product.zip
 ```
 
 解压命令：
@@ -62,7 +62,7 @@ unzip ***.zip
 部署工具解压后完整目录结构及各文件/目录用途说明如下，业务配置统一在配置文件`.env.custom` 中调整，其他文件非必要不修改，：
 
 ```
-JiuwenClaw_deployTool_0.0.<version>_arm64/
+JiuwenClaw_deployTool_<VERSION>_<ARCH>_product/
 ├── .env.example                          # 配置文件的参数说明书
 ├── .env.custom                           # 配置文件（需用户手动修改）
 ├── README.md                             # 部署工具本地说明文档
@@ -748,22 +748,27 @@ MODE=dev
 
 # ===================== jiuwenclaw 模块调试 =====================
 # CLAW源码宿主机绝对路径，仅调试claw组件时填写；不调试直接留空
-# 源码仓库：https://gitcode.com/openJiuwen/jiuwenswarm
-# 代码分支：dev/enterprise_kub
+# 源码仓库：https://gitcode.com/openJiuwen/jiuwenswarm.git
+# 代码分支：dev-stable
 CLAW_CODE_PATH=""
 
 # ===================== agent-runtime 模块调试 =====================
 # Runtime源码宿主机绝对路径，仅调试runtime组件时填写；不调试直接留空
-# 源码仓库：https://gitcode.com/openJiuwen/agent-runtime
+# 源码仓库：https://gitcode.com/openJiuwen/agent-runtime.git
 # 代码分支：develop
 RUNTIME_CODE_PATH=""
 
 # ===================== agent-core 模块调试 =====================
 # agent-core项目在宿主机本地代码路径，仅调试core组件时填写；不调试直接留空
+# 源码仓库：https://gitcode.com/openJiuwen/agent-core.git
+# 代码分支：dev-stable
 CORE_CODE_PATH=""
 
 # 是否要给 Web 模块mount代码
-# 注意：Web源代码代码需要npm run build之后，才能mount进容器，
+# 注意：Web源代码代码需要npm install之后，才能mount进容器。
+# cd jiuwenswarm/channels/web/frontend
+# npm install
+
 IS_MOUNT_WEB_CODE="false"
 ```
 

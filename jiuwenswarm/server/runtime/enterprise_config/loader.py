@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Collection
 from typing import Any
 
-from jiuwenswarm.common.local_env_config import is_enterprise
+from jiuwenswarm.edition import is_enterprise
 from jiuwenswarm.common.schema.agent import AgentRequest
 from jiuwenswarm.common.utils import logger
 

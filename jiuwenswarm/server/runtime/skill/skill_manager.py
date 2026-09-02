@@ -33,7 +33,8 @@ from openjiuwen.agent_evolving.checkpointing.evolution_store import (
     EvolutionLog as EvolutionFile,
     EvolutionRecord as EvolutionEntry,
 )
-from jiuwenswarm.common.local_env_config import get_local_config, is_enterprise
+from jiuwenswarm.common.local_env_config import get_local_config
+from jiuwenswarm.edition import is_enterprise
 from jiuwenswarm.common.utils import (
     get_agent_root_dir,
     get_agent_skills_dir,

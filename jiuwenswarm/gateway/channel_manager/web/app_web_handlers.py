@@ -63,7 +63,7 @@ from jiuwenswarm.common.config import (
     update_updater_in_config,
     update_proactive_recommendation_in_config,
 )
-from jiuwenswarm.common.local_env_config import is_enterprise
+from jiuwenswarm.edition import is_enterprise
 from jiuwenswarm.common.request_identity import (
     apply_routing_metadata,
     normalize_routing_identity,
