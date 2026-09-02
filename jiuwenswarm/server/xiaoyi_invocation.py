@@ -24,10 +24,9 @@ XIAOYI_INVOCATION_EXTENSION_KEY = "jiuwenswarm.xiaoyi_invocation"
 # x-hag-trace-id 头值上限：celia sse-api 模型网关拒绝 >64 字符（回 data: {"error":{}}
 # 空错误帧，对话空返回）。trace 核心段 = `${sessionId}&${interactionId 短码}`，
 # 构造统一收口在 common.invocation_context.billing_trace.build_billing_core
-# （上限 45 = 64 - 最长计费前缀「xiaoyi-work-failed-」19，超长先截 session 段保
-# interaction 短码）；与桌面端计费上报（billing-service.ts coreTraceId）同核心段。
-# 临时计费标记方案见 docs/billing-trace-marker-design.md：模型调用经 TraceAwareModel
-# 出口加 xiaoyi-work-{begin|}- 前缀，终态由 interface_deep 补发虚拟模型调用。
+# （上限 45，超长先截 session 段保 interaction 短码）；模型调用携带的
+# x-hag-trace-id 与计费上报（task/status/update）完全同值（裸核心段，2026-09-02 起
+# 无 xiaoyi-work-* 前缀；与桌面端 billing-service.ts coreTraceId 同口径）。
 from jiuwenswarm.common.invocation_context.billing_trace import (
     MAX_CORE_LEN,
     MAX_TRACE_ID_LEN,
@@ -152,9 +151,9 @@ def build_xiaoyi_trace_context(request: AgentRequest) -> TraceContext | None:
     """Convert Xiaoyi task/cron identity to the public trace contract."""
     # 桌面计费链路（优先于渠道分支）：客户端在 metadata.interaction_id 显式下发
     # 本轮交互 id 时，trace 核心段固定为 sessionId&interactionId 短码——与端侧计费
-    # 状态上报（fulfillment NEW→FINISH/FAILED，前缀 xiaoyi-work-{begin|end|failed}-）
-    # 同核心段；HITL 续跑 request_id 变更但 interaction_id 不变，本轮所有模型调用的
-    # x-hag-trace-id 全程稳定。
+    # 状态上报（fulfillment task/status/update NEW→FINISH/FAILED）的
+    # x-hag-trace-id 完全同值；HITL 续跑 request_id 变更但 interaction_id 不变，
+    # 本轮所有模型调用的 x-hag-trace-id 全程稳定。
     metadata = request.metadata if isinstance(request.metadata, dict) else {}
     session_id = _first_text(request.session_id)
     explicit_interaction_id = _first_text(metadata.get("interaction_id"))
@@ -187,7 +186,7 @@ def build_xiaoyi_trace_context(request: AgentRequest) -> TraceContext | None:
     return TraceContext(
         version=TRACE_CONTEXT_VERSION,
         # xiaoyi 渠道 task_id 本身即复合形态（session&task&…），保留原串；
-        # 按计费核心段上限 45 截断（加 xiaoyi-work-failed- 前缀后仍 ≤64）
+        # 按计费核心段上限 45 截断
         trace_id=task_id[:MAX_CORE_LEN],
         conversation_id=parts[0].strip() or None,
         interaction_id=parts[1].strip() if len(parts) > 1 and parts[1].strip() else None,
