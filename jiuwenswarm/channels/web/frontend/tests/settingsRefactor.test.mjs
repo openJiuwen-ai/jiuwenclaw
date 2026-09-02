@@ -23,6 +23,7 @@ import {
 } from '../node_modules/.cache/settings-refactor/registry/buildSettingsPageDefinition.js';
 import {
   isMediaCapabilityConfigured,
+  mediaCapabilityModalities,
   mediaCapabilityConfigFields,
   mediaCapabilityEnabledField,
   mediaCapabilityPersistenceFields,
@@ -1014,6 +1015,20 @@ test('Settings i18n is symmetrical and includes the optional field affordance', 
   assert.equal(zh.channels.xiaoyiApps.defaultAppName, '默认小艺应用');
   assert.equal(en.channels.xiaoyiApps.defaultAppName, 'Default Xiaoyi App');
   assert.doesNotMatch(source('src/features/settings/modules/channels/channelAdapters.ts'), /默认小艺应用|zh-Hans-CN/);
+  const dynamicAgentKeys = [
+    ...mediaCapabilityModalities.flatMap((modality) => [
+      `settingsPanel.agent.${modality}`,
+      `settingsPanel.agent.${modality}Description`,
+      `settingsPanel.agent.${modality}ConfigTitle`,
+    ]),
+    'settingsPanel.agent.toggleCapability',
+    'settingsPanel.agent.saveAndEnable',
+    'settingsPanel.agent.savedRestartRequired',
+  ];
+  for (const key of dynamicAgentKeys) {
+    assert.equal(typeof translationAt(zh, key), 'string', `Missing Chinese translation ${key}`);
+    assert.equal(typeof translationAt(en, key), 'string', `Missing English translation ${key}`);
+  }
   for (const file of sourceFilesUnder('src/features/settings').filter((candidate) =>
     /\.tsx?$/.test(candidate.pathname),
   )) {
