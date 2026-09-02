@@ -145,7 +145,7 @@ def test_team_a2a_outbound_rail_uses_live_route_when_context_session_is_empty(
 
 
 def test_team_a2a_outbound_rail_is_excluded_from_enterprise_runtime(monkeypatch) -> None:
-    monkeypatch.setenv("AGENT_RUNTIME", "1")
+    monkeypatch.setenv("JIUWENSWARM_EDITION", "enterprise")
     context = SwarmBuildContext(session_id="session-a2a", channel="web")
 
     assert member_rails._build_a2a_outbound_toolkit_rail({}, context) is None

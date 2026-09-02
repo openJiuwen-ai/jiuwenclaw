@@ -55,5 +55,5 @@ def test_code_team_modes_exclude_adapter_owned_a2a_outbound_rail(sub_mode):
 
 
 def test_enterprise_code_mode_excludes_a2a_outbound_rail(monkeypatch):
-    monkeypatch.setenv("AGENT_RUNTIME", "1")
+    monkeypatch.setenv("JIUWENSWARM_EDITION", "enterprise")
     assert "_a2a_outbound_toolkit_rail" not in _rail_attr_names(sub_mode="normal")

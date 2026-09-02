@@ -180,11 +180,9 @@ def _build_a2a_outbound_toolkit_rail(
     context: SwarmBuildContext,
 ) -> A2AOutboundToolkitRail | None:
     """Build the shared A2A rail with a route stable across member tasks."""
-    from jiuwenswarm.agents.harness.common.rails.permissions.config_loader import (
-        is_enterprise_runtime,
-    )
+    from jiuwenswarm.common.local_env_config import is_enterprise
 
-    if is_enterprise_runtime():
+    if is_enterprise():
         return None
     inp = A2AOutboundToolkitInput.resolve(params, context)
     session_id = str(inp.session_id or "").strip()
