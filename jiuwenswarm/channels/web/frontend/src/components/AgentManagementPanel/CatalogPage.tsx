@@ -1,3 +1,4 @@
+import { useCallback, useLayoutEffect, useRef, useState } from 'react';
 import { ChevronLeft, ChevronRight } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import type { AgentCatalogItem, RequestStatus } from '../../features/agentManagement';
@@ -32,6 +33,95 @@ function SkeletonCard() {
   return <div className="agent-management-card agent-management-card--skeleton" aria-hidden="true" />;
 }
 
+type CategoryRowProps = {
+  category: string;
+  onChange: (value: string) => void;
+};
+
+function CategoryRow({ category, onChange }: CategoryRowProps) {
+  const { t } = useTranslation();
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const [canScrollLeft, setCanScrollLeft] = useState(false);
+  const [canScrollRight, setCanScrollRight] = useState(false);
+
+  const updateScrollState = useCallback(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    setCanScrollLeft(el.scrollLeft > 1);
+    setCanScrollRight(el.scrollLeft < el.scrollWidth - el.clientWidth - 1);
+  }, []);
+
+  useLayoutEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    updateScrollState();
+    if (typeof ResizeObserver === 'undefined') return;
+    const observer = new ResizeObserver(updateScrollState);
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [updateScrollState]);
+
+  const scrollByPage = (direction: 1 | -1) => {
+    const el = scrollRef.current;
+    if (!el) return;
+    el.scrollBy({ left: direction * el.clientWidth * 0.8, behavior: 'smooth' });
+  };
+
+  return (
+    <div
+      className={`agent-management-category-row${canScrollLeft ? ' is-scroll-left' : ''}${canScrollRight ? ' is-scroll-right' : ''}`}
+    >
+      <button
+        type="button"
+        className="agent-management-category-scroll agent-management-category-scroll--prev"
+        aria-label={t('agentManagement.categoryScrollPrev')}
+        onClick={() => scrollByPage(-1)}
+        data-hidden={!canScrollLeft}
+      >
+        <ChevronLeft size={16} aria-hidden="true" />
+      </button>
+      <div
+        className="agent-management-category-row__viewport"
+        ref={scrollRef}
+        role="tablist"
+        aria-label={t('agentManagement.categoryLabel')}
+        onScroll={updateScrollState}
+      >
+        <button
+          type="button"
+          role="tab"
+          aria-selected={!category}
+          className={`agent-management-category${!category ? ' is-active' : ''}`}
+          onClick={() => onChange('')}
+        >
+          {t('agentManagement.categoryAll')}
+        </button>
+        {CATEGORIES.map(item => (
+          <button
+            key={item}
+            type="button"
+            role="tab"
+            aria-selected={category === item}
+            className={`agent-management-category${category === item ? ' is-active' : ''}`}
+            onClick={() => onChange(item)}
+          >
+            {t(`agentManagement.categories.${item}`, { defaultValue: item })}
+          </button>
+        ))}
+      </div>
+      <button
+        type="button"
+        className="agent-management-category-scroll agent-management-category-scroll--next"
+        aria-label={t('agentManagement.categoryScrollNext')}
+        onClick={() => scrollByPage(1)}
+        data-hidden={!canScrollRight}
+      >
+        <ChevronRight size={16} aria-hidden="true" />
+      </button>
+    </div>
+  );
+}
+
 export function CatalogPage({
   scope,
   items,
@@ -62,29 +152,7 @@ export function CatalogPage({
     <section className="agent-management-catalog" data-testid={`agent-catalog-${scope}`}>
       {!isMine ? (
         <div className="agent-management-toolbar">
-          <div className="agent-management-category-row" role="tablist" aria-label={t('agentManagement.categoryLabel')}>
-            <button
-              type="button"
-              role="tab"
-              aria-selected={!category}
-              className={`agent-management-category${!category ? ' is-active' : ''}`}
-              onClick={() => onCategoryChange('')}
-            >
-              {t('agentManagement.categoryAll')}
-            </button>
-            {CATEGORIES.map(item => (
-              <button
-                key={item}
-                type="button"
-                role="tab"
-                aria-selected={category === item}
-                className={`agent-management-category${category === item ? ' is-active' : ''}`}
-                onClick={() => onCategoryChange(item)}
-              >
-                {t(`agentManagement.categories.${item}`, { defaultValue: item })}
-              </button>
-            ))}
-          </div>
+          <CategoryRow category={category} onChange={onCategoryChange} />
         </div>
       ) : null}
 

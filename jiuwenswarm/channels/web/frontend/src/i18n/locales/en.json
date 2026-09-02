@@ -2159,6 +2159,8 @@
     "categoryLabel": "Agent categories",
     "categoryAll": "All",
     "categoryOther": "Other",
+    "categoryScrollPrev": "Scroll categories left",
+    "categoryScrollNext": "Scroll categories right",
     "mineSubtitle": "Manage Agents you created or installed",
     "searchLabel": "Search Agents",
     "searchCatalog": "Search Agents",
@@ -2198,7 +2200,7 @@
       "createViaChatPrompt": "Help me create an xxx Agent who is good at xxx",
       "back": "Back"
     },
-    "card": { "open": "Open {{name}} details", "actions": "Actions for {{name}}" },
+    "card": { "open": "Open {{name}} details", "actions": "Actions for {{name}}", "moreTagsTooltip": "More tags: {{tags}}" },
     "states": {
       "installed": "Installed",
       "loadError": "Unable to load the Agent list. Try again.",
