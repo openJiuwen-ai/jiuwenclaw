@@ -668,9 +668,13 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
   const isVoicePressingRef = useRef(false);
   const { t } = useTranslation();
   const activeSessionId = useChatStore((s) => s.activeSessionId);
+  const hasPendingQuestion = useChatStore(
+    (s) => Boolean(s.runtimes[activeSessionId ?? '']?.pendingQuestion),
+  );
   const isCompactRunning = Boolean(
     activeSessionId && compactingSessionIds.has(activeSessionId),
   );
+  const composerDisabled = isCompactRunning || hasPendingQuestion;
   const selectedAgentId = useSessionStore((s) => {
     const runtime = s.runtimes[activeSessionId ?? ''];
     if (runtime?.mode !== 'agent') return null;
@@ -946,11 +950,11 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
     },
   });
 
-  const imageInputDisabled = isListening || isCompactRunning || (isInterruptible && !isTeamMode);
+  const imageInputDisabled = isListening || composerDisabled || (isInterruptible && !isTeamMode);
   const isDesktopBridgeReady = useDesktopLocalFilePickerReady();
   // "+" 触发按钮本身不跟图片/目标的可用性挂钩：菜单以后可能挂其他跟图片/目标无关的功能，
   // 触发按钮只要不在录音就该能点开；具体某一项能不能选，交给菜单里每一项各自的禁用态处理。
-  const attachTriggerDisabled = isListening || isCompactRunning;
+  const attachTriggerDisabled = isListening || composerDisabled;
   const readyAttachments = useMemo(
     () =>
       attachments.filter(
@@ -976,8 +980,10 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
           useChatStore.getState().setInputValue(sid, finalText);
         }
         setPendingVoiceText('');
+        if (composerDisabled) return;
 
         setTimeout(() => {
+          if (sid && useChatStore.getState().runtimes[sid]?.pendingQuestion) return;
           if (isTeamMode) {
             onSubmit(finalText);
           } else if (isInterruptible) {
@@ -991,7 +997,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
         }, 150);
       }
     }
-  }, [isListening, pendingVoiceText, inputValue, isInterruptible, isTeamMode, onSubmit, onInterrupt]);
+  }, [composerDisabled, isListening, pendingVoiceText, inputValue, isInterruptible, isTeamMode, onSubmit, onInterrupt]);
 
   useEffect(() => {
     return () => {
@@ -1629,7 +1635,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
   );
 
   const handleSubmit = useCallback(() => {
-    if (isCompactRunning) return;
+    if (composerDisabled) return;
 
     // 用富文本（含 chip 标记）作为发送内容，气泡可交织渲染技能
     const richContent = extractRichContent();
@@ -1756,7 +1762,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
     readyMediaItems,
     hasUploadingAttachments,
     hasAttachmentErrors,
-    isCompactRunning,
+    composerDisabled,
     isInterruptible,
     isListening,
     onSubmit,
@@ -1775,15 +1781,15 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
 
   const trimmedDraft = (inputValue + pendingVoiceText).trim();
   const hasTextDraft = trimmedDraft.length > 0;
-  // Attachments / listening still count as "composer busy" so Stop stays hidden
-  // while the user is preparing a follow-up, but they do not enable Send.
+  // Attachments / listening count as "composer busy" so Stop stays hidden while
+  // preparing a follow-up. A pending approval keeps Stop available and blocks Send.
   const hasDraft = hasTextDraft || attachments.length > 0 || isListening;
   const isImageInterruptBlocked =
     isInterruptible && !isTeamMode && !isAgentMode && readyMediaItems.length > 0;
-  const showStop = isProcessing && !isPaused && !hasDraft;
+  const showStop = isProcessing && !isPaused && (!hasDraft || hasPendingQuestion);
   const hasReadyMedia = readyMediaItems.length > 0;
   const canSubmit = showStop || (
-    !isCompactRunning &&
+    !composerDisabled &&
     (hasTextDraft || hasReadyMedia) &&
     !isLoadingHistory &&
     !isImageInterruptBlocked &&
@@ -2802,8 +2808,8 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
       )}
       <div
         ref={inputRef}
-        contentEditable={!isCompactRunning}
-        aria-disabled={isCompactRunning}
+        contentEditable={!composerDisabled}
+        aria-disabled={composerDisabled}
         suppressContentEditableWarning
         onBeforeInput={handleEditorBeforeInput}
         onInput={handleEditorInput}
@@ -2815,6 +2821,8 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
         data-placeholder={
           isCompactRunning
             ? t('chat.placeholderCompacting')
+            : hasPendingQuestion
+              ? t('chat.placeholderAwaitingApproval')
             : isListening
               ? t('chat.placeholderVoice')
             : isTeamMode
@@ -2829,7 +2837,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                     ? t('chat.placeholderProcessing')
                     : t('chat.placeholder')
         }
-        className={cx('chat-input-editor', isCompactRunning && 'chat-input-editor--disabled')}
+        className={cx('chat-input-editor', composerDisabled && 'chat-input-editor--disabled')}
         data-testid="chat-panel-input"
       />
 
@@ -3519,7 +3527,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
           {isAgentMode && <ContextUsageIndicator />}
 
           <ChatModelSelector
-            disabled={isProcessing || isCompactRunning || (!isAgentMode && activeSessionId !== NEW_CONVERSATION_ID)}
+            disabled={isProcessing || composerDisabled || (!isAgentMode && activeSessionId !== NEW_CONVERSATION_ID)}
           />
 
           <button
