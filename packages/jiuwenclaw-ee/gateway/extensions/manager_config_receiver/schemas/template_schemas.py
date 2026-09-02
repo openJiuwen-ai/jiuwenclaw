@@ -163,6 +163,25 @@ class SkillWhitelistTemplateCreateRequest(SkillWhitelistTemplateUpdateRequest):
     skill_id: str = Field(..., min_length=1, max_length=512)
 
 
+class PermissionsTemplateUpdateRequest(SafeTextMixin):
+    template_name: str | None = Field(default=None, max_length=128)
+    description: str | None = Field(default=None, max_length=512)
+    enabled: bool | None = None
+    body: dict[str, Any] | None = None
+    data: dict[str, Any] | None = None
+
+
+class PermissionsTemplateCreateRequest(PermissionsTemplateUpdateRequest):
+    template_id: str = Field(..., min_length=1, max_length=100)
+    template_name: str = Field(..., min_length=1, max_length=128)
+    body: dict[str, Any] = Field(
+        ...,
+        description=(
+            "完整 permissions 段，结构与 config.yaml::permissions 一致"
+        ),
+    )
+
+
 class AgentTemplateUpdateRequest(SafeTextMixin):
     template_name: str | None = Field(default=None, max_length=128)
     description: str | None = Field(default=None, max_length=512)
