@@ -3106,13 +3106,17 @@ class SkillTurboExecutor:
             node_status = "completed"
             info = artifact.get("info") if isinstance(artifact.get("info"), dict) else {}
             files = artifact.get("files") if isinstance(artifact.get("files"), list) else []
-        self._node_artifacts_holder[subplan.plan_name] = {
+        artifact_entry: dict[str, Any] = {
             "task_id": task_id,
             "status": node_status,
             "info": info,
             "files": files,
             "finished_at": timestamp,
         }
+        delivery_summary = artifact.get("delivery_summary")
+        if isinstance(delivery_summary, str) and delivery_summary.strip():
+            artifact_entry["delivery_summary"] = delivery_summary.strip()
+        self._node_artifacts_holder[subplan.plan_name] = artifact_entry
         logger.debug(
             "[SkillTurboExecutor] node_artifact collected: plan_name=%s status=%s has_artifact=%s",
             subplan.plan_name,
