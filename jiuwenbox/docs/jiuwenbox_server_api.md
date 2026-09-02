@@ -250,9 +250,9 @@ print(resp.json())
 
 说明：
 
-- Conch 创建时读取有效 policy 的 `conch` 段（`template_id`、`filesystem_policy.bind_mounts`、`network`、可选成对的 `run_as_user` / `run_as_group`）。
+- Conch 创建时读取有效 policy 的 `conch` 段（`template_name`、`filesystem_policy.bind_mounts`、`network`、可选成对的 `run_as_user` / `run_as_group`）。
 - process（bwrap）环境优先级为 policy `environment` → create `env` → exec `env` → runtime 保留变量。有效 policy 的 `environment` 也不能声明 `SANDBOX_IP`。
-- `conch.template_id` 解析顺序：有效 policy → 环境变量 `JIUWENBOX_CONCH_TEMPLATE_ID` → 不传（由 conchd `sandbox.default_template_id` 决定）。
+- `conch.template_name` 解析顺序：有效 policy → 环境变量 `JIUWENBOX_CONCH_TEMPLATE_NAME` → 不传（由 conchd `sandbox.default_template_name` 决定）。
 - `conch.run_as_user` / `conch.run_as_group`：可选成对；create 时在宿主机解析为 uid:gid（纯数字直通，名字走 `pwd`/`grp`）。未配置则保持 conch-agent 身份。未知名/越界 **400**。与顶层 `process.run_as_*` 无关；改身份需重建沙箱。
 - `conch.network` 仅支持 IPv4/CIDR 的 `default` + `allowed_ips` / `blocked_ips`（无域名/端口/IPv6）；映射到 Conch `allowOut`/`denyOut`/`allowIn`/`denyIn`，并由 `egress.default` 推导 SDK 内部的 `allow_internet_access`（不对用户暴露）。
 - `ingress.default: deny` 且 `allowed_ips` 为空时，适配层仅在发给 Conch 的 `denyIn` 注入 `0.0.0.0/0`，**不会**写入用户可见/持久化的 jiuwenbox policy。

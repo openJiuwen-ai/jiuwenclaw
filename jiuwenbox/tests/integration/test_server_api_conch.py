@@ -92,7 +92,7 @@ class SandboxTrackingClient:
 
 def _conch_template_available() -> bool:
     return bool(
-        (os.environ.get("JIUWENBOX_CONCH_TEMPLATE_ID") or "").strip()
+        (os.environ.get("JIUWENBOX_CONCH_TEMPLATE_NAME") or "").strip()
     )
 
 
@@ -105,13 +105,13 @@ def _require_conch_template_env() -> None:
     """
     if not _conch_template_available():
         pytest.skip(
-            "Set JIUWENBOX_CONCH_TEMPLATE_ID to run Conch runtime e2e "
+            "Set JIUWENBOX_CONCH_TEMPLATE_NAME to run Conch runtime e2e "
             "(server must have Conch SDK/conchd configured)"
         )
 
 
-def _conch_template_id() -> str:
-    return (os.environ.get("JIUWENBOX_CONCH_TEMPLATE_ID") or "").strip()
+def _conch_template_name() -> str:
+    return (os.environ.get("JIUWENBOX_CONCH_TEMPLATE_NAME") or "").strip()
 
 
 def _conch_create_json(
@@ -122,7 +122,7 @@ def _conch_create_json(
     include_template: bool = True,
     sandbox_id: str | None = None,
 ) -> dict:
-    """Build a create body; inject template_id via request policy for remote servers."""
+    """Build a create body; inject template_name via request policy for remote servers."""
     body: dict = {"sandbox_runtime": "conch", "policy_mode": policy_mode}
     if env is not None:
         body["env"] = env
@@ -130,10 +130,10 @@ def _conch_create_json(
         body["sandbox_id"] = sandbox_id
     merged = {} if policy is None else dict(policy)
     if include_template:
-        template_id = _conch_template_id()
+        template_name = _conch_template_name()
         conch = dict(merged.get("conch") or {})
-        if template_id and not (conch.get("template_id") or "").strip():
-            conch["template_id"] = template_id
+        if template_name and not (conch.get("template_name") or "").strip():
+            conch["template_name"] = template_name
         merged["conch"] = conch
     if merged:
         body["policy"] = merged
@@ -184,7 +184,7 @@ def client(server_endpoint):
 
 def _default_conch_block() -> dict:
     return {
-        "template_id": "",
+        "template_name": "",
         "vcpu_num": None,
         "vcpu_max": None,
         "ram_mb": None,
@@ -399,7 +399,7 @@ class TestConchSandboxTypeAlways:
 class TestConchSandboxRuntime:
     """Lifecycle / exec / files / network tests against a Conch-capable server.
 
-    Opt in with ``JIUWENBOX_CONCH_TEMPLATE_ID``. SDK/conchd must be configured on
+    Opt in with ``JIUWENBOX_CONCH_TEMPLATE_NAME``. SDK/conchd must be configured on
     the jiuwenbox **server** host; this client only uses the HTTP API.
     """
 
@@ -414,7 +414,7 @@ class TestConchSandboxRuntime:
         assert body["pid"] is None
         assert body["phase"] == "ready", body
         policy = client.get(f"/api/v1/policies/{body['id']}").json()
-        assert policy["conch"]["template_id"] == _conch_template_id()
+        assert policy["conch"]["template_name"] == _conch_template_name()
 
     @staticmethod
     def test_create_with_vcpu_ram_and_conch_env(client):
@@ -513,16 +513,16 @@ class TestConchSandboxRuntime:
     @staticmethod
     def test_request_policy_template_overrides_env(client):
         _require_conch_template_env()
-        request_template = (os.environ.get("JIUWENBOX_CONCH_TEMPLATE_ID_OVERRIDE") or "").strip()
+        request_template = (os.environ.get("JIUWENBOX_CONCH_TEMPLATE_NAME_OVERRIDE") or "").strip()
         if not request_template:
             pytest.skip(
-                "Set JIUWENBOX_CONCH_TEMPLATE_ID_OVERRIDE to a second valid template id"
+                "Set JIUWENBOX_CONCH_TEMPLATE_NAME_OVERRIDE to a second valid template name"
             )
 
         resp = client.post(
             "/api/v1/sandboxes",
             json=_conch_create_json(
-                policy={"conch": {"template_id": request_template}},
+                policy={"conch": {"template_name": request_template}},
                 include_template=False,
             ),
         )
@@ -531,7 +531,7 @@ class TestConchSandboxRuntime:
         assert body["sandbox_runtime"] == "conch"
         assert body["phase"] == "ready", body
         policy = client.get(f"/api/v1/policies/{body['id']}").json()
-        assert policy["conch"]["template_id"] == request_template
+        assert policy["conch"]["template_name"] == request_template
 
     @staticmethod
     def test_append_bind_mounts_enter_effective_policy(client, tmp_path):
@@ -1319,7 +1319,7 @@ class TestConchSandboxRuntime:
         assert overridden["ingress"]["default"] == "deny"
         assert overridden["ingress"]["allowed_ips"] == ["192.0.2.10"]
         assert "0.0.0.0/0" not in overridden["ingress"]["blocked_ips"]
-        assert before["conch"]["template_id"] == override.json()["conch"]["template_id"]
+        assert before["conch"]["template_name"] == override.json()["conch"]["template_name"]
 
         got = client.get(f"/api/v1/policies/{sandbox_id}")
         assert got.status_code == 200, got.text

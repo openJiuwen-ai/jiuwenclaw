@@ -25,7 +25,7 @@ from jiuwenswarm.common.config import (
     get_sandbox_runtime,
     get_sandbox_startup_mode,
     reject_files_for_jiuwenbox_conch,
-    require_jiuwenbox_conch_template_id,
+    require_jiuwenbox_conch_template_name,
 )
 from jiuwenswarm.common.utils import (
     get_agent_workspace_dir,
@@ -661,8 +661,8 @@ def create_sandbox_sysop_card(
         if is_conch:
             reject_files_for_jiuwenbox_conch(files_runtime)
             endpoint = get_sandbox_endpoint()
-            template_id = require_jiuwenbox_conch_template_id(
-                endpoint.get("template_id")
+            template_name = require_jiuwenbox_conch_template_name(
+                endpoint.get("template_name")
             )
             policy_raw, upload_list = build_filesystem_policy(
                 None,
@@ -678,7 +678,7 @@ def create_sandbox_sysop_card(
             )
             bind_mounts = list(fs_raw.get("bind_mounts") or [])
             conch_policy: dict[str, Any] = {
-                "template_id": template_id,
+                "template_name": template_name,
                 "filesystem_policy": {"bind_mounts": bind_mounts},
             }
             run_as_user = str(endpoint.get("user") or "").strip()
@@ -725,7 +725,7 @@ def create_sandbox_sysop_card(
             logger.info(
                 "[sysop_builder] jiuwenbox-conch SysOperationCard created:\n"
                 "  base_url=%s provider_type=%s api_sandbox_runtime=conch\n"
-                "  template_id=%s\n"
+                "  template_name=%s\n"
                 "  isolation_custom_id=%s\n"
                 "  idle_ttl=%s idle_check_interval=%s\n"
                 "  preserve_file_sharing_mode=%s\n"
@@ -735,7 +735,7 @@ def create_sandbox_sysop_card(
                 "  policy_mode=%s",
                 sandbox_url,
                 provider_type,
-                template_id,
+                template_name,
                 isolation_custom_id,
                 idle_ttl_seconds,
                 idle_check_interval,

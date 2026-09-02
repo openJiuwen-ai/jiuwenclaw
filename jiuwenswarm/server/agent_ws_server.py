@@ -115,7 +115,7 @@ from jiuwenswarm.common.config import (
     get_sandbox_startup_mode,
     get_sandbox_startup_mode_explicit,
     reject_files_for_jiuwenbox_conch,
-    require_jiuwenbox_conch_template_id,
+    require_jiuwenbox_conch_template_name,
     remove_mcp_server_in_config,
     resolve_preserve_file_sharing_mode_default,
     resolve_sandbox_policy_path,
@@ -1318,7 +1318,7 @@ class AgentWebSocketServer:
                 )
                 return
             if str(sandbox_type).strip().lower() == "jiuwenbox-conch":
-                require_jiuwenbox_conch_template_id(endpoint.get("template_id"))
+                require_jiuwenbox_conch_template_name(endpoint.get("template_name"))
                 reject_files_for_jiuwenbox_conch(get_sandbox_runtime().get("files"))
             raw_policy = endpoint.get("policy_file") or ""
             effective_policy_file = raw_policy or DEFAULT_SANDBOX_POLICY_FILE
@@ -1373,7 +1373,7 @@ class AgentWebSocketServer:
                     "policy_file": effective_policy_file,
                 }
                 if str(sandbox_type).strip().lower() == "jiuwenbox-conch":
-                    persist_kwargs["template_id"] = endpoint.get("template_id")
+                    persist_kwargs["template_name"] = endpoint.get("template_name")
                 update_sandbox_endpoint(
                     url,
                     sandbox_type,
@@ -6909,7 +6909,7 @@ class AgentWebSocketServer:
         sandbox_type = endpoint.get("type") or "jiuwenbox"
         normalized_type = str(sandbox_type).strip().lower()
         if normalized_type == "jiuwenbox-conch":
-            require_jiuwenbox_conch_template_id(endpoint.get("template_id"))
+            require_jiuwenbox_conch_template_name(endpoint.get("template_name"))
             reject_files_for_jiuwenbox_conch(get_sandbox_runtime().get("files"))
 
         # startup_mode:
@@ -6989,7 +6989,7 @@ class AgentWebSocketServer:
             "preserve_file_sharing_mode": preserve_mode,
         }
         if normalized_type == "jiuwenbox-conch":
-            persist_kwargs["template_id"] = endpoint.get("template_id")
+            persist_kwargs["template_name"] = endpoint.get("template_name")
         try:
             update_sandbox_endpoint(
                 url,
@@ -7010,7 +7010,7 @@ class AgentWebSocketServer:
             "policy_file": effective_policy_file,
         }
         if normalized_type == "jiuwenbox-conch":
-            endpoint_view["template_id"] = endpoint.get("template_id")
+            endpoint_view["template_name"] = endpoint.get("template_name")
 
         return {
             "runtime": runtime,
