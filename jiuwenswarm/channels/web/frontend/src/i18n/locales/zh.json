@@ -34,6 +34,7 @@
     "chat": "对话",
     "work": "任务",
     "agent": "智能体",
+    "experiments": "实验",
     "teams": "团队",
     "sessions": "会话",
     "cron": "定时任务",
@@ -463,7 +464,11 @@
         "board": "任务板视图"
       },
       "metrics": {
-        "progress": "进度"
+        "progress": "进度",
+        "optimizationObject": "优化对象",
+        "descInfo": "描述信息",
+        "viewDetail": "查看详情",
+        "artifactPreviewPlaceholder": "中间产物预览（接口 ready 后填充）"
       },
       "columns": {
         "waiting": "等待中",
@@ -3123,6 +3128,111 @@
       "failed": "上次运行失败",
       "skipped": "上次运行已跳过",
       "cancelled": "上次运行已取消"
+    }
+  },
+  "rsi": {
+    "title": "实验",
+    "createExperiment": "创建实验",
+    "empty": {
+      "title": "暂无实验任务",
+      "hint": "我们支持创建Harness优化、论文优化和程序优化实验"
+    },
+    "list": {
+      "loading": "加载中…",
+      "error": "加载实验列表失败"
+    },
+    "createDialog": {
+      "title": "创建实验",
+      "nameLabel": "实验名称",
+      "namePlaceholder": "请输入实验名称",
+      "typeLabel": "实验类型",
+      "typeHarness": "Harness 优化",
+      "typeArtifact": "产物优化",
+      "artifactSubtypeLabel": "产物子类型",
+      "artifactTypeLabel": "产物类型",
+      "subtypePaper": "论文",
+      "subtypeProgram": "程序",
+      "optimizerModelLabel": "优化模型",
+      "testerModelLabel": "测试模型",
+      "datasetLabel": "评测集",
+      "datasetPlaceholder": "请选择或输入本地路径，如 file://Users/jiuwen/evaluationset.csv",
+      "browse": "浏览",
+      "maxIterationsLabel": "最大迭代轮次",
+      "searchWidthLabel": "最大搜索宽度",
+      "optimizationInstructionLabel": "优化指令（可选，优化指令和论文必须上传一个）",
+      "optimizationInstructionPlaceholder": "优化指令与产物至少上传一个",
+      "paperLabel": "论文（可选，优化指令和论文必须上传一个）",
+      "paperPlaceholder": "选择论文文件路径",
+      "programLabel": "程序路径",
+      "programPlaceholder": "选择程序文件路径",
+      "validate": "校验",
+      "validating": "校验中…",
+      "valid": "校验通过，共 {{count}} 条样本",
+      "invalid": "校验未通过",
+      "sampleUnknown": "校验通过",
+      "modelPlaceholder": "选择模型",
+      "freeModels": "免费模型",
+      "customModels": "自定义模型",
+      "submit": "创建",
+      "cancel": "取消",
+      "infoBar": "优化指令和产物至少上传一个；程序必填程序文件与运行方法指令。",
+      "validation": {
+        "nameRequired": "请输入实验名称",
+        "datasetRequired": "请选择数据集文件",
+        "optimizerRequired": "请选择优化模型",
+        "testerRequired": "请选择测试模型",
+        "paperOrInstruction": "优化指令和论文至少上传一个",
+        "programRequired": "请选择程序文件"
+      }
+    },
+    "configDialog": {
+      "title": "配置信息",
+      "readonly": "只读"
+    },
+    "detail": {
+      "optimizationResult": "优化结果",
+      "bestArtifact": "当前最优产物",
+      "baselineScore": "基线分数",
+      "usage": "用量（token）",
+      "iterations": "迭代轮次",
+      "evalCount": "组合评测",
+      "pruned": "剪枝",
+      "harnessProcess": "Harness 优化过程",
+      "programProcess": "程序优化过程",
+      "runningStage": "运行中",
+      "nodeHint": "每个节点是一套完整插件组合，标签表示本轮发生变化的组件",
+      "estimatedCost": "实际估算成本：{{cost}}元",
+      "selectedNode": "当前选中",
+      "inherit": "继承",
+      "othersInherit": "其余继承",
+      "legendBestPath": "最优路径",
+      "legendEvaluated": "已评测",
+      "legendPending": "待评测/评测中",
+      "legendPruned": "剪枝",
+      "statusCreated": "已创建",
+      "statusQueued": "排队中",
+      "statusRunning": "运行中",
+      "statusCompleted": "已完成",
+      "statusFailed": "已失败",
+      "statusPaused": "已暂停",
+      "statusTerminated": "已终止",
+      "actionConfig": "配置信息",
+      "actionPause": "中断训练",
+      "actionResume": "继续",
+      "actionStart": "开始训练",
+      "actionInstall": "安装插件",
+      "actionDownload": "下载",
+      "actionTerminate": "终止",
+      "tagType": "类型",
+      "tagStatus": "状态",
+      "tagMaxIterations": "最大迭代轮次",
+      "tagMaxSearchWidth": "最大搜索宽度",
+      "tagCreatedAt": "创建时间",
+      "expandView": "放大查看",
+      "locate": "定位",
+      "evaluating": "正在评测",
+      "candidate": "候选",
+      "progress": "进度"
     }
   }
 }

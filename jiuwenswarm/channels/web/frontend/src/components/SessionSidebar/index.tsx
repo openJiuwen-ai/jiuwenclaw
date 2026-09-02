@@ -49,10 +49,23 @@ const connectorMarketNavIcon = (
   </svg>
 );
 
+// "实验"（RSI 优化）导航图标——烧瓶/演进树隐喻，单色 currentColor。
+const experimentsNavIcon = (
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.5}>
+    <path
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      d="M9 3h6M10 3v6.5L5.5 18a2 2 0 0 0 1.8 3h9.4a2 2 0 0 0 1.8-3L14 9.5V3"
+    />
+    <path strokeLinecap="round" strokeLinejoin="round" d="M8.5 15h7" />
+  </svg>
+);
+
 const mainNavItems: NavItem[] = [
   { key: 'chat', labelKey: 'nav.work', icon: <WorkIcon aria-hidden /> },
   { key: 'skills', labelKey: 'nav.skills', icon: <SkillDesignIcon aria-hidden /> },
   { key: 'agents', labelKey: 'nav.agent', icon: <AgentDesignIcon aria-hidden /> },
+  { key: 'experiments', labelKey: 'nav.experiments', icon: experimentsNavIcon },
   { key: 'connectorMarket', labelKey: 'nav.connectorMarket', icon: connectorMarketNavIcon },
   { key: 'teams', labelKey: 'nav.teams', icon: teamNavIcon },
   { key: 'settings', labelKey: 'nav.settings', icon: <SettingsIcon aria-hidden /> },
