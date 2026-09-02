@@ -315,6 +315,8 @@ class AgentWebSocketServer:
         self._ping_interval = ping_interval
         self._ping_timeout = ping_timeout
         self._server: Any = None
+        # 事件循环饥饿观测（非保活）：测量 sleep(1) 唤醒延迟，便于对齐 pong 超时。
+        self._loop_lag_task: asyncio.Task[None] | None = None
         # send_push的推送订阅者统一由PushRegistry持有，本类不持有当前连接；
         # WS侧以每连接唯一id：``make_ws_push_subscriber_id(ws)``注册。
         # key是``_ws_capabilities_key``返回的str(id(ws))，与RequestContext.connection_id
@@ -499,6 +501,40 @@ class AgentWebSocketServer:
         # startup_mode 决定要不要自动把 jiuwenbox 子进程也拉起来。失败不阻塞
         # 启动 (用户依然可以在 TUI 里跑 /sandbox enable 重试)。
         await self._bootstrap_internal_jiuwenbox()
+        self._start_loop_lag_monitor()
+
+    def _start_loop_lag_monitor(self) -> None:
+        """启动事件循环 lag 观测 task（验收用，不主动断连/不发应用心跳）。"""
+        if self._loop_lag_task is not None and not self._loop_lag_task.done():
+            return
+        self._loop_lag_task = asyncio.create_task(
+            self._loop_lag_monitor(),
+            name="ws-loop-lag-monitor",
+        )
+
+    async def _loop_lag_monitor(self) -> None:
+        """每隔约 1s 测量预期唤醒 vs 实际唤醒延迟。
+
+        lag > 1.0s → WARNING；lag > 5.0s → ERROR。仅观测，不干预连接。
+        """
+        interval_s = 1.0
+        while True:
+            started = time.monotonic()
+            await asyncio.sleep(interval_s)
+            lag_s = time.monotonic() - started - interval_s
+            if lag_s <= 1.0:
+                continue
+            lag_ms = lag_s * 1000.0
+            if lag_s > 5.0:
+                logger.error(
+                    "[AgentWebSocketServer] event loop lag high lag_ms=%.0f",
+                    lag_ms,
+                )
+            else:
+                logger.warning(
+                    "[AgentWebSocketServer] event loop lag elevated lag_ms=%.0f",
+                    lag_ms,
+                )
 
         # 事件循环停摆探针 + 主线程栈采样器：用于定位「同步处理占住事件循环
         # 数秒导致网关 ping/pong 超时、任务被一刀切取消」类问题（见
@@ -748,6 +784,9 @@ class AgentWebSocketServer:
         warmup = _startup_warmup_task
         _startup_warmup_task = None
         await _cancel_warmup_task(warmup, "startup warmup")
+        lag_task = self._loop_lag_task
+        self._loop_lag_task = None
+        await _cancel_warmup_task(lag_task, "loop lag monitor")
         had_server = self._server is not None
         if had_server:
             self._server.close()
