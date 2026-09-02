@@ -175,6 +175,7 @@
   top: calc(100% + 8px);
   right: 0;
   z-index: 20;
+  width: max-content;
   min-width: 131px;
   border: 1px solid var(--color-border-default);
   border-radius: var(--radius-md);
@@ -194,6 +195,7 @@
   text-align: left;
   cursor: pointer;
   font-size: 14px;
+  white-space: nowrap;
 }
 
 .agent-management-create-menu__popover button:hover,
