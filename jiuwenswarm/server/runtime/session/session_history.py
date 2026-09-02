@@ -281,17 +281,24 @@ def _dedup_records_last_wins(records: list[dict[str, Any]]) -> list[dict[str, An
         content = record.get("content")
         return content.strip() if isinstance(content, str) else ""
 
-    # 每 key 最后一条 chat.final 的正文（前缀判断基准）
-    last_index_by_key: dict[str, int] = {}
-    last_text_by_key: dict[str, str] = {}
+    # 逐 key 收集 finals，从后往前链式判定：存在「后续同 key final 以本稿为前缀」
+    # （累计快照链，不限是否为终稿）→ 本稿丢弃；否则独立正文段保留。
+    final_indices_by_key: dict[str, list[tuple[int, str]]] = {}
     for index, record in enumerate(records):
         if str(record.get("event_type") or "") != "chat.final":
             continue
         key = _dedup_key(record)
         if not key:
             continue
-        last_index_by_key[key] = index
-        last_text_by_key[key] = _record_text(record)
+        final_indices_by_key.setdefault(key, []).append((index, _record_text(record)))
+
+    drop_indices: set[int] = set()
+    for finals in final_indices_by_key.values():
+        later_texts: list[str] = []
+        for index, text in reversed(finals):
+            if text and any(later.startswith(text) for later in later_texts):
+                drop_indices.add(index)
+            later_texts.append(text)
 
     kept: list[dict[str, Any]] = []
     kept_text_by_key: dict[str, str] = {}
@@ -303,16 +310,13 @@ def _dedup_records_last_wins(records: list[dict[str, Any]]) -> list[dict[str, An
         if not key:
             kept.append(record)
             continue
-        if index != last_index_by_key.get(key):
-            # 中间稿：终稿前缀（累计快照）或与已保留正文重复（重试同稿）→ 丢弃
-            text = _record_text(record)
-            if not text:
-                continue
-            if last_text_by_key.get(key, "").startswith(text):
-                continue
-            if kept_text_by_key.get(key) == text:
-                continue
-        kept_text_by_key[key] = _record_text(record)
+        if index in drop_indices:
+            continue
+        text = _record_text(record)
+        # 与已保留正文逐字重复（重试同稿）也丢弃
+        if text and kept_text_by_key.get(key) == text:
+            continue
+        kept_text_by_key[key] = text
         kept.append(record)
     return kept
 
