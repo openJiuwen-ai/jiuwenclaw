@@ -249,6 +249,7 @@ async def trigger_main_agent(
         # 无脑给每个 chunk setdefault(source) 导致主 agent 在话术后继续跑工具推进用户
         # 任务时，后续进度/工具消息也被渲染成技能推荐卡片（共享同一 request_id）。
         proactive_marking_closed = False
+        push_failed = False
         try:
             async for chunk in agent.process_message_stream(agent_request):
                 # chunk 经 server.send_push 推 Gateway。send_push 内部已用
@@ -301,19 +302,30 @@ async def trigger_main_agent(
                         c = chunk_payload.get("content")
                         if isinstance(c, str):
                             delta_parts.append(c)
-                    await server.send_push({
+                    pushed_ok = await transport.send_push({
                         "request_id": getattr(chunk, "request_id", "") or agent_request.request_id,
                         "channel_id": cid,
                         "session_id": session_id,
                         "payload": chunk_payload,
                         "is_complete": bool(getattr(chunk, "is_complete", False)),
                     })
+                    # send_push 失败信号有两种（不同 transport 实现各异）：
+                    #   - AgentWebSocketServer.send_push 返回 bool，False = 无 ws/降级/发送失败
+                    #   - RuntimeHostPushTransport.send_push 失败时抛 RuntimeError（成功返回 None）
+                    # 显式返回 False = 推送失败；None/True = 成功（None 来自不返回值的 transport）。
+                    # 失败时 chunk 没真到前端，不算送达，记 push_failed 让下方判定排除，
+                    # 防止"假送达"：ws 短断时仍写 history（幽灵卡片）+ 误占 24h cooldown。
+                    if pushed_ok is False:
+                        push_failed = True
+                        logger.debug("[ProactiveEngine] send_push reported not-pushed (ws down?)")
                 except Exception as exc:
+                    # 兜底：send_push 抛异常（RuntimeHostPushTransport 失败时抛/测试 mock）同样标失败。
+                    push_failed = True
                     logger.debug("[ProactiveEngine] send_push chunk failed: %s", exc)
-            # 送达判定收紧：循环跑完且未产 chat.error 且确实拿到话术正文（final/delta）。
-            # 缺任何一条 = 未真正送达（LLM 失败/0 token/异常），不计 delivered →
-            # 不写 history、不占 cooldown，避免空记录 + 误占 24h 冷却位。
-            if not had_chat_error and (final_content or "".join(delta_parts)):
+            # 送达判定收紧：循环跑完且未产 chat.error 且确实拿到话术正文（final/delta）
+            # 且推送未失败。缺任何一条 = 未真正送达（LLM 失败/0 token/推送异常），
+            # 不计 delivered → 不写 history、不占 cooldown，避免空记录 + 误占 24h 冷却位。
+            if not had_chat_error and not push_failed and (final_content or "".join(delta_parts)):
                 delivered = True
             elif had_chat_error:
                 logger.info("[ProactiveEngine] not delivered (main agent chat.error, no phrasing text)")
