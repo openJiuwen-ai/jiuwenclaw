@@ -106,6 +106,34 @@ async def test_logging_db_flat_codec() -> None:
     assert rows[0]["level"] == "ERROR"
     assert rows[0]["full"] == "DEBUG"
     assert "body" not in rows[0]
+    assert rows[0].get("created_at") is not None
+    assert rows[0].get("updated_at") is not None
+
+    created_at = rows[0]["created_at"]
+    await repo.merge_levels({"gateway": "WARNING"})
+    rows = await store.list("logging_config", limit=1)
+    assert rows[0]["gateway"] == "WARNING"
+    assert rows[0]["created_at"] == created_at
+    assert rows[0].get("updated_at") is not None
+
+
+@pytest.mark.asyncio
+async def test_permissions_db_body_writes_timestamps() -> None:
+    store = InMemoryPersistentBackend()
+    repo = PermissionsConfigRepository(
+        store, DbBodySectionCodec(), instance_id=""
+    )
+    await repo.merge({"enabled": True})
+    rows = await store.list("permissions_config", limit=1)
+    assert rows
+    assert rows[0].get("created_at") is not None
+    assert rows[0].get("updated_at") is not None
+    created_at = rows[0]["created_at"]
+    await repo.merge({"enabled": False})
+    rows = await store.list("permissions_config", limit=1)
+    assert rows[0]["body"]["enabled"] is False
+    assert rows[0]["created_at"] == created_at
+    assert rows[0].get("updated_at") is not None
 
 
 @pytest.mark.asyncio
