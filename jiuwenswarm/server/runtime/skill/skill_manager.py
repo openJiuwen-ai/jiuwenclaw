@@ -547,15 +547,17 @@ class SkillManager:
             os.getenv("TEAM_SKILLS_HUB_HMAC_SECRET_ENV")
             or "SKILL_DOWNLOAD_HMAC_SECRET"
         ).strip()
+        # 默认 if-present：Hub 未下发签名时仅记 verified=false 不拦截安装；
+        # 需要强验签的环境通过 TEAM_SKILLS_HUB_HMAC_VERIFICATION=required 显式开启
         verification = str(
-            os.getenv("TEAM_SKILLS_HUB_HMAC_VERIFICATION") or "required"
+            os.getenv("TEAM_SKILLS_HUB_HMAC_VERIFICATION") or "if-present"
         ).strip().lower()
         if verification not in {"required", "if-present"}:
             logger.warning(
-                "Invalid TEAM_SKILLS_HUB_HMAC_VERIFICATION=%s; using required",
+                "Invalid TEAM_SKILLS_HUB_HMAC_VERIFICATION=%s; using if-present",
                 verification,
             )
-            verification = "required"
+            verification = "if-present"
         return SourceConfig(
             source_id=SWARM_SKILL_HUB_SOURCE_ID,
             provider_type="swarmskillhub",
@@ -2409,6 +2411,7 @@ class SkillManager:
         force: bool,
         fingerprint: str | None = None,
         verification: dict[str, Any] | None = None,
+        market_display_name: str = "",
     ) -> dict[str, Any]:
         """Atomically replace the entity, then commit the JSON installation record."""
         existing_ref = self._find_installation_by_skill_ref(source_id, skill_id)
@@ -2458,6 +2461,7 @@ class SkillManager:
                 fingerprint=fingerprint,
                 verification=verification,
                 entity_dir=entity_dir,
+                market_display_name=market_display_name,
             )
         except Exception:
             if dest.exists():
@@ -2483,6 +2487,8 @@ class SkillManager:
                 "missing_params", "source_id, skill_id and version_id are required"
             )
         force = bool(params.get("force", False))
+        # 市场展示名（技能广场卡片名）透传落盘，让「我的技能」与技能广场同名显示
+        market_display_name = str(params.get("display_name") or "").strip()[:200]
         try:
             descriptor, body, verification = await self._fetch_verified_source_artifact(
                 source_id=source_id,
@@ -2520,6 +2526,7 @@ class SkillManager:
                     force=force,
                     fingerprint=descriptor.fingerprint,
                     verification=verification,
+                    market_display_name=market_display_name,
                 )
             skill_payload: dict[str, Any] = {}
             for key in (
@@ -5791,6 +5798,7 @@ class SkillManager:
             "removable",
             "sync_status",
             "consistency",
+            "market_display_name",
         ):
             if key in dto:
                 payload[key] = dto[key]
@@ -5834,6 +5842,7 @@ class SkillManager:
         fingerprint: str | None = None,
         verification: dict[str, Any] | None = None,
         entity_dir: str | None = None,
+        market_display_name: str | None = None,
         replace_by_name: bool = False,
     ) -> dict[str, Any]:
         """Create or update one managed installation in workspace JSON."""
@@ -5903,6 +5912,7 @@ class SkillManager:
             ("skill_id", skill_id),
             ("version_id", version_id),
             ("fingerprint", fingerprint),
+            ("market_display_name", market_display_name),
         ):
             normalized = str(value or "").strip()
             if normalized:

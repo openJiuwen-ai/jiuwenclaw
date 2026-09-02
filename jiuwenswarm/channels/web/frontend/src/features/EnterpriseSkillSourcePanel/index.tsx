@@ -82,6 +82,29 @@ function labelText(label: { name?: string } | string | undefined): string {
   return label.name || '';
 }
 
+/** 安装/更新中状态按产物唯一键判定：name 在 Hub 侧可重复或为空，直接用会让所有按钮一起转 */
+function itemKey(item: SkillCandidate, fallbackSourceId: string): string {
+  return `${item.source_id || fallbackSourceId}:${item.skill_id || item.name}:${item.version_id}`;
+}
+
+/**
+ * 页签来回切换会卸载并重挂面板，挂载时的自动加载（providers/updates/search）
+ * 用短 TTL 模块级缓存兜底：避免重复请求打满后端 scope 队列（SCOPE_FULL_TIMEOUT），
+ * 也让瞬态失败时可回退到缓存快照而不是清空列表。用户主动操作（搜索/翻页/安装/更新）始终走实时请求。
+ */
+const MOUNT_CACHE_TTL_MS = 60_000;
+const providersCache = new Map<string, { at: number; sources: SourceDescriptor[] }>();
+const updatesCache = new Map<string, { at: number; items: UpdateStatus[] }>();
+const searchCache = new Map<string, { at: number; items: SkillCandidate[]; total: number }>();
+
+function isFresh(at: number): boolean {
+  return Date.now() - at < MOUNT_CACHE_TTL_MS;
+}
+
+function searchCacheKey(sessionId: string, sourceId: string, q: string, page: number): string {
+  return `${sessionId}|${sourceId}|${q}|${page}`;
+}
+
 export function EnterpriseSkillSourcePanel({ sessionId, viewMode = 'list', externalSearchQuery, onInstalled }: EnterpriseSkillSourcePanelProps) {
   const { t } = useTranslation();
   const [sources, setSources] = useState<SourceDescriptor[]>([]);
@@ -100,9 +123,22 @@ export function EnterpriseSkillSourcePanel({ sessionId, viewMode = 'list', exter
 
   const withSession = useCallback((params?: Record<string, unknown>) => ({ ...(params || {}), session_id: sessionId }), [sessionId]);
 
-  // 1) 拉取可用技能源，默认选中第一个可搜索的来源
+  // 1) 拉取可用技能源，默认选中第一个可搜索的来源（挂载时优先用缓存，避免页签切换重复请求）
   useEffect(() => {
     let cancelled = false;
+    const applySources = (enabled: SourceDescriptor[]) => {
+      if (cancelled) return;
+      setSources(enabled);
+      if (enabled.length > 0) setSourceId(enabled[0].source_id);
+      else setLoadState('error');
+    };
+    const cached = providersCache.get(sessionId);
+    if (cached && isFresh(cached.at)) {
+      applySources(cached.sources);
+      return () => {
+        cancelled = true;
+      };
+    }
     void (async () => {
       try {
         const data = await webRequest<{
@@ -112,12 +148,15 @@ export function EnterpriseSkillSourcePanel({ sessionId, viewMode = 'list', exter
         }>('skills.source.providers', withSession());
         if (!data.success) throw new Error(data.error_message || t('skills.source.errors.loadFailed'));
         const enabled = (data.providers || []).filter(item => item.enabled !== false && (item.capabilities || []).includes('search'));
-        if (cancelled) return;
-        setSources(enabled);
-        if (enabled.length > 0) setSourceId(enabled[0].source_id);
-        else setLoadState('error');
+        providersCache.set(sessionId, { at: Date.now(), sources: enabled });
+        applySources(enabled);
       } catch (error) {
         if (cancelled) return;
+        const fallback = providersCache.get(sessionId);
+        if (fallback) {
+          applySources(fallback.sources);
+          return;
+        }
         setLoadState('error');
         showToast('error', error instanceof Error ? error.message : t('skills.source.errors.loadFailed'));
       }
@@ -125,34 +164,58 @@ export function EnterpriseSkillSourcePanel({ sessionId, viewMode = 'list', exter
     return () => {
       cancelled = true;
     };
-  }, [showToast, t, withSession]);
+  }, [sessionId, showToast, t, withSession]);
 
-  // 2) 已安装技能的更新状态（按 source_id:name 作为已装判定）
-  useEffect(() => {
-    if (!sourceId) return;
-    let cancelled = false;
-    void (async () => {
+  // 2) 已安装技能的更新状态（按 source_id:name 作为已装判定；挂载走缓存，安装/更新后强制刷新）
+  const loadUpdates = useCallback(
+    async (targetSourceId: string, force = false) => {
+      if (!targetSourceId) return;
+      const cacheKey = `${sessionId}|${targetSourceId}`;
+      const applyItems = (items: UpdateStatus[]) => {
+        setUpdateStatuses(new Map(items.map(item => [`${item.source_id}:${item.name}`, item])));
+      };
+      const cached = updatesCache.get(cacheKey);
+      if (!force && cached && isFresh(cached.at)) {
+        applyItems(cached.items);
+        return;
+      }
       try {
         const data = await webRequest<{
           success: boolean;
           items?: UpdateStatus[];
-        }>('skills.updates.check', withSession({ source_id: sourceId }));
-        if (!cancelled && data.success) {
-          setUpdateStatuses(new Map((data.items || []).map(item => [`${item.source_id}:${item.name}`, item])));
-        }
+        }>('skills.updates.check', withSession({ source_id: targetSourceId }));
+        if (!data.success) return;
+        const items = data.items || [];
+        updatesCache.set(cacheKey, { at: Date.now(), items });
+        applyItems(items);
       } catch {
         // 更新状态查询失败不阻断搜索展示
       }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [sourceId, withSession]);
+    },
+    [sessionId, withSession],
+  );
 
-  // 3) 搜索
+  useEffect(() => {
+    if (!sourceId) return;
+    void loadUpdates(sourceId);
+  }, [sourceId, loadUpdates]);
+
+  // 3) 搜索（preferCache 仅用于挂载/来源切换的自动加载；失败时回退缓存快照不清空列表）
   const runSearch = useCallback(
-    async (targetPage: number) => {
+    async (targetPage: number, options?: { preferCache?: boolean }) => {
       if (!sourceId) return;
+      const q = query.trim();
+      const cacheKey = searchCacheKey(sessionId, sourceId, q, targetPage);
+      if (options?.preferCache) {
+        const cached = searchCache.get(cacheKey);
+        if (cached && isFresh(cached.at)) {
+          setResults(cached.items);
+          setTotal(cached.total);
+          setPage(targetPage);
+          setLoadState('success');
+          return;
+        }
+      }
       setLoadState('loading');
       clearToast();
       try {
@@ -165,30 +228,41 @@ export function EnterpriseSkillSourcePanel({ sessionId, viewMode = 'list', exter
           'skills.source.search',
           withSession({
             source_id: sourceId,
-            q: query.trim(),
+            q,
             page: targetPage,
             page_size: PAGE_SIZE,
           }),
         );
         if (!data.success) throw new Error(data.error_message || t('skills.source.errors.searchFailed'));
-        setResults(data.items || []);
-        setTotal(data.total ?? (data.items || []).length);
+        const items = data.items || [];
+        const newTotal = data.total ?? items.length;
+        searchCache.set(cacheKey, { at: Date.now(), items, total: newTotal });
+        setResults(items);
+        setTotal(newTotal);
         setPage(targetPage);
         setLoadState('success');
       } catch (error) {
-        setResults([]);
-        setTotal(0);
-        setLoadState('error');
+        const cached = searchCache.get(cacheKey);
+        if (cached) {
+          setResults(cached.items);
+          setTotal(cached.total);
+          setPage(targetPage);
+          setLoadState('success');
+        } else {
+          setResults([]);
+          setTotal(0);
+          setLoadState('error');
+        }
         showToast('error', error instanceof Error ? error.message : t('skills.source.errors.searchFailed'));
       }
     },
-    [query, showToast, sourceId, t, withSession],
+    [query, sessionId, showToast, sourceId, t, withSession],
   );
 
   useEffect(() => {
     if (sourceId) {
       setPage(1);
-      void runSearch(1);
+      void runSearch(1, { preferCache: true });
     }
     // sourceId 变化时触发；内部模式 query 变化由搜索按钮/回车触发，外部模式由下面 query effect 触发
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -212,7 +286,7 @@ export function EnterpriseSkillSourcePanel({ sessionId, viewMode = 'list', exter
   const handleInstall = useCallback(
     async (item: SkillCandidate, force = false) => {
       if (installingId) return;
-      setInstallingId(item.name);
+      setInstallingId(itemKey(item, sourceId));
       clearToast();
       try {
         const data = await webRequest<{
@@ -226,6 +300,8 @@ export function EnterpriseSkillSourcePanel({ sessionId, viewMode = 'list', exter
             source_id: item.source_id || sourceId,
             skill_id: item.skill_id,
             version_id: item.version_id,
+            // 市场展示名透传落盘，安装后「我的技能」与技能广场同名显示
+            ...(item.display_name ? { display_name: item.display_name } : {}),
             force,
           }),
         );
@@ -240,6 +316,8 @@ export function EnterpriseSkillSourcePanel({ sessionId, viewMode = 'list', exter
         const skillName = data.skill?.name || item.name;
         showToast('success', t('skills.source.messages.installed', { name: skillName }));
         await onInstalled?.(skillName);
+        // 安装后刷新已装状态缓存，保证卡片徽章与下次挂载读取的缓存一致
+        void loadUpdates(item.source_id || sourceId, true);
         void runSearch(page);
       } catch (error) {
         showToast('error', error instanceof Error ? error.message : t('skills.source.errors.installFailed'));
@@ -247,7 +325,7 @@ export function EnterpriseSkillSourcePanel({ sessionId, viewMode = 'list', exter
         setInstallingId(null);
       }
     },
-    [installingId, onInstalled, page, runSearch, showToast, sourceId, t, withSession],
+    [installingId, loadUpdates, onInstalled, page, runSearch, showToast, sourceId, t, withSession],
   );
 
   const handleConfirmInstall = useCallback(() => {
@@ -260,7 +338,7 @@ export function EnterpriseSkillSourcePanel({ sessionId, viewMode = 'list', exter
     async (item: SkillCandidate, status: UpdateStatus) => {
       if (installingId) return;
       const targetVersionId = status.latest_version_id || item.version_id;
-      setInstallingId(item.name);
+      setInstallingId(itemKey(item, sourceId));
       clearToast();
       try {
         const data = await webRequest<{
@@ -287,6 +365,8 @@ export function EnterpriseSkillSourcePanel({ sessionId, viewMode = 'list', exter
           });
           return next;
         });
+        // 同步缓存，避免下次挂载读到更新前的旧状态
+        void loadUpdates(item.source_id || sourceId, true);
         showToast('success', t('skills.source.messages.updated', { name: data.skill?.name || item.name }));
         await onInstalled?.(data.skill?.name || item.name);
       } catch (error) {
@@ -295,13 +375,13 @@ export function EnterpriseSkillSourcePanel({ sessionId, viewMode = 'list', exter
         setInstallingId(null);
       }
     },
-    [installingId, onInstalled, showToast, sourceId, t, withSession],
+    [installingId, loadUpdates, onInstalled, showToast, sourceId, t, withSession],
   );
 
   const renderAction = (item: SkillCandidate) => {
     const status = updateStatuses.get(`${item.source_id}:${item.name}`);
     const isInstalled = Boolean(status);
-    const isInstalling = installingId === item.name;
+    const isInstalling = installingId === itemKey(item, sourceId);
     if (isInstalled && status?.has_update) {
       return (
         <button
@@ -469,7 +549,7 @@ export function EnterpriseSkillSourcePanel({ sessionId, viewMode = 'list', exter
           message={t('skills.source.replaceConfirm', { name: pendingConfirm.name })}
           onConfirm={handleConfirmInstall}
           onCancel={() => setPendingConfirm(null)}
-          loading={installingId === pendingConfirm.name}
+          loading={installingId === itemKey(pendingConfirm, sourceId)}
         />
       )}
     </div>
