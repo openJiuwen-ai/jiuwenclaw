@@ -46,6 +46,20 @@ def test_code_system_prompt_does_not_reference_disabled_subagents():
     assert "plan_agent" not in prompt
 
 
+def test_code_system_prompt_disambiguates_media_generation_from_coding():
+    prompt = build_code_system_prompt()
+    doing_tasks = prompt.split("# Using your tools", 1)[0]
+    assert "# Doing tasks" in doing_tasks
+    assert "media deliverable" in doing_tasks
+    assert "`skill_tool`" in doing_tasks
+    assert "SKILL.md" in doing_tasks
+    assert "## Generative media skills" not in prompt
+    assert "`seedream-image-gen`" not in prompt
+    assert "`invoke`" not in prompt
+    assert "PluginSkillExecTool" not in prompt
+    assert "seedreamLite4Skill" not in prompt
+
+
 def test_all_code_todo_tools_registered():
     assert set(CODE_TODO_TOOL_PROMPTS) == {
         "todo_create",

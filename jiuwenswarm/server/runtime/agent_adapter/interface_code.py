@@ -1255,30 +1255,25 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
                 tool_name,
             )
 
-        # design 模式：注册统一元工具 invoke（PluginSkillExecTool / agent_as_a_tool）。
-        # design 提示词大量依赖 invoke 路由图像（seedreamLite4Skill）/ 视频
-        # （seedanceMiniTask）能力，CodeAdapter 默认不挂载它，此处按 design 信号
-        # 主动补齐，对齐 DeepAdapter 的注册行为（见 interface_deep.py:5385-5394）。
-        # 受 `agents.invoke_tool.enabled` 控制（默认 true）。
-        if getattr(self, "_session_instance_mode", None) == "design":
-            invoke_cfg = (config_base.get("agents") or {}).get("invoke_tool") or {}
-            if bool(invoke_cfg.get("enabled", True)) and not getattr(
-                self, "_invoke_tool_registered", False
-            ):
-                try:
-                    invoke_tool = InvokeTool()
-                    owner_id = self._tool_owner_id()
-                    self._register_agent_owned_tool(invoke_tool, owner_id)
-                    tool_cards.append(invoke_tool.card)
-                    self._invoke_tool_registered = True
-                    logger.info(
-                        "[JiuwenSwarmCodeAdapter] invoke meta-tool registered (design mode)"
-                    )
-                except Exception as exc:
-                    logger.warning(
-                        "[JiuwenSwarmCodeAdapter] invoke meta-tool registration failed: %s",
-                        exc,
-                    )
+        # 统一元工具 invoke（云插件 mcp/run / agent_as_a_tool）。code 与 design
+        # 共用 CodeAdapter：生图 / 视频 / 音乐 skill 的 SKILL.md 都要求调 invoke，
+        # 对齐 DeepAdapter 的注册行为。受 `agents.invoke_tool.enabled` 控制（默认 true）。
+        invoke_cfg = (config_base.get("agents") or {}).get("invoke_tool") or {}
+        if bool(invoke_cfg.get("enabled", True)) and not getattr(
+            self, "_invoke_tool_registered", False
+        ):
+            try:
+                invoke_tool = InvokeTool()
+                owner_id = self._tool_owner_id()
+                self._register_agent_owned_tool(invoke_tool, owner_id)
+                tool_cards.append(invoke_tool.card)
+                self._invoke_tool_registered = True
+                logger.info("[JiuwenSwarmCodeAdapter] invoke meta-tool registered")
+            except Exception as exc:
+                logger.warning(
+                    "[JiuwenSwarmCodeAdapter] invoke meta-tool registration failed: %s",
+                    exc,
+                )
 
         return tool_cards
 

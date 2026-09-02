@@ -24,6 +24,7 @@ def test_code_adapter_builds_acp_chat_when_profile_configured(monkeypatch):
         "jiuwenswarm.server.runtime.agent_adapter.interface_code.get_config",
         lambda: {
             "acp_agents": {"codex": {"command": "npx", "args": []}},
+            "agents": {"invoke_tool": {"enabled": False}},
             "modes": {"code": {"tools": ["acp_chat"]}},
         },
     )
@@ -42,6 +43,7 @@ def test_code_adapter_skips_acp_chat_without_profiles(monkeypatch):
         "jiuwenswarm.server.runtime.agent_adapter.interface_code.get_config",
         lambda: {
             "acp_agents": {},
+            "agents": {"invoke_tool": {"enabled": False}},
             "modes": {"code": {"tools": ["acp_chat"]}},
         },
     )
@@ -82,3 +84,63 @@ def test_code_adapter_builds_coding_memory_rail_without_embedding_config(monkeyp
     assert created["embedding_config"].model_name == "text-embedding-v3"
     assert created["embedding_config"].base_url == ""
     assert created["embedding_config"].api_key is None
+
+
+def _patch_code_tool_runtime(monkeypatch, config):
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.agent_adapter.interface_code.get_config",
+        lambda: config,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.agent_adapter.interface_code.Runner",
+        SimpleNamespace(resource_mgr=_FakeResourceMgr()),
+    )
+
+
+def test_code_adapter_registers_invoke_in_code_mode(monkeypatch):
+    _patch_code_tool_runtime(
+        monkeypatch,
+        {
+            "agents": {"invoke_tool": {"enabled": True}},
+            "modes": {"code": {"tools": []}},
+        },
+    )
+    adapter = JiuwenSwarmCodeAdapter()
+    adapter._session_instance_mode = "code"
+
+    cards = adapter.build_code_tool_cards("agent-id")
+
+    assert [card.name for card in cards] == ["invoke"]
+    assert adapter._invoke_tool_registered is True
+
+
+def test_code_adapter_skips_invoke_when_disabled(monkeypatch):
+    _patch_code_tool_runtime(
+        monkeypatch,
+        {
+            "agents": {"invoke_tool": {"enabled": False}},
+            "modes": {"code": {"tools": []}},
+        },
+    )
+    adapter = JiuwenSwarmCodeAdapter()
+    adapter._session_instance_mode = "code"
+
+    cards = adapter.build_code_tool_cards("agent-id")
+
+    assert cards == []
+    assert not getattr(adapter, "_invoke_tool_registered", False)
+
+
+def test_code_adapter_registers_invoke_in_design_mode(monkeypatch):
+    _patch_code_tool_runtime(
+        monkeypatch,
+        {
+            "modes": {"code": {"tools": []}},
+        },
+    )
+    adapter = JiuwenSwarmCodeAdapter()
+    adapter._session_instance_mode = "design"
+
+    cards = adapter.build_code_tool_cards("agent-id")
+
+    assert [card.name for card in cards] == ["invoke"]
