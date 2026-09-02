@@ -107,9 +107,9 @@ class PushRegistry:
     """推送订阅者注册表：把「推给当前连接」变成「推给匹配的订阅者」。"""
 
     __slots__ = (
-        "_subscribers",
         "_reverse_rpc_owner_id",
         "_reverse_rpc_owner_lost_callback",
+        "_subscribers",
     )
 
     def __init__(self) -> None:
@@ -196,7 +196,7 @@ class PushRegistry:
                 )
             else:
                 sent = await subscriber.sink.send_wire(wire)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             logger.warning(
                 "[PushRegistry] 反向 RPC 推送超时(%.1fs)，注销订阅者: id=%s",
                 SEND_TIMEOUT,
