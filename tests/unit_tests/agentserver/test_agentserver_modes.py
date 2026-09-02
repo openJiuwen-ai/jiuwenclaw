@@ -371,7 +371,7 @@ def _prepare_build_inputs_trusted_dirs_test(monkeypatch):
     from jiuwenswarm.server.runtime.agent_adapter import interface as interface_module
 
     class FakeSkillManager:
-        def __init__(self, workspace_dir=None):
+        def __init__(self, workspace_dir=None, service_id=None, agent_id=None):
             self.workspace_dir = workspace_dir
             self.hook = None
 
@@ -1336,7 +1336,7 @@ def test_process_message_stream_treats_team_plan_confirm_resume_as_team_follow_u
     from jiuwenswarm.server.runtime.agent_adapter import interface as interface_module
 
     class FakeSkillManager:
-        def __init__(self, workspace_dir=None):
+        def __init__(self, workspace_dir=None, service_id=None, agent_id=None):
             self.workspace_dir = workspace_dir
             self.hook = None
 
@@ -2167,7 +2167,7 @@ def test_build_inputs_threads_workspace_dir_into_cwd(monkeypatch, tmp_path):
     from jiuwenswarm.server.runtime.agent_adapter import interface as interface_module
 
     class FakeSkillManager:
-        def __init__(self, workspace_dir=None):
+        def __init__(self, workspace_dir=None, service_id=None, agent_id=None):
             self.workspace_dir = workspace_dir
             self.hook = None
 
@@ -2246,7 +2246,7 @@ def test_build_inputs_omits_cwd_when_workspace_dir_unset(monkeypatch):
     from jiuwenswarm.server.runtime.agent_adapter import interface as interface_module
 
     class FakeSkillManager:
-        def __init__(self, workspace_dir=None):
+        def __init__(self, workspace_dir=None, service_id=None, agent_id=None):
             self.workspace_dir = workspace_dir
             self.hook = None
 
@@ -2465,7 +2465,7 @@ def test_agent_manager_creates_code_adapter_with_tenant_config_for_code_team(mon
     calls = []
 
     class FakeSkillManager:
-        def __init__(self, workspace_dir=None):
+        def __init__(self, workspace_dir=None, service_id=None, agent_id=None):
             self.workspace_dir = workspace_dir
             self.hook = None
 
@@ -2527,7 +2527,7 @@ def test_agent_manager_creates_code_adapter_for_team_plan(monkeypatch):
     calls = []
 
     class FakeSkillManager:
-        def __init__(self, workspace_dir=None):
+        def __init__(self, workspace_dir=None, service_id=None, agent_id=None):
             self.workspace_dir = workspace_dir
             self.hook = None
 
@@ -2581,7 +2581,7 @@ def test_agent_manager_uses_project_dir_in_cache_identity(monkeypatch, tmp_path)
     created = []
 
     class FakeSkillManager:
-        def __init__(self, workspace_dir=None):
+        def __init__(self, workspace_dir=None, service_id=None, agent_id=None):
             self.workspace_dir = workspace_dir
             self.hook = None
 

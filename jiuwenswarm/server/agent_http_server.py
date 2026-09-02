@@ -25,6 +25,24 @@ API_PREFIX = "/api/v1"
 PORT_SCAN_RANGE = 10
 PORT_SCAN_STEP = 1000
 
+#: 企业版北向允许的 Skill 方法白名单（与 Gateway ``invoke.py`` 的
+#: ``_ENTERPRISE_SKILL_ALLOWED`` 保持一致）。企业版暂不开放 skills.toggle /
+#: install / uninstall 等写操作，仅只读列表/详情开放。
+_ENTERPRISE_SKILL_ALLOWED = frozenset({"skills.list", "skills.get", "skills.enterprise.list"})
+
+
+def _is_enterprise_skill_forbidden(method: str) -> bool:
+    """AgentServer 侧防御性校验：企业版下拒绝白名单外的 ``skills.*`` 写操作。
+
+    正常链路已由 Gateway 的 ``is_enterprise_write_forbidden`` 拦截；此处兜底
+    AgentServer 被直连（HTTP 直连）时绕过 Gateway 改启停/安装/卸载的情况。
+    """
+    from jiuwenswarm.common.utils import is_enterprise
+
+    if not is_enterprise():
+        return False
+    return method.startswith("skills.") and method not in _ENTERPRISE_SKILL_ALLOWED
+
 #: HTTP 侧交给业务层的 ``RequestContext.connection_id``。
 #:
 #: **必须跨请求稳定。** 业务层用它给"按连接分槽"的逻辑做键 —— 目前是
@@ -464,6 +482,15 @@ class AgentHTTPServer:
         tenant_ids: dict[str, str] | None = None,
     ) -> tuple[dict[str, Any], int]:
         """非流式调用，返回 (响应体, 状态码)。"""
+        if _is_enterprise_skill_forbidden(method):
+            return (
+                {
+                    "request_id": request_id,
+                    "ok": False,
+                    "error": {"code": "FORBIDDEN", "message": "企业版配置由管理面统一下发"},
+                },
+                403,
+            )
         agent_request = build_agent_request(
             method=method,
             params=params,
