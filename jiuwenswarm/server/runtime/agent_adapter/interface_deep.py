@@ -4480,6 +4480,18 @@ class JiuWenSwarmDeepAdapter:
             DEFAULT_AGENT_LOAD_SLOTS,
         )
         self._enterprise_config = loaded
+        if loaded is not None and self._skill_manager is not None:
+            try:
+                await self._skill_manager.apply_skill_source_configs(
+                    getattr(loaded, "extension_config", None)
+                )
+            except Exception as exc:  # noqa: BLE001
+                # SourceManager applies revisions atomically; a bad revision leaves
+                # the last valid registry active for existing requests.
+                logger.error(
+                    "[JiuWenSwarmDeepAdapter] skill source config rejected: %s",
+                    exc,
+                )
         if loaded is None:
             from jiuwenswarm.common.request_identity import web_routing_identity
 
@@ -4493,6 +4505,10 @@ class JiuWenSwarmDeepAdapter:
                 identity.get("bot_id"),
                 identity.get("user_id"),
             )
+
+    async def prepare_skill_source_config(self, request: AgentRequest) -> None:
+        """Load the effective policy before a source RPC, even before chat startup."""
+        await self._load_enterprise_config(request)
 
     def _inject_extension_config_into_inputs(self, inputs: dict[str, Any]) -> None:
         """将企业策略中的 extension_config 注入 inputs（替代 ee gateway channel_context 透传）。"""
@@ -6469,7 +6485,7 @@ class JiuWenSwarmDeepAdapter:
             )
 
     async def refresh_enabled_skills_from_db(self) -> None:
-        """Refresh enabled skills from the current tenant workspace state."""
+        """workspace Skill 状态变更后刷新启用集并热替换 ``SkillUseRail``。"""
         if not is_skill_whitelist_tenant(self._agent_id, self._service_id):
             return
         if self._instance is None:

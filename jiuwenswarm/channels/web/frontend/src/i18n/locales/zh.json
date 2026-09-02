@@ -1912,6 +1912,7 @@
       "install": "安装",
       "replaceConfirm": "已安装同名技能「{{name}}」，继续安装将卸载已安装的版本并替换为当前选择的版本。是否继续？",
       "installing": "安装中…",
+      "updating": "更新中…",
       "updatedAt": "更新于 {{date}}",
       "configTitle": "配置",
       "configDescription": "请输入从 ClawHub 平台获取的 CLI Token，用于访问 ClawHub 技能库。",

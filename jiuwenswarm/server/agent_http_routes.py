@@ -269,12 +269,40 @@ ROUTES: list[RouteSpec] = [
         ReqMethod.SKILLS_TEAMSKILLS_HUB_DELETE.value,
     ),
     RouteSpec(
+        "GET", "/skills/sources", ReqMethod.SKILLS_SOURCE_PROVIDERS.value
+    ),
+    RouteSpec(
+        "GET", "/skills/sources/search", ReqMethod.SKILLS_SOURCE_SEARCH.value
+    ),
+    RouteSpec(
+        "POST", "/skills/sources/install", ReqMethod.SKILLS_SOURCE_INSTALL.value, 201
+    ),
+    RouteSpec(
+        "GET", "/skills/updates", ReqMethod.SKILLS_UPDATES_CHECK.value
+    ),
+    RouteSpec(
+        "POST", "/skills/actions/update", ReqMethod.SKILLS_UPDATE.value
+    ),
+    RouteSpec(
+        "GET", "/skills/enterprise", ReqMethod.SKILLS_ENTERPRISE_LIST.value
+    ),
+    RouteSpec(
         "POST", "/skills/enterprise/install", ReqMethod.SKILLS_ENTERPRISE_INSTALL.value, 201
     ),
     RouteSpec(
         "POST",
         "/skills/enterprise/actions/uninstall",
         ReqMethod.SKILLS_ENTERPRISE_UNINSTALL.value,
+    ),
+    RouteSpec(
+        "GET",
+        "/skills/enterprise/sources",
+        ReqMethod.SKILLS_ENTERPRISE_SOURCE_PROVIDERS.value,
+    ),
+    RouteSpec(
+        "GET",
+        "/skills/enterprise/sources/search",
+        ReqMethod.SKILLS_ENTERPRISE_SOURCE_SEARCH.value,
     ),
     RouteSpec("GET", "/skills/{name}", ReqMethod.SKILLS_GET.value),
     RouteSpec("DELETE", "/skills/{name}", ReqMethod.SKILLS_UNINSTALL.value),
