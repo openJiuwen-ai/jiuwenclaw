@@ -28,6 +28,40 @@ class TestResolveAtFileReferences:
             os.unlink(fname)
 
     @staticmethod
+    def test_binary_documents_are_referenced_not_inlined():
+        """Reading a PDF as text yields mojibake — hand over the path instead."""
+        with tempfile.NamedTemporaryFile(mode="wb", suffix=".pdf", delete=False) as f:
+            f.write(b"%PDF-1.4\n\x00\x01\x02binary garbage\xff\xfe")
+            fname = f.name
+        try:
+            basename = os.path.basename(fname)
+            cwd = os.path.dirname(fname)
+            result = MessageHandler.resolve_at_file_references(f"check @{basename}", cwd=cwd)
+
+            assert "<file-content" not in result
+            assert "<file-reference" in result
+            assert "binary garbage" not in result
+            # The model needs to be told what can actually open it.
+            assert "read_pdf" in result
+            assert fname in result
+        finally:
+            os.unlink(fname)
+
+    @staticmethod
+    def test_text_files_are_still_inlined_alongside_binaries():
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False) as f:
+            f.write("# Heading\nbody text")
+            fname = f.name
+        try:
+            basename = os.path.basename(fname)
+            cwd = os.path.dirname(fname)
+            result = MessageHandler.resolve_at_file_references(f"see @{basename}", cwd=cwd)
+            assert "<file-content" in result
+            assert "body text" in result
+        finally:
+            os.unlink(fname)
+
+    @staticmethod
     def test_quoted_path_with_spaces():
         with tempfile.NamedTemporaryFile(
             mode="w", suffix=".txt", prefix="my file", delete=False

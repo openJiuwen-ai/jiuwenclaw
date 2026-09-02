@@ -58,6 +58,10 @@ FILE_TYPE_TO_MIME_TYPE: dict[str, str] = {
     "mp4": "video/mp4",
 }
 
+# 内联文件内容的字符上限：抓取上限是 5MB 字节，若原样拼进消息会直接撑爆上下文。
+# 与 TUI 的 @file 内联上限保持一致。
+_INLINE_FILE_TEXT_LIMIT = 128 * 1024
+
 # 全局 XiaoyiChannel 实例字典（供手机端工具调用使用）
 _xiaoyi_channel_instances: dict[str, "XiaoyiChannel"] = {}
 
@@ -1233,6 +1237,11 @@ class XiaoyiChannel(BaseChannel):
                     if is_text_mime_type(mime_type):
                         try:
                             text_content = await extract_text_from_url(uri, 5_000_000, 30_000)
+                            if len(text_content) > _INLINE_FILE_TEXT_LIMIT:
+                                text_content = (
+                                    text_content[:_INLINE_FILE_TEXT_LIMIT]
+                                    + f"\n... (已截断，原文约 {len(text_content)} 字符)"
+                                )
                             text += f"\n\n[文件内容: {name}]\n{text_content}"
                             file_attachments.append(f"[文件: {name}]")
                             logger.info(f"XiaoYi: Successfully extracted text from: {name}")
