@@ -236,6 +236,7 @@
       "externalCliAgents": "Third-Party Agents",
       "externalCliAgentsDescription": "For Team mode only.",
       "a2ui": "A2UI generation",
+      "trajectoryUi": "Trajectory UI",
       "proactive": "Proactive recommendations",
       "proactiveLimits": "Recommendation limits",
       "proactiveLimitsDescription": "Up to {{daily}} per day and {{rounds}} conversation rounds per check.",
@@ -307,6 +308,7 @@
         "description": "Choose the shared guardrail mode for ordinary Agents and Teams."
       },
       "a2ui_enabled": { "title": "Enable A2UI", "description": "Render supported results as interactive interfaces." },
+      "trajectory_ui_enabled": { "title": "Enable trajectory UI", "description": "Show Chat and Trajectory switching in Agent and Team modes and enable the trajectory observability data path." },
       "external_cli_agent_claude_enabled": {
         "title": "Enable Claude",
         "description": "Allow a Team Leader to spawn a Claude Agent."
@@ -343,6 +345,24 @@
     "validation": {
       "required": "This field is required",
       "integerRange": "Enter an integer from {{min}} to {{max}}"
+
+    }
+  },
+  "trajectory": {
+    "loading": "Loading trajectory UI…",
+    "tabs": {
+      "aria": "Agent and Team content view",
+      "trajectory": "Trajectory"
+    },
+    "team": {
+      "memberLanes": "Member trajectory lanes",
+      "members": "Members"
+    },
+    "layout": {
+      "hideSessions": "Collapse sessions",
+      "showSessions": "Show sessions",
+      "hideTasks": "Collapse tasks",
+      "showTasks": "Show tasks"
     }
   },
   "team": {

@@ -1024,7 +1024,7 @@ async def test_runtime_git_status_is_stable_system_context_for_one_invoke(tmp_pa
 
 
 @pytest.mark.asyncio
-async def test_runtime_prompt_uses_runtime_cwd_over_stale_trusted_dir(tmp_path, monkeypatch):
+async def test_runtime_prompt_distinguishes_cwd_from_project_dir(tmp_path, monkeypatch):
     builder = SystemPromptBuilder(language="en")
     agent = _FakeAgent(builder)
     stale_dir = tmp_path / "missing-worktree"
@@ -1061,18 +1061,105 @@ async def test_runtime_prompt_uses_runtime_cwd_over_stale_trusted_dir(tmp_path, 
     assert "# Directory and File-Operation Boundaries" in prompt
     assert "# Runtime Directory Context" not in prompt
     assert "# Working Directory Runtime Values" not in prompt
-    assert "The project directory is your current workspace" in prompt
+    assert "The project directory is the project root and project-context boundary" in prompt
     assert f"the current project directory is: `{project_dir}`" in prompt
+    assert (
+        f"The current working directory (cwd, relative-path base, and Bash default) is: `{current_dir}`"
+        in prompt
+    )
+    assert "Resolve relative paths in user tasks against the current working directory" in prompt
     assert "Agent internal data directory" in prompt
     assert "## JiuwenSwarm Internal Directories" in prompt
     assert str(project_dir) in prompt
-    assert str(current_dir) not in prompt
+    assert str(current_dir) in prompt
     assert str(stale_dir) not in prompt
     assert str(extra_dir) not in prompt
     assert "System directory" not in prompt
 
     items = await agent.prompt_attachment_manager.list_by_filter(session_id="sess1")
     assert [item.id for item in items if item.id.endswith(".trusted_dirs_policy")] == []
+
+
+@pytest.mark.asyncio
+async def test_runtime_prompt_distinguishes_cwd_from_project_dir_in_chinese(
+    tmp_path, monkeypatch
+):
+    builder = SystemPromptBuilder(language="cn")
+    agent = _FakeAgent(builder)
+    project_dir = tmp_path / "project"
+    current_dir = tmp_path / "task"
+    agent_data_dir = tmp_path / "agent-data"
+    project_dir.mkdir()
+    current_dir.mkdir()
+    agent_data_dir.mkdir()
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.harness.common.rails.runtime_prompt_rail.get_agent_workspace_dir",
+        lambda: agent_data_dir,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.harness.common.rails.runtime_prompt_rail.get_user_workspace_dir",
+        lambda: tmp_path / "jiuwenswarm-data",
+    )
+
+    runtime_rail = RuntimePromptRail(language="cn", channel="tui")
+    runtime_rail.init(agent)
+    runtime_rail.set_runtime_paths(cwd=str(current_dir), project_dir=str(project_dir))
+    ctx = AgentCallbackContext(
+        agent=agent,
+        inputs=None,
+        session=_FakeSession(),
+        extra={},
+    )
+
+    await runtime_rail.before_model_call(ctx)
+
+    prompt = builder.build()
+    assert "项目目录是当前项目的根目录与项目上下文边界" in prompt
+    assert f"当前项目目录是：`{project_dir}`" in prompt
+    assert (
+        f"当前工作目录（cwd、相对路径基准及 Bash 默认目录）是：`{current_dir}`" in prompt
+    )
+    assert (
+        "用户任务中的相对路径必须相对于当前工作目录路径去解析" in prompt
+    )
+
+
+@pytest.mark.asyncio
+async def test_runtime_prompt_preserves_single_directory_prompt_when_paths_match(
+    tmp_path, monkeypatch
+):
+    builder = SystemPromptBuilder(language="en")
+    agent = _FakeAgent(builder)
+    project_dir = tmp_path / "project"
+    agent_data_dir = tmp_path / "agent-data"
+    project_dir.mkdir()
+    agent_data_dir.mkdir()
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.harness.common.rails.runtime_prompt_rail.get_agent_workspace_dir",
+        lambda: agent_data_dir,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.harness.common.rails.runtime_prompt_rail.get_user_workspace_dir",
+        lambda: tmp_path / "jiuwenswarm-data",
+    )
+
+    runtime_rail = RuntimePromptRail(language="en", channel="web")
+    runtime_rail.init(agent)
+    runtime_rail.set_runtime_paths(cwd=str(project_dir), project_dir=str(project_dir))
+    ctx = AgentCallbackContext(
+        agent=agent,
+        inputs=None,
+        session=_FakeSession(),
+        extra={},
+    )
+
+    await runtime_rail.before_model_call(ctx)
+
+    prompt = builder.build()
+    assert "## Project Directory" in prompt
+    assert "## Project and Working Directories" not in prompt
+    assert f"the current project directory is: `{project_dir}`" in prompt
+    assert "Resolve relative paths in user tasks against the current project directory" in prompt
 
 
 @pytest.mark.asyncio

@@ -26,6 +26,9 @@ from openjiuwen.harness.rails import (
 )
 from openjiuwen.harness.rails.evolution import EvolutionReviewRuntime
 from openjiuwen.harness.rails.context_engineer import ContextProcessorRail
+from openjiuwen.extensions.observability.demand import (
+    get_trajectory_span_processor,
+)
 
 from jiuwenswarm.agents.harness.common.rails.ask_user_rail import StructuredAskUserRail
 from jiuwenswarm.agents.harness.common.rails.avatar_rail import AvatarPromptRail
@@ -43,9 +46,6 @@ from jiuwenswarm.common.config import (
 )
 from jiuwenswarm.common.reasoning_injector import build_reasoning_model_request_kwargs
 from jiuwenswarm.common.utils import get_agent_skills_dir
-from jiuwenswarm.agents.harness.observability_runtime import (
-    get_trajectory_span_processor,
-)
 from jiuwenswarm.server.runtime.skill import load_execution_disabled_skills
 
 logger = logging.getLogger(__name__)

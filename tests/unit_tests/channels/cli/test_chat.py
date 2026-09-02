@@ -15,7 +15,7 @@ from unittest.mock import patch
 
 import pytest
 
-from jiuwenswarm.cli.chat import (
+from jiuwenswarm.channels.cli.chat import (
     MODE_ALIASES,
     VALID_MODES,
     _build_default_gateway_url,
@@ -30,13 +30,13 @@ from jiuwenswarm.cli.chat import (
     build_parser,
     resolve_mode,
 )
-from jiuwenswarm.cli.events import (
+from jiuwenswarm.channels.cli.events import (
     event_kind,
     is_terminal_event,
     needs_user_input,
 )
-from jiuwenswarm.cli.gateway_client import GatewayClient
-from jiuwenswarm.cli.render import HumanRenderer, JsonRenderer, JsonlRenderer
+from jiuwenswarm.channels.cli.gateway_client import GatewayClient
+from jiuwenswarm.channels.cli.render import HumanRenderer, JsonRenderer, JsonlRenderer
 
 
 class TestResolveMode:
@@ -180,7 +180,7 @@ class TestBuildRequest:
             trusted_dir=None,
         )
         req = _build_request(args, "test")
-        assert req["params"]["cwd"] == "/custom/cwd"
+        assert req["params"]["cwd"] == str(Path("/custom/cwd").resolve())
 
     @staticmethod
     def test_with_project_dir(monkeypatch):
@@ -193,13 +193,13 @@ class TestBuildRequest:
             trusted_dir=None,
         )
         req = _build_request(args, "test")
-        assert req["params"]["project_dir"] == "/custom/project"
+        assert req["params"]["project_dir"] == str(Path("/custom/project").resolve())
 
     @staticmethod
     def test_with_trusted_dirs(monkeypatch):
         monkeypatch.setattr(os, "getcwd", lambda: "/cwd")
         monkeypatch.setattr(
-            "jiuwenswarm.cli.chat._get_persisted_external_dirs",
+            "jiuwenswarm.channels.cli.chat._get_persisted_external_dirs",
             lambda: [],
         )
         args = argparse.Namespace(
@@ -211,7 +211,7 @@ class TestBuildRequest:
         )
         req = _build_request(args, "test")
         assert sorted(str(d) for d in req["params"]["trusted_dirs"]) == sorted(
-            ["/dir1", "/dir2"]
+            str(Path(path).resolve()) for path in ("/dir1", "/dir2")
         )
 
     @staticmethod
@@ -517,7 +517,7 @@ class TestHumanRenderer:
             r = HumanRenderer()
             r.handle_error({"error": "bad thing"})
             assert "bad thing" in stream.getvalue()
-        TestHumanRenderer._capture_logging("jiuwenswarm.cli.render", _run)
+        TestHumanRenderer._capture_logging("jiuwenswarm.channels.cli.render", _run)
 
     @staticmethod
     def test_reasoning_hidden_by_default():
@@ -525,7 +525,7 @@ class TestHumanRenderer:
             r = HumanRenderer()
             r.handle_reasoning({"content": "thinking..."})
             assert "thinking" not in stream.getvalue()
-        TestHumanRenderer._capture_logging("jiuwenswarm.cli.render", _run)
+        TestHumanRenderer._capture_logging("jiuwenswarm.channels.cli.render", _run)
 
     @staticmethod
     def test_reasoning_shown_when_enabled():
@@ -533,7 +533,7 @@ class TestHumanRenderer:
             r = HumanRenderer(show_reasoning=True)
             r.handle_reasoning({"content": "thinking..."})
             assert "thinking..." in stream.getvalue()
-        TestHumanRenderer._capture_logging("jiuwenswarm.cli.render", _run)
+        TestHumanRenderer._capture_logging("jiuwenswarm.channels.cli.render", _run)
 
     @staticmethod
     def test_tool_call_hidden_by_default():
@@ -541,7 +541,7 @@ class TestHumanRenderer:
             r = HumanRenderer()
             r.handle_tool_call({"tool_name": "bash", "arguments": "{}"})
             assert "bash" not in stream.getvalue()
-        TestHumanRenderer._capture_logging("jiuwenswarm.cli.render", _run)
+        TestHumanRenderer._capture_logging("jiuwenswarm.channels.cli.render", _run)
 
     @staticmethod
     def test_tool_call_shown_when_enabled():
@@ -549,7 +549,7 @@ class TestHumanRenderer:
             r = HumanRenderer(show_tools=True)
             r.handle_tool_call({"tool_name": "bash", "arguments": '{"cmd":"ls"}'})
             assert "bash" in stream.getvalue()
-        TestHumanRenderer._capture_logging("jiuwenswarm.cli.render", _run)
+        TestHumanRenderer._capture_logging("jiuwenswarm.channels.cli.render", _run)
 
     @staticmethod
     def test_tool_result_hidden_by_default():
@@ -557,7 +557,7 @@ class TestHumanRenderer:
             r = HumanRenderer()
             r.handle_tool_result({"tool_name": "bash", "status": "done"})
             assert "bash" not in stream.getvalue()
-        TestHumanRenderer._capture_logging("jiuwenswarm.cli.render", _run)
+        TestHumanRenderer._capture_logging("jiuwenswarm.channels.cli.render", _run)
 
     @staticmethod
     def test_tool_result_shown_when_enabled():
@@ -565,7 +565,7 @@ class TestHumanRenderer:
             r = HumanRenderer(show_tools=True)
             r.handle_tool_result({"tool_name": "bash", "status": "done"})
             assert "bash" in stream.getvalue()
-        TestHumanRenderer._capture_logging("jiuwenswarm.cli.render", _run)
+        TestHumanRenderer._capture_logging("jiuwenswarm.channels.cli.render", _run)
 
     @staticmethod
     def test_ensure_loading_picks_random_verb():
@@ -642,7 +642,7 @@ class TestGatewayClient:
 
             return FakeWs()
 
-        with patch("jiuwenswarm.cli.gateway_client._connect_ws", _mock_connect):
+        with patch("jiuwenswarm.channels.cli.gateway_client._connect_ws", _mock_connect):
             client = GatewayClient("ws://127.0.0.1:19001/tui")
             await client.connect()
 
@@ -659,7 +659,7 @@ class TestGatewayClient:
 
             return FakeWs()
 
-        with patch("jiuwenswarm.cli.gateway_client._connect_ws", _mock_connect):
+        with patch("jiuwenswarm.channels.cli.gateway_client._connect_ws", _mock_connect):
             client = GatewayClient("ws://127.0.0.1:19001/tui")
             with pytest.raises(ConnectionError):
                 await client.connect()
@@ -677,7 +677,7 @@ class TestGatewayClient:
 
             return FakeWs()
 
-        with patch("jiuwenswarm.cli.gateway_client._connect_ws", _mock_connect):
+        with patch("jiuwenswarm.channels.cli.gateway_client._connect_ws", _mock_connect):
             client = GatewayClient("ws://127.0.0.1:19001/tui")
             with pytest.raises(ConnectionError):
                 await client.connect()
@@ -716,7 +716,7 @@ class TestInteractiveLoop:
             {"type": "event", "event": "chat.final", "payload": {"content": "Hello world"}},
         ]
 
-        from jiuwenswarm.cli.chat import _run_interactive_loop
+        from jiuwenswarm.channels.cli.chat import _run_interactive_loop
 
         client = await self._make_connected_client(messages)
         renderer = HumanRenderer()
@@ -769,7 +769,7 @@ class TestInteractiveLoop:
             },
         ]
 
-        from jiuwenswarm.cli.chat import _run_interactive_loop
+        from jiuwenswarm.channels.cli.chat import _run_interactive_loop
 
         client = await self._make_connected_client(messages)
         renderer = HumanRenderer()
@@ -790,7 +790,7 @@ class TestInteractiveLoop:
             {"type": "event", "event": "chat.error", "payload": {"error": "something broke"}},
         ]
 
-        from jiuwenswarm.cli.chat import _run_interactive_loop
+        from jiuwenswarm.channels.cli.chat import _run_interactive_loop
 
         client = await self._make_connected_client(messages)
         renderer = HumanRenderer()
@@ -817,7 +817,7 @@ class TestInteractiveLoop:
             },
         ]
 
-        from jiuwenswarm.cli.chat import _run_interactive_loop
+        from jiuwenswarm.channels.cli.chat import _run_interactive_loop
 
         client = await self._make_connected_client(messages)
         renderer = HumanRenderer()
@@ -848,7 +848,7 @@ class TestInteractiveLoop:
             {"type": "event", "event": "chat.final", "payload": {"content": "ok"}},
         ]
 
-        from jiuwenswarm.cli.chat import _run_interactive_loop
+        from jiuwenswarm.channels.cli.chat import _run_interactive_loop
 
         client = await self._make_connected_client(messages)
         renderer = HumanRenderer()
@@ -886,7 +886,7 @@ class TestInteractiveLoop:
             async def close(self):
                 pass
 
-        from jiuwenswarm.cli.chat import _run_interactive_loop
+        from jiuwenswarm.channels.cli.chat import _run_interactive_loop
 
         client = GatewayClient("ws://127.0.0.1:19001/tui")
         client.set_mock_ws(FakeWs())
@@ -911,7 +911,7 @@ class TestInteractiveLoop:
             {"type": "event", "event": "chat.final", "payload": {"content": "step1step2"}},
         ]
 
-        from jiuwenswarm.cli.chat import _run_interactive_loop
+        from jiuwenswarm.channels.cli.chat import _run_interactive_loop
 
         client = await self._make_connected_client(messages)
         renderer = HumanRenderer()
@@ -929,7 +929,7 @@ class TestInteractiveLoop:
     @pytest.mark.asyncio
     @staticmethod
     async def test_delta_gap_inserts_line_break():
-        from jiuwenswarm.cli.chat import _run_interactive_loop
+        from jiuwenswarm.channels.cli.chat import _run_interactive_loop
 
         messages = [
             {"type": "event", "event": "chat.delta", "payload": {"content": "part1"}},
@@ -964,7 +964,7 @@ class TestInteractiveLoop:
         def mock_monotonic():
             return fake_time[0]
 
-        with patch("jiuwenswarm.cli.render.time.monotonic", mock_monotonic):
+        with patch("jiuwenswarm.channels.cli.render.time.monotonic", mock_monotonic):
             client = GatewayClient("ws://127.0.0.1:19001/tui")
             client.set_mock_ws(FakeWs())
             renderer = HumanRenderer()
@@ -983,7 +983,7 @@ class TestInteractiveLoop:
 class TestSpinner:
     @staticmethod
     def test_spinner_frames_cycle():
-        from jiuwenswarm.cli.render import _SPINNER_FRAMES as frames
+        from jiuwenswarm.channels.cli.render import _SPINNER_FRAMES as frames
 
         r = HumanRenderer()
         r.ensure_loading()
@@ -1007,21 +1007,21 @@ class TestSpinner:
 
     @staticmethod
     def test_spinner_verb_rotates():
-        from jiuwenswarm.cli.render import _VERBS
+        from jiuwenswarm.channels.cli.render import _VERBS
 
         fake_time = 1000.0
 
         def mock_monotonic():
             return fake_time
 
-        with patch("jiuwenswarm.cli.render.time.monotonic", mock_monotonic):
+        with patch("jiuwenswarm.channels.cli.render.time.monotonic", mock_monotonic):
             r = HumanRenderer()
             r.ensure_loading()
             initial_verb = r.verb
 
         fake_time += 5.5
 
-        with patch("jiuwenswarm.cli.render.time.monotonic", mock_monotonic):
+        with patch("jiuwenswarm.channels.cli.render.time.monotonic", mock_monotonic):
             r.tick_spinner()
 
         assert r.verb != initial_verb
@@ -1043,13 +1043,13 @@ class TestTrustedDirsState:
     @staticmethod
     def test_load_state_missing_file(monkeypatch, tmp_path):
         state_file = tmp_path / "nonexistent.json"
-        monkeypatch.setattr("jiuwenswarm.cli.chat._STATE_FILE", state_file)
+        monkeypatch.setattr("jiuwenswarm.channels.cli.chat._STATE_FILE", state_file)
         assert _load_state() == {}
 
     @staticmethod
     def test_save_and_load_state(monkeypatch, tmp_path):
         state_file = tmp_path / "state.json"
-        monkeypatch.setattr("jiuwenswarm.cli.chat._STATE_FILE", state_file)
+        monkeypatch.setattr("jiuwenswarm.channels.cli.chat._STATE_FILE", state_file)
         _save_state({"/dir1": True, "/dir2": False})
         assert state_file.exists()
         loaded = _load_state()
@@ -1059,7 +1059,7 @@ class TestTrustedDirsState:
     def test_load_state_corrupted_file(monkeypatch, tmp_path):
         state_file = tmp_path / "bad.json"
         state_file.write_text("not json", encoding="utf-8")
-        monkeypatch.setattr("jiuwenswarm.cli.chat._STATE_FILE", state_file)
+        monkeypatch.setattr("jiuwenswarm.channels.cli.chat._STATE_FILE", state_file)
         assert _load_state() == {}
 
 

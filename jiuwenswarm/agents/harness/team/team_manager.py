@@ -17,6 +17,7 @@ from openjiuwen.agent_teams.agent.team_agent import TeamAgent
 from openjiuwen.agent_teams.runtime.pool import RuntimeState
 from openjiuwen.agent_teams.schema.blueprint import TeamAgentSpec
 from openjiuwen.agent_teams.context import reset_session_id, set_session_id
+from openjiuwen.agent_teams import observability as team_observability
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.common.logging import server_logger
 from openjiuwen.harness import DeepAgent
@@ -73,10 +74,11 @@ from jiuwenswarm.agents.harness.team.team_runtime_inheritance import (
     build_member_rails,
     get_default_model_name,
 )
-from jiuwenswarm.agents.harness.observability_runtime import (
-    acquire_observability_demand,
-    build_observability_config,
-    release_observability_demand,
+from jiuwenswarm.agents.harness.observability_runtime import build_observability_config
+from jiuwenswarm.observability.config import load_trajectory_store_settings
+from jiuwenswarm.observability.runtime import (
+    shutdown_trajectory_runtime,
+    sync_trajectory_runtime,
 )
 from jiuwenswarm.server.runtime.session.session_metadata import get_session_metadata
 
@@ -134,13 +136,35 @@ def sync_team_observability() -> None:
     * enabled → disabled : ``shutdown_observability()``
     * unchanged          : no-op
 
+    The Web trajectory store is an independent fan-out owned by
+    ``sync_trajectory_runtime``; Team tracing keeps its own demand so
+    disabling Team observability never tears down a trajectory sink another
+    runtime still uses.
+
     Evolution also requests the provider when the explicit switch is disabled.
     """
     global _observability_active
     config = get_config()
     cfg = config.get("team_observability", {}) or {}
+    trajectory_settings = load_trajectory_store_settings(config)
     evolution_requested = get_skill_evolution_enabled(config)
-    want_enabled = bool(cfg.get("enabled", False)) or evolution_requested
+    # The Web trajectory store needs the provider exactly like single-Agent
+    # does: spans must be exported so the record processor can fan them out to
+    # the SQLite sink. ``trajectory_ui.enabled`` therefore also pulls the
+    # provider up, mirroring ``sync_agent_observability``.
+    want_enabled = (
+        bool(cfg.get("enabled", False))
+        or trajectory_settings.enabled
+        or evolution_requested
+    )
+
+    # Always synchronize the trajectory store first (start when its setting is
+    # enabled, tear the sink down otherwise); the provider decision below only
+    # controls the tracing side.
+    try:
+        sync_trajectory_runtime(trajectory_settings, demand="team")
+    except Exception as exc:
+        logger.warning("[TeamObservability] trajectory runtime sync failed: %s", exc)
 
     if not want_enabled:
         if _observability_active:
@@ -154,10 +178,7 @@ def sync_team_observability() -> None:
             service_name="jiuwenswarm",
             traces_dir=traces_dir,
         )
-        provider_existed = acquire_observability_demand(
-            "team",
-            observability_config=obs_cfg,
-        )
+        provider_existed = team_observability.acquire_observability(obs_cfg)
         was_active = _observability_active
         _observability_active = True
         if not was_active and not provider_existed:
@@ -185,10 +206,15 @@ def sync_team_observability() -> None:
 def shutdown_team_observability() -> None:
     """Shutdown team observability (called on disable or process exit)."""
     global _observability_active
+    try:
+        if not shutdown_trajectory_runtime(demand="team"):
+            logger.warning("[TeamObservability] trajectory runtime did not drain cleanly")
+    except Exception as exc:
+        logger.warning("[TeamObservability] trajectory runtime shutdown failed: %s", exc)
     if not _observability_active:
         return
     try:
-        release_observability_demand("team")
+        team_observability.release_observability()
         _observability_active = False
         logger.info("[TeamObservability] disabled")
     except Exception as exc:
@@ -1929,7 +1955,8 @@ class TeamManager:
             logger.info("[TeamManager] all teams cleaned")
 
     def get_team_agent(self, session_id: str) -> TeamAgent | None:
-        return self._team_agents.get(session_id)
+        """Return the live Team leader for either supported runtime path."""
+        return self._team_agents.get(session_id) or self._runner_team_agents.get(session_id)
 
     def get_monitor_handler(self, session_id: str) -> TeamMonitorHandler | None:
         return self._team_monitors.get(session_id)

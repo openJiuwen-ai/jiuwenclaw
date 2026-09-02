@@ -513,7 +513,7 @@ export function AgentManagementPanel({ onUseAgent, onUsePrompt, onCreateViaChat 
   if (view === 'detail') {
     return (
       <>
-        <main className="agent-management-panel agent-management-panel--detail" data-source={client.source}>
+        <main className="agent-management-panel agent-management-panel--detail" data-source={client.source} data-testid="agent-management-panel" data-variant="detail">
           <DefinitionDetailPage
             detail={state.detail}
             detailStatus={state.detailStatus}
@@ -557,7 +557,7 @@ export function AgentManagementPanel({ onUseAgent, onUsePrompt, onCreateViaChat 
   if (view === 'create') {
     return (
       <>
-        <main className="agent-management-panel agent-management-panel--create" data-source={client.source}>
+        <main className="agent-management-panel agent-management-panel--create" data-source={client.source} data-testid="agent-management-panel" data-variant="create">
           <AgentEditor
             draft={draft}
             skillOptions={state.skillOptions}
@@ -585,19 +585,21 @@ export function AgentManagementPanel({ onUseAgent, onUsePrompt, onCreateViaChat 
 
   const isMine = view === 'mine';
   return (
-    <main className={`agent-management-panel agent-management-panel--${isMine ? 'mine' : 'catalog'}`} data-source={client.source}>
-      <header className="agent-management-header">
+    <main className={`agent-management-panel agent-management-panel--${isMine ? 'mine' : 'catalog'}`} data-source={client.source} data-testid="agent-management-panel" data-variant={isMine ? 'mine' : 'catalog'}>
+      <header className="agent-management-header" data-testid="agent-management-header">
         <div>
-          <h1>{t('agentManagement.title')}</h1>
-          <p>{t('agentManagement.subtitle')}</p>
+          <h1 data-testid="agent-management-title">{t('agentManagement.title')}</h1>
+          <p data-testid="agent-management-subtitle">{t('agentManagement.subtitle')}</p>
         </div>
       </header>
-      <div className="agent-management-primary-row">
-        <nav className="agent-management-primary-tabs" role="tablist" aria-label={t('agentManagement.tabsLabel')}>
+      <div className="agent-management-primary-row" data-testid="agent-management-primary-row">
+        <nav className="agent-management-primary-tabs" role="tablist" aria-label={t('agentManagement.tabsLabel')} data-testid="agent-management-primary-tabs">
           <button
             type="button"
             role="tab"
             aria-selected={!isMine}
+            data-testid="agent-management-primary-tab"
+            data-variant="catalog"
             className={!isMine ? 'is-active' : ''}
             onClick={() => {
               setCreateMenuOpen(false);
@@ -612,6 +614,8 @@ export function AgentManagementPanel({ onUseAgent, onUsePrompt, onCreateViaChat 
             type="button"
             role="tab"
             aria-selected={isMine}
+            data-testid="agent-management-primary-tab"
+            data-variant="mine"
             className={isMine ? 'is-active' : ''}
             onClick={() => {
               setCreateMenuOpen(false);
@@ -623,8 +627,8 @@ export function AgentManagementPanel({ onUseAgent, onUsePrompt, onCreateViaChat 
             {t('agentManagement.tabs.mine')}
           </button>
         </nav>
-        <div className="agent-management-primary-actions">
-          <label className="agent-management-search">
+        <div className="agent-management-primary-actions" data-testid="agent-management-primary-actions">
+          <label className="agent-management-search" data-testid="agent-management-search">
             <SearchIcon aria-hidden="true" />
             <input
               type="search"
@@ -635,26 +639,28 @@ export function AgentManagementPanel({ onUseAgent, onUsePrompt, onCreateViaChat 
               value={isMine ? mineQuery : query}
               onChange={event => (isMine ? (setMineQuery(event.target.value), setMinePage(1)) : (setQuery(event.target.value), setCatalogPage(1)))}
               placeholder={t(isMine ? 'agentManagement.searchMine' : 'agentManagement.searchCatalog')}
+              data-testid="agent-management-search-input"
             />
           </label>
           {isMine ? (
-            <div className="agent-management-create-menu">
+            <div className="agent-management-create-menu" data-testid="agent-management-create-menu">
               <button
                 type="button"
                 className="agent-management-button agent-management-button--primary agent-management-create"
                 aria-haspopup="menu"
                 aria-expanded={createMenuOpen}
+                data-testid="agent-management-create-button"
                 onClick={() => setCreateMenuOpen(open => !open)}
               >
                 {t('agentManagement.actions.create')}
                 <ChevronDown size={15} aria-hidden="true" />
               </button>
               {createMenuOpen ? (
-                <div className="agent-management-create-menu__popover" role="menu">
-                  <button type="button" role="menuitem" onClick={openCreate}>
+                <div className="agent-management-create-menu__popover" role="menu" data-testid="agent-management-create-menu-popover">
+                  <button type="button" role="menuitem" data-testid="agent-management-create-menu-item" data-variant="create-first" onClick={openCreate}>
                     {t('agentManagement.actions.createFirst')}
                   </button>
-                  <button type="button" role="menuitem" onClick={() => { setCreateMenuOpen(false); onCreateViaChat?.(); }}>
+                  <button type="button" role="menuitem" data-testid="agent-management-create-menu-item" data-variant="create-by-chat" onClick={() => { setCreateMenuOpen(false); onCreateViaChat?.(); }}>
                     {t('agentManagement.actions.createByChat')}
                   </button>
                   <button type="button" role="menuitem" onClick={openUpload}>
@@ -667,12 +673,12 @@ export function AgentManagementPanel({ onUseAgent, onUsePrompt, onCreateViaChat 
         </div>
       </div>
       {actionError ? (
-        <div className="agent-management-inline-error" role="alert">
+        <div className="agent-management-inline-error" role="alert" data-testid="agent-management-inline-error">
           {actionError}
         </div>
       ) : null}
       {actionNotice ? (
-        <div className="agent-management-inline-notice" role="status">
+        <div className="agent-management-inline-notice" role="status" data-testid="agent-management-inline-notice">
           {actionNotice}
         </div>
       ) : null}

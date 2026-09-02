@@ -1,13 +1,13 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-"""Unit tests for jiuwenswarm.cli.render."""
+"""Unit tests for jiuwenswarm.channels.cli.render."""
 
 from __future__ import annotations
 
 import io
 import json
 
-from jiuwenswarm.cli.render import HumanRenderer, JsonRenderer, JsonlRenderer
+from jiuwenswarm.channels.cli.render import HumanRenderer, JsonRenderer, JsonlRenderer
 
 
 class TestHumanRenderer:
@@ -115,7 +115,7 @@ class TestHumanRenderer:
             r = HumanRenderer()
             r.handle_error({"error": "bad thing"})
             assert "bad thing" in stream.getvalue()
-        TestHumanRenderer._capture_logging("jiuwenswarm.cli.render", _run)
+        TestHumanRenderer._capture_logging("jiuwenswarm.channels.cli.render", _run)
 
     @staticmethod
     def test_reasoning_hidden_by_default():
@@ -123,7 +123,7 @@ class TestHumanRenderer:
             r = HumanRenderer()
             r.handle_reasoning({"content": "thinking..."})
             assert "thinking" not in stream.getvalue()
-        TestHumanRenderer._capture_logging("jiuwenswarm.cli.render", _run)
+        TestHumanRenderer._capture_logging("jiuwenswarm.channels.cli.render", _run)
 
     @staticmethod
     def test_reasoning_shown_when_enabled():
@@ -131,7 +131,7 @@ class TestHumanRenderer:
             r = HumanRenderer(show_reasoning=True)
             r.handle_reasoning({"content": "thinking..."})
             assert "thinking..." in stream.getvalue()
-        TestHumanRenderer._capture_logging("jiuwenswarm.cli.render", _run)
+        TestHumanRenderer._capture_logging("jiuwenswarm.channels.cli.render", _run)
 
     @staticmethod
     def test_tool_call_hidden_by_default():
@@ -139,7 +139,7 @@ class TestHumanRenderer:
             r = HumanRenderer()
             r.handle_tool_call({"tool_name": "bash", "arguments": "{}"})
             assert "bash" not in stream.getvalue()
-        TestHumanRenderer._capture_logging("jiuwenswarm.cli.render", _run)
+        TestHumanRenderer._capture_logging("jiuwenswarm.channels.cli.render", _run)
 
     @staticmethod
     def test_tool_call_shown_when_enabled():
@@ -147,7 +147,7 @@ class TestHumanRenderer:
             r = HumanRenderer(show_tools=True)
             r.handle_tool_call({"tool_name": "bash", "arguments": '{"cmd":"ls"}'})
             assert "bash" in stream.getvalue()
-        TestHumanRenderer._capture_logging("jiuwenswarm.cli.render", _run)
+        TestHumanRenderer._capture_logging("jiuwenswarm.channels.cli.render", _run)
 
     @staticmethod
     def test_tool_result_hidden_by_default():
@@ -155,7 +155,7 @@ class TestHumanRenderer:
             r = HumanRenderer()
             r.handle_tool_result({"tool_name": "bash", "status": "done"})
             assert "bash" not in stream.getvalue()
-        TestHumanRenderer._capture_logging("jiuwenswarm.cli.render", _run)
+        TestHumanRenderer._capture_logging("jiuwenswarm.channels.cli.render", _run)
 
     @staticmethod
     def test_tool_result_shown_when_enabled():
@@ -163,7 +163,7 @@ class TestHumanRenderer:
             r = HumanRenderer(show_tools=True)
             r.handle_tool_result({"tool_name": "bash", "status": "done"})
             assert "bash" in stream.getvalue()
-        TestHumanRenderer._capture_logging("jiuwenswarm.cli.render", _run)
+        TestHumanRenderer._capture_logging("jiuwenswarm.channels.cli.render", _run)
 
     @staticmethod
     def test_ensure_loading_picks_random_verb():
@@ -225,7 +225,7 @@ class TestJsonlRenderer:
 class TestSpinner:
     @staticmethod
     def test_spinner_frames_cycle():
-        from jiuwenswarm.cli.render import _SPINNER_FRAMES as frames
+        from jiuwenswarm.channels.cli.render import _SPINNER_FRAMES as frames
 
         r = HumanRenderer()
         r.ensure_loading()
@@ -249,7 +249,7 @@ class TestSpinner:
 
     @staticmethod
     def test_spinner_verb_rotates():
-        from jiuwenswarm.cli.render import _VERBS
+        from jiuwenswarm.channels.cli.render import _VERBS
         from unittest.mock import patch
 
         fake_time = 1000.0
@@ -257,14 +257,14 @@ class TestSpinner:
         def mock_monotonic():
             return fake_time
 
-        with patch("jiuwenswarm.cli.render.time.monotonic", mock_monotonic):
+        with patch("jiuwenswarm.channels.cli.render.time.monotonic", mock_monotonic):
             r = HumanRenderer()
             r.ensure_loading()
             initial_verb = r.verb
 
         fake_time += 5.5
 
-        with patch("jiuwenswarm.cli.render.time.monotonic", mock_monotonic):
+        with patch("jiuwenswarm.channels.cli.render.time.monotonic", mock_monotonic):
             r.tick_spinner()
 
         assert r.verb != initial_verb

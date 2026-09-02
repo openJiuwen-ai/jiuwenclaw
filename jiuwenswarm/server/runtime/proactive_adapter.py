@@ -18,12 +18,48 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
+from jiuwenswarm.runtime.context import get_current_agent_manager
+from jiuwenswarm.runtime.host_services import (
+    RuntimeHostPushTransport,
+    send_runtime_push,
+)
+
 logger = logging.getLogger(__name__)
 
 # 后台主 agent 推送任务的 inflight 集合，防止同 session 重复并发触发 stream。
 # fire-and-forget 后 cron 可能在一个后台 tick 还没跑完时又来下一次，靠这个
 # 标志跳过，避免同 session 并发 process_message_stream（不支持并发）。
 _proactive_push_inflight: set[str] = set()
+
+
+def resolve_proactive_adapter(agent: Any) -> Any | None:
+    """Resolve the execution adapter without importing a Server implementation."""
+    if agent is None:
+        return None
+    for attr in ("_adapter", "adapter", "_active_adapter"):
+        adapter = getattr(agent, attr, None)
+        if adapter is not None and (
+            hasattr(adapter, "apply_sandbox_runtime_patch")
+            or hasattr(adapter, "is_deep_agent_executing_for_session")
+        ):
+            return adapter
+    if hasattr(agent, "apply_sandbox_runtime_patch") or hasattr(
+        agent,
+        "is_deep_agent_executing_for_session",
+    ):
+        return agent
+    return None
+
+
+def _resolve_agent_manager(server: Any, explicit: Any | None = None) -> Any | None:
+    """Prefer the active Runtime context, then explicit or host injection."""
+    current = get_current_agent_manager()
+    if current is not None:
+        return current
+    if explicit is not None:
+        return explicit
+    getter = getattr(server, "get_agent_manager", None)
+    return getter() if callable(getter) else None
 
 
 @dataclass
@@ -76,7 +112,13 @@ def build_proactive_agent():
         return None
 
 
-async def trigger_main_agent(server, request: ProactiveTriggerRequest) -> bool:
+async def trigger_main_agent(
+    server: Any,
+    request: ProactiveTriggerRequest,
+    *,
+    agent_manager: Any | None = None,
+    push_transport: Any | None = None,
+) -> bool:
     """Drive the main agent to run one round with the directive-style query.
 
     避让：目标 session 正在跑 stream 时跳过（同 session 不支持并发 stream）。
@@ -118,15 +160,18 @@ async def trigger_main_agent(server, request: ProactiveTriggerRequest) -> bool:
     # sub_mode），会建出第二个 agent，导致推荐进的不是用户对话用的 context。
     # agent 不在内存 = 用户尚未在该 channel 发过消息（无活跃 context 可投递）→ 跳过本次 tick，
     # 等用户用过一次、agent 建好后下个 tick 自然拿到。
-    agent = server.get_agent_manager().get_agent_nowait(cid)
+    manager = _resolve_agent_manager(server, agent_manager)
+    if manager is None:
+        logger.info("[ProactiveEngine] trigger: no runtime agent manager, skipping")
+        return False
+    agent = manager.get_agent_nowait(cid)
     if agent is None or not hasattr(agent, "process_message_stream"):
         logger.info("[ProactiveEngine] trigger: no agent for channel=%s "
                     "(user hasn't used this channel yet), skipping", cid)
         return False
     # 内层 adapter 用于避让检查（is_deep_agent_executing_for_session 在 adapter 上）
     # 用公开 resolve_adapter 避开 protected-access
-    from jiuwenswarm.server.agent_ws_server import AgentWebSocketServer
-    adapter = AgentWebSocketServer.resolve_adapter(agent)
+    adapter = resolve_proactive_adapter(agent)
 
     # 避让：目标 session 正忙 → 跳过本次 tick
     if adapter is not None and hasattr(adapter, "is_deep_agent_executing_for_session"):
@@ -165,6 +210,9 @@ async def trigger_main_agent(server, request: ProactiveTriggerRequest) -> bool:
                     inflight_key)
         return False
     _proactive_push_inflight.add(inflight_key)
+    transport = (
+        RuntimeHostPushTransport() if push_transport is None else push_transport
+    )
 
     async def _push_chunks() -> None:
         """后台消费主 agent 的流式输出并推 Gateway。"""
@@ -180,20 +228,17 @@ async def trigger_main_agent(server, request: ProactiveTriggerRequest) -> bool:
                 # 不带主动推荐标记。前端靠 payload.source==='proactive_recommendation'
                 # 识别卡片、payload.proactive_type 选颜色，缺这俩会退化成普通白色气泡。
                 # decision.type 在手上，给每个 chunk 的 payload 补上。
-                try:
-                    chunk_payload = dict(getattr(chunk, "payload", None) or {})
-                    chunk_payload.setdefault("source", "proactive_recommendation")
-                    chunk_payload.setdefault("proactive_type", decision.type)
-                    chunk_payload.setdefault("proactive_target", decision.target)
-                    await server.send_push({
-                        "request_id": getattr(chunk, "request_id", "") or agent_request.request_id,
-                        "channel_id": cid,
-                        "session_id": session_id,
-                        "payload": chunk_payload,
-                        "is_complete": bool(getattr(chunk, "is_complete", False)),
-                    })
-                except Exception as exc:
-                    logger.debug("[ProactiveEngine] send_push chunk failed: %s", exc)
+                chunk_payload = dict(getattr(chunk, "payload", None) or {})
+                chunk_payload.setdefault("source", "proactive_recommendation")
+                chunk_payload.setdefault("proactive_type", decision.type)
+                chunk_payload.setdefault("proactive_target", decision.target)
+                await transport.send_push({
+                    "request_id": getattr(chunk, "request_id", "") or agent_request.request_id,
+                    "channel_id": cid,
+                    "session_id": session_id,
+                    "payload": chunk_payload,
+                    "is_complete": bool(getattr(chunk, "is_complete", False)),
+                })
             # 循环正常跑完（未抛异常）= 主 agent 输出流尽，推荐确实送达。
             delivered = True
         except Exception as exc:
@@ -235,7 +280,10 @@ async def init_proactive_engine(server, config: dict[str, Any] | None = None) ->
         # 检查 agent 是否活跃——在调 LLM 之前检查，避免 agent 被 evict 后白调 LLM。
         def _check_agent_cb(channel_id):
             cid = channel_id or "web"
-            agent = server.get_agent_manager().get_agent_nowait(cid)
+            manager = _resolve_agent_manager(server)
+            if manager is None:
+                return False
+            agent = manager.get_agent_nowait(cid)
             return agent is not None and hasattr(agent, "process_message_stream")
         proactive_engine.set_check_agent_available_callback(_check_agent_cb)
 
@@ -245,7 +293,7 @@ async def init_proactive_engine(server, config: dict[str, Any] | None = None) ->
             cid = channel_id or "web"
             import time as _time
             try:
-                await server.send_push({
+                sent = await send_runtime_push({
                     "request_id": f"proactive_notification_{int(_time.time() * 1000)}",
                     "channel_id": cid,
                     "payload": {
@@ -255,7 +303,7 @@ async def init_proactive_engine(server, config: dict[str, Any] | None = None) ->
                         "source": "proactive_notification",
                     },
                 })
-                return True
+                return sent
             except Exception as exc:
                 logger.debug("[ProactiveEngine] send_notification push failed: %s", exc)
                 return False

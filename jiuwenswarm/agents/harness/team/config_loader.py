@@ -554,6 +554,8 @@ def load_team_spec_dict(
     spec_dict["lifecycle"] = team_raw.get("lifecycle", "persistent")
     spec_dict["teammate_mode"] = team_raw.get("teammate_mode", "build_mode")
     spec_dict["spawn_mode"] = team_raw.get("spawn_mode", "inprocess")
+    spec_dict["dispatch_mode"] = team_raw.get("dispatch_mode", "autonomous")
+    spec_dict["enable_task_verification"] = team_raw.get("enable_task_verification", False)
     spec_dict["enable_hitt"] = team_raw.get("enable_hitt", True)
     spec_dict["enable_permissions"] = _resolve_enable_permissions(config_base)
     _apply_swarmflow_budget(spec_dict, team_raw.get("swarmflow_budget"))

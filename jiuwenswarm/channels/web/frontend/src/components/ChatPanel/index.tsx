@@ -773,7 +773,12 @@ function BeeBanner({ className, altText, onTrigger }: { className: string; altTe
   );
 }
 
-export function ChatPanel({
+/**
+ * The chat surface stays mounted while the user inspects trajectory data.
+ * Keep this boundary memoized so changing only the active surface does not
+ * rebuild a potentially very large message timeline and composer subtree.
+ */
+export const ChatPanel = React.memo(function ChatPanel({
   onSendMessage,
   onInputIntent,
   onPersistMedia,
@@ -1517,4 +1522,4 @@ export function ChatPanel({
       </div>
     </div>
   );
-}
+});

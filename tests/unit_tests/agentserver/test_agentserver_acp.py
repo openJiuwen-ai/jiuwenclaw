@@ -24,6 +24,7 @@ from jiuwenswarm.agents.harness.common.rails.symphony.retrieval_context_processo
 from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
 from jiuwenswarm.common.schema.agent import AgentRequest
 from jiuwenswarm.common.schema.message import ReqMethod
+from jiuwenswarm.observability.session_delete import trajectory_session_accepts_records
 from jiuwenswarm.server.runtime.team_entity_store import TeamEntityStoreError
 
 
@@ -3064,6 +3065,7 @@ async def test_handle_session_delete_initializes_persistent_checkpointer(monkeyp
     assert heartbeat_delete_prepared == ["sess-agent-1"]
     assert heartbeat_deleted == ["sess-agent-1"]
     assert not session_dir.exists()
+    assert trajectory_session_accepts_records("sess-agent-1") is False
     assert fake_ws.sent == [
         {
             "response_id": "req-session-delete",
@@ -3208,6 +3210,7 @@ async def test_handle_session_delete_keeps_state_when_runtime_drain_fails(
     assert evict_calls == []
     assert release_calls == []
     assert session_dir.exists()
+    assert trajectory_session_accepts_records("sess-agent-busy") is True
     assert fake_ws.sent == [
         {
             "response_id": "req-session-delete-busy",
@@ -3293,6 +3296,7 @@ async def test_handle_session_delete_unbinds_team_session(monkeypatch, tmp_path)
     assert delete_calls == [{"session_id": "sess-team-1", "reason": "session.delete: "}]
     assert cleared_metadata_cache == ["sess-team-1"]
     assert not session_dir.exists()
+    assert trajectory_session_accepts_records("sess-team-1") is True
     binding = binding_store.get("research_team")
     assert binding is not None
     assert binding.session_ids == ("sess-keep",)

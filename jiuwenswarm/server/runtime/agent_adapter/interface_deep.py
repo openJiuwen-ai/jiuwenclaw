@@ -389,7 +389,7 @@ from jiuwenswarm.server.runtime.agent_adapter.sysop_builder import (
 from jiuwenswarm.server.runtime.agent_adapter.user_turn import TEAM_USER_TURN_KEY, UserTurn
 from jiuwenswarm.agents.harness.common.auto_harness.service import _HARNESS_PACKAGES_FILE
 from jiuwenswarm.agents.harness.common.plugins.rail_manager import get_rail_manager
-from jiuwenswarm.gateway.cron import CronTargetChannel
+from jiuwenswarm.runtime.cron import CronTargetChannel
 from jiuwenswarm.common.schema.agent import AgentRequest, AgentResponse, AgentResponseChunk
 from jiuwenswarm.common.schema.message import ReqMethod
 from jiuwenswarm.common.utils import (
@@ -1328,6 +1328,52 @@ async def ensure_persistent_checkpointer() -> None:
     finally:
         if acquired:
             lock.release()
+
+
+async def close_persistent_checkpointer() -> None:
+    """Dispose the process-owned persistent checkpointer connection pool."""
+    global _PERSISTENT_CHECKPOINTER_READY
+
+    if not _PERSISTENT_CHECKPOINTER_READY:
+        return
+    lock = await _get_persistent_checkpointer_lock()
+    async with lock:
+        if not _PERSISTENT_CHECKPOINTER_READY:
+            return
+        checkpointer = CheckpointerFactory.get_checkpointer()
+        kv_store = getattr(checkpointer, "_kv_store", None)
+        engine = getattr(kv_store, "engine", None)
+        dispose = getattr(engine, "dispose", None)
+        dispose_error: BaseException | None = None
+        try:
+            if callable(dispose):
+                await dispose()
+        except BaseException as exc:
+            dispose_error = exc
+
+        reset_error: BaseException | None = None
+        try:
+            CheckpointerFactory.set_default_checkpointer(None)
+        except BaseException as exc:
+            reset_error = exc
+        finally:
+            # READY describes whether the currently installed factory value is
+            # safe to reuse.  Even a failed/partial dispose must force the next
+            # Runtime startup through initialization instead of reusing a
+            # potentially closed pool.
+            _PERSISTENT_CHECKPOINTER_READY = False
+
+        if dispose_error is not None:
+            if reset_error is not None:
+                logger.warning(
+                    "[JiuWenSwarmDeepAdapter] checkpointer factory reset failed "
+                    "while preserving dispose error: %s",
+                    reset_error,
+                )
+            raise dispose_error
+        if reset_error is not None:
+            raise reset_error
+        logger.info("[JiuWenSwarmDeepAdapter] persistent checkpointer closed")
 
 
 _MODE_DISPLAY_MAP: dict[str, dict[str, str]] = {
@@ -6399,7 +6445,7 @@ class JiuWenSwarmDeepAdapter:
         """Build SkillEvolutionRail."""
         if not get_skill_evolution_enabled(config):
             return None
-        from jiuwenswarm.agents.harness.observability_runtime import (
+        from openjiuwen.extensions.observability.demand import (
             get_trajectory_span_processor,
         )
 
@@ -6444,7 +6490,7 @@ class JiuWenSwarmDeepAdapter:
             if self._skill_manager is not None
             else []
         )
-        from jiuwenswarm.agents.harness.observability_runtime import (
+        from openjiuwen.extensions.observability.demand import (
             get_trajectory_span_processor,
         )
 
@@ -6548,7 +6594,7 @@ class JiuWenSwarmDeepAdapter:
                 logger.debug("[JiuWenSwarmDeepAdapter] SkillCreateRail disabled by config")
                 return None
 
-            from jiuwenswarm.agents.harness.observability_runtime import (
+            from openjiuwen.extensions.observability.demand import (
                 get_trajectory_span_processor,
             )
 
@@ -6603,20 +6649,27 @@ class JiuWenSwarmDeepAdapter:
             task_planning_rail = None
         return task_planning_rail
 
-    @staticmethod
     def _build_subagent_rail(
+        self,
         config_base: dict[str, Any] | None = None,
     ) -> SubagentRail | None:
-        """Build SubagentRail for subagent delegation."""
+        """Build SubagentRail for subagent delegation.
+
+        The rail is supplied by the adapter, so ``create_deep_agent()`` skips
+        its own default SubagentRail (``_already_provided`` matches subclasses).
+        That makes this the only place the ``react.subagent_runtime.enabled``
+        switch can reach the rail — without it the runtime tools silently fall
+        back to ``task_tool``.
+        """
+        enable_runtime = self._resolve_enable_subagent_runtime(config_base)
         try:
-            runtime_enabled = is_subagent_runtime_enabled(config_base)
             subagent_rail = BrowserTaskPromptRail(
-                enable_subagent_runtime=runtime_enabled,
+                enable_subagent_runtime=enable_runtime,
             )
             logger.info(
                 "[JiuWenSwarmDeepAdapter] SubagentRail create success "
-                "(subagent_runtime=%s)",
-                runtime_enabled,
+                "(load-aware browser policy, subagent_runtime=%s)",
+                enable_runtime,
             )
         except Exception as exc:
             logger.warning("[JiuWenSwarmDeepAdapter] SubagentRail create failed: %s", exc)
@@ -7115,15 +7168,19 @@ class JiuWenSwarmDeepAdapter:
         # for task-loop runs, or agent.<name>.invoke for single-round) under the root
         # run span per iteration/round. It is the only thing that creates the
         # task_iteration / invoke spans that llm.call + tool.* nest under. It
-        # self-disables (before_* returns early when get_team_span() is None), so
-        # attaching it unconditionally is safe and also adapts to runtime
+        # self-disables (before_* returns early when there is no run root span),
+        # so attaching it unconditionally is safe and also adapts to runtime
         # enable/disable of agent_observability without rebuilding the agent.
+        #
+        # The harness rail is the whole agent tier here: the team contribution
+        # (agentteam.* identity) is a separate rail the team blueprint mounts,
+        # and a single agent has no team to describe.
         try:
-            from openjiuwen.agent_teams.observability.rail import ObservabilityRail
+            from openjiuwen.harness.observability import AgentObservabilityRail
 
-            rails_list.append(ObservabilityRail())
+            rails_list.append(AgentObservabilityRail())
         except Exception as exc:
-            logger.warning("%s Failed to attach ObservabilityRail: %s", log_prefix, exc)
+            logger.warning("%s Failed to attach AgentObservabilityRail: %s", log_prefix, exc)
         stage_timer.mark("observability_rail")
 
         total_ms = stage_timer.total_ms()
@@ -9861,7 +9918,7 @@ class JiuWenSwarmDeepAdapter:
             }
         ):
             return True
-        from jiuwenswarm.gateway.message_handler.evolution_approval import (
+        from jiuwenswarm.runtime.evolution import (
             is_interrupt_evolution_approval_answer_payload,
         )
 
@@ -10723,7 +10780,7 @@ class JiuWenSwarmDeepAdapter:
         """Close the frontend evolution status after a team skill approval is resolved."""
         if not session_id:
             return
-        from jiuwenswarm.server.gateway_push import WebSocketGatewayPushTransport
+        from jiuwenswarm.runtime.host_services import RuntimeHostPushTransport
 
         stage = "completed" if accepted else "hidden"
         message = (
@@ -10734,7 +10791,7 @@ class JiuWenSwarmDeepAdapter:
         try:
             await push_evolution_status(
                 EvolutionPushContext(
-                    transport=WebSocketGatewayPushTransport(),
+                    transport=RuntimeHostPushTransport(),
                     channel_id=channel_id,
                     session_id=session_id,
                 ),
@@ -11601,6 +11658,8 @@ class JiuWenSwarmDeepAdapter:
             self._stream_event_rail.reset_abort(session_id)
         image_files_token = None
         _run_span: Any = None
+        _run_exception: BaseException | None = None
+        _run_error_type = ""
         collected_content: list[str] = []
         error_text: str | None = None
         interaction_stream = None
@@ -11608,10 +11667,12 @@ class JiuWenSwarmDeepAdapter:
         # 提前 import 观测 span 工具：原 import 在 try 内 _sync_prompt_attachments
         # 之后，若该处抛异常，finally 的 close_agent_run_span 会因名字未绑定
         # 抛 UnboundLocalError，掩盖真因。提前到函数顶部规避（见 traceback 8111）。
-        from jiuwenswarm.agents.harness.agent_observability import (  # noqa: E402
+        from openjiuwen.harness.observability import (  # noqa: E402
             close_agent_run_span,
-            mark_single_agent_team,
             open_agent_run_span,
+        )
+
+        from jiuwenswarm.agents.harness.agent_observability import (  # noqa: E402
             sync_agent_observability,
         )
         try:
@@ -11663,16 +11724,17 @@ class JiuWenSwarmDeepAdapter:
             # config before running, and open a root span so OtelCallbackHandler
             # has a parent for LLM/tool spans (see streaming path for details).
             sync_agent_observability()
-            mark_single_agent_team(self._instance)
-            from jiuwenswarm.server.runtime.debug_trace.paths import (
-                resolve_debug_trace_mode,
+            _trajectory_mode = deprecate_mode(
+                request.params.get("mode")
+                if isinstance(request.params, dict)
+                else mode
             )
-
             _run_span = open_agent_run_span(
                 session_id=session_id,
-                mode=resolve_debug_trace_mode(
-                    mode, getattr(request, "_original_mode", None)
-                ),
+                mode=_trajectory_mode,
+                request_id=request.request_id,
+                run_id=request.request_id,
+                turn_id=request.request_id,
             )
             attach_goal = self._wants_attach_goal(request.params)
             dispatch_mode = self._resolve_input_dispatch_mode(request.params)
@@ -11719,6 +11781,9 @@ class JiuWenSwarmDeepAdapter:
                     metadata=request.metadata,
                 )
             async for chunk in interaction_stream:
+                terminal_failure = self._run_failure(chunk)
+                if terminal_failure is not None:
+                    _run_error_type, error_text = terminal_failure
                 if hasattr(chunk, "type") and hasattr(chunk, "payload"):
                     # openjiuwen emits terminal model failures as an ``answer``
                     # chunk whose error text is in ``payload.output`` and whose
@@ -11736,6 +11801,8 @@ class JiuWenSwarmDeepAdapter:
                         error_text = str(output) if output else "task failed"
                         continue
                     if chunk.type in ("llm_output", "answer"):
+                        if terminal_failure is not None:
+                            continue
                         text = (
                             chunk.payload.get("content", "")
                             if isinstance(chunk.payload, dict)
@@ -11754,6 +11821,12 @@ class JiuWenSwarmDeepAdapter:
                                 err = parsed.get("error") or parsed.get("message") or ""
                                 if err:
                                     error_text = str(err)
+                                    if terminal_failure is None:
+                                        _run_error_type = str(
+                                            parsed.get("error_type")
+                                            or parsed.get("code")
+                                            or event_type
+                                        )
                 else:
                     parsed = self._parse_stream_chunk(chunk, _parent_session_id=self._parent_session_id)
                     if parsed is not None:
@@ -11761,7 +11834,8 @@ class JiuWenSwarmDeepAdapter:
                         if text:
                             collected_content.append(text)
             interaction_stream_abort = False
-        except asyncio.CancelledError:
+        except asyncio.CancelledError as exc:
+            _run_exception = exc
             logger.info(
                 "[JiuWenSwarmDeepAdapter] Agent 任务被取消: request_id=%s session_id=%s",
                 request.request_id,
@@ -11769,20 +11843,10 @@ class JiuWenSwarmDeepAdapter:
             )
             raise
         except Exception as e:
+            _run_exception = e
             logger.error("[JiuWenSwarmDeepAdapter] Agent 任务执行异常: %s", e)
             raise
         finally:
-            close_agent_run_span(
-                _run_span,
-                session_id=session_id,
-                output="".join(collected_content),
-            )
-            if image_files_token is not None:
-                from jiuwenswarm.agents.harness.common.prompt.user_prompt_builder import (
-                    reset_current_multimodal_image_files,
-                )
-
-                reset_current_multimodal_image_files(image_files_token)
             if interaction_stream is not None:
                 try:
                     await interaction_stream.close(
@@ -11790,6 +11854,20 @@ class JiuWenSwarmDeepAdapter:
                     )
                 except Exception:
                     logger.debug("[Goal] interaction stream close failed", exc_info=True)
+            close_agent_run_span(
+                _run_span,
+                session_id=session_id,
+                output="".join(collected_content),
+                exception=_run_exception,
+                error_type=_run_error_type,
+                error_message=error_text or "",
+            )
+            if image_files_token is not None:
+                from jiuwenswarm.agents.harness.common.prompt.user_prompt_builder import (
+                    reset_current_multimodal_image_files,
+                )
+
+                reset_current_multimodal_image_files(image_files_token)
             self._unregister_session_agent_task(session_id)
             TOOL_PERMISSION_CHANNEL_ID.reset(token_cid)
             cleanup_permission_context(token_perm)
@@ -12255,6 +12333,8 @@ class JiuWenSwarmDeepAdapter:
         stream_consumer_cancelled = False
         image_files_token = None
         _run_span: Any = None
+        _run_exception: BaseException | None = None
+        run_failure: tuple[str, str] | None = None
         _debug_logger = None
         _debug_trace_token = None  # reset token for the ContextVar-bound logger
         interaction_stream = None
@@ -12262,10 +12342,12 @@ class JiuWenSwarmDeepAdapter:
         # 提前 import 观测 span 工具（同 7382 处理由）：原 import 在 try 内
         # _sync_prompt_attachments 之后，该处异常会让 finally 的
         # close_agent_run_span 因名字未绑定抛 UnboundLocalError，掩盖真因。
-        from jiuwenswarm.agents.harness.agent_observability import (  # noqa: E402
+        from openjiuwen.harness.observability import (  # noqa: E402
             close_agent_run_span,
-            mark_single_agent_team,
             open_agent_run_span,
+        )
+
+        from jiuwenswarm.agents.harness.agent_observability import (  # noqa: E402
             sync_agent_observability,
         )
         try:
@@ -12350,9 +12432,17 @@ class JiuWenSwarmDeepAdapter:
             # Sync single-agent / coding-agent observability with current config
             # before running.
             sync_agent_observability(force=_dbg_settings.otel_enabled)
-            mark_single_agent_team(self._instance)
+            _trajectory_mode = deprecate_mode(
+                request.params.get("mode")
+                if isinstance(request.params, dict)
+                else _debug_trace_mode
+            )
             _run_span = open_agent_run_span(
-                session_id=session_id, mode=_debug_trace_mode
+                session_id=session_id,
+                mode=_trajectory_mode,
+                request_id=request.request_id,
+                run_id=request.request_id,
+                turn_id=request.request_id,
             )
             _otel_trace_id = ""
             _otel_span_id = ""
@@ -12445,6 +12535,14 @@ class JiuWenSwarmDeepAdapter:
                     interaction_stream_abort = False
                     return
                 if result_type == "goal_error":
+                    goal_error_type = str(
+                        control.get("error_code", "goal_error") or "goal_error"
+                    )
+                    goal_error_message = str(
+                        control.get("error", "goal operation failed")
+                        or "goal operation failed"
+                    )
+                    run_failure = (goal_error_type, goal_error_message)
                     if interaction_stream is not None:
                         await interaction_stream.close(abort_active_round=False)
                         interaction_stream = None
@@ -12453,8 +12551,8 @@ class JiuWenSwarmDeepAdapter:
                         channel_id=cid,
                         payload={
                             "event_type": ERROR_EVENT_TYPE,
-                            "code": control.get("error_code", "goal_error"),
-                            "message": control.get("error", "goal operation failed"),
+                            "code": goal_error_type,
+                            "message": goal_error_message,
                             "goal": control.get("goal"),
                         },
                         is_complete=True,
@@ -12594,7 +12692,6 @@ class JiuWenSwarmDeepAdapter:
                         mode=self._resolve_input_dispatch_mode(request.params),
                     )
                 )
-            run_failure: tuple[str, str] | None = None
             # Start of the wait for the runner's first chunk; every branch above
             # has either handed the message over or attached to a running round.
             runner_stream_started_at = time.monotonic()
@@ -12936,7 +13033,8 @@ class JiuWenSwarmDeepAdapter:
                 else:
                     _debug_logger.end_run(status="ok")
             interaction_stream_abort = run_failure is not None
-        except asyncio.CancelledError:
+        except asyncio.CancelledError as exc:
+            _run_exception = exc
             stream_consumer_cancelled = True
             logger.info(
                 "[JiuWenSwarmDeepAdapter] 流式任务被取消: request_id=%s session_id=%s",
@@ -12953,6 +13051,7 @@ class JiuWenSwarmDeepAdapter:
                 _debug_logger.end_run(status="cancelled")
             raise
         except Exception as exc:
+            _run_exception = exc
             logger.exception("[JiuWenSwarmDeepAdapter] 流式任务异常: %s", exc)
             if _debug_logger is not None:
                 _debug_logger.end_run(status="error", error=exc)
@@ -12971,11 +13070,6 @@ class JiuWenSwarmDeepAdapter:
             # goal set 因 lease 被占而早退时，chat 流还在，不能在这里落盘。
             if not self._session_has_other_running_agent_tasks(session_id):
                 self._flush_pending_goal_objective_history(session_id)
-            close_agent_run_span(
-                _run_span,
-                session_id=session_id,
-                output=_assemble_run_answer(run_answer_deltas, run_answer_final),
-            )
             if _debug_logger is not None:
                 _debug_logger.flush()
             if _debug_trace_token is not None:
@@ -12998,6 +13092,14 @@ class JiuWenSwarmDeepAdapter:
                     )
                 except Exception:
                     logger.debug("[Goal] interaction stream close failed", exc_info=True)
+            close_agent_run_span(
+                _run_span,
+                session_id=session_id,
+                output=_assemble_run_answer(run_answer_deltas, run_answer_final),
+                exception=_run_exception,
+                error_type=run_failure[0] if run_failure is not None else "",
+                error_message=run_failure[1] if run_failure is not None else "",
+            )
             self._unregister_session_agent_task(session_id)
             TOOL_PERMISSION_CHANNEL_ID.reset(token_cid)
             cleanup_permission_context(token_perm)
@@ -13122,36 +13224,66 @@ class JiuWenSwarmDeepAdapter:
         """
         ctype = getattr(chunk, "type", None)
         payload = getattr(chunk, "payload", None)
+        if isinstance(chunk, dict):
+            ctype = chunk.get("type") or chunk.get("event_type")
+            payload = chunk.get("payload", chunk)
+        ctype = getattr(ctype, "value", ctype)
+        normalized_type = str(ctype or "").strip()
 
         def _get(key, default=None):
             if isinstance(payload, dict):
                 return payload.get(key, default)
             return getattr(payload, key, default)
 
-        if ctype == "controller_output" and payload is not None:
-            inner_t = getattr(payload, "type", None)
+        def _failure(default_type: str, default_message: str) -> tuple[str, str]:
+            error_type = (
+                _get("error_type")
+                or _get("code")
+                or _get("type")
+                or default_type
+            )
+            message = (
+                _get("message")
+                or _get("error")
+                or _get("detail")
+                or default_message
+            )
+            return str(error_type), str(message)
+
+        if normalized_type == "controller_output" and payload is not None:
+            inner_t = _get("type")
             inner_val = getattr(inner_t, "value", inner_t) if inner_t is not None else None
             if inner_val == "task_failed":
-                data = getattr(payload, "data", None) or []
+                data = _get("data") or []
                 msg = next(
                     (
-                        getattr(item, "text", None)
+                        item.get("text") if isinstance(item, dict) else getattr(item, "text", None)
                         for item in data
-                        if hasattr(item, "text")
                     ),
                     None,
                 )
                 return "task_failed", (msg or "task failed")
             return None
 
-        if ctype == "answer" and _get("result_type") == "error":
+        if normalized_type == "answer" and _get("result_type") == "error":
             out = _get("output")
             if isinstance(out, dict):
                 out = out.get("output")
             return "answer_error", (str(out) if out else "task failed")
 
-        if isinstance(chunk, dict) and chunk.get("result_type") == "error":
-            return "answer_error", str(chunk.get("output") or "task failed")
+        if normalized_type == ERROR_EVENT_TYPE:
+            return _failure("execution_error", "execution error")
+
+        if normalized_type in {"error", "chat.error"}:
+            return _failure(normalized_type, "task failed")
+
+        if _get("result_type") in {"error", "goal_error"}:
+            out = _get("output")
+            if isinstance(out, dict):
+                out = out.get("output") or out.get("message") or out.get("error")
+            if out:
+                return _failure("answer_error", str(out))
+            return _failure("answer_error", "task failed")
 
         return None
 
@@ -14116,6 +14248,27 @@ class JiuWenSwarmDeepAdapter:
                     ))
         if tools and token_counter:
             tools_tokens = token_counter.count_tools(tools) or 0
+        elif tools:
+            # ContextEngine intentionally returns no token counter for models
+            # without a supported tokenizer.  Keep the /context breakdown
+            # useful in that mode instead of reporting registered tools as 0.
+            # Mirror TiktokenCounter.count_tools()'s wire shape, then apply the
+            # same character-based fallback used for the prompt and messages.
+            tools_tokens = 3
+            for index, tool in enumerate(tools):
+                function_obj = {
+                    "name": tool.name,
+                    "description": tool.description or "",
+                    "parameters": tool.parameters,
+                }
+                json_text = json.dumps(
+                    function_obj,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                    default=str,
+                )
+                piece = f"<|start|>functions.{tool.name}:{index}\n{json_text}<|end|>"
+                tools_tokens += max(len(piece) // 4, 1)
         else:
             tools_tokens = 0
 
@@ -14744,10 +14897,10 @@ class JiuWenSwarmDeepAdapter:
 
     async def _watch_evolution_and_push(self, rid: str, cid: str, session_id: str) -> None:
         """Poll passive evolution events and push progress, approval, and terminal status."""
-        from jiuwenswarm.server.gateway_push import WebSocketGatewayPushTransport
+        from jiuwenswarm.runtime.host_services import RuntimeHostPushTransport
 
         push_context = EvolutionPushContext(
-            transport=WebSocketGatewayPushTransport(),
+            transport=RuntimeHostPushTransport(),
             channel_id=cid,
             session_id=session_id,
         )

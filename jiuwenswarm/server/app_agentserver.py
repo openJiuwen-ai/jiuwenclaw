@@ -30,6 +30,7 @@ from jiuwenswarm.common.utils import cleanup_stale_openjiuwen_descs
 cleanup_stale_openjiuwen_descs()
 
 from openjiuwen.core.common.logging import LogManager  # pylint: disable=wrong-import-order
+from openjiuwen.harness.observability import install_subagent_observability_hook  # pylint: disable=wrong-import-order
 
 # --- Now safe to import jiuwenswarm modules ---
 from jiuwenswarm.common.debug_dump import install_async_dump_handler
@@ -216,10 +217,6 @@ apply_task_tool_debug_patch()
 # 让所有分发路径创建的 subagent 都带上 OTel 观测 rail（内置 task_tool、自定义
 # agent 工具、后台 subagent），这样子 agent 的 llm/tool span 归属自己的
 # agent.<type>.invoke span，而不是挂到派发它的 agent 身上。
-from jiuwenswarm.agents.harness.agent_observability import (
-    install_subagent_observability_hook,
-)
-
 install_subagent_observability_hook()
 
 
@@ -311,6 +308,10 @@ async def _run(host: str, port: int) -> None:
         name="zen-free-models-warmup",
     )
 
+    from jiuwenswarm.observability.gateway_hints import trajectory_gateway_hint_bridge
+
+    trajectory_gateway_hint_bridge.bind(asyncio.get_running_loop(), server.send_push)
+
     # ---------- ProactiveEngine 初始化 ----------
     # 适配逻辑（建专用 agent + 触发主 agent 回调）封装在 proactive_adapter，
     # app_agentserver 只调 init_proactive_engine。
@@ -332,7 +333,10 @@ async def _run(host: str, port: int) -> None:
     # Distributed teammate can receive bootstrap before any team-mode request arrives.
     # Keep a lightweight daemon alive so remote member bootstrap is consumed proactively.
     teammate_bootstrap_task = asyncio.create_task(
-        run_teammate_bootstrap_daemon(stop_event=stop_event)
+        run_teammate_bootstrap_daemon(
+            stop_event=stop_event,
+            agent_manager=server.get_agent_manager(),
+        )
     )
 
     def _on_signal() -> None:
@@ -353,6 +357,7 @@ async def _run(host: str, port: int) -> None:
         pass
     finally:
         logger.info("[AgentServer] stopping…")
+        await trajectory_gateway_hint_bridge.unbind()
         if teammate_bootstrap_task is not None:
             teammate_bootstrap_task.cancel()
             try:

@@ -3685,6 +3685,7 @@ export function SkillPanel({
               <button
                 type="button"
                 onClick={() => setOauthLoginOpen(false)}
+                data-testid="skill-panel-oauth-login-close-btn"
                 className="w-7 h-7 flex items-center justify-center rounded-md hover:bg-secondary text-text-muted hover:text-text"
               >
                 <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
@@ -3703,6 +3704,8 @@ export function SkillPanel({
                 onClick={() => handleOAuthLogin('gitcode')}
                 disabled={oauthLoadingProvider === 'gitcode'}
                 className="flex items-center justify-center gap-2 rounded-[16px] text-sm whitespace-nowrap transition-colors w-full mb-3"
+                data-testid="skill-panel-oauth-login-btn"
+                data-variant="gitcode"
                 style={{
                   height: '40px',
                   backgroundColor: '#191919',
@@ -3726,6 +3729,8 @@ export function SkillPanel({
                 onClick={() => handleOAuthLogin('github')}
                 disabled={oauthLoadingProvider === 'github'}
                 className="flex items-center justify-center gap-2 rounded-[16px] text-sm whitespace-nowrap transition-colors w-full"
+                data-testid="skill-panel-oauth-login-btn"
+                data-variant="github"
                 style={{
                   height: '40px',
                   backgroundColor: '#fff',
@@ -3744,7 +3749,7 @@ export function SkillPanel({
                 )}
                 {oauthLoadingProvider === 'github' ? t('skills.oauthLogin.loading') : t('skills.oauthLogin.githubLogin')}
               </button>
-              <p className="mt-4 text-xs text-text-muted text-center">
+              <p className="mt-4 text-xs text-text-muted text-center" data-testid="skill-panel-oauth-login-callback-hint">
                 {t('skills.oauthLogin.callbackHint')}
               </p>
               {oauthError && (

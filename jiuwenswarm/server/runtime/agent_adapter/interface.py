@@ -3352,7 +3352,7 @@ class JiuWenSwarm:
                                 completion_status = "error"
                                 abort_terminal_status = "error"
                             _note_goal_stream_payload(et, data.payload)
-                            should_record = et.startswith("chat.")
+                            should_record = et.startswith("chat.") or et == "context.usage"
                             final_segment_started_at: float | None = None
                             if not should_record and et == EventType.TEAM_MESSAGE.value:
                                 should_record = True
@@ -3542,7 +3542,7 @@ class JiuWenSwarm:
                             completion_status = "error"
                             abort_terminal_status = "error"
                         _note_goal_stream_payload(et, data)
-                        should_record = et.startswith("chat.")
+                        should_record = et.startswith("chat.") or et == "context.usage"
                         final_segment_started_at = None
                         if not should_record and et == EventType.TEAM_MESSAGE.value:
                             should_record = True

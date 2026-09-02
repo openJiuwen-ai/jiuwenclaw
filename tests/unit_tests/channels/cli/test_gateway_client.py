@@ -1,6 +1,6 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-"""Unit tests for jiuwenswarm.cli.gateway_client."""
+"""Unit tests for jiuwenswarm.channels.cli.gateway_client."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 import pytest
 
-from jiuwenswarm.cli.gateway_client import GatewayClient
+from jiuwenswarm.channels.cli.gateway_client import GatewayClient
 
 
 class TestGatewayClient:
@@ -30,7 +30,7 @@ class TestGatewayClient:
 
             return FakeWs()
 
-        with patch("jiuwenswarm.cli.gateway_client._connect_ws", _mock_connect):
+        with patch("jiuwenswarm.channels.cli.gateway_client._connect_ws", _mock_connect):
             client = GatewayClient("ws://127.0.0.1:19001/tui")
             await client.connect()
 
@@ -47,7 +47,7 @@ class TestGatewayClient:
 
             return FakeWs()
 
-        with patch("jiuwenswarm.cli.gateway_client._connect_ws", _mock_connect):
+        with patch("jiuwenswarm.channels.cli.gateway_client._connect_ws", _mock_connect):
             client = GatewayClient("ws://127.0.0.1:19001/tui")
             with pytest.raises(ConnectionError):
                 await client.connect()
@@ -65,7 +65,7 @@ class TestGatewayClient:
 
             return FakeWs()
 
-        with patch("jiuwenswarm.cli.gateway_client._connect_ws", _mock_connect):
+        with patch("jiuwenswarm.channels.cli.gateway_client._connect_ws", _mock_connect):
             client = GatewayClient("ws://127.0.0.1:19001/tui")
             with pytest.raises(ConnectionError):
                 await client.connect()

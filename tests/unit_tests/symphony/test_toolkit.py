@@ -473,8 +473,14 @@ async def test_plan_timeout_classifies_cancelled_graph_build_as_terminal_timeout
         build_entered.set()
         await asyncio.Event().wait()
 
+    async def successful_probe(_config):
+        return None
+
     async def stale_graph_status():
         return {"success": True, "exists": True, "stale": True}
+
+    async def passing_model_probe(_llm_config):
+        return None
 
     monkeypatch.setattr(
         "jiuwenswarm.symphony.service.load_symphony_config",
@@ -483,6 +489,16 @@ async def test_plan_timeout_classifies_cancelled_graph_build_as_terminal_timeout
     monkeypatch.setattr(
         "jiuwenswarm.symphony.service.LLMConfig.from_default_model",
         lambda: object(),
+    )
+    # The build path probes the primary model before building; keep it passing so
+    # the timeout under test is the one raised by the blocked graph build.
+    monkeypatch.setattr(
+        "jiuwenswarm.symphony.service.probe_model_connection",
+        passing_model_probe,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.symphony.service.probe_model_connection",
+        successful_probe,
     )
     monkeypatch.setattr(
         "jiuwenswarm.symphony.service.service_build_graph",
