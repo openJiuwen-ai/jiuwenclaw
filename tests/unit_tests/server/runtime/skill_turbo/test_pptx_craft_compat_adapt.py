@@ -14,6 +14,7 @@ from jiuwenswarm.server.runtime.skill_turbo.skill_codes.ppt.ppt_page_gen import 
     _build_page_gen_rewrite_hint,
     _extract_chart_scaffold_region,
     _extract_designer_section,
+    _filled_chart_scaffold_is_progressed,
     _is_chart_candidate_page,
     _merge_chart_scaffold_from_filled,
     _repair_content_template_chrome,
@@ -374,6 +375,37 @@ def test_merge_chart_scaffold_active_script_without_comment():
     assert "CHART_SCAFFOLD_BEGIN" not in merged
     assert 'const option = {"series"' in merged
 
+
+def test_chart_scaffold_path_b_ignores_main_inline_echarts_init():
+    """PAGE_CONTENT 内违规 echarts.init 不得当作 scaffold 进度写回 seed。"""
+    dormant_scaffold = (
+        "<!-- CHART_SCAFFOLD_BEGIN "
+        '<script>const option = null;</script> '
+        "CHART_SCAFFOLD_END -->"
+    )
+    main_inline = (
+        '<script>const option = {"series":[{"data":[1]}]}; '
+        'echarts.init(document.getElementById("chart-1"));</script>'
+    )
+    seed = (
+        "<html><body>"
+        '<main>{{PAGE_CONTENT}}</main>'
+        '<div class="flex-shrink-0"><p>f</p></div>'
+        f"{dormant_scaffold}"
+        "</body></html>"
+    )
+    filled = (
+        "<html><body>"
+        f'<main><div id="chart-1"></div>{main_inline}</main>'
+        '<div class="flex-shrink-0"><p>f</p></div>'
+        f"{dormant_scaffold}"
+        "</body></html>"
+    )
+    assert _filled_chart_scaffold_is_progressed(filled) is False
+    assert _extract_chart_scaffold_region(filled) is None
+    merged = _merge_chart_scaffold_from_filled(seed, filled)
+    assert "CHART_SCAFFOLD_BEGIN" in merged
+    assert 'const option = null' in merged
 
 
 _RESEARCH_OUTLINE = """**类型**：content

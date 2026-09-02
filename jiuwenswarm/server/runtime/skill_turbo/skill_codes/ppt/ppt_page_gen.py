@@ -757,6 +757,16 @@ def _is_chart_candidate_page(
     return any(signal in combined for signal in _CHART_CANDIDATE_SEMANTIC_SIGNALS)
 
 
+def _html_chart_scaffold_script_region(html_no_comments: str) -> str:
+    """路径 B 扫描区：与 content-template 物理布局一致（</main> 后、</body> 前）。"""
+    body_close = html_no_comments.lower().rfind("</body>")
+    before_body = html_no_comments[:body_close] if body_close != -1 else html_no_comments
+    main_close = before_body.lower().rfind("</main>")
+    if main_close == -1:
+        return ""
+    return before_body[main_close:]
+
+
 def _filled_chart_scaffold_is_progressed(filled_html: str) -> bool:
     """filled 中 scaffold 已填 option 或已暴露为活跃 script（非纯 dormant）。"""
     if not filled_html:
@@ -766,7 +776,8 @@ def _filled_chart_scaffold_is_progressed(filled_html: str) -> bool:
         if _chart_scaffold_option_populated(body):
             return True
     html_no_comments = _HTML_COMMENT_RE.sub("", filled_html)
-    for match in _SCRIPT_BODY_RE.finditer(html_no_comments):
+    scaffold_region = _html_chart_scaffold_script_region(html_no_comments)
+    for match in _SCRIPT_BODY_RE.finditer(scaffold_region):
         body = match.group(1) or ""
         if "echarts.init" in body.lower() and _chart_scaffold_option_populated(body):
             return True
@@ -780,9 +791,8 @@ def _extract_chart_scaffold_region(filled_html: str) -> str | None:
         if _chart_scaffold_option_populated(body):
             return body.strip()
     html_no_comments = _HTML_COMMENT_RE.sub("", filled_html)
-    body_close = html_no_comments.lower().rfind("</body>")
-    prefix = html_no_comments[:body_close] if body_close != -1 else html_no_comments
-    for match in reversed(list(_SCRIPT_BODY_RE.finditer(prefix))):
+    scaffold_region = _html_chart_scaffold_script_region(html_no_comments)
+    for match in reversed(list(_SCRIPT_BODY_RE.finditer(scaffold_region))):
         body = match.group(1) or ""
         if "echarts.init" in body.lower() and _chart_scaffold_option_populated(body):
             return match.group(0).strip()
