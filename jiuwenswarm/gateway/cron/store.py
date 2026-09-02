@@ -132,6 +132,7 @@ class CronJobStore:
         self._path = path or get_cron_jobs_path()
         self._lock = asyncio.Lock()
         self._file_lock_timeout = float(file_lock_timeout)
+        self._warned_missing = False
 
     @property
     def path(self) -> Path:
@@ -514,6 +515,13 @@ class CronJobStore:
         path = self._path
         try:
             if not path.exists():
+                if not self._warned_missing:
+                    logger.warning(
+                        "[Cron] cron_jobs.json not found at %s, treating as empty "
+                        "(jobs may have been lost by a workspace migration)",
+                        path,
+                    )
+                    self._warned_missing = True
                 return {"version": 1, "jobs": []}
             raw = path.read_text(encoding="utf-8")
             data = json.loads(raw) if raw.strip() else {}
