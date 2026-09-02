@@ -804,9 +804,24 @@ def _answer_item_is_empty(item: Any) -> bool:
 
 
 def _is_auto_skip(status: str, answers: list[Any]) -> bool:
-    """Detect Relay-Claw 侧 120s 倒计时自动应答（answered + 全部空答案）。"""
-    if status != "answered" or not answers:
+    """Detect when the user did not provide a usable answer.
+
+    Two shapes both count as "auto-skip" -> LLM fallback fills defaults:
+    1. Relay-Claw 120s timeout auto-answer: ``status=="answered"`` with a
+       non-empty answers list whose items are all empty (blank
+       selected_options + no free text).
+    2. Pure skip / empty answers: ``status=="answered"`` with an empty (or
+       None-coerced) answers list. The previous ``not answers`` short-circuit
+       wrongly classified this as a RequirementCollectError, which triggered
+       fallback subagent re-asks of ask_user in a loop (the LLM saw an empty
+       answers envelope and decided to ask again). Treating empty answers as
+       auto-skip lets the existing ``_llm_default_*`` fallback infer the field
+       from context, breaking the re-ask loop.
+    """
+    if status != "answered":
         return False
+    if not answers:
+        return True
     return all(_answer_item_is_empty(item) for item in answers)
 
 
