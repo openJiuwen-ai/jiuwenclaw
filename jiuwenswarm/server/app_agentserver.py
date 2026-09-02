@@ -275,7 +275,6 @@ async def _run_with_telemetry(host: str, port: int, telemetry_lifecycle) -> None
         from jiuwenswarm.infrastructure.log_masking.engine import LogMaskingEngine
 
         await LogMaskingEngine.reload_log_masking_rule()
-        logger.info("[AgentServer] log masking rules loaded from Gateway DB (if any)")
     except Exception:  # noqa: BLE001
         logger.warning("[AgentServer] log_masking_rule cold load skipped", exc_info=True)
 
