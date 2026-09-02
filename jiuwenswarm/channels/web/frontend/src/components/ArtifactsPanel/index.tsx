@@ -319,7 +319,7 @@ export function ArtifactsPanel({
         </div>
 
         {selectedArtifact ? (
-          <div className="min-h-0 flex-1 overflow-hidden bg-transparent" data-testid="artifact-preview-surface">
+          <div className="min-h-0 flex-1 overflow-hidden bg-transparent p-3" data-testid="artifact-preview-surface">
             <FilePreview artifact={selectedArtifact} onPresentationStructureInvalidChange={handlePresentationStructureInvalidChange} />
           </div>
         ) : (

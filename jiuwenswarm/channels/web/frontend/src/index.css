@@ -402,7 +402,7 @@ body.workspace-resize-active iframe {
   .card {
     background: var(--color-surface-card);
     border-radius: var(--radius-lg);
-    padding: 20px;
+    padding-top: 64px;
   }
 
   .main-panel-card {
@@ -610,6 +610,15 @@ body.workspace-resize-active iframe {
 
   .chat-bubble-wrapper--with-files {
     width: 100%;
+  }
+
+  .message-row [data-testid="chat-panel-message-meta"] {
+    opacity: 0;
+    transition: opacity 150ms ease;
+  }
+
+  .message-row:hover [data-testid="chat-panel-message-meta"] {
+    opacity: 1;
   }
 
   /* AI disclaimer — footer note pinned below the composer */
@@ -1355,10 +1364,10 @@ body.workspace-resize-active iframe {
     font-weight: 400;
   }
 
-  /* 群聊消息正文：16px / 28px 行高 */
+  /* 群聊消息正文：14px / 28px 行高 */
   .team-group-chat-message-list .team-message-markdown {
-    font-size: 16px;
-    line-height: 28px;
+    font-size: 14px;
+    line-height: 22px;
   }
 
   .chat-timeline {
@@ -2262,4 +2271,20 @@ body.workspace-resize-active iframe {
     --tool-panel-width: var(--shell-nav-width);
     --statusbar-right-space: var(--tool-panel-width);
   }
+}
+
+/* data-tooltip 自适应提示：useAdaptiveTooltip 以 portal 渲染到 body，
+   水平位置由 JS 计算（默认居中，空间不足贴边/收进视口），这里只管外观 */
+.adaptive-tooltip {
+  box-sizing: border-box;
+  max-width: 320px;
+  padding: 7px 16px;
+  border: 1px solid var(--color-border-default);
+  border-radius: 6px;
+  background: var(--color-surface-popover);
+  box-shadow: var(--effect-shadow-lg);
+  color: var(--color-text-primary);
+  font-size: 12px;
+  line-height: 18px;
+  pointer-events: none;
 }
