@@ -519,7 +519,19 @@ def _save_sandbox_user_password(password: str) -> None:
         )
         _reg_set_str(const.REG_VALUE_SANDBOX_USER_PW, enc.hex())
     except ImportError:  # pragma: no cover
-        logger.warning("pywin32 缺失, 沙箱用户密码未加密存储 (仅开发环境)")
+        # 旧日志"未加密存储"误导排查: 实际是根本未存储 (后续读注册表取不到密码,
+        # 沙箱启动失败且日志指向错). 非开发环境 pywin32 缺失属关键依赖缺失,
+        # fail-fast 而非静默跳过 (避免后续启动失败排查困难).
+        if sys.flags.dev_mode:
+            logger.warning(
+                "pywin32 缺失, 沙箱用户密码未存储 (仅开发环境容忍, "
+                "生产环境 pywin32 为必需依赖)",
+            )
+        else:
+            raise RuntimeError(
+                "pywin32 缺失, 无法存储沙箱用户密码 (DPAPI 加密依赖 pywin32, "
+                "pywin32 为 jbx-sandbox 必需依赖)",
+            )
 
 
 def _create_sandbox_user(password: str, *, retries: int = 1) -> bool:
