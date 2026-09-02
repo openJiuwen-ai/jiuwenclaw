@@ -113,7 +113,7 @@ export function ExternalCliInstallDialog({
               });
             }
             const artifactLabel =
-              status.artifact_count && status.artifact_index
+              status.phase === 'downloading' && status.artifact_count && status.artifact_index
                 ? t('config.externalCli.installArtifact', {
                     current: status.artifact_index,
                     total: status.artifact_count,

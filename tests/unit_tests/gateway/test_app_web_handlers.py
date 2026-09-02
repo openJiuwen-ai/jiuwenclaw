@@ -2063,6 +2063,46 @@ async def test_external_cli_codex_install_status_returns_snapshot():
     assert payload["switching_source"] is False
 
 
+@pytest.mark.parametrize("cli_agent", ["claude", "codex"])
+def test_external_cli_install_success_clears_download_artifact_state(cli_agent: str) -> None:
+    lock = app_web_handlers._EXTERNAL_CLI_DEPENDENCY_INSTALL_LOCKS[cli_agent]
+    status = app_web_handlers._EXTERNAL_CLI_DEPENDENCY_INSTALL_STATUSES[cli_agent]
+    with lock:
+        status.update({
+            "status": "running",
+            "phase": "downloading",
+            "downloaded_bytes": 1024,
+            "total_bytes": 4096,
+            "bytes_per_second": 512.0,
+            "eta_seconds": 6.0,
+            "artifact_index": 1,
+            "artifact_count": 1,
+            "current_package": "claude-agent-sdk",
+            "current_version": "0.2.115",
+            "download_attempt": 2,
+            "download_max_attempts": 5,
+            "switching_source": True,
+        })
+
+    app_web_handlers._update_external_cli_dependency_install_status(
+        cli_agent,
+        app_web_handlers._external_cli_dependency_install_succeeded_updates(),
+    )
+
+    snapshot = app_web_handlers._snapshot_external_cli_dependency_install_status(cli_agent)
+    assert snapshot["status"] == "succeeded"
+    assert snapshot["phase"] == "succeeded"
+    assert snapshot["downloaded_bytes"] == 0
+    assert snapshot["total_bytes"] == 0
+    assert snapshot["artifact_index"] == 0
+    assert snapshot["artifact_count"] == 0
+    assert snapshot["current_package"] == ""
+    assert snapshot["current_version"] == ""
+    assert snapshot["download_attempt"] == 0
+    assert snapshot["download_max_attempts"] == 0
+    assert snapshot["switching_source"] is False
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("value", ["true", "false"])
 async def test_config_set_updates_canonical_skill_evolution(
