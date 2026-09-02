@@ -22,6 +22,8 @@ from jiuwenswarm.agents.harness.common.tools.invoke_meta.invoke_tool import Invo
 from jiuwenswarm.agents.harness.common.tools.invoke_meta.plugin_skill_catalog import (
     extract_seedance_query_state,
     extract_seedance_task_id,
+    invoke_arguments_description,
+    invoke_function_name_description,
     invoke_tool_description,
     is_prod_plugin_runtime,
 )
@@ -417,7 +419,10 @@ async def test_invoke_missing_bundle_name_errors(monkeypatch):
 def test_invoke_tool_description_omits_internal_transport():
     desc = invoke_tool_description()
     assert "当前插件运行区：" in desc
-    assert "skill_tool" in desc
+    assert "skill_tool" not in desc
+    assert "禁止臆造" not in desc
+    assert "禁止臆造" not in invoke_arguments_description()
+    assert "禁止臆造" not in invoke_function_name_description()
     assert "CloudWsRelay" not in desc
     assert "/ws/link" not in desc
     assert "PluginSkillExecTool" not in desc
@@ -893,8 +898,9 @@ def _lyrics_write_args(**extra: Any) -> dict[str, Any]:
 
 def test_invoke_tool_description_points_at_skills_not_recipes():
     text = invoke_tool_description()
-    assert "skill_tool" in text
     assert "当前插件运行区：" in text
+    assert "skill_tool" not in text
+    assert "禁止臆造" not in text
     assert "lyricsGeneration" not in text
     assert "musicGeneration" not in text
     assert "PluginSkillExecTool" not in text
@@ -1101,6 +1107,12 @@ def test_design_system_prompt_points_at_skills_not_catalog():
     assert "# Doing tasks" not in prompt
     assert "com.atomicservice.5765880207845681341" not in prompt
     assert "com.huawei.pluginPlatform" not in prompt
+    assert "`functionName`" not in prompt
+    assert "`bundleName`" not in prompt
+    assert "query step" not in prompt
+    assert "Confirm before generating" not in prompt
+    assert "vocal/instrumental" not in prompt
+    assert "lyrics markdown" in prompt
 
 
 _PROD_MCP = "wss://hag-drcn.op.dbankcloud.com/agent-runtime-service-ws/v1/mcp/run"
@@ -1248,4 +1260,7 @@ def test_skills_goal_override_uses_real_skill_slugs():
         assert "PluginSkillExecTool" not in text
         assert "com.atomicservice" not in text
         assert "seedreamLite4Skill" not in text
+        assert "then call `invoke`" not in text
+        assert "再调用 `invoke`" not in text
+        assert "Deliver the video file" in text or "交付视频文件" in text
 

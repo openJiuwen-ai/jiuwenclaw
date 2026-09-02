@@ -108,13 +108,13 @@ Prefer the skills and tools below; call `skill_tool` to retrieve the full `SKILL
     - Usage rule: call `skill_tool` to load `seedream-image-gen` and follow its SKILL.md. Deliver the image file, never stop after writing only a prompt or script.
 
 13. Video Generation (`seedance-video-gen`)
-    - Usage rule: call `skill_tool` to load `seedance-video-gen` and follow its SKILL.md. Deliver the mp4, never a storyboard markdown.
+    - Usage rule: call `skill_tool` to load `seedance-video-gen` and follow its SKILL.md. Deliver the video file, never a storyboard markdown.
 
 14. Music Generation (`music-generation`)
     - Usage rule: call `skill_tool` to load `music-generation` and follow its SKILL.md. Deliver the audio file.
 
 15. Image Understanding (`xiaoyi-image-understanding`)
-    - Usage rule: call `skill_tool` to load `xiaoyi-image-understanding` and follow its SKILL.md, then call `invoke`.
+    - Usage rule: call `skill_tool` to load `xiaoyi-image-understanding` and follow its SKILL.md.
 """
 
 _STATIC_BLOCK_CN = """## 技能
@@ -165,13 +165,13 @@ _STATIC_BLOCK_CN = """## 技能
      - 使用规则：先 `skill_tool` 加载 `seedream-image-gen` 并严格按其 SKILL.md 填写。交付图像文件，不要只写 prompt 或脚本就停下。
 
 13. 视频生成（`seedance-video-gen`）
-     - 使用规则：先 `skill_tool` 加载 `seedance-video-gen` 并严格按其 SKILL.md 填写。交付 mp4，绝非分镜 markdown。
+     - 使用规则：先 `skill_tool` 加载 `seedance-video-gen` 并严格按其 SKILL.md 填写。交付视频文件，绝非分镜 markdown。
 
 14. 音乐生成（`music-generation`）
      - 使用规则：先 `skill_tool` 加载 `music-generation` 并严格按其 SKILL.md 填写。交付音频文件。
 
 15. 图像理解（`xiaoyi-image-understanding`）
-     - 使用规则：先 `skill_tool` 加载 `xiaoyi-image-understanding` 并按其 SKILL.md 填写，再调用 `invoke`。
+     - 使用规则：先 `skill_tool` 加载 `xiaoyi-image-understanding` 并严格按其 SKILL.md 填写。
 """
 
 _STATIC_BLOCK: Dict[str, str] = {"cn": _STATIC_BLOCK_CN, "en": _STATIC_BLOCK_EN}

@@ -132,7 +132,6 @@ def invoke_arguments_description() -> str:
     return (
         "必含 bundleName（当前区表中的包名）以及该能力的业务字段，原样透传。"
         "functionName 写在顶层，不要把业务参数包进 content，除非 SKILL.md 要求数组。"
-        "禁止臆造 bundleName。"
     )
 
 
@@ -141,20 +140,18 @@ def invoke_function_name_description() -> str:
     return (
         "云端能力：填已加载 skill 中当前区表的真实 functionName；"
         "远程 Agent：agent_as_a_tool。"
-        "禁止臆造名称。"
     )
 
 
 def invoke_tool_description() -> str:
-    """Short ToolCard: current zone + skill_tool then passthrough invoke."""
+    """Short ToolCard: current zone + passthrough invoke from loaded skill tables."""
     zone = plugin_runtime_zone_label()
     other = "蓝绿" if zone == "现网" else "现网"
     return (
         f"当前插件运行区：{zone}。"
         f"functionName 与 bundleName 必须使用已加载 skill 中「{zone}」表；"
         f"禁止混用{other}名字。"
-        "先 skill_tool 读取对应 skill 的 SKILL.md，再按该文档填写 invoke；"
-        "业务字段原样透传，禁止臆造 functionName/bundleName。"
+        "业务字段原样透传。"
         "调用形态：顶层 functionName 为真实云端能力名，arguments 必含 bundleName。"
         "远程 Agent：functionName=agent_as_a_tool。"
     )
