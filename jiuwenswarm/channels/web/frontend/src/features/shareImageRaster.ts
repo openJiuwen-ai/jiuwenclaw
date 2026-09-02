@@ -1,7 +1,7 @@
 export const SHARE_IMAGE_WIDTH = 750;
 export const SHARE_IMAGE_PIXEL_RATIO = 3;
 export const SHARE_IMAGE_TILE_WORKING_BYTE_LIMIT = 48 * 1024 * 1024;
-export const SHARE_IMAGE_MAX_PART_OUTPUT_HEIGHT = 192_000;
+export const SHARE_IMAGE_MAX_PART_OUTPUT_HEIGHT = 128_000;
 export const SHARE_IMAGE_FLOW_CONTAINER_SELECTOR = '.chat-timeline, .share-image-group-list';
 export const SHARE_IMAGE_FLOW_BLOCK_SELECTOR = ['.chat-timeline > *', '.share-image-group-list > *', '.a2ui-message-content > *', '.chat-markdown > *'].join(
   ', ',

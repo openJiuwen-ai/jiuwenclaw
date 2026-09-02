@@ -89,12 +89,12 @@ test('keeps the share image at exact 3x dimensions without global downscaling', 
 test('keeps ordinary exports whole and balances oversized exports below the viewer-safe height', () => {
   assert.deepEqual(getShareImagePartOutputHeights(10_000), [30_000]);
   assert.deepEqual(getShareImagePartOutputHeights(11_804), [35_412]);
-  assert.deepEqual(getShareImagePartOutputHeights(64_000), [192_000]);
-  assert.deepEqual(getShareImagePartOutputHeights(64_001), [96_002, 96_001]);
+  assert.deepEqual(getShareImagePartOutputHeights(42_666), [127_998]);
+  assert.deepEqual(getShareImagePartOutputHeights(42_667), [64_001, 64_000]);
   const heights = getShareImagePartOutputHeights(485_824);
-  assert.equal(heights.length, 8);
+  assert.equal(heights.length, 12);
   assert.equal(heights.reduce((sum, height) => sum + height, 0), 1_457_472);
-  assert.ok(heights.every(height => height <= 192_000));
+  assert.ok(heights.every(height => height <= 128_000));
   assert.ok(Math.max(...heights) - Math.min(...heights) <= 1);
 });
 

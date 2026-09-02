@@ -28,7 +28,7 @@ from jiuwenswarm.common.config import get_config, resolve_env_vars
 _PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 _PNG_IEND = b"\x00\x00\x00\x00IEND\xaeB`\x82"
 _PNG_OUTPUT_WIDTH = 2_250
-_MAX_PNG_OUTPUT_HEIGHT = 192_000
+_MAX_PNG_OUTPUT_HEIGHT = 128_000
 _JOB_TTL_SECONDS = 60 * 60
 _RENDER_IDLE_TIMEOUT_SECONDS = 15 * 60
 _ZIP_PART_NAME_PATTERN = re.compile(

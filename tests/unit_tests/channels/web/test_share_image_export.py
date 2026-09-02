@@ -223,8 +223,12 @@ def test_share_image_export_validates_png_height_and_zip_parts(tmp_path: Path) -
     png_path.write_bytes(_test_png())
     _validate_png(png_path)
 
+    max_height_path = tmp_path / "max-height.png"
+    max_height_path.write_bytes(_test_png(height=128_000))
+    _validate_png(max_height_path)
+
     too_tall_path = tmp_path / "too-tall.png"
-    too_tall_path.write_bytes(_test_png(height=192_001))
+    too_tall_path.write_bytes(_test_png(height=128_001))
     with pytest.raises(RuntimeError, match="share_export_png_height_unsupported"):
         _validate_png(too_tall_path)
 
