@@ -320,25 +320,40 @@ class RuntimePromptRail(DeepAgentRail):
                 or agent_workspace_dir
             )
             has_project = project_dir is not None
-            # The prompt consistently calls the active path the project
-            # directory. When no explicit project is bound, cwd is the
-            # project directory shown to the model.
             prompt_project_dir = project_dir or runtime_cwd
+            has_distinct_cwd = bool(
+                has_project
+                and not self._same_path(project_dir or "", runtime_cwd)
+            )
 
             if not self._force_english and self._language == "cn":
-                if has_project:
-                    project_path = project_dir
-                else:
-                    project_path = runtime_cwd
+                project_description = (
+                    "- 项目目录是当前项目的根目录与项目上下文边界，"
+                    if has_distinct_cwd
+                    else "- 项目目录是你当前的工作空间，"
+                )
+                cwd_description = (
+                    f"- 当前工作目录（cwd、相对路径基准及 Bash 默认目录）是：`{runtime_cwd}`\n\n"
+                    if has_distinct_cwd
+                    else "\n"
+                )
+                separation_rule = (
+                    "- 项目目录与当前工作目录是两个独立概念，不得互相替换。\n"
+                    if has_distinct_cwd
+                    else ""
+                )
+                operation_directory = "当前工作目录" if has_distinct_cwd else "当前项目目录"
                 directory_content = (
                     "# 目录与文件操作边界\n\n"
                     "## 项目目录\n\n"
                     "### 项目目录说明\n\n"
-                    "- 项目目录是你当前的工作空间，"
-                    f"当前项目目录是：`{project_path}`\n\n"
+                    f"{project_description}"
+                    f"当前项目目录是：`{prompt_project_dir}`\n"
+                    f"{cwd_description}"
                     "### 项目目录规则\n\n"
-                    "- 用户任务中的相对路径必须相对于当前项目目录路径去解析。\n"
-                    "- Bash 未显式传入 `workdir` 时，默认在当前项目目录执行。\n"
+                    f"{separation_rule}"
+                    f"- 用户任务中的相对路径必须相对于{operation_directory}路径去解析。\n"
+                    f"- Bash 未显式传入 `workdir` 时，默认在{operation_directory}执行。\n"
                     "- 用户已经提供明确路径时直接使用，不要重复询问。\n"
                     "- 只有任务确实需要操作某个项目、且现有上下文无法确定项目位置时，才询问项目路径。\n"
                     "- 用户明确指定保存位置时，优先使用用户指定位置；否则，项目代码、测试、配置、构建文件、项目文档、报告、导出文件、图片和数据文件等放在当前工作目录的合理位置。\n\n"
@@ -357,16 +372,37 @@ class RuntimePromptRail(DeepAgentRail):
                     "- 用户任务中的 `config/`、`memory/`、`skills/`、`todo/` 或 `workspace/` 不自动映射到 JiuwenSwarm 内部目录。"
                 )
             else:
+                project_description = (
+                    "- The project directory is the project root and project-context boundary; "
+                    if has_distinct_cwd
+                    else "- The project directory is your current workspace; "
+                )
+                cwd_description = (
+                    f"- The current working directory (cwd, relative-path base, and Bash default) is: "
+                    f"`{runtime_cwd}`\n\n"
+                    if has_distinct_cwd
+                    else "\n"
+                )
+                separation_rule = (
+                    "- The project directory and current working directory are independent concepts; do not "
+                    "substitute one for the other.\n"
+                    if has_distinct_cwd
+                    else ""
+                )
+                operation_directory = (
+                    "current working directory" if has_distinct_cwd else "current project directory"
+                )
                 directory_content = (
                     "# Directory and File-Operation Boundaries\n\n"
                     "## Project Directory\n\n"
                     "### Project Directory Description\n\n"
-                    "- The project directory is your current workspace; "
-                    f"the current project directory is: `{prompt_project_dir}`\n\n"
+                    f"{project_description}"
+                    f"the current project directory is: `{prompt_project_dir}`\n"
+                    f"{cwd_description}"
                     "### Project Directory Rules\n\n"
-                    "- Resolve relative paths in user tasks against the current project directory.\n"
-                    "- When Bash is called without an explicit `workdir`, run it in the current project "
-                    "directory.\n"
+                    f"{separation_rule}"
+                    f"- Resolve relative paths in user tasks against the {operation_directory}.\n"
+                    f"- When Bash is called without an explicit `workdir`, run it in the {operation_directory}.\n"
                     "- When the user has provided an explicit path, use it directly without asking again.\n"
                     "- Ask for a project path only when the task truly requires a project and its location "
                     "cannot be determined from the existing context.\n"

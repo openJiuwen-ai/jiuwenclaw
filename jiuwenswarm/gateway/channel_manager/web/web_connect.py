@@ -85,7 +85,6 @@ _WEB_FULL_PAYLOAD_EVENT_TYPES = frozenset(
         "plan.mode_exited",
         "runtime.accepted",
         "execution.error",
-        "proactive_recommendation",
     }
 )
 
@@ -876,6 +875,11 @@ class WebChannel(BaseWsChannel):
                 # 否则前端无法按 source 短路：proactive 的 chat.reasoning 会被当作
                 # 用户轮思考流追加进 reasoningSegments，污染上一条消息的思考状态。
                 "source", "proactive_type", "proactive_target",
+                # proactive_rec_id 必须透传，前端用它关联赞/踩反馈按钮。
+                # 不在此白名单会被本分支丢弃 → 卡片虽渲染但 message.proactiveRecId
+                # 为空 → 赞/踩按钮不出现（ProactiveRecommendationCard 按 proactiveRecId
+                # 条件渲染按钮）。
+                "proactive_rec_id",
             ):
                 _val = msg.payload.get(_key)
                 if _val is not None:
@@ -1642,9 +1646,9 @@ class WebChannel(BaseWsChannel):
         """
         if not clients:
             return
-        # context.usage 是发给前端的完整上下文 Token 使用信息。它不写入
-        # 会话 history，因此在真正进入 WebSocket writer 前记录最终帧，便于
-        # 核对前端实际收到的 context_window、parts 及兼容别名。
+        # context.usage 是发给前端的完整上下文 Token 使用信息。它同时写入
+        # 会话 history；这里额外记录最终发送帧，便于核对前端实际收到的
+        # context_window、parts 及兼容别名。
         if frame.get("event") == "context.usage":
             await self._persist_frontend_context_usage(frame)
         for client in clients:

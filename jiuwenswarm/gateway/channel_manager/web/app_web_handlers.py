@@ -827,6 +827,9 @@ _FORWARD_REQ_METHODS = frozenset({
     "issue.state.list",
     "issue.matrix",
     "issue.delete",
+    # 主动推荐反馈（点赞/点踩）：经 E2A 转发到 AgentServer 的
+    # _handle_proactive_feedback，写入 recommendation.json 的 feedback_buffer。
+    "proactive.feedback",
 })
 
 _FORWARD_NO_LOCAL_HANDLER_METHODS = frozenset({
@@ -972,6 +975,7 @@ _FORWARD_NO_LOCAL_HANDLER_METHODS = frozenset({
     "agents.tools_list",
     "external_cli.detect",
     "external_cli.codex_install_status",
+    "proactive.feedback",
 })
 
 # 配置信息：config.get 返回、config.set 可修改的键（前端 param 名 -> 环境变量名）
@@ -1688,6 +1692,27 @@ def _update_external_cli_dependency_install_status(cli_agent: str, updates: dict
         status["updated_at"] = time.time()
 
 
+def _external_cli_dependency_install_succeeded_updates() -> dict[str, Any]:
+    """Build a terminal success state without stale download progress."""
+    return {
+        "status": "succeeded",
+        "phase": "succeeded",
+        "error": "",
+        "finished_at": time.time(),
+        "downloaded_bytes": 0,
+        "total_bytes": 0,
+        "bytes_per_second": 0.0,
+        "eta_seconds": 0.0,
+        "artifact_index": 0,
+        "artifact_count": 0,
+        "current_package": "",
+        "current_version": "",
+        "download_attempt": 0,
+        "download_max_attempts": 0,
+        "switching_source": False,
+    }
+
+
 def _append_external_cli_dependency_install_log(cli_agent: str, line: str) -> None:
     stripped = line.strip()
     if not stripped:
@@ -1711,15 +1736,8 @@ def _snapshot_claude_dependency_install_status() -> dict[str, Any]:
 def _ensure_claude_dependency_available_or_start_install() -> dict[str, Any] | None:
     if importlib.util.find_spec("claude_agent_sdk") is not None:
         with _CLAUDE_DEPENDENCY_INSTALL_LOCK:
-            _CLAUDE_DEPENDENCY_INSTALL_STATUS.update(
-                {
-                    "status": "succeeded",
-                    "phase": "succeeded",
-                    "error": "",
-                    "finished_at": time.time(),
-                    "updated_at": time.time(),
-                }
-            )
+            _CLAUDE_DEPENDENCY_INSTALL_STATUS.update(_external_cli_dependency_install_succeeded_updates())
+            _CLAUDE_DEPENDENCY_INSTALL_STATUS["updated_at"] = time.time()
         return None
     if _is_frozen_runtime():
         return _ensure_managed_external_cli_runtime_or_start_install("claude")
@@ -1759,7 +1777,7 @@ def _install_claude_dependency_background() -> None:
     try:
         package = _resolve_openjiuwen_extra_package("claude")
         _install_optional_dependency("claude", package, "claude_agent_sdk")
-        updates = {"status": "succeeded", "phase": "succeeded", "error": "", "finished_at": time.time()}
+        updates = _external_cli_dependency_install_succeeded_updates()
     except Exception as exc:  # noqa: BLE001
         logger.warning("[config.set] Claude dependency installation failed: %s", exc)
         _append_external_cli_dependency_install_log("claude", str(exc))
@@ -1855,14 +1873,7 @@ def _run_managed_external_cli_runtime_install(cli_agent: str) -> None:
 
     _update_external_cli_dependency_install_status(
         cli_agent,
-        {
-            "status": "succeeded",
-            "phase": "succeeded",
-            "error": "",
-            "finished_at": time.time(),
-            "bytes_per_second": 0.0,
-            "eta_seconds": 0.0,
-        },
+        _external_cli_dependency_install_succeeded_updates(),
     )
 
 
@@ -1880,12 +1891,7 @@ def _append_codex_dependency_install_log(line: str) -> None:
 
 def _ensure_codex_dependency_available_or_start_install() -> dict[str, Any] | None:
     if importlib.util.find_spec("openai_codex") is not None:
-        _update_codex_dependency_install_status({
-            "status": "succeeded",
-            "phase": "succeeded",
-            "error": "",
-            "finished_at": time.time(),
-        })
+        _update_codex_dependency_install_status(_external_cli_dependency_install_succeeded_updates())
         return None
 
     if _is_frozen_runtime():
@@ -1943,12 +1949,7 @@ def _run_codex_dependency_install_background() -> None:
         })
         return
 
-    _update_codex_dependency_install_status({
-        "status": "succeeded",
-        "phase": "succeeded",
-        "error": "",
-        "finished_at": time.time(),
-    })
+    _update_codex_dependency_install_status(_external_cli_dependency_install_succeeded_updates())
 
 
 def _install_codex_dependency() -> None:

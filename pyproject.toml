@@ -20,6 +20,7 @@ dependencies = [
     "openjiuwen @ git+https://gitcode.com/openJiuwen/agent-core.git@da6edb59f6a41ef7f4a7620b0398db679cde622a",
     "pgvector>=0.4.2,<0.5",
     "portalocker>=3.2.0,<4",
+    "prompt-toolkit>=3.0,<4.0",
     "websockets>=12.0,<16",
     "psutil>=7.2.2,<8",
     "aiosqlite>=0.22.1,<0.23",
@@ -123,7 +124,8 @@ test = [
 ]
 
 [project.scripts]
-jiuwenswarm = "jiuwenswarm.cli.main:main"
+jiuwenswarm = "jiuwenswarm.channels.cli.main:main"
+jiuwenswarm-process = "jiuwenswarm.channels.process_cli.main:main"
 jiuwenswarm-app = "jiuwenswarm.app:main"
 jiuwenswarm-agentserver = "jiuwenswarm.server.app_agentserver:main"
 jiuwenswarm-gateway = "jiuwenswarm.gateway.app_gateway:main"

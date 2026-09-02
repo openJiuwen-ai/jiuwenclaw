@@ -3025,7 +3025,7 @@ class JiuWenSwarm:
                 return
             extra_fields = _attach_reasoning_content({
                 k: v for k, v in request.params.items()
-                if k in ("source", "proactive_type", "proactive_target", "automation")
+                if k in ("source", "proactive_type", "proactive_target", "automation", "proactive_rec_id")
             })
             if not isinstance(extra_fields, dict):
                 extra_fields = {}
@@ -3352,7 +3352,7 @@ class JiuWenSwarm:
                                 completion_status = "error"
                                 abort_terminal_status = "error"
                             _note_goal_stream_payload(et, data.payload)
-                            should_record = et.startswith("chat.")
+                            should_record = et.startswith("chat.") or et == "context.usage"
                             final_segment_started_at: float | None = None
                             if not should_record and et == EventType.TEAM_MESSAGE.value:
                                 should_record = True
@@ -3488,6 +3488,7 @@ class JiuWenSwarm:
                                     "proactive_type",
                                     "proactive_target",
                                     "automation",
+                                    "proactive_rec_id",
                                 ):
                                     if pk not in extra_fields and pk in request.params:
                                         extra_fields[pk] = request.params[pk]
@@ -3542,7 +3543,7 @@ class JiuWenSwarm:
                             completion_status = "error"
                             abort_terminal_status = "error"
                         _note_goal_stream_payload(et, data)
-                        should_record = et.startswith("chat.")
+                        should_record = et.startswith("chat.") or et == "context.usage"
                         final_segment_started_at = None
                         if not should_record and et == EventType.TEAM_MESSAGE.value:
                             should_record = True
@@ -3673,6 +3674,7 @@ class JiuWenSwarm:
                                 "proactive_type",
                                 "proactive_target",
                                 "automation",
+                                "proactive_rec_id",
                             ):
                                 if pk not in extra_fields and pk in request.params:
                                     extra_fields[pk] = request.params[pk]
@@ -3812,6 +3814,7 @@ class JiuWenSwarm:
                 "proactive_type",
                 "proactive_target",
                 "automation",
+                "proactive_rec_id",
             ):
                 if key in request.params:
                     history_metadata[key] = request.params[key]

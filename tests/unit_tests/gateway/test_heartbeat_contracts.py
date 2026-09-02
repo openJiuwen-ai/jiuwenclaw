@@ -50,6 +50,7 @@ def test_legacy_health_check_relay_normalizes_at_gateway_ingress() -> None:
             payload={"event_type": "heartbeat.relay", "heartbeat": "HEALTH_CHECK_OK"},
             metadata={},
             agent_ref=None,
+            ok=True,
         ),
         "health-check-session",
     )

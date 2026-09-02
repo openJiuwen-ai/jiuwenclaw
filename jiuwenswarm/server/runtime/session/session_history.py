@@ -125,6 +125,15 @@ def _has_persistable_assistant_payload(
         return True
     if str(payload.get("reasoning_content") or "").strip():
         return True
+    if et == "context.usage":
+        # context.usage is a blank assistant event whose complete structured
+        # payload must survive history restore. Reject the legacy invalid
+        # fallback frame, which has no canonical context snapshot fields.
+        return isinstance(payload.get("context_window"), dict) and isinstance(
+            payload.get("parts"), dict
+        )
+    if et == "chat.usage_summary" and isinstance(payload.get("usage"), dict):
+        return bool(payload["usage"])
     if et == "chat.file" and payload.get("files"):
         return True
     if et == "chat.tool_call" and (payload.get("tool_call") or payload.get("tool_calls")):

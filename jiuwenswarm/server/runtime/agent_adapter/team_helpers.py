@@ -3751,10 +3751,10 @@ async def _watch_team_evolution_and_push(
     if not _team_evolution_host_events_enabled(rail):
         return
 
-    from jiuwenswarm.server.gateway_push import WebSocketGatewayPushTransport
+    from jiuwenswarm.runtime.host_services import RuntimeHostPushTransport
 
     push_context = EvolutionPushContext(
-        transport=WebSocketGatewayPushTransport(),
+        transport=RuntimeHostPushTransport(),
         channel_id=channel_id,
         session_id=session_id,
     )

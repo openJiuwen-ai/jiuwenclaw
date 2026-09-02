@@ -19,6 +19,7 @@ export const DEFAULT_BINDINGS: KeybindingBlock[] = [
       "ctrl+t": "app:toggleTodos",
       "ctrl+g": "app:toggleTeamPanel",
       "ctrl+o": "app:toggleTranscript",
+      "alt+h": "app:viewHumanInputs",
       escape: "app:cancelWork",
     },
   },

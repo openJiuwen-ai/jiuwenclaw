@@ -333,7 +333,10 @@ async def _run(host: str, port: int) -> None:
     # Distributed teammate can receive bootstrap before any team-mode request arrives.
     # Keep a lightweight daemon alive so remote member bootstrap is consumed proactively.
     teammate_bootstrap_task = asyncio.create_task(
-        run_teammate_bootstrap_daemon(stop_event=stop_event)
+        run_teammate_bootstrap_daemon(
+            stop_event=stop_event,
+            agent_manager=server.get_agent_manager(),
+        )
     )
 
     def _on_signal() -> None:

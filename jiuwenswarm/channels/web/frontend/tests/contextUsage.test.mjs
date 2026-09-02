@@ -202,7 +202,7 @@ test('replaces overview, parts and KV together and accepts a new request after s
   }
 });
 
-test('the live event is the only context usage path; history does not restore snapshots', () => {
+test('history restore accepts the full context usage event while live delivery stays unchanged', () => {
   const source = (file) => readFileSync(new URL('../src/' + file, import.meta.url), 'utf8');
   const hook = source('hooks/useWebSocket.ts');
   assert.match(hook, /webClient.on\('context.usage', \(\{ payload \}\) => \{\s*receiveContextUsage\(payload\);/);
@@ -212,5 +212,6 @@ test('the live event is the only context usage path; history does not restore sn
       /command\.context|contextRestore|normalizeContextUsageOverview|normalizeContextUsageDetail/,
     );
   }
-  assert.doesNotMatch(source('features/historyRestore.ts'), /contextUsage|context\.usage/);
+  assert.match(source('features/historyRestore.ts'), /'context\.usage'/);
+  assert.match(source('features/historyRestore.ts'), /onContextUsage/);
 });

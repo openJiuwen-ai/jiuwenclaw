@@ -1585,6 +1585,7 @@ export const SkillGraphPanel = forwardRef<SkillGraphPanelHandle, SkillGraphPanel
   );
 
   const isGraphBuildRunning = buildProgress?.status === 'running';
+  const isGraphBuildError = buildProgress?.status === 'error';
   const isGraphBuildCancelled = buildProgress?.status === 'cancelled';
   const isBusy = loading || updating;
   const canCancelBuild = (updating || isGraphBuildRunning) && !cancellingBuild;
@@ -1595,6 +1596,7 @@ export const SkillGraphPanel = forwardRef<SkillGraphPanelHandle, SkillGraphPanel
   const createdAt = asString(manifest.created_at);
   const graphUpdatedAt = createdAt ? new Date(createdAt).toLocaleString() : '';
   const currentProgressPercent = progressPercent(buildProgress);
+  const showBuildProgress = !isGraphBuildError && !isGraphBuildCancelled;
   const progressLabel = buildProgressLabel(buildProgress, updating, t);
   const progressTitle = isGraphBuildRunning
     ? t('skills.graph.status.refreshing')
@@ -1697,11 +1699,15 @@ export const SkillGraphPanel = forwardRef<SkillGraphPanelHandle, SkillGraphPanel
           <div data-testid="skill-graph-panel-build-log" className="skill-graph-panel__build-log">
             <div data-testid="skill-graph-panel-progress-head" className="skill-graph-panel__progress-head">
               <span data-testid="skill-graph-panel-progress-title">{progressTitle}</span>
-              <strong data-testid="skill-graph-panel-progress-percent">{currentProgressPercent}%</strong>
+              {showBuildProgress ? (
+                <strong data-testid="skill-graph-panel-progress-percent">{currentProgressPercent}%</strong>
+              ) : null}
             </div>
-            <div data-testid="skill-graph-panel-progress-track" className="skill-graph-panel__progress-track" aria-hidden="true">
-              <span style={{ width: `${currentProgressPercent}%` }} />
-            </div>
+            {showBuildProgress ? (
+              <div data-testid="skill-graph-panel-progress-track" className="skill-graph-panel__progress-track" aria-hidden="true">
+                <span style={{ width: `${currentProgressPercent}%` }} />
+              </div>
+            ) : null}
             {buildMetricsText ? (
               <div data-testid="skill-graph-panel-build-metrics" className="skill-graph-panel__build-metrics">
                 <span>{buildMetricsText}</span>
