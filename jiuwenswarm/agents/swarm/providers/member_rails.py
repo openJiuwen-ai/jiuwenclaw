@@ -269,8 +269,13 @@ def _build_runtime_prompt_rail(
         # ``task_workspace_root`` is non-None here (guarded above), and the
         # context's resolver returns a path whenever that root is set, so a
         # None would be an internal invariant violation rather than a runtime
-        # condition to paper over.
-        assert work_dir is not None
+        # condition to paper over. Use an explicit raise instead of assert so
+        # the guard survives ``python -O`` (G.TES.01).
+        if work_dir is None:
+            raise RuntimeError(
+                "resolve_member_work_dir() returned None despite "
+                "task_workspace_root being set"
+            )
         rail.set_runtime_paths(
             cwd=work_dir,
             project_dir=inp.project_dir,
