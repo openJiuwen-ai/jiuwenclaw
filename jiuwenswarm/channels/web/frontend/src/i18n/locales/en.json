@@ -2083,6 +2083,8 @@
       "timeout": "Execution timed out",
       "running": "Running...",
       "toolName": "Tool name",
+      "sourceSkill": "Source skill",
+      "sourceSkillInline": "{{label}} (skill: {{skill}})",
       "arguments": "Arguments",
       "result": "Result",
       "truncated": "result truncated"
