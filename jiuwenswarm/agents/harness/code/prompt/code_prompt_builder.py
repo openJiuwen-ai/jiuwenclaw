@@ -218,6 +218,9 @@ def _code_doing_tasks_prompt() -> PromptSection:
         '"methodName" to snake case, '
         'do not just answer with "method_name"; '
         "locate the method in the code and edit it there.\n"
+        "- If the user wants an image, video, or audio file generated "
+        "(a media deliverable, not a generator implemented in the repo), "
+        "load the matching skill with `skill_tool` and follow its SKILL.md.\n"
         "- You are highly capable and can help users "
         "accomplish ambitious tasks "
         "that would otherwise be too complex or time-consuming. "
