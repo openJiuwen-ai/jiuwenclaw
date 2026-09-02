@@ -648,9 +648,20 @@ class CeliaMemoryProvider(MemoryProvider):
         )
 
     def system_prompt_block(self) -> str:
-        """Return the packaged instructions for compatibility with older callers."""
+        """Return packaged rules plus provider-specific state for legacy callers.
 
-        return load_celia_agent_prompt()
+        CeliaMemoryRail loads the packaged prompt directly.  Keeping the
+        runtime-state sentence here preserves the former public return value
+        without putting a machine-specific path in the rail-owned prompt.
+        """
+
+        base = load_celia_agent_prompt()
+        runtime_state = (
+            "The real compatibility state is at "
+            f"{self.config.runtime_state_path}; MEMORYSTATE=false disables L1/L2 "
+            "extraction but keeps L3."
+        )
+        return "\n\n".join(part for part in (base, runtime_state) if part)
 
     async def on_session_end(self, messages=None) -> None:
         context = self._context()
