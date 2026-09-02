@@ -414,7 +414,7 @@ bwrap / ProcessRuntime **忽略**本段。创建 Conch 沙箱时由 `ConchRuntim
 
 | 字段 | 默认 | 说明 |
 | --- | --- | --- |
-| `template_id` | `""` | Conch template；也可由 `JIUWENBOX_CONCH_TEMPLATE_ID` 或 conchd 默认兜底 |
+| `template_name` | `""` | Conch template；也可由 `JIUWENBOX_CONCH_TEMPLATE_NAME` 或 conchd 默认兜底 |
 | `vcpu_num` | 省略/`null` | 可选；VM 启动 vCPU 数（`>= 1`）。省略则用 SDK/`sdk-config.yaml` 默认 |
 | `vcpu_max` | 省略/`null` | 可选；vCPU 上限，须 `>= vcpu_num`；单独设置而无 `vcpu_num` 会校验失败 |
 | `ram_mb` | 省略/`null` | 可选；VM 内存 MB（`>= 1`） |
@@ -427,7 +427,7 @@ bwrap / ProcessRuntime **忽略**本段。创建 Conch 沙箱时由 `ConchRuntim
 
 ```yaml
 conch:
-  template_id: tmpl_xxx
+  template_name: tmpl_xxx
   vcpu_num: 2
   vcpu_max: 4
   ram_mb: 4096
@@ -575,7 +575,7 @@ sandbox:
   # —— 端点 & 类型 ——
   url: "http://127.0.0.1:8321"      # jiuwenbox HTTP 端点；TCP 用 http://，UDS 用 unix:///abs/socket/path
   type: "jiuwenbox"                 # jiuwenbox | jiuwenbox-conch | yuanrong
-  # template_id: "<conch-template>" # jiuwenbox-conch 必填；本模式不支持 files
+  # template_name: "<conch-template>" # jiuwenbox-conch 必填；本模式不支持 files
 
   # —— 启动方式 & policy ——
   startup_mode: "internal"          # internal=agent-server 自动拉起 jiuwenbox-server；external=用户自行启动
@@ -598,7 +598,7 @@ sandbox:
 | --- | --- | --- | --- |
 | `sandbox.url` | URL 字符串 | `http://127.0.0.1:8321` | jiuwenbox 管理 API 端点。TCP 用 `http://host:port`；UDS 用 `unix:///abs/socket/path`（与 `JIUWENBOX_LISTEN` 配置的形态一致） |
 | `sandbox.type` | 字符串 | `jiuwenbox` | `jiuwenbox`（bwrap/process）、`jiuwenbox-conch`（同一 HTTP + Conch；provider 仍复用 jiuwenbox）、`yuanrong` |
-| `sandbox.template_id` | 字符串 | （无） | **`jiuwenbox-conch` 必填**，写入 `policy.conch.template_id` |
+| `sandbox.template_name` | 字符串 | （无） | **`jiuwenbox-conch` 必填**，写入 `policy.conch.template_name` |
 | `sandbox.user` / `sandbox.group` | 字符串 | （无） | 可选成对；`jiuwenbox-conch` 下原样写入 `policy.conch.run_as_user` / `run_as_group`，由 jiuwenbox-server 在宿主机解析。名字解析依赖 jiuwenbox 进程可见的 passwd/group；容器化且未映射时建议直接写数字字符串 |
 | `sandbox.startup_mode` | `internal` / `external` | `internal` | `internal`：agent-server 启动时自动 spawn `jiuwenbox-server` 子进程并落盘最终生效的 `url`（端口被占用时自动换端口）；`external`：jiuwenswarm 完全不碰 jiuwenbox 进程，要求按本 README 顶部的方式提前自己启动。Conch 推荐 `external` |
 | `sandbox.policy_file` | 文件名 / 路径 | `code-agent-policy.yaml` | 仅给文件名 → 自动定位到 `jiuwenbox/configs/<name>`；包含 `/` `\` 或 `~` 时按整路径解析。**仅在 `startup_mode=internal` 下生效**——`external` 模式下 policy 由用户自启动时的 `JIUWENBOX_DEFAULT_POLICY_PATH` 决定 |
@@ -615,7 +615,7 @@ sandbox:
   type: jiuwenbox-conch
   url: http://127.0.0.1:8321
   startup_mode: external
-  template_id: <conch-template>
+  template_name: <conch-template>
   # user: "1000"      # optional; pair with group → policy.conch.run_as_*
   # group: "1000"
   policy_file: code-agent-policy.yaml

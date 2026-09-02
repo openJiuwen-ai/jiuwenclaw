@@ -13,24 +13,24 @@ from jiuwenbox.models.policy import (
     SecurityPolicy,
 )
 
-JIUWENBOX_CONCH_TEMPLATE_ID_ENV = "JIUWENBOX_CONCH_TEMPLATE_ID"
+JIUWENBOX_CONCH_TEMPLATE_NAME_ENV = "JIUWENBOX_CONCH_TEMPLATE_NAME"
 
 # Linux uid_t/gid_t are 32-bit; (uid_t)-1 / (gid_t)-1 is reserved as invalid.
 _CONCH_POSIX_ID_MAX = 2**32 - 2
 
 
 class ConchRunAsError(ValueError):
-    """Raised when conch.run_as_user / run_as_group cannot be resolved on the host."""
+    """Raised when conch.run_as_user / conch.run_as_group cannot be resolved on the host."""
 
 
-def resolve_conch_template_id(policy: SecurityPolicy) -> str | None:
-    """Resolve Conch template id: policy field, then env, else None for conchd default."""
-    template_id = (policy.conch.template_id or "").strip()
-    if template_id:
-        return template_id
-    env_template_id = (os.environ.get(JIUWENBOX_CONCH_TEMPLATE_ID_ENV) or "").strip()
-    if env_template_id:
-        return env_template_id
+def resolve_conch_template_name(policy: SecurityPolicy) -> str | None:
+    """Resolve Conch template name: policy field, then env, else None for conchd default."""
+    template_name = (policy.conch.template_name or "").strip()
+    if template_name:
+        return template_name
+    env_template_name = (os.environ.get(JIUWENBOX_CONCH_TEMPLATE_NAME_ENV) or "").strip()
+    if env_template_name:
+        return env_template_name
     return None
 
 

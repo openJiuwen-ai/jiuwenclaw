@@ -865,7 +865,7 @@ class ConchPolicy(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    template_id: str = ""
+    template_name: str = ""
     vcpu_num: int | None = None
     vcpu_max: int | None = None
     ram_mb: int | None = None
@@ -877,13 +877,13 @@ class ConchPolicy(BaseModel):
     filesystem_policy: ConchFilesystemPolicy = Field(default_factory=ConchFilesystemPolicy)
     network: ConchNetworkPolicy = Field(default_factory=ConchNetworkPolicy)
 
-    @field_validator("template_id", mode="before")
+    @field_validator("template_name", mode="before")
     @classmethod
-    def normalize_template_id(cls, value: object) -> str:
+    def normalize_template_name(cls, value: object) -> str:
         if value is None:
             return ""
         if not isinstance(value, str):
-            raise ValueError("conch.template_id must be a string")
+            raise ValueError("conch.template_name must be a string")
         return value.strip()
 
     @field_validator("vcpu_num", "vcpu_max", "ram_mb", mode="before")

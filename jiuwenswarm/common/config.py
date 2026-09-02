@@ -2204,7 +2204,7 @@ def get_model_config(name: str, index: int | None = None) -> dict[str, Any] | No
 # Sandbox runtime config
 #
 # 字段挂在 ``sandbox`` 顶层 (与 ``url`` / ``type`` / ``startup_mode`` /
-# ``policy_file`` / ``preserve_file_sharing_mode`` / ``template_id`` 并列):
+# ``policy_file`` / ``preserve_file_sharing_mode`` / ``template_name`` 并列):
 #
 #   sandbox:
 #     # type: jiuwenbox | jiuwenbox-conch | yuanrong
@@ -2223,7 +2223,7 @@ def get_model_config(name: str, index: int | None = None) -> dict[str, Any] | No
 #     type: jiuwenbox-conch
 #     url: http://127.0.0.1:8321
 #     startup_mode: external          # 推荐
-#     template_id: <conch-template>   # 必填
+#     template_name: <conch-template> # 必填
 #     policy_file: code-agent-policy.yaml
 #     enabled: true
 #     preserve_file_sharing_mode: mount
@@ -2440,12 +2440,12 @@ def sandbox_files_has_entries(files: Any) -> bool:
     return False
 
 
-def require_jiuwenbox_conch_template_id(template_id: Any) -> str:
-    """Validate and return non-empty ``sandbox.template_id`` for jiuwenbox-conch."""
-    text = str(template_id or "").strip()
+def require_jiuwenbox_conch_template_name(template_name: Any) -> str:
+    """Validate and return non-empty ``sandbox.template_name`` for jiuwenbox-conch."""
+    text = str(template_name or "").strip()
     if not text:
         raise ValueError(
-            "sandbox.template_id is required when sandbox.type=jiuwenbox-conch"
+            "sandbox.template_name is required when sandbox.type=jiuwenbox-conch"
         )
     return text
 
@@ -2625,7 +2625,7 @@ def get_sandbox_endpoint() -> dict[str, Any]:
     - ``url`` 为空时回落占位 ``http://yuanrong.local`` (仅作 cache key)
 
     当 ``type=jiuwenbox-conch`` 时额外返回:
-    - ``template_id`` (字符串; 可能为空, 由 enable / 建 card 再硬校验)
+    - ``template_name`` (字符串; 可能为空, 由 enable / 建 card 再硬校验)
     - 若 yaml 中存在: ``user`` / ``group`` (原样透传到 policy.conch.run_as_*)
 
     Raises:
@@ -2652,7 +2652,7 @@ def get_sandbox_endpoint() -> dict[str, Any]:
             if key in sandbox:
                 result[key] = sandbox[key]
     if sandbox_type == _SANDBOX_TYPE_JIUWENBOX_CONCH:
-        result["template_id"] = str(sandbox.get("template_id") or "").strip()
+        result["template_name"] = str(sandbox.get("template_name") or "").strip()
         if "user" in sandbox:
             result["user"] = sandbox["user"]
         if "group" in sandbox:
@@ -2667,7 +2667,7 @@ def update_sandbox_endpoint(
     preserve_file_sharing_mode: str | None = None,
     startup_mode: str | None = None,
     policy_file: str | None = None,
-    template_id: str | None = None,
+    template_name: str | None = None,
     executor: str | None = None,
     image: str | None = None,
     workdir: str | None = None,
@@ -2680,13 +2680,13 @@ def update_sandbox_endpoint(
 ) -> dict[str, Any]:
     """写入 ``sandbox.url`` / ``sandbox.type`` 以及可选的
     ``preserve_file_sharing_mode`` / ``startup_mode`` / ``policy_file``
-    / ``template_id`` / yuanrong knobs 到 config.yaml; 返回实际写入的字段集合
+    / ``template_name`` / yuanrong knobs 到 config.yaml; 返回实际写入的字段集合
     (没有改动的字段不在返回里)。
 
     所有 ``None`` 入参表示"本次不修改该字段, 保留 config.yaml 中既有值",
     以方便 ``_handle_sandbox_enable`` 在不同阶段分批落盘。
 
-    当 ``type=jiuwenbox-conch`` 时: ``template_id`` 最终必须非空; 且当前
+    当 ``type=jiuwenbox-conch`` 时: ``template_name`` 最终必须非空; 且当前
     ``sandbox.files`` 不得有非空 allow/deny。
     """
     url_value = str(url or "").strip()
@@ -2722,13 +2722,13 @@ def update_sandbox_endpoint(
     sandbox_block = data["sandbox"]
 
     template_value: str | None = None
-    if template_id is not None:
-        template_value = str(template_id).strip()
+    if template_name is not None:
+        template_value = str(template_name).strip()
     elif type_value == _SANDBOX_TYPE_JIUWENBOX_CONCH:
-        template_value = str(sandbox_block.get("template_id") or "").strip()
+        template_value = str(sandbox_block.get("template_name") or "").strip()
 
     if type_value == _SANDBOX_TYPE_JIUWENBOX_CONCH:
-        require_jiuwenbox_conch_template_id(template_value)
+        require_jiuwenbox_conch_template_name(template_value)
         reject_files_for_jiuwenbox_conch(sandbox_block.get("files"))
 
     sandbox_block["url"] = url_value
@@ -2742,7 +2742,7 @@ def update_sandbox_endpoint(
     if executor_value is not None:
         sandbox_block["executor"] = executor_value
     if type_value == _SANDBOX_TYPE_JIUWENBOX_CONCH and template_value is not None:
-        sandbox_block["template_id"] = template_value
+        sandbox_block["template_name"] = template_value
 
     optional_writes: dict[str, Any] = {}
     if image is not None:
@@ -2779,7 +2779,7 @@ def update_sandbox_endpoint(
     if executor_value is not None:
         result["executor"] = executor_value
     if type_value == _SANDBOX_TYPE_JIUWENBOX_CONCH and template_value is not None:
-        result["template_id"] = template_value
+        result["template_name"] = template_value
     result.update(optional_writes)
     return result
 

@@ -54,7 +54,7 @@ def _base_policy(**overrides) -> SecurityPolicy:
             "idle_check_interval": 60,
         },
         "conch": {
-            "template_id": "default",
+            "template_name": "default",
             "vcpu_num": 1,
             "network": {
                 "egress": {
@@ -197,7 +197,7 @@ def test_merge_append_conch_network_and_scalars():
         },
         mode="append",
     )
-    assert merged.conch.template_id == "default"
+    assert merged.conch.template_name == "default"
     assert merged.conch.vcpu_num == 2
     assert merged.conch.ram_mb == 1024
     assert merged.conch.network.egress.blocked_ips == [
@@ -225,7 +225,7 @@ def test_merge_override_conch_list_replace_preserves_other_fields():
     )
     assert merged.conch.network.egress.blocked_ips == ["203.0.113.9"]
     assert merged.conch.network.egress.default == "allow"
-    assert merged.conch.template_id == "default"
+    assert merged.conch.template_name == "default"
     assert merged.conch.vcpu_num == 1
 
 
@@ -299,7 +299,7 @@ def test_update_store_save_keeps_merged_non_network_fields(tmp_path):
     assert loaded.cgroup.pids_max == 64
     assert loaded.cgroup.memory_max == 256 * 1024 * 1024
     assert loaded.conch.network.egress.blocked_ips == ["203.0.113.7"]
-    assert loaded.conch.template_id == "default"
+    assert loaded.conch.template_name == "default"
 
 
 def test_update_store_missing_file_resolves_to_base(tmp_path):

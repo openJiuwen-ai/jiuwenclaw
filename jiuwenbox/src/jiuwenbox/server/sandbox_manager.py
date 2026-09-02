@@ -1985,7 +1985,11 @@ class SandboxManager:
         sandbox_ids: list[str] = []
         async with self._lock:
             if update_default_policy:
-                assert candidate is not None
+                if candidate is None:
+                    raise RuntimeError(
+                        "internal error: candidate policy is unset while "
+                        "update_default_policy is enabled"
+                    )
                 previous_timeout = self.policy.timeout
                 self.update_store.save(candidate)
                 self.policy = candidate
