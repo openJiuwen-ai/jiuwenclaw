@@ -2979,8 +2979,10 @@
       "message": "This plugin will become unavailable — you can reinstall it anytime."
     },
     "empty": {
-      "myMcp": "No MCPs installed yet",
-      "myPlugin": "No plugins installed yet",
+      "myMcp": "No MCPs yet",
+      "myPlugin": "No plugins yet",
+      "mcp": "No MCPs available",
+      "plugin": "No plugins available",
       "searchNoResult": "No matches found",
       "loadingPlugin": "Loading plugins...",
       "loadingMcp": "Loading MCPs...",
