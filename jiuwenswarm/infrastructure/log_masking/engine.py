@@ -289,6 +289,13 @@ class LogMaskingEngine:
                     else bool(rows)
                 )
                 cls.reload_from_rows(rows, db_authoritative=authoritative)
+                engine = cls.get_instance()
+                _logger.info(
+                    "[log_masking_db] reloaded: rows=%d rules=%d authoritative=%s",
+                    len(rows),
+                    len(engine.rules),
+                    engine.uses_external_rules,
+                )
             except Exception as exc:  # noqa: BLE001
                 _logger.warning(
                     "[log_masking_db] log_masking_rule read failed: %s",
