@@ -500,6 +500,21 @@ class AgentWebSocketServer:
         # 启动 (用户依然可以在 TUI 里跑 /sandbox enable 重试)。
         await self._bootstrap_internal_jiuwenbox()
 
+        # 事件循环停摆探针 + 主线程栈采样器：用于定位「同步处理占住事件循环
+        # 数秒导致网关 ping/pong 超时、任务被一刀切取消」类问题（见
+        # ``jiuwenswarm/server/event_loop_monitor.py`` 模块 docstring）。
+        # 幂等挂载；失败仅告警，绝不影响服务启动。
+        try:
+            from jiuwenswarm.server.event_loop_monitor import (
+                ensure_event_loop_monitor,
+            )
+
+            await ensure_event_loop_monitor()
+        except Exception:
+            logger.exception(
+                "[AgentWebSocketServer] 事件循环监控装载失败（已忽略）"
+            )
+
     async def _bootstrap_internal_jiuwenbox(self) -> None:
         """启动时按 ``config.yaml::sandbox`` 自动拉起 jiuwenbox 子进程。
 
