@@ -12,6 +12,7 @@ from jiuwenswarm.server.runtime.skill_turbo.skill_codes.ppt.ppt_page_gen import 
     _build_content_template_fill_prompt,
     _build_content_template_fill_system_prompt,
     _build_page_gen_rewrite_hint,
+    _extract_chart_scaffold_region,
     _extract_designer_section,
     _is_chart_candidate_page,
     _merge_chart_scaffold_from_filled,
@@ -320,6 +321,33 @@ def test_custom_chart_prompt_mentions_chart_font_family():
     )
     assert "CHART_FONT_FAMILY" in prompt
     assert "必须" in prompt and "frontmatter" in prompt
+
+
+def test_extract_chart_scaffold_region_ignores_scripts_after_body_with_prior_comment():
+    """</body> 前有 HTML 注释时，须在去注释坐标系内截断，避免误取 body 后的 script。"""
+    scaffold_script = (
+        '<script>const option = {"series":[{"data":[1]}]}; '
+        'echarts.init(document.getElementById("chart-1"));</script>'
+    )
+    decoy_script = (
+        '<script>const option = {"series":[{"data":[999]}]}; '
+        'echarts.init(document.getElementById("decoy"));</script>'
+    )
+    filled = (
+        "<html><body>"
+        '<main><div id="chart-1"></div></main>'
+        "<!-- layout note: keep chart area visible -->"
+        f"{scaffold_script}"
+        "</body>"
+        f"{decoy_script}"
+        "</html>"
+    )
+    region = _extract_chart_scaffold_region(filled)
+    assert region is not None
+    assert 'getElementById("chart-1")' in region
+    assert 'getElementById("decoy")' not in region
+    assert "[1]" in region
+    assert "[999]" not in region
 
 
 def test_merge_chart_scaffold_active_script_without_comment():

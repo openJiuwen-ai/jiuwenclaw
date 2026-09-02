@@ -780,7 +780,7 @@ def _extract_chart_scaffold_region(filled_html: str) -> str | None:
         if _chart_scaffold_option_populated(body):
             return body.strip()
     html_no_comments = _HTML_COMMENT_RE.sub("", filled_html)
-    body_close = filled_html.lower().rfind("</body>")
+    body_close = html_no_comments.lower().rfind("</body>")
     prefix = html_no_comments[:body_close] if body_close != -1 else html_no_comments
     for match in reversed(list(_SCRIPT_BODY_RE.finditer(prefix))):
         body = match.group(1) or ""
