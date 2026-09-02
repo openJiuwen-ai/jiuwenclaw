@@ -2140,6 +2140,8 @@
     "categoryLabel": "智能体分类",
     "categoryAll": "全部",
     "categoryOther": "其他",
+    "categoryScrollPrev": "向左滚动分类",
+    "categoryScrollNext": "向右滚动分类",
     "mineSubtitle": "管理你创建或已安装的智能体",
     "searchLabel": "搜索智能体",
     "searchCatalog": "搜索智能体",
@@ -2179,7 +2181,7 @@
       "createViaChatPrompt": "帮我创建一个xxx专家，擅长xxx",
       "back": "返回"
     },
-    "card": { "open": "查看 {{name}} 详情", "actions": "{{name}} 操作" },
+    "card": { "open": "查看 {{name}} 详情", "actions": "{{name}} 操作", "moreTagsTooltip": "更多标签：{{tags}}" },
     "states": {
       "installed": "已安装",
       "loadError": "智能体列表加载失败，请重试。",
