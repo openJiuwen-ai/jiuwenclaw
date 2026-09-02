@@ -10581,9 +10581,6 @@ class AgentWebSocketServer:
         if self._rsi_handlers is not None:
             return self._rsi_handlers
         from jiuwenswarm.agents.harness.common.rsi import build_rsi_service_context
-        from jiuwenswarm.agents.harness.common.rsi.mock_artifact_provider import (
-            build_mock_artifact_adapters,
-        )
         from jiuwenswarm.server.rsi import RsiAgentServerHandlers
 
         provider_mode = os.environ.get("RSI_PROVIDER_MODE", "").strip().lower()

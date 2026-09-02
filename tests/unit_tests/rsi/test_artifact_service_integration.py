@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from jiuwenswarm.agents.harness.common.rsi import build_rsi_service_context
+from jiuwenswarm.agents.harness.common.rsi.mock_artifact_provider import MockArtifactProvider
 from jiuwenswarm.common.schema.message import ReqMethod
 from jiuwenswarm.server.rsi import RsiAgentServerHandlers
 

@@ -648,7 +648,7 @@ class RsiArtifactDownloadService:
     ) -> dict[str, Any]:
         try:
             raw_artifact = adapter.locate_artifact(task_id, artifact_id)
-        except (FileNotFoundError, OSError) as exc:
+        except OSError as exc:
             raise RsiArtifactNotFound(str(exc)) from exc
         raw = _plain_provider(raw_artifact)
         if not isinstance(raw, dict):
@@ -802,8 +802,9 @@ def _ensure_provider_valid(result: Any) -> None:
                 "code": str(raw.get("code") or "DATASET_INVALID"),
             }
         )
-    if any(item.get("code") == "PATH_INVALID" for item in errors):
-        raise RsiPathInvalid(errors[0]["reason"] if errors else "产物路径无效")
+    path_invalid = next((item for item in errors if item.get("code") == "PATH_INVALID"), None)
+    if path_invalid is not None:
+        raise RsiPathInvalid(path_invalid["reason"])
     message = errors[0]["reason"] if errors else "Provider 输入校验失败"
     raise RsiDatasetInvalid(message, errors=errors)
 

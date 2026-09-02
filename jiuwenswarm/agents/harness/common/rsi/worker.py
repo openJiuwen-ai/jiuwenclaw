@@ -17,6 +17,7 @@ from typing import Any
 
 from jiuwenswarm.agents.harness.common.rsi.errors import (
     RsiDatasetInvalid,
+    RsiNotReady,
     RsiScenarioNotSupported,
     RsiTaskStateConflict,
 )
@@ -104,12 +105,14 @@ class RsiWorker:
                 self._conflict(task_id, f"状态 {task.status} 不可 pause")
             if task.status == TaskStatus.QUEUED.value:
                 self._dequeue_locked(task_id)
-            else:
-                self._schedule_provider_control(task_id, adapter, "pause")
-            result = self.store.update_status(
-                task_id, [task.status], TaskStatus.PAUSED.value, cause=f"cancel({mode})"
-            )
-            return result.status
+                result = self.store.update_status(
+                    task_id, [task.status], TaskStatus.PAUSED.value, cause=f"cancel({mode})"
+                )
+                return result.status
+            # A running task remains RUNNING until the Provider confirms the
+            # pause.  The control task owns the eventual state transition.
+            self._schedule_provider_control(task_id, adapter, "pause")
+            return task.status
         if mode == "terminate":
             if task.status not in {
                 TaskStatus.CREATED.value,
@@ -120,8 +123,15 @@ class RsiWorker:
                 self._conflict(task_id, f"状态 {task.status} 不可 terminate")
             if task.status == TaskStatus.QUEUED.value:
                 self._dequeue_locked(task_id)
-            elif task.status == TaskStatus.RUNNING.value and adapter is not None:
+                result = self.store.update_status(
+                    task_id, [task.status], TaskStatus.TERMINATED.value, cause=f"cancel({mode})"
+                )
+                return result.status
+            if task.status in {TaskStatus.RUNNING.value, TaskStatus.PAUSED.value} and adapter is not None:
+                # Keep the public state unchanged until the Provider confirms
+                # termination, including the PAUSED -> TERMINATED path.
                 self._schedule_provider_control(task_id, adapter, "terminate")
+                return task.status
             result = self.store.update_status(
                 task_id, [task.status], TaskStatus.TERMINATED.value, cause=f"cancel({mode})"
             )
@@ -304,23 +314,101 @@ class RsiWorker:
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
-            logger.warning("[RSI] 无运行中事件循环，无法立即调用 Provider.%s task=%s", mode, task_id)
-            return
+            raise RsiNotReady(
+                f"当前无运行中事件循环，无法调用 Provider.{mode}: task={task_id}"
+            )
         previous = self._control_tasks.get(task_id)
         if previous is not None and not previous.done():
-            return
-        control_task = loop.create_task(method(task_id))
+            logger.warning(
+                "[RSI] Provider.%s task=%s 将在前一个控制完成后执行",
+                mode,
+                task_id,
+            )
+
+        async def _invoke() -> Any:
+            if previous is not None:
+                try:
+                    await previous
+                except asyncio.CancelledError:
+                    if not previous.cancelled():
+                        raise
+                except Exception as exc:  # noqa: BLE001 - continue queued control
+                    logger.warning(
+                        "[RSI] 前一个 Provider 控制失败，继续执行 Provider.%s task=%s: %s",
+                        mode,
+                        task_id,
+                        exc,
+                    )
+            result = await method(task_id)
+            self._apply_control_result(task_id, mode, result)
+            return result
+
+        control_task = loop.create_task(_invoke())
         self._control_tasks[task_id] = control_task
 
         def _control_done(done: asyncio.Task[Any]) -> None:
-            self._control_tasks.pop(task_id, None)
+            if self._control_tasks.get(task_id) is done:
+                self._control_tasks.pop(task_id, None)
             if done.cancelled():
+                logger.warning("[RSI] Provider.%s control cancelled task=%s", mode, task_id)
                 return
-            exc = done.exception()
-            if exc is not None:
+            try:
+                done.result()
+            except Exception as exc:  # noqa: BLE001 - keep worker alive
                 logger.warning("[RSI] Provider.%s failed task=%s: %s", mode, task_id, exc)
 
         control_task.add_done_callback(_control_done)
+
+    def _apply_control_result(self, task_id: str, mode: str, result: Any) -> None:
+        """Commit the public state only after a Provider control returns."""
+        raw_status = getattr(result, "status", result)
+        raw_status = getattr(raw_status, "value", raw_status)
+        status = str(raw_status or "").upper()
+        target = {
+            "COMPLETED": TaskStatus.COMPLETED.value,
+            "FAILED": TaskStatus.FAILED.value,
+            "PAUSED": TaskStatus.PAUSED.value,
+            "TERMINATED": TaskStatus.TERMINATED.value,
+        }.get(status)
+        if target is None:
+            logger.warning(
+                "[RSI] Provider.%s returned an unusable status task=%s status=%r",
+                mode,
+                task_id,
+                raw_status,
+            )
+            return
+        try:
+            current = self.store.get(task_id).status
+            if current == target:
+                return
+            allowed_targets = {
+                TaskStatus.RUNNING.value: {
+                    TaskStatus.COMPLETED.value,
+                    TaskStatus.FAILED.value,
+                    TaskStatus.PAUSED.value,
+                    TaskStatus.TERMINATED.value,
+                },
+                TaskStatus.PAUSED.value: {TaskStatus.TERMINATED.value},
+            }
+            if target not in allowed_targets.get(current, set()):
+                logger.debug(
+                    "[RSI] Provider.%s result ignored for task=%s current=%s target=%s",
+                    mode,
+                    task_id,
+                    current,
+                    target,
+                )
+                return
+            self.store.update_status(
+                task_id,
+                [current],
+                target,
+                cause=f"provider.{status.lower()}",
+            )
+        except RsiTaskStateConflict:
+            # The run path or another control already owns the final state.
+            logger.debug("[RSI] task state changed while applying Provider.%s: %s", mode, task_id)
 
     def _persist_results(self, task_id: str, result: Any) -> None:
         """引擎结果落盘（IterativeSingleHarnessResult 形状）→ task.json.config.results。
