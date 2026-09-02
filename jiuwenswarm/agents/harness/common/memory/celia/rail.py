@@ -19,6 +19,7 @@ from openjiuwen.harness.rails.memory.external_memory_rail import (
 )
 from openjiuwen.harness.prompts.sections import SectionName
 
+from .prompt import load_celia_agent_prompt
 from .provider import CeliaMemoryProvider, _redact_diagnostic
 
 logger = logging.getLogger(__name__)
@@ -65,7 +66,7 @@ class CeliaMemoryRail(DeepAgentRail):
         self._attachment_manager = getattr(agent, "prompt_attachment_manager", None)
         self._register_provider_tools(agent)
         if self._system_prompt_builder is not None:
-            block = self._provider.system_prompt_block()
+            block = load_celia_agent_prompt()
             if block:
                 language = getattr(self._system_prompt_builder, "language", "cn")
                 section = build_external_memory_section(block, language=language)

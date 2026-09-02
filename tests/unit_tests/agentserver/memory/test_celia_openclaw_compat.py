@@ -250,6 +250,7 @@ async def test_provider_fixed_load_never_loads_l1_full_text(tmp_path, monkeypatc
     get_fixed_context_cache().clear()
     context = await provider.prefetch("query")
     assert "profile" in context and "brief" in context
+    assert "CELIA_MEMORY_GUIDE" not in context
     assert "memory_load_l1" not in client.calls
 
 
