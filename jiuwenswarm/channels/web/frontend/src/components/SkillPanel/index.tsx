@@ -153,6 +153,7 @@ interface SkillPanelProps {
 
 function getSourceLabel(source: string, t: (key: string) => string, isBuiltinSource?: boolean, sourceType?: string): string {
   if (sourceType === 'prebuilt') return t('skills.enterprisePrebuilt');
+  if (sourceType === 'builtin') return t('skills.source.builtin');
   if (isBuiltinSource) return t('skills.source.builtin');
   if (source === "local") return t('skills.source.local');
   if (source === "project") return t('skills.source.project');
@@ -164,7 +165,9 @@ function getSourceLabel(source: string, t: (key: string) => string, isBuiltinSou
 }
 
 function isAdministratorManagedSkill(skill: SkillItem): boolean {
-  return skill.source_type === 'prebuilt';
+  // 企业 DTO：removable 是后端给的权威字段（user=true 可卸载/启停，builtin/prebuilt=false）。
+  if (typeof skill.removable === 'boolean') return !skill.removable;
+  return skill.source_type === 'prebuilt' || skill.source_type === 'builtin';
 }
 
 /** 与后端一致：tags/allowed_tools 可能是逗号分隔字符串，统一为 string[] */
@@ -603,7 +606,7 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
   const { t, i18n } = useTranslation();
   const readOnly = isEnterprise();
   const [activeTab, setActiveTab] = useState<"my" | "marketplace" | "index" | "graph">("my");
-  const [mySkillsSubTab, setMySkillsSubTab] = useState<"all" | "enabled" | "disabled">("all");
+  const [mySkillsSubTab, setMySkillsSubTab] = useState<"all" | "enabled" | "disabled" | "builtin" | "prebuilt" | "user">("all");
   const [mySkillsPage, setMySkillsPage] = useState(1);
   const [marketplaceSubTab, setMarketplaceSubTab] = useState<"builtin" | "swarmskills" | "online">("builtin");
   const [searchTrigger, setSearchTrigger] = useState(0);
@@ -1301,6 +1304,28 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
       );
     }
 
+    // 企业版：能走到这里说明 removable=true（用户自装，如企业 SkillHub 来源），
+    // 允许卸载，样式与个人版卸载按钮一致
+    if (readOnly) {
+      const isLoading = actionTarget === skill.name;
+      return (
+        <button
+          onClick={(event) => {
+            event.stopPropagation();
+            handleUninstall(skill.name, skill.origin);
+          }}
+          className="flex items-center gap-2 px-3 py-1.5 rounded-full text-sm whitespace-nowrap hover:bg-secondary "
+          disabled={isLoading}
+          style={{ color: 'var(--color-text-primary)' }}
+        >
+          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2} style={{ color: 'var(--color-text-primary)' }}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1 1h-4a1 1 0 00-1 1v3M4 7h16" />
+          </svg>
+          {t('skills.actions.uninstall')}
+        </button>
+      );
+    }
+
     const plugin = installedSkillMap.get(skill.name);
 
     // 未安装到用户目录的内置技能（来自内置目录，需要安装）
@@ -1421,9 +1446,9 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
     if (installedSkillMap.has(skill.name)) return t('skills.status.installed');
     if (skill.source === "local") return t('skills.status.installed');
     if (skill.is_builtin) {
-      return t('skills.status.notInstalled');
+      return "";
     }
-    if (skill.source !== "project") return t('skills.status.notInstalled');
+    if (skill.source !== "project") return "";
     return t('skills.status.builtIn');
   };
 
@@ -1440,11 +1465,26 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
       case "disabled":
         filtered = visibleSkills.filter(s => s.enabled === false);
         break;
+      case "builtin":
+        filtered = visibleSkills.filter(s => s.source_type === "builtin");
+        break;
+      case "prebuilt":
+        filtered = visibleSkills.filter(s => s.source_type === "prebuilt");
+        break;
+      case "user":
+        filtered = visibleSkills.filter(s => s.source_type === "user");
+        break;
       default:
+        // 企业版「全部」：企业预置优先，其次内置、用户自装；个人版保持原有顺序
+        if (readOnly) {
+          const priority = (s: SkillItem) =>
+            s.source_type === "prebuilt" ? 0 : s.source_type === "builtin" ? 1 : s.source_type === "user" ? 2 : 3;
+          filtered = [...visibleSkills].sort((a, b) => priority(a) - priority(b));
+        }
         break;
     }
     return filtered;
-  }, [visibleSkills, mySkillsSubTab, installedSkillMap]);
+  }, [visibleSkills, mySkillsSubTab, installedSkillMap, readOnly]);
 
   const mySkillsFiltered = useMemo(() => getMySkillsFiltered(), [getMySkillsFiltered]);
   const mySkillsTotalPages = Math.max(1, Math.ceil(mySkillsFiltered.length / MY_SKILLS_PAGE_SIZE));
@@ -2265,17 +2305,19 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
 
                     <div className="flex flex-col items-end gap-2">
                       <div className="flex items-center gap-4">
-                        <div className="flex items-center gap-2">
-                          <span className="text-sm whitespace-nowrap" style={{ color: 'var(--color-text-primary)' }}>{selectedSkill.enabled === false ? t('skills.mySkillsTabs.disabled') : t('skills.mySkillsTabs.enabled')}</span>
-                          <Switch
-                            checked={selectedSkill.enabled !== false}
-                            onChange={() => toggleSkillDisabled(selectedSkill.name, selectedSkill.origin)}
-                            disabled={
-                              actionTarget === `toggle:${selectedSkill.origin || selectedSkill.name}` ||
-                              isAdministratorManagedSkill(selectedSkill)
-                            }
-                          />
-                        </div>
+                        {!readOnly && (
+                          <div className="flex items-center gap-2">
+                            <span className="text-sm whitespace-nowrap" style={{ color: 'var(--color-text-primary)' }}>{selectedSkill.enabled === false ? t('skills.mySkillsTabs.disabled') : t('skills.mySkillsTabs.enabled')}</span>
+                            <Switch
+                              checked={selectedSkill.enabled !== false}
+                              onChange={() => toggleSkillDisabled(selectedSkill.name, selectedSkill.origin)}
+                              disabled={
+                                actionTarget === `toggle:${selectedSkill.origin || selectedSkill.name}` ||
+                                isAdministratorManagedSkill(selectedSkill)
+                              }
+                            />
+                          </div>
+                        )}
                         {renderActionButton(selectedSkill)}
                       </div>
                       {!readOnly && renderEvolutionButton(selectedSkill)}
@@ -2316,36 +2358,83 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
               <div className="mt-4 flex flex-col flex-1 min-h-0">
                 <div className="flex items-center gap-3 flex-shrink-0">
                   <div className="flex items-center gap-2">
-                    <button
-                      onClick={() => setMySkillsSubTab("all")}
-                      className={`px-4 text-sm font-medium  ${
-                        mySkillsSubTab === "all"
-                          ? "rounded-[8px] bg-secondary h-8 text-text"
-                          : "text-text-muted hover:text-text"
-                      }`}
-                    >
-                      {t('skills.mySkillsTabs.all')}
-                    </button>
-                    <button
-                      onClick={() => setMySkillsSubTab("enabled")}
-                      className={`px-4 text-sm font-medium  ${
-                        mySkillsSubTab === "enabled"
-                          ? "rounded-[8px] bg-secondary h-8 text-text"
-                          : "text-text-muted hover:text-text"
-                      }`}
-                    >
-                      {t('skills.mySkillsTabs.enabled')}
-                    </button>
-                    <button
-                      onClick={() => setMySkillsSubTab("disabled")}
-                      className={`px-4 text-sm font-medium  ${
-                        mySkillsSubTab === "disabled"
-                          ? "rounded-[8px] bg-secondary h-8 text-text"
-                          : "text-text-muted hover:text-text"
-                      }`}
-                    >
-                      {t('skills.mySkillsTabs.disabled')}
-                    </button>
+                    {readOnly ? (
+                      <>
+                        <button
+                          onClick={() => setMySkillsSubTab("all")}
+                          className={`px-4 text-sm font-medium  ${
+                            mySkillsSubTab === "all"
+                              ? "rounded-[8px] bg-secondary h-8 text-text"
+                              : "text-text-muted hover:text-text"
+                          }`}
+                        >
+                          {t('skills.mySkillsTabs.all')}
+                        </button>
+                        <button
+                          onClick={() => setMySkillsSubTab("builtin")}
+                          className={`px-4 text-sm font-medium  ${
+                            mySkillsSubTab === "builtin"
+                              ? "rounded-[8px] bg-secondary h-8 text-text"
+                              : "text-text-muted hover:text-text"
+                          }`}
+                        >
+                          {t('skills.mySkillsTabs.builtin')}
+                        </button>
+                        <button
+                          onClick={() => setMySkillsSubTab("prebuilt")}
+                          className={`px-4 text-sm font-medium  ${
+                            mySkillsSubTab === "prebuilt"
+                              ? "rounded-[8px] bg-secondary h-8 text-text"
+                              : "text-text-muted hover:text-text"
+                          }`}
+                        >
+                          {t('skills.mySkillsTabs.prebuilt')}
+                        </button>
+                        <button
+                          onClick={() => setMySkillsSubTab("user")}
+                          className={`px-4 text-sm font-medium  ${
+                            mySkillsSubTab === "user"
+                              ? "rounded-[8px] bg-secondary h-8 text-text"
+                              : "text-text-muted hover:text-text"
+                          }`}
+                        >
+                          {t('skills.mySkillsTabs.user')}
+                        </button>
+                      </>
+                    ) : (
+                      <>
+                        <button
+                          onClick={() => setMySkillsSubTab("all")}
+                          className={`px-4 text-sm font-medium  ${
+                            mySkillsSubTab === "all"
+                              ? "rounded-[8px] bg-secondary h-8 text-text"
+                              : "text-text-muted hover:text-text"
+                          }`}
+                        >
+                          {t('skills.mySkillsTabs.all')}
+                        </button>
+                        <button
+                          onClick={() => setMySkillsSubTab("enabled")}
+                          className={`px-4 text-sm font-medium  ${
+                            mySkillsSubTab === "enabled"
+                              ? "rounded-[8px] bg-secondary h-8 text-text"
+                              : "text-text-muted hover:text-text"
+                          }`}
+                        >
+                          {t('skills.mySkillsTabs.enabled')}
+                        </button>
+                        <button
+                          onClick={() => setMySkillsSubTab("disabled")}
+                          className={`px-4 text-sm font-medium  ${
+                            mySkillsSubTab === "disabled"
+                              ? "rounded-[8px] bg-secondary h-8 text-text"
+                              : "text-text-muted hover:text-text"
+                          }`}
+                        >
+                          {t('skills.mySkillsTabs.disabled')}
+                        </button>
+                      </>
+                    )}
                   </div>
                   <div className="flex-1 min-w-0">
                     <input
@@ -2402,26 +2491,32 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
                                   <div className="text-sm text-text-muted mt-1 line-clamp-3">
                                     {skillDisplayDesc(skill, t('skills.noDescription'))}
                                   </div>
-                                  <div className="flex flex-wrap gap-2 mt-3 text-xs text-text-muted">
-                                    <span className="px-2 py-1 rounded-full bg-secondary border border-border">
-                                      {t('skills.sourceLabel')}: {getSourceLabel(skill.source, t, skill.is_builtin_source, skill.source_type)}
-                                    </span>
-                                    <span className="px-2 py-1 rounded-full bg-secondary border border-border">
-                                      {t('skills.statusLabel')}: {renderStatus(skill)}
-                                    </span>
+                                  {(!readOnly || mySkillsSubTab === "all") && (
+                                    <div className="flex flex-wrap gap-2 mt-3 text-xs text-text-muted">
+                                      <span className="px-2 py-1 rounded-full bg-secondary border border-border">
+                                        {t('skills.sourceLabel')}: {getSourceLabel(skill.source, t, skill.is_builtin_source, skill.source_type)}
+                                      </span>
+                                      {renderStatus(skill) && (
+                                        <span className="px-2 py-1 rounded-full bg-secondary border border-border">
+                                          {t('skills.statusLabel')}: {renderStatus(skill)}
+                                        </span>
+                                      )}
+                                    </div>
+                                  )}
+                                </div>
+                              </div>
+                              {!readOnly && (
+                                <div className="flex flex-col items-end gap-2 flex-shrink-0">
+                                  {renderEvolutionButton(skill)}
+                                  <div className="flex items-center gap-2">
+                                    <Switch
+                                      checked={!isDisabled}
+                                      onChange={() => toggleSkillDisabled(skill.name, skill.origin)}
+                                      disabled={isToggling || isAdministratorManagedSkill(skill)}
+                                    />
                                   </div>
                                 </div>
-                              </div>
-                              <div className="flex flex-col items-end gap-2 flex-shrink-0">
-                                {!readOnly && renderEvolutionButton(skill)}
-                                <div className="flex items-center gap-2">
-                                  <Switch
-                                    checked={!isDisabled}
-                                    onChange={() => toggleSkillDisabled(skill.name, skill.origin)}
-                                    disabled={isToggling || isAdministratorManagedSkill(skill)}
-                                  />
-                                </div>
-                              </div>
+                              )}
                             </div>
                           ) : (
                             <>
@@ -2439,25 +2534,33 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
                                 </div>
                               </div>
                               <div className="flex flex-wrap gap-1.5 mt-2 flex-shrink-0 text-xs text-text-muted">
-                                <span className="px-2 py-0.5 rounded-full bg-secondary border border-border truncate">
-                                  {t('skills.sourceLabel')}: {getSourceLabel(skill.source, t, skill.is_builtin_source, skill.source_type)}
-                                </span>
-                                <span className="px-2 py-0.5 rounded-full bg-secondary border border-border truncate">
-                                  {t('skills.statusLabel')}: {renderStatus(skill)}
-                                </span>
+                                {(!readOnly || mySkillsSubTab === "all") && (
+                                  <>
+                                    <span className="px-2 py-0.5 rounded-full bg-secondary border border-border truncate">
+                                      {t('skills.sourceLabel')}: {getSourceLabel(skill.source, t, skill.is_builtin_source, skill.source_type)}
+                                    </span>
+                                    {renderStatus(skill) && (
+                                      <span className="px-2 py-0.5 rounded-full bg-secondary border border-border truncate">
+                                        {t('skills.statusLabel')}: {renderStatus(skill)}
+                                      </span>
+                                    )}
+                                  </>
+                                )}
                               </div>
-                              <div className="flex items-center mt-auto pt-2 gap-2 flex-shrink-0" style={{ width: "100%" }}>
-                                <div className="flex gap-1.5 flex-1">
-                                  {!readOnly && renderEvolutionButton(skill)}
+                              {!readOnly && (
+                                <div className="flex items-center mt-auto pt-2 gap-2 flex-shrink-0" style={{ width: "100%" }}>
+                                  <div className="flex gap-1.5 flex-1">
+                                    {renderEvolutionButton(skill)}
+                                  </div>
+                                  <div className="flex items-center gap-2">
+                                    <Switch
+                                      checked={!isDisabled}
+                                      onChange={() => toggleSkillDisabled(skill.name, skill.origin)}
+                                      disabled={isToggling || isAdministratorManagedSkill(skill)}
+                                    />
+                                  </div>
                                 </div>
-                                <div className="flex items-center gap-2">
-                                  <Switch
-                                    checked={!isDisabled}
-                                    onChange={() => toggleSkillDisabled(skill.name, skill.origin)}
-                                    disabled={isToggling || isAdministratorManagedSkill(skill)}
-                                  />
-                                </div>
-                              </div>
+                              )}
                             </>
                           )}
                         </div>

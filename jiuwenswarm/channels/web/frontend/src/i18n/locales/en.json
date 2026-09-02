@@ -1503,7 +1503,10 @@
     "mySkillsTabs": {
       "all": "All",
       "enabled": "Enabled",
-      "disabled": "Disabled"
+      "disabled": "Disabled",
+      "builtin": "Built-in",
+      "prebuilt": "Enterprise prebuilt",
+      "user": "User-installed"
     },
     "enable": "Enable",
     "noDisabledSkills": "No disabled skills",

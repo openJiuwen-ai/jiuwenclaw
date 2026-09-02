@@ -60,7 +60,6 @@ KNOWN_SLOT_KEYS = frozenset({
     "embedding_model",
     "skill_whitelist",
     "extension_config",
-    "service_config",
 })
 
 
