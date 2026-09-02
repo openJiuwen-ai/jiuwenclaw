@@ -177,6 +177,8 @@
       "reloadAfterFailure": "Reload and verify",
       "modelsResponseInvalid": "The model-list response is invalid. Please try again.",
       "catalogResponseInvalid": "The model-provider catalog response is invalid. Please try again.",
+      "catalogLoadingCustomAvailable": "Loading built-in model providers. You can still choose Custom to continue.",
+      "catalogLoadFailedCustomAvailable": "Built-in model providers failed to load. You can still choose Custom to continue.",
       "catalogLoading": "Loading model providers and reasoning options. Please wait.",
       "catalogLoadFailed": "Model providers and reasoning options failed to load. Retry before saving.",
       "saveResponseInvalid": "The model-save response is invalid. Reload to verify the server state.",
@@ -210,13 +212,18 @@
       "webSearch": "Web search",
       "mediaTools": "Tools",
       "vision": "Image processing",
+      "visionDescription": "Enable image processing; disabling it keeps the saved model configuration.",
+      "visionConfigTitle": "Configure image processing model",
       "audio": "Audio processing",
+      "audioDescription": "Enable audio processing; disabling it keeps the saved model configuration.",
+      "audioConfigTitle": "Configure audio processing model",
       "video": "Video understanding",
       "videoDescription": "Enable video understanding; disabling it keeps the saved model configuration.",
       "videoConfigTitle": "Configure video understanding model",
       "toggleCapability": "Toggle {{name}} capability",
       "saveAndEnable": "Save and enable",
-      "savedRestartRequired": "Saved; takes effect after restart."
+      "savedRestartRequired": "Saved; takes effect after restart.",
+      "team": "Agent team"
     },
     "browser": {
       "runtime": "Browser runtime",
