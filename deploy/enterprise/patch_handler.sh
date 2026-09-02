@@ -44,18 +44,37 @@ render_patch_file() {
     success "AgentServer configuration rendered"
 }
 
+# agentserver-env ConfigMap：主容器 envFrom 必引用（含 AGENT_HTTP_*），与 APPLY_PATCH 无关。
+# APPLY_PATCH 只控制是否把 agentserver.json / 模型模板 curl 下发给 runtime。
+install_agentserver_env_configmap() {
+    if [[ "${DEPLOY_VARS["RENDER_ONLY"]}" == "true" ]]; then
+        return
+    fi
+
+    local yaml_file="${CONFIG["AS_ENV_YAML_FILE"]}"
+    if [[ ! -f "${yaml_file}" ]]; then
+        error "AgentServer env ConfigMap YAML missing (run render first): ${yaml_file}"
+    fi
+    info "Applying AgentServer env ConfigMap: ${DEPLOY_VARS["AGENT_SERVER_ENV_CM_NAME"]}"
+    exec_cmd kubectl apply -f "${yaml_file}"
+}
+
 install_agentserver_patch() {
-    if [[ "${DEPLOY_VARS["RENDER_ONLY"]}" == "true" || "${DEPLOY_VARS["APPLY_PATCH"]}" == "false" ]]; then
+    if [[ "${DEPLOY_VARS["RENDER_ONLY"]}" == "true" ]]; then
+        return
+    fi
+
+    ensure_secret_configmap
+    install_agentserver_env_configmap
+
+    if [[ "${DEPLOY_VARS["APPLY_PATCH"]}" == "false" ]]; then
+        info "APPLY_PATCH=false: skip pushing AgentServer config_sync template"
         return
     fi
 
     local runtime_port="${DEPLOY_VARS["AGENT_RUNTIME_NODE_PORT"]}"
     local host="${DEPLOY_VARS["CURRENT_NODE_IP"]:-127.0.0.1}"
-    local yaml_file="${CONFIG["AS_ENV_YAML_FILE"]}"
     local json_file="${CONFIG["AS_JSON_FILE"]}"
-
-    ensure_secret_configmap
-    exec_cmd kubectl apply -f "${yaml_file}"
 
     # 下发agentserver服务配置
     info "Pushing AgentServer template"
@@ -145,10 +164,13 @@ install_patch()
 }
 
 uninstall_patch() {
-    if [[ "${DEPLOY_VARS["RENDER_ONLY"]}" == "true" || "${DEPLOY_VARS["APPLY_PATCH"]}" == "false" ]]; then
+    if [[ "${DEPLOY_VARS["RENDER_ONLY"]}" == "true" ]]; then
         return
     fi
 
+    # 与 install 对称：env ConfigMap 默认会 apply，卸载时也应清理（不依赖 APPLY_PATCH）
     local yaml_file="${CONFIG["AS_ENV_YAML_FILE"]}"
-    exec_cmd kubectl delete -f "${yaml_file}"  --ignore-not-found=true
+    if [[ -f "${yaml_file}" ]]; then
+        exec_cmd kubectl delete -f "${yaml_file}" --ignore-not-found=true
+    fi
 }
