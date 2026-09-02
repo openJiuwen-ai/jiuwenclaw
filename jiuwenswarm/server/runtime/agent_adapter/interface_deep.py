@@ -4506,8 +4506,6 @@ class JiuWenSwarmDeepAdapter:
         if routing is None:
             return
         try:
-            from jiuwenswarm.common.schema.agent import AgentRequest, ReqMethod
-
             request = AgentRequest(
                 request_id="enterprise-config-refresh",
                 channel_id="default",
