@@ -22,6 +22,7 @@ import AgentDesignIcon from '../../assets/智能体.svg?react';
 import MoreDesignIcon from '../../assets/更多.svg?react';
 import { webRequest } from '../../services/webClient';
 import { useEnterpriseContext } from '../../services/enterpriseContext';
+import { isClickOutside } from './clickOutside';
 import { EditableCombobox } from './EditableCombobox';
 
 type MainNavKey =
@@ -168,6 +169,8 @@ export function SessionSidebar({
   const settingsRef = useRef<HTMLButtonElement>(null);
   const enterprise = useEnterpriseContext();
   const [contextOpen, setContextOpen] = useState(false);
+  const contextButtonRef = useRef<HTMLButtonElement>(null);
+  const contextPanelRef = useRef<HTMLDivElement>(null);
 
   const handleNewSession = useCallback(() => {
     onNavigate('chat');
@@ -209,6 +212,19 @@ export function SessionSidebar({
     onMorePanelOpenChange?.(isMoreActive);
     return () => onMorePanelOpenChange?.(false);
   }, [isMoreActive, onMorePanelOpenChange]);
+
+  useEffect(() => {
+    if (!contextOpen) return;
+
+    const handleClickOutside = (event: MouseEvent) => {
+      if (isClickOutside(event.target as Node | null, [contextPanelRef.current, contextButtonRef.current])) {
+        setContextOpen(false);
+      }
+    };
+
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, [contextOpen]);
 
   return (
     <aside className="sidebar sidebar--icon-rail">
@@ -273,6 +289,7 @@ export function SessionSidebar({
 
       {enterprise && (
         <button
+          ref={contextButtonRef}
           type="button"
           className={`icon-rail-nav-item${contextOpen ? ' icon-rail-nav-item--active' : ''}`}
           onClick={() => setContextOpen(open => !open)}
@@ -284,7 +301,7 @@ export function SessionSidebar({
         </button>
       )}
       {enterprise && contextOpen && (
-        <div className="enterprise-context-popover">
+        <div ref={contextPanelRef} className="enterprise-context-popover">
           <div className="enterprise-context-popover__user">
             {enterprise.user.display_name || enterprise.user.user_id}
             <small>{enterprise.user.user_id}</small>
