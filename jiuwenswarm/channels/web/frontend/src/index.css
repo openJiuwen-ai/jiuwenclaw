@@ -1360,7 +1360,7 @@ body.workspace-resize-active iframe {
   .team-group-chat-message-list .team-event-group-chip--broadcast {
     background: transparent;
     color: var(--color-text-link);
-    font-size: 16px;
+    font-size: 14px;
     font-weight: 400;
   }
 
