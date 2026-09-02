@@ -53,7 +53,10 @@ import { getWebTransport } from '../utils/env';
 import { isEnterprise } from '../edition';
 import { createStreamDeltaBatcher } from '../services/streamDeltaBatcher';
 import { createStreamDeltaStripper } from '../utils/toolProtocol';
-import { shouldHandleRequestEvent } from './requestEventFilter';
+import {
+  isMatchingSubagentApprovalExpiry,
+  shouldHandleRequestEvent,
+} from './requestEventFilter';
 import {
   fetchTtsAudio,
   playAudioBase64,
@@ -1943,6 +1946,9 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         const pendingQuestion = useChatStore.getState().getRuntime(sessionId)?.pendingQuestion;
         const pendingMatches = pendingQuestion?.request_id === requestId;
         const effectiveSource = source ?? (pendingMatches ? pendingQuestion?.source : undefined);
+        // 子 Agent 委托审批的严格关联标识，随应答回传后端路由
+        const agentScopeId = pendingMatches ? pendingQuestion?.agent_scope_id : undefined;
+        const agentScopePayload = agentScopeId ? { agent_scope_id: agentScopeId } : {};
         const approvalSchema =
           pendingMatches
             ? pendingQuestion?.approvalSchema
@@ -1991,6 +1997,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
             ...structuredPlanPayload,
             ...approvalSchemaPayload,
             ...evolutionMetaPayload,
+            ...agentScopePayload,
           });
         } else if (effectiveSource === 'activate_confirm') {
           const action = answers[0]?.selected_options[0] === '拒绝' ? 'reject' : 'accept';
@@ -2011,7 +2018,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           });
           useHarnessStore.getState().setActivateInteraction(sessionId, null);
         } else {
-          // 否则发送 chat.user_answer（自进化确认）
+          // 否则发送 chat.user_answer（自进化确认 / 子 Agent 委托审批）
           await request('chat.user_answer', {
             session_id: sessionId,
             ...getSessionWorkContext(sessionId),
@@ -2021,6 +2028,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
             ...sourcePayload,
             ...approvalSchemaPayload,
             ...evolutionMetaPayload,
+            ...agentScopePayload,
           });
         }
         useChatStore.getState().setPendingQuestion(sessionId, null);
@@ -3665,6 +3673,17 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           questionPayload.plan_language === 'cn' || questionPayload.plan_language === 'en'
             ? questionPayload.plan_language
             : undefined;
+        const agentScopeId =
+          typeof questionPayload.agent_scope_id === 'string'
+            ? questionPayload.agent_scope_id
+            : undefined;
+        // Skill 加载审批卡：透传结构化数据（payload_schema["x-skill-approval-card"]，
+        // 若后端通道已携带）；缺失时由卡片组件回退渲染 message markdown。
+        const rawCard = questionPayload['x-skill-approval-card'] ?? questionPayload['skill_approval_card'];
+        const skillApprovalCard =
+          rawCard && typeof rawCard === 'object'
+            ? (rawCard as AskUserQuestionPayload['skill_approval_card'])
+            : undefined;
         const normalizedPayload: AskUserQuestionPayload = {
           request_id: typeof questionPayload.request_id === 'string' ? questionPayload.request_id : '',
           source: typeof questionPayload.source === 'string' ? questionPayload.source : undefined,
@@ -3674,8 +3693,23 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           ...(planApprovalKind ? { planApprovalKind } : {}),
           ...(planContent !== undefined ? { planContent } : {}),
           ...(planLanguage ? { planLanguage } : {}),
+          ...(agentScopeId ? { agent_scope_id: agentScopeId } : {}),
+          ...(skillApprovalCard ? { skill_approval_card: skillApprovalCard } : {}),
         };
         useChatStore.getState().setPendingQuestion(sessionId, normalizedPayload);
+      }),
+      webClient.on('chat.ask_user_question_expired', ({ payload }) => {
+        const sessionId = resolveEventSessionId(payload);
+        if (!sessionId) return;
+        // 子 Agent 委托审批超时/取消：仅当 expired 与当前挂起问题严格匹配时收起卡片
+        const pendingQuestion = useChatStore.getState().getRuntime(sessionId)?.pendingQuestion;
+        if (!isMatchingSubagentApprovalExpiry(pendingQuestion, payload)) return;
+        useChatStore.getState().setPendingQuestion(sessionId, null);
+        if (payload.reason === 'timeout') {
+          // timeout 后子 Agent 仍会继续加载或获得一次模型恢复机会
+          useChatStore.getState().setProcessing(sessionId, true);
+          useChatStore.getState().setThinking(sessionId, true);
+        }
       }),
       // 同时监听 session_result 事件，以处理后端可能发送的不同格式
       webClient.on('session_result', ({ payload }) => {

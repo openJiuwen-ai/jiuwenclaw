@@ -71,6 +71,7 @@ class AgentSkillWhitelistConfig:
 @dataclass
 class SkillWhitelistSyncResult:
     enabled_skill_dirs: list[str] = field(default_factory=list)
+    prebuilt_skill_dirs: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
     succeeded: list[str] = field(default_factory=list)
     failed: list[dict[str, str]] = field(default_factory=list)
@@ -301,6 +302,12 @@ class SkillWhitelistSynchronizer:
             installed_skills_map, kept_prebuilt_names, result
         )
         result.enabled_skill_dirs = self._manager.list_enabled_skill_names()
+        # 预置技能名单（按安装账本 source_type 判定）供动态授权 trust 快照使用。
+        result.prebuilt_skill_dirs = [
+            name
+            for name, row in installed_skills_map.items()
+            if str(row.get("source_type") or "").strip() == SOURCE_PREBUILT
+        ]
         return result
 
     async def reconcile_disk_into_ledger(self) -> SkillWhitelistSyncResult:
