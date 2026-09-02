@@ -840,13 +840,47 @@ def _normalize_question_preview(preview: Any) -> dict[str, Any] | None:
     return normalized
 
 
+_PERMANENT_REMEMBER_LABELS = frozenset({
+    "永久记住",
+    "Always Allow",
+    "always_allow",
+    "allow_always",
+})
+
+_PERMANENT_REMEMBER_HINT_RE = re.compile(
+    r"[；;]?\s*选择「永久记住」[^。\n]*[。.]?",
+)
+
+
 def _default_interrupt_options() -> list[dict[str, str]]:
-    return [
+    """权限审批默认选项。
+
+    企业版不提供「永久记住」：该能力依赖写回本地 config.yaml / session overlay，
+    与 Agent permissions 模板权威源不一致，且当前 supervisor Task 下 session_id
+    常丢失导致落盘失败。长期策略请改 Manager permissions 模板。
+    """
+    options = [
         {"label": "本次允许", "description": "仅本次授权执行"},
         {"label": "会话内记住", "description": "本次会话内自动放行同类操作"},
-        {"label": "永久记住", "description": "写回磁盘，所有会话均自动放行"},
         {"label": "拒绝", "description": "拒绝执行此工具"},
     ]
+    if not is_enterprise():
+        options.insert(
+            2,
+            {"label": "永久记住", "description": "写回磁盘，所有会话均自动放行"},
+        )
+    return options
+
+
+def _is_permanent_remember_option(option: dict[str, Any]) -> bool:
+    label = str(option.get("label") or "").strip()
+    value = str(option.get("value") or "").strip()
+    return label in _PERMANENT_REMEMBER_LABELS or value in _PERMANENT_REMEMBER_LABELS
+
+
+def _strip_permanent_remember_hint(message: str) -> str:
+    cleaned = _PERMANENT_REMEMBER_HINT_RE.sub("", message or "")
+    return cleaned.strip()
 
 
 def _plan_approval_interrupt_options(
@@ -875,6 +909,12 @@ def _question_options_from_ui_options(
         if normalized["label"]:
             options.append(normalized)
     if options:
+        # 仅过滤权限审批弹窗；技能演进等仍可保留「总是允许」。
+        if is_enterprise() and source == "permission_interrupt":
+            options = [
+                option for option in options
+                if not _is_permanent_remember_option(option)
+            ]
         return options
     return _plan_approval_interrupt_options(source, tool_name, message) or _default_interrupt_options()
 
@@ -953,6 +993,8 @@ def extract_question_from_interaction(payload: Any) -> dict | None:
     else:
         header = f"权限审批: {tool_name}" if tool_name else "权限审批"
         question = message
+        if is_enterprise() and source == "permission_interrupt":
+            question = _strip_permanent_remember_hint(question)
 
     return {
         "question": question,
