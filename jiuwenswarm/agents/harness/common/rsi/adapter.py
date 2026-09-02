@@ -126,14 +126,16 @@ def validate_scenario(
     """
     from jiuwenswarm.agents.harness.common.rsi.errors import RsiBadRequest
 
+    scenario_value = str(scenario or "").strip().upper()
+    artifact_value = str(artifact_type or "").strip().upper() or None
     try:
-        scenario_enum = Scenario(scenario)
+        scenario_enum = Scenario(scenario_value)
     except ValueError as exc:
         raise RsiScenarioNotSupported(f"scenario 非法: {scenario}") from exc
     artifact_enum: ArtifactType | None = None
-    if artifact_type:
+    if artifact_value:
         try:
-            artifact_enum = ArtifactType(artifact_type)
+            artifact_enum = ArtifactType(artifact_value)
         except ValueError as exc:
             raise RsiScenarioNotSupported(f"artifact_type 非法: {artifact_type}") from exc
     if scenario_enum is Scenario.ARTIFACT and artifact_type_required and artifact_enum is None:

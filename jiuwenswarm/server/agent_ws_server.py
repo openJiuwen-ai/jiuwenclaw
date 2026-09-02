@@ -10564,6 +10564,18 @@ class AgentWebSocketServer:
         from jiuwenswarm.server.rsi import RsiAgentServerHandlers
 
         context = build_rsi_service_context(None)
+        # Mock Providers are an explicit local/test seam.  Production must
+        # register the concrete program/paper Providers at this boundary.
+        if os.environ.get("RSI_USE_MOCK_PROVIDER", "").strip().lower() == "true":
+            from jiuwenswarm.agents.harness.common.rsi.mock_artifact_provider import (
+                build_mock_artifact_adapters,
+            )
+            context.register_adapters(
+                build_mock_artifact_adapters(
+                    context.tasks_root,
+                    model_resolver=self._resolve_model,
+                )
+            )
         handlers = RsiAgentServerHandlers(
             context,
             send_push=self.send_push,

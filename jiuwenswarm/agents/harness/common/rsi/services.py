@@ -8,13 +8,26 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import asdict, is_dataclass
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
 from jiuwenswarm.agents.harness.common.rsi.adapter import validate_scenario
+from jiuwenswarm.agents.harness.common.rsi.artifact_adapter import (
+    provider_best_artifact,
+    provider_report_to_web,
+    provider_state_to_progress,
+    provider_usage_to_dict,
+    validate_provider_artifact_path,
+)
 from jiuwenswarm.agents.harness.common.rsi.errors import (
+    RsiArtifactNotFound,
     RsiBadRequest,
+    RsiDatasetInvalid,
+    RsiNotReady,
     RsiPathInvalid,
+    RsiTaskNotFound,
 )
 from jiuwenswarm.agents.harness.common.rsi.models import (
     ArtifactType,
@@ -33,17 +46,25 @@ logger = logging.getLogger(__name__)
 class RsiTaskService:
     """任务命令/查询（I2/I3/I4/I5）。"""
 
-    def __init__(self, store: Any, *, adapter: Any = None, harness_refs_provider: Any = None) -> None:
+    def __init__(
+        self,
+        store: Any,
+        *,
+        adapter: Any = None,
+        adapter_resolver: Any = None,
+        harness_refs_provider: Any = None,
+    ) -> None:
         self.store = store
         self.adapter = adapter
+        self.adapter_resolver = adapter_resolver
         self.harness_refs_provider = harness_refs_provider
 
     # -- I2 create --
 
     def create(self, params: dict[str, Any]) -> dict[str, Any]:
         """``rsi.task.create``（web §6.1 三分支校验）。返回 {task_id, status=CREATED}。"""
-        scenario_raw = str(params.get("scenario") or "").strip()
-        artifact_type_raw = str(params.get("artifact_type") or "").strip() or None
+        scenario_raw = str(params.get("scenario") or "").strip().upper()
+        artifact_type_raw = str(params.get("artifact_type") or "").strip().upper() or None
         scenario, artifact_type = validate_scenario(
             scenario_raw, artifact_type_raw,
             artifact_type_required=(scenario_raw == Scenario.ARTIFACT.value),
@@ -65,8 +86,8 @@ class RsiTaskService:
         search_width = _positive_int(params.get("search_width"), default=1, field="search_width")
         optimization_instruction = params.get("optimization_instruction")
         if optimization_instruction is not None:
-            optimization_instruction = str(optimization_instruction).strip()
-            if len(str(optimization_instruction)) > 1000:
+            optimization_instruction = str(optimization_instruction).strip() or None
+            if optimization_instruction is not None and len(optimization_instruction) > 1000:
                 raise RsiBadRequest("optimization_instruction 至多 1000 字符")
 
         # 场景字段校验（web §6.1 规则②③）
@@ -79,21 +100,39 @@ class RsiTaskService:
             if params.get("artifact_path"):
                 raise RsiBadRequest("harness 分支不接受 artifact_path")
         else:
-            artifact_path = str(params.get("artifact_path") or "").strip()
-            if not artifact_path:
-                raise RsiBadRequest(f"{artifact_type.value} 必填 artifact_path")
-            if not Path(artifact_path).expanduser().is_file():
-                raise RsiPathInvalid(f"产物路径不存在: {artifact_path}")
-            if artifact_type is ArtifactType.PAPER and not artifact_path.lower().endswith(".zip"):
-                raise RsiPathInvalid("PAPER 产物必须是 .zip")
+            artifact_path = str(
+                params.get("artifact_path") or params.get("input_file") or ""
+            ).strip() or None
+            if artifact_type is ArtifactType.PROGRAM and not artifact_path:
+                raise RsiBadRequest("PROGRAM 必填 artifact_path")
+            if artifact_path:
+                path = Path(artifact_path).expanduser()
+                if not path.exists():
+                    raise RsiPathInvalid(f"产物路径不存在: {artifact_path}")
+                if artifact_type is ArtifactType.PAPER and (
+                    not path.is_file() or path.suffix.lower() != ".zip"
+                ):
+                    raise RsiPathInvalid("PAPER 产物必须是 .zip")
             if artifact_type is ArtifactType.PAPER:
                 input_file = str(params.get("input_file") or "").strip() or None
+                if not artifact_path and not optimization_instruction:
+                    raise RsiBadRequest("PAPER 至少需要 artifact_path 或 optimization_instruction")
 
         # 优化指令仅产物·论文可填
         if scenario is Scenario.HARNESS and optimization_instruction:
             raise RsiBadRequest("harness 优化不接受 optimization_instruction")
         if scenario is Scenario.ARTIFACT and artifact_type is ArtifactType.PROGRAM and optimization_instruction:
             raise RsiBadRequest("PROGRAM 优化不接受 optimization_instruction")
+
+        selected_adapter = self._resolve_adapter(scenario, artifact_type)
+        if scenario is Scenario.ARTIFACT and selected_adapter is not None:
+            _ensure_provider_valid(
+                selected_adapter.validate_input(
+                    artifact_path,
+                    scenario=scenario.value,
+                    artifact_type=artifact_type.value if artifact_type else None,
+                )
+            )
 
         task_id = generate_task_id()
         run_dir = str(self.store.tasks_root / task_id / "run")
@@ -103,6 +142,8 @@ class RsiTaskService:
         config: dict[str, Any] = {
             "harness_refs_path": harness_refs_path,
             "artifact_path": artifact_path,
+            "optimization_instruction": optimization_instruction,
+            "artifact_type": artifact_type.value if artifact_type else None,
             "results": {},
             "active_ref_released": False,
         }
@@ -131,6 +172,14 @@ class RsiTaskService:
         # 进度树根注册（拉取 I4/tree + 推送 P2/P3 同源；基线缺省 None）
         return {"task_id": task_id, "status": TaskStatus.CREATED.value}
 
+    def _resolve_adapter(self, scenario: Scenario | None, artifact_type: ArtifactType | None) -> Any:
+        if self.adapter_resolver is not None:
+            return self.adapter_resolver(
+                scenario.value if scenario is not None else None,
+                artifact_type.value if artifact_type is not None else None,
+            )
+        return self.adapter
+
     # -- I3 list --
 
     def list(self, params: dict[str, Any]) -> list[dict[str, Any]]:
@@ -140,15 +189,17 @@ class RsiTaskService:
         scenario: Scenario | None = None
         artifact_type: ArtifactType | None = None
         if scenario_raw:
+            scenario_value = str(scenario_raw).strip().upper()
+            artifact_value = str(artifact_type_raw).strip().upper() if artifact_type_raw else None
             scenario, artifact_type = validate_scenario(
-                str(scenario_raw), str(artifact_type_raw) if artifact_type_raw else None,
+                scenario_value, artifact_value,
                 artifact_type_required=False,
             )
             if scenario is Scenario.HARNESS and artifact_type is not None:
                 raise RsiBadRequest("harness 过滤不接受 artifact_type")
         elif artifact_type_raw:
             try:
-                artifact_type = ArtifactType(str(artifact_type_raw))
+                artifact_type = ArtifactType(str(artifact_type_raw).strip().upper())
             except ValueError as exc:
                 raise RsiBadRequest(f"artifact_type 非法: {artifact_type_raw}") from exc
         tasks = self.store.list(
@@ -159,12 +210,44 @@ class RsiTaskService:
 
     # -- I4 get --
 
-    def get(self, params: dict[str, Any], *, projector: Any, usage_recorder: Any, artifact_service: Any) -> dict[str, Any]:
+    def get(
+        self,
+        params: dict[str, Any],
+        *,
+        projector: Any,
+        usage_recorder: Any,
+        artifact_service: Any,
+        adapter: Any = None,
+    ) -> dict[str, Any]:
         """``rsi.task.get``（web §6.3：config + progress + best_artifact + usage）。"""
         task_id = str(params.get("task_id") or "").strip()
         if not task_id:
             raise RsiBadRequest("task_id 必填")
         task = self.store.get(task_id)
+        if adapter is None and self.adapter_resolver is not None:
+            adapter = self.adapter_resolver(task.scenario, task.artifact_type)
+        if adapter is not None and task.scenario == Scenario.ARTIFACT.value:
+            state = _read_provider_snapshot(adapter, "read_state", task_id)
+            report = _read_provider_snapshot(adapter, "read_report", task_id)
+            if state is not None or report is not None:
+                progress = provider_state_to_progress(state) if state is not None else None
+                usage = (
+                    provider_usage_to_dict(getattr(state, "usage", None))
+                    if state is not None
+                    else None
+                )
+                if usage is None and report is not None:
+                    usage = provider_usage_to_dict(getattr(report, "usage", None))
+                best_artifact = provider_best_artifact(report) if report is not None else None
+                if best_artifact is None:
+                    best_artifact = artifact_service.best_artifact(task_id)
+                return task.get_projection(
+                    progress=progress,
+                    usage=usage,
+                    best_artifact=best_artifact,
+                )
+            # A task can be CREATED before the Provider has made its first
+            # snapshot; retain the normal service-side projection then.
         progress: dict[str, Any] | None = None
         try:
             progress = projector.derive_progress(task_id)
@@ -223,26 +306,32 @@ class RsiTaskService:
 class RsiDatasetService:
     """``rsi.dataset.validate``（I1 主入口；真实校验委托 adapter，⚠️外部）。"""
 
-    def __init__(self, adapter: Any = None) -> None:
+    def __init__(self, adapter: Any = None, *, adapter_resolver: Any = None) -> None:
         self.adapter = adapter
+        self.adapter_resolver = adapter_resolver
 
-    def validate(self, params: dict[str, Any]) -> dict[str, Any]:
+    def validate(self, params: dict[str, Any], *, adapter: Any = None) -> dict[str, Any]:
         """web §5.1 出参：{valid, sample_count, errors[]}。"""
         input_file = str(params.get("input_file") or "").strip()
         if not input_file:
             raise RsiBadRequest("input_file 必填")
-        scenario = str(params.get("scenario") or "").strip()
-        artifact_type = str(params.get("artifact_type") or "").strip() or None
+        scenario = str(params.get("scenario") or "").strip().upper()
+        artifact_type = str(params.get("artifact_type") or "").strip().upper() or None
         validate_scenario(
             scenario, artifact_type,
             artifact_type_required=(scenario == "ARTIFACT"),
         )
         path = Path(input_file).expanduser()
-        if not path.is_file():
+        if not path.exists() or (scenario != Scenario.ARTIFACT.value and not path.is_file()):
             raise RsiPathInvalid(f"本地路径不存在: {path}")
         result: RsiDatasetResult
-        if self.adapter is not None and hasattr(self.adapter, "validate_input"):
-            result = self.adapter.validate_input(str(path), scenario=scenario, artifact_type=artifact_type)
+        selected_adapter = adapter or self.adapter
+        if selected_adapter is None and self.adapter_resolver is not None:
+            selected_adapter = self.adapter_resolver(scenario, artifact_type)
+        if selected_adapter is not None and hasattr(selected_adapter, "validate_input"):
+            result = selected_adapter.validate_input(
+                str(path), scenario=scenario, artifact_type=artifact_type
+            )
         else:
             from jiuwenswarm.agents.harness.common.rsi.adapter import default_validate_input
 
@@ -253,18 +342,35 @@ class RsiDatasetService:
 class RsiReportService:
     """``rsi.report.get``（I10，⚠️外部：真值来源 C3 read_report / 事件投影）。"""
 
-    def __init__(self, store: Any, projector: Any, usage_recorder: Any, artifact_service: Any) -> None:
+    def __init__(
+        self,
+        store: Any,
+        projector: Any,
+        usage_recorder: Any,
+        artifact_service: Any,
+        *,
+        adapter_resolver: Any = None,
+    ) -> None:
         self.store = store
         self.projector = projector
         self.usage_recorder = usage_recorder
         self.artifact_service = artifact_service
+        self.adapter_resolver = adapter_resolver
 
-    def get(self, params: dict[str, Any]) -> dict[str, Any]:
+    def get(self, params: dict[str, Any], *, adapter: Any = None) -> dict[str, Any]:
         """web §8.1 出参。未运行（无引擎 report）时提供任务级兜底投影。"""
         task_id = str(params.get("task_id") or "").strip()
         if not task_id:
             raise RsiBadRequest("task_id 必填")
         task = self.store.get(task_id)
+        if adapter is None and self.adapter_resolver is not None:
+            adapter = self.adapter_resolver(task.scenario, task.artifact_type)
+        if adapter is not None and task.scenario == Scenario.ARTIFACT.value:
+            state = _read_provider_snapshot(adapter, "read_state", task_id)
+            report = _read_provider_snapshot(adapter, "read_report", task_id)
+            if report is not None or state is not None:
+                return provider_report_to_web(report, state)
+            # CREATED tasks legitimately have no Provider report yet.
         progress = self.projector.derive_progress(task_id)
         usage = self.usage_recorder.usage_summary(task_id)
         best_artifact = self.artifact_service.best_artifact(task_id)
@@ -290,42 +396,87 @@ class RsiReportService:
 class RsiTreeService:
     """``rsi.tree.get``（I13，⚠️外部：真值来源事件投影 + C3 快照重建）。"""
 
-    def __init__(self, projector: Any) -> None:
+    def __init__(self, projector: Any, *, store: Any = None, adapter_resolver: Any = None) -> None:
         self.projector = projector
+        self.store = store
+        self.adapter_resolver = adapter_resolver
 
-    def get(self, params: dict[str, Any]) -> dict[str, Any]:
+    def get(self, params: dict[str, Any], *, adapter: Any = None) -> dict[str, Any]:
         task_id = str(params.get("task_id") or "").strip()
         if not task_id:
             raise RsiBadRequest("task_id 必填")
+        task = self.store.get(task_id) if self.store is not None else None
+        if adapter is None and task is not None and self.adapter_resolver is not None:
+            if task.scenario == Scenario.ARTIFACT.value:
+                adapter = self.adapter_resolver(task.scenario, task.artifact_type)
+        if adapter is not None and (task is None or task.scenario == Scenario.ARTIFACT.value):
+            tree = _read_provider_snapshot(adapter, "get_tree", task_id)
+            if tree is not None:
+                return self.projector.sync_provider_tree(task_id, tree)
         return self.projector.derive_tree(task_id)
 
 
 class RsiUsageService:
     """``rsi.usage.get``（I11，⚠️外部：usage 插桩后收尾；C1 单价预留）。"""
 
-    def __init__(self, usage_recorder: Any) -> None:
+    def __init__(self, usage_recorder: Any, *, store: Any = None, adapter_resolver: Any = None) -> None:
         self.usage_recorder = usage_recorder
+        self.store = store
+        self.adapter_resolver = adapter_resolver
 
-    def get(self, params: dict[str, Any]) -> dict[str, Any]:
+    def get(self, params: dict[str, Any], *, adapter: Any = None) -> dict[str, Any]:
         task_id = str(params.get("task_id") or "").strip()
         if not task_id:
             raise RsiBadRequest("task_id 必填")
+        task = self.store.get(task_id) if self.store is not None else None
+        if adapter is None and task is not None and self.adapter_resolver is not None:
+            if task.scenario == Scenario.ARTIFACT.value:
+                adapter = self.adapter_resolver(task.scenario, task.artifact_type)
+        if adapter is not None and (task is None or task.scenario == Scenario.ARTIFACT.value):
+            # During a live run the event consumer has the richest view
+            # (including per-iteration cumulative snapshots).  Prefer it and
+            # fall back to the durable Provider snapshot after a restart.
+            try:
+                return self.usage_recorder.get(task_id)
+            except RsiTaskNotFound:
+                # Provider snapshot is the recovery path after a restart.
+                pass
+            state = _read_provider_snapshot(adapter, "read_state", task_id)
+            report = _read_provider_snapshot(adapter, "read_report", task_id)
+            usage = None
+            if report is not None:
+                usage = provider_usage_to_dict(getattr(report, "usage", None))
+            if usage is None and state is not None:
+                usage = provider_usage_to_dict(getattr(state, "usage", None))
+            if usage is not None:
+                return {
+                    "usage": usage,
+                    "per_iteration": [],
+                    "usage_by_node": {},
+                }
         return self.usage_recorder.get(task_id)
 
 
 class RsiArtifactDownloadService:
     """``rsi.artifact.download`` 定位（I12；下载通道复用 Gateway HTTP Range bridge）。"""
 
-    def __init__(self, artifact_service: Any, store: Any) -> None:
+    def __init__(self, artifact_service: Any, store: Any, *, adapter_resolver: Any = None) -> None:
         self.artifact_service = artifact_service
         self.store = store
+        self.adapter_resolver = adapter_resolver
 
-    def locate(self, params: dict[str, Any]) -> dict[str, Any]:
+    def locate(self, params: dict[str, Any], *, adapter: Any = None) -> dict[str, Any]:
         """返回可下载文件信息（zip path/kind/is_best）；HTTP 流由通道层完成。"""
         task_id = str(params.get("task_id") or "").strip()
         if not task_id:
             raise RsiBadRequest("task_id 必填")
+        task = self.store.get(task_id)
+        if adapter is None and self.adapter_resolver is not None:
+            if task.scenario == Scenario.ARTIFACT.value:
+                adapter = self.adapter_resolver(task.scenario, task.artifact_type)
         artifact_id = str(params.get("artifact_id") or "").strip() or None
+        if adapter is not None and task.scenario == Scenario.ARTIFACT.value:
+            return self._locate_provider(task_id, artifact_id, adapter)
         artifact = self.artifact_service.locate(task_id, artifact_id)
         # 消费成功 → 放行后续 delete（在用产物语义：下载即消费）
         if artifact_id is None or artifact.is_best:
@@ -340,6 +491,51 @@ class RsiArtifactDownloadService:
             "filename": Path(artifact.path).name,
         }
 
+    def _locate_provider(self, task_id: str, artifact_id: str | None, adapter: Any) -> dict[str, Any]:
+        try:
+            raw_artifact = adapter.locate_artifact(task_id, artifact_id)
+        except OSError as exc:
+            raise RsiArtifactNotFound(str(exc)) from exc
+        raw = _plain_provider(raw_artifact)
+        if not isinstance(raw, dict):
+            raise RsiArtifactNotFound("Provider 返回了无法识别的产物引用")
+        task = self.store.get(task_id)
+        path_value = raw.get("path")
+        if path_value:
+            candidate = Path(path_value).expanduser()
+            if not candidate.is_absolute():
+                candidate = Path(task.run_dir) / candidate
+            path_value = str(candidate)
+        try:
+            path = validate_provider_artifact_path(path_value)
+        except RsiPathInvalid as exc:
+            raise RsiArtifactNotFound(str(exc)) from exc
+        task_dir = (Path(self.store.tasks_root) / task_id).resolve()
+        try:
+            path.relative_to(task_dir)
+        except ValueError as exc:
+            raise RsiPathInvalid("Provider 产物路径超出任务目录") from exc
+        if not path.is_file():
+            raise RsiArtifactNotFound(f"产物文件不存在: {path}")
+        best_node_id = None
+        report = _read_provider_snapshot(adapter, "read_report", task_id)
+        if report is not None:
+            best_node_id = _plain_provider(report).get("best_node_id")
+        is_best = artifact_id is None or (
+            best_node_id is not None and raw.get("node_id") == best_node_id
+        )
+        if is_best:
+            try:
+                self.store.mark_active_ref_released(task_id)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("[RSI] 在用产物标记释放失败 task=%s: %s", task_id, exc)
+        return {
+            "path": str(path),
+            "kind": "artifact_package",
+            "is_best": is_best,
+            "filename": path.name,
+        }
+
 
 def _positive_int(raw: Any, *, default: int, field: str) -> int:
     if raw is None:
@@ -351,3 +547,51 @@ def _positive_int(raw: Any, *, default: int, field: str) -> int:
     if value < 1:
         raise RsiBadRequest(f"{field} 必须是正整数")
     return value
+
+
+def _ensure_provider_valid(result: Any) -> None:
+    """Map either agent-core or local adapter validation to RSI errors."""
+    if bool(getattr(result, "valid", False)):
+        return
+    raw_errors = getattr(result, "errors", None) or []
+    errors: list[dict[str, str]] = []
+    for item in raw_errors:
+        raw = _plain_provider(item)
+        if not isinstance(raw, dict):
+            continue
+        errors.append(
+            {
+                "reason": str(raw.get("message") or raw.get("reason") or "输入校验失败"),
+                "code": str(raw.get("code") or "DATASET_INVALID"),
+            }
+        )
+    path_invalid = next((item for item in errors if item.get("code") == "PATH_INVALID"), None)
+    if path_invalid is not None:
+        raise RsiPathInvalid(path_invalid["reason"])
+    message = errors[0]["reason"] if errors else "Provider 输入校验失败"
+    raise RsiDatasetInvalid(message, errors=errors)
+
+
+def _plain_provider(value: Any) -> Any:
+    if is_dataclass(value):
+        return {key: _plain_provider(item) for key, item in asdict(value).items()}
+    if isinstance(value, Mapping):
+        return {str(key): _plain_provider(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_plain_provider(item) for item in value]
+    return value
+
+
+_PROVIDER_QUERY_FALLBACK = (FileNotFoundError, NotImplementedError, OSError, RsiNotReady)
+
+
+def _read_provider_snapshot(adapter: Any, method_name: str, task_id: str) -> Any:
+    """Read an optional Provider snapshot while preserving service fallbacks."""
+
+    method = getattr(adapter, method_name, None)
+    if not callable(method):
+        return None
+    try:
+        return method(task_id)
+    except _PROVIDER_QUERY_FALLBACK:
+        return None

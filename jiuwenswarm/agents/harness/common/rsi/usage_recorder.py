@@ -7,10 +7,12 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+from dataclasses import asdict, is_dataclass
 from typing import Any
 
 from jiuwenswarm.agents.harness.common.rsi.errors import RsiTaskNotFound
-from jiuwenswarm.agents.harness.common.rsi.models import RsiModelCall, Usage
+from jiuwenswarm.agents.harness.common.rsi.models import RsiModelCall, Tokens, Usage
 
 _ROOT_NODE = "ROOT"
 
@@ -25,6 +27,11 @@ class RsiUsageRecorder:
     def __init__(self) -> None:
         self._by_node: dict[str, dict[str, Usage]] = {}  # task_id -> {node_id: Usage}
         self._node_sequence: dict[str, list[str]] = {}  # task_id -> 派生节点序
+        # Artifact Providers report cumulative usage snapshots rather than
+        # one model-call event.  Keep this stream separate so repeated P2
+        # events do not get added together.
+        self._cumulative: dict[str, Usage] = {}
+        self._cumulative_by_iteration: dict[str, dict[int, Usage]] = {}
 
     def record(
         self,
@@ -50,8 +57,6 @@ class RsiUsageRecorder:
         model_call_raw = payload.get("model_call")
         if not isinstance(model_call_raw, dict):
             return
-        from jiuwenswarm.agents.harness.common.rsi.models import Tokens
-
         tokens_raw = model_call_raw.get("tokens") or {}
         tokens = Tokens(
             input=int(tokens_raw.get("input") or 0),
@@ -65,19 +70,39 @@ class RsiUsageRecorder:
         )
         self.record(task_id, payload.get("node_ref"), model_call)
 
+    def record_cumulative(self, task_id: str, usage: Any, *, iteration: int | None = None) -> None:
+        """Record a Provider cumulative usage snapshot idempotently."""
+        parsed = _usage_from_value(usage)
+        if parsed is None:
+            return
+        self._cumulative[task_id] = parsed
+        if iteration is not None:
+            try:
+                index = int(iteration)
+            except (TypeError, ValueError):
+                index = 0
+            if index > 0:
+                self._cumulative_by_iteration.setdefault(task_id, {})[index] = parsed
+
     def get(self, task_id: str) -> dict[str, Any]:
         """``rsi.usage.get`` 出参（web §8.2）。"""
-        if task_id not in self._by_node:
+        if task_id not in self._by_node and task_id not in self._cumulative:
             raise RsiTaskNotFound(task_id)
         nodes = self._by_node.get(task_id, {})
-        total = Usage()
-        for usage in nodes.values():
-            total.merge(usage)
-        per_iteration = []
-        for index, node_id in enumerate(self._node_sequence.get(task_id, []), start=1):
-            per_iteration.append(
+        total = _copy_usage(self._cumulative.get(task_id)) if task_id in self._cumulative else Usage()
+        if task_id not in self._cumulative:
+            for usage in nodes.values():
+                total.merge(usage)
+        if task_id in self._cumulative:
+            per_iteration = [
+                {"iteration": index, "usage": usage.to_dict()}
+                for index, usage in sorted(self._cumulative_by_iteration.get(task_id, {}).items())
+            ]
+        else:
+            per_iteration = [
                 {"iteration": index, "usage": nodes.get(node_id, Usage()).to_dict()}
-            )
+                for index, node_id in enumerate(self._node_sequence.get(task_id, []), start=1)
+            ]
         usage_by_node = {node_id: usage.to_dict() for node_id, usage in nodes.items()}
         return {
             "usage": total.to_dict(),
@@ -91,3 +116,58 @@ class RsiUsageRecorder:
             return self.get(task_id)["usage"]
         except RsiTaskNotFound:
             return None
+
+
+def _usage_from_value(value: Any) -> Usage | None:
+    """Convert Provider dataclasses or dicts without coupling to agent-core."""
+    if value is None:
+        return None
+    raw = asdict(value) if is_dataclass(value) else value
+    if not isinstance(raw, Mapping):
+        return None
+    tokens_raw = raw.get("tokens")
+    if is_dataclass(tokens_raw):
+        tokens_raw = asdict(tokens_raw)
+    if not isinstance(tokens_raw, Mapping):
+        tokens_raw = {}
+    return Usage(
+        tokens=Tokens(
+            input=_safe_int(tokens_raw.get("input")),
+            output=_safe_int(tokens_raw.get("output")),
+            cache_hit=_safe_int(tokens_raw.get("cache_hit")),
+        ),
+        cost_estimate=_safe_float(raw.get("cost_estimate")),
+        call_count=_safe_int(raw.get("call_count")),
+    )
+
+
+def _copy_usage(value: Usage | None) -> Usage:
+    if value is None:
+        return Usage()
+    return Usage(
+        tokens=Tokens(
+            input=value.tokens.input,
+            output=value.tokens.output,
+            cache_hit=value.tokens.cache_hit,
+        ),
+        cost_estimate=value.cost_estimate,
+        call_count=value.call_count,
+    )
+
+
+def _safe_int(value: Any) -> int:
+    if value is None or isinstance(value, bool):
+        return 0
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _safe_float(value: Any) -> float:
+    if value is None or isinstance(value, bool):
+        return 0.0
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
