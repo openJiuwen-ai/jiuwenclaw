@@ -8,6 +8,8 @@
 
 from __future__ import annotations
 
+from contextlib import redirect_stdout
+import io
 import json
 import os
 import zipfile
@@ -19,6 +21,7 @@ from jiuwenswarm.common.utils import (
     CopyDiffResult,
     _ensure_mcp_builtins,
     _find_mcp_builtins_seed,
+    _print_console_progress,
     _read_zip_index_version,
 )
 
@@ -111,6 +114,34 @@ def test_find_seed_none_when_absent(seed_dir: Path) -> None:
 
 def _new_diff() -> CopyDiffResult:
     return CopyDiffResult([], [], [])
+
+
+def _capture_progress(encoding: str, message: str) -> bytes:
+    buffer = io.BytesIO()
+    stream = io.TextIOWrapper(
+        buffer,
+        encoding=encoding,
+        errors="strict",
+        write_through=True,
+    )
+    try:
+        with redirect_stdout(stream):
+            _print_console_progress(message)
+        return buffer.getvalue()
+    finally:
+        stream.detach()
+
+
+def test_console_progress_preserves_unicode_with_utf8() -> None:
+    assert _capture_progress("utf-8", "MCP 预置包") == (
+        "MCP 预置包".encode() + os.linesep.encode()
+    )
+
+
+def test_console_progress_escapes_unicode_with_cp1252() -> None:
+    assert _capture_progress("cp1252", "MCP 预置包") == (
+        b"MCP \\u9884\\u7f6e\\u5305" + os.linesep.encode()
+    )
 
 
 def test_first_install_extracts_nested(seed_dir: Path, tmp_path: Path) -> None:

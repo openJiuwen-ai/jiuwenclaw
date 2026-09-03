@@ -38,6 +38,7 @@ from openjiuwen.agent_teams.paths import (
 from openjiuwen.agent_teams.schema.blueprint import TransportSpec
 from openjiuwen.agent_teams.schema.team import TeamMemberSpec, TeamRole
 from openjiuwen.core.foundation.tool import McpServerConfig
+from openjiuwen.extensions.observability.demand import get_trajectory_span_processor
 from openjiuwen.harness.schema.extension_spec import AgentTemplateSpec
 
 from jiuwenswarm.agents.swarm.config_specs import build_member_deep_agent_spec
@@ -46,7 +47,6 @@ from jiuwenswarm.agents.swarm.context import (
     get_heartbeat_job_service,
 )
 from jiuwenswarm.agents.swarm.registry import register_swarm_providers
-from jiuwenswarm.agents.harness.observability_runtime import get_trajectory_span_processor
 from jiuwenswarm.common.config import get_config
 from jiuwenswarm.common.mcp_config import (
     build_enabled_mcp_server_configs,

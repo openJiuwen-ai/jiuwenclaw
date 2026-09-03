@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import importlib
 import json
+import stat
 import zipfile
 from pathlib import Path
 
@@ -33,7 +34,13 @@ def _seed_valid_agent_group(
     *,
     under: str,
 ) -> Path:
-    package = workspace / "plugins" / AGENT_GROUPS / under / package_id
+    package = (
+        workspace.parent.parent
+        / ".agent_teams"
+        / AGENT_GROUPS
+        / under
+        / package_id
+    )
     package.mkdir(parents=True)
     (package / "manifest.json").write_text(
         json.dumps(
@@ -112,8 +119,9 @@ class TestPrepareWorkspaceAndMarketplace:
             assert not (plugins / kind / "marketplace.json").exists()
             assert not any((plugins / kind / "built_in").iterdir())
             assert not any((plugins / kind / "local").iterdir())
-        assert (plugins / AGENT_GROUPS / "built_in").is_dir()
-        assert (plugins / AGENT_GROUPS / "local").is_dir()
+        groups = tmp_path / ".agent_teams" / AGENT_GROUPS
+        assert (groups / "built_in").is_dir()
+        assert (groups / "local").is_dir()
 
     def test_prepare_overwrite_true_resets_false_keeps_built_in(self, tmp_path: Path) -> None:
         utils.prepare_workspace(overwrite=True, workspace_dir=tmp_path)
@@ -187,8 +195,8 @@ class TestAgentGroupResolution:
             under="built_in",
         )
         invalid = (
-            extension_workspace
-            / "plugins"
+            extension_workspace.parent.parent
+            / ".agent_teams"
             / AGENT_GROUPS
             / "local"
             / "invalid-group"
@@ -220,6 +228,7 @@ class TestAgentGroupResolution:
                     "zh": "统一证据、风险和建议的输出结构",
                     "en": "统一证据、风险和建议的输出结构",
                 },
+                "avatar": "",
             }
         ]
         assert str(extension_workspace) not in json.dumps(cards, ensure_ascii=False)
@@ -262,8 +271,8 @@ class TestAgentGroupResolution:
         extension_workspace: Path,
     ) -> None:
         package = (
-            extension_workspace
-            / "plugins"
+            extension_workspace.parent.parent
+            / ".agent_teams"
             / AGENT_GROUPS
             / "local"
             / "finance-group"
@@ -280,6 +289,9 @@ class TestAgentGroupResolution:
             encoding="utf-8",
         )
 
+        catalog.upsert_agent_group_marketplace_entry(
+            "finance-group", installed=True, source="local"
+        )
         assert catalog.resolve_agent_group_dir("finance-group") == package.resolve()
 
     def test_resolve_agent_group_rejects_conflict(
@@ -288,8 +300,8 @@ class TestAgentGroupResolution:
     ) -> None:
         for source in ("local", "built_in"):
             package = (
-                extension_workspace
-                / "plugins"
+                extension_workspace.parent.parent
+                / ".agent_teams"
                 / AGENT_GROUPS
                 / source
                 / "duplicate"
@@ -305,11 +317,244 @@ class TestAgentGroupResolution:
                 ),
                 encoding="utf-8",
             )
+        catalog.upsert_agent_group_marketplace_entry(
+            "duplicate", installed=True, source="local"
+        )
 
         with pytest.raises(ValueError, match="package conflict"):
             catalog.resolve_agent_group_dir("duplicate")
         with pytest.raises(ValueError, match="package conflict"):
             catalog.list_agent_groups()
+
+
+class TestAgentGroupLifecycle:
+    def _create_expert(self, package_id: str) -> None:
+        catalog.create_agent_template(
+            {
+                "id": package_id,
+                "name": package_id,
+                "description": f"{package_id} description",
+                "persona": f"# {package_id}\n",
+                "skills": [],
+            }
+        )
+
+    def _create_group(self) -> dict:
+        self._create_expert("planning-expert")
+        self._create_expert("review-expert")
+        return catalog.create_agent_group(
+            {
+                "id": "delivery-review-team",
+                "name": "交付评审专家团",
+                "description": "规划与风险复核协作。",
+                "persona": "先独立分析，再由 Leader 汇总结论。",
+                "category": "engineering",
+                "tags": [
+                    {
+                        "id": "technical-review",
+                        "zh": "技术评审",
+                        "en": "Technical Review",
+                    }
+                ],
+                "leaderId": "planning-expert",
+                "memberIds": ["review-expert"],
+                "skills": [],
+                "quickInputs": ["评审这个技术方案"],
+            }
+        )
+
+    def test_create_writes_team_storage_and_round_trips(
+        self, extension_workspace: Path
+    ) -> None:
+        assert self._create_group() == {"id": "delivery-review-team"}
+        home = extension_workspace.parent.parent
+        package = (
+            home
+            / ".agent_teams"
+            / AGENT_GROUPS
+            / "local"
+            / "delivery-review-team"
+        )
+        assert package.is_dir()
+        assert not (
+            extension_workspace
+            / "plugins"
+            / AGENT_GROUPS
+            / "local"
+            / "delivery-review-team"
+        ).exists()
+
+        card = catalog.show_agent_group("delivery-review-team")
+        assert card is not None
+        assert card["id"] == "delivery-review-team"
+        assert card["name"] == "delivery-review-team"
+        assert card["displayName"] == {
+            "zh": "交付评审专家团",
+            "en": "交付评审专家团",
+        }
+        assert card["installed"] is False
+        assert card["persona"] == "先独立分析，再由 Leader 汇总结论。"
+        assert card["tags"] == [
+            {
+                "id": "technical-review",
+                "zh": "技术评审",
+                "en": "Technical Review",
+            }
+        ]
+        assert card["leaderId"] == "leader"
+        assert [member["agentTemplateId"] for member in card["members"]] == [
+            "planning-expert",
+            "review-expert",
+        ]
+        assert card["quickInputs"] == [
+            {"zh": "评审这个技术方案", "en": "评审这个技术方案"}
+        ]
+        assert card["capabilities"]["canUse"] is False
+        assert str(home) not in json.dumps(card, ensure_ascii=False)
+
+        tree = catalog.list_agent_group_files("delivery-review-team")
+        assert any(item["path"] == "README.md" for item in tree)
+        content = catalog.read_agent_group_file(
+            "delivery-review-team", "agents/leader/AGENT.md"
+        )
+        assert "专家团 Leader" in content["content"]
+
+    def test_install_enables_runtime_and_uninstall_removes_local(
+        self, extension_workspace: Path
+    ) -> None:
+        self._create_group()
+        with pytest.raises(ValueError, match="not installed"):
+            catalog.resolve_agent_group_dir("delivery-review-team")
+
+        catalog.install_agent_group({"id": "delivery-review-team"})
+        resolved = catalog.resolve_agent_group_dir("delivery-review-team")
+        assert resolved == (
+            extension_workspace.parent.parent
+            / ".agent_teams"
+            / AGENT_GROUPS
+            / "local"
+            / "delivery-review-team"
+        ).resolve()
+        assert catalog.is_agent_group_installed("delivery-review-team") is True
+        card = catalog.show_agent_group("delivery-review-team")
+        assert card is not None and card["capabilities"]["canUse"] is True
+
+        catalog.uninstall_agent_group({"id": "delivery-review-team"})
+        assert catalog.show_agent_group("delivery-review-team") is None
+        assert catalog.is_agent_group_installed("delivery-review-team") is False
+
+    def test_create_rejects_invalid_member_without_partial_package(
+        self, extension_workspace: Path
+    ) -> None:
+        self._create_expert("planning-expert")
+        with pytest.raises(ValueError, match="not found"):
+            catalog.create_agent_group(
+                {
+                    "id": "broken-team",
+                    "name": "Broken",
+                    "description": "Broken",
+                    "persona": "Broken",
+                    "leaderId": "planning-expert",
+                    "memberIds": ["missing-expert"],
+                    "skills": [],
+                }
+            )
+        assert not (
+            extension_workspace.parent.parent
+            / ".agent_teams"
+            / AGENT_GROUPS
+            / "local"
+            / "broken-team"
+        ).exists()
+
+    def test_import_valid_group_writes_local_uninstalled(
+        self, extension_workspace: Path, tmp_path: Path
+    ) -> None:
+        source_workspace = tmp_path / "source-home" / "agent" / "workspace"
+        source = _seed_valid_agent_group(
+            source_workspace,
+            "imported-review",
+            under="local",
+        )
+        result = catalog.import_agent_group({"path": str(source)})
+        assert result == {"id": "imported-review"}
+        imported = (
+            extension_workspace.parent.parent
+            / ".agent_teams"
+            / AGENT_GROUPS
+            / "local"
+            / "imported-review"
+        )
+        assert imported.is_dir()
+        assert catalog.is_agent_group_installed("imported-review") is False
+
+    def test_resource_group_install_and_uninstall_preserves_shelf_card(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        extension_workspace: Path,
+        tmp_path: Path,
+    ) -> None:
+        source_workspace = tmp_path / "resource-home" / "agent" / "workspace"
+        resource_package = _seed_valid_agent_group(
+            source_workspace,
+            "resource-review",
+            under="resources",
+        )
+        monkeypatch.setattr(
+            catalog,
+            "get_equipment_resources_agent_groups_dir",
+            lambda: resource_package.parent,
+        )
+
+        before = catalog.show_agent_group("resource-review")
+        assert before is not None
+        assert before["source"] == "builtin"
+        assert before["installed"] is False
+
+        catalog.install_agent_group({"id": "resource-review"})
+        installed_copy = (
+            extension_workspace.parent.parent
+            / ".agent_teams"
+            / AGENT_GROUPS
+            / "built_in"
+            / "resource-review"
+        )
+        assert installed_copy.is_dir()
+        assert catalog.resolve_agent_group_dir("resource-review") == installed_copy.resolve()
+
+        catalog.uninstall_agent_group({"id": "resource-review"})
+        assert not installed_copy.exists()
+        after = catalog.show_agent_group("resource-review")
+        assert after is not None
+        assert after["source"] == "builtin"
+        assert after["installed"] is False
+
+    @pytest.mark.parametrize("unsafe_kind", ["traversal", "symlink"])
+    def test_import_group_archive_rejects_unsafe_members(
+        self,
+        extension_workspace: Path,
+        tmp_path: Path,
+        unsafe_kind: str,
+    ) -> None:
+        archive = tmp_path / f"unsafe-{unsafe_kind}.zip"
+        with zipfile.ZipFile(archive, "w") as zf:
+            if unsafe_kind == "traversal":
+                zf.writestr("../escaped.txt", "unsafe")
+            else:
+                link = zipfile.ZipInfo("unsafe-team/link")
+                link.create_system = 3
+                link.external_attr = (stat.S_IFLNK | 0o777) << 16
+                zf.writestr(link, "manifest.json")
+
+        with pytest.raises(ValueError, match="illegal path|symbolic links"):
+            catalog.import_agent_group({"path": str(archive)})
+        assert not (
+            extension_workspace.parent.parent
+            / ".agent_teams"
+            / AGENT_GROUPS
+            / "local"
+            / "unsafe-team"
+        ).exists()
 
 
 class TestCreateInstallUninstall:

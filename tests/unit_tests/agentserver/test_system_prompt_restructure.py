@@ -1,5 +1,4 @@
 import asyncio
-from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -290,6 +289,13 @@ async def test_symphony_orchestration_rail_injects_when_tool_visible(
     assert "Calling `skill_branch_explore` creates a mandatory orchestration follow-up" in prompt
     assert "never pass every Skill returned by exploration" in prompt
     assert "still call `symphony_compose_graph`" in prompt
+    assert "`planned_graph.graph.metadata.status`" in prompt
+    assert "`planned_graph.graph.nodes`" in prompt
+    assert "`planned_graph.graph.edges`" in prompt
+    assert "Do not present a planning" in prompt
+    assert "search_skill" not in prompt
+    assert "install_skill" not in prompt
+    assert "returned\n`content` directly" not in prompt
     assert "none of the three trigger conditions is true" in prompt
     assert "Symphony" not in prompt
 
@@ -819,6 +825,67 @@ async def test_runtime_dynamic_sections_go_to_prompt_attachment_when_manager_ava
 
 
 @pytest.mark.asyncio
+async def test_runtime_attachment_request_mode_wins_over_localized_snapshot(tmp_path, monkeypatch):
+    monkeypatch.setattr(_utils_mod, "get_config_dir", lambda: tmp_path)
+    builder = SystemPromptBuilder(language="cn")
+    agent = _FakeAgent(builder)
+    runtime_rail = RuntimePromptRail(language="cn", channel="web")
+    runtime_rail.init(agent)
+    runtime_rail.set_mode("agent")
+    ctx = AgentCallbackContext(
+        agent=agent,
+        inputs=None,
+        session=_FakeSession(),
+        extra={},
+    )
+
+    # The first refresh falls back to the request-bound canonical mode while
+    # the asynchronous diagnostic snapshot does not exist yet.
+    await runtime_rail.before_invoke(ctx)
+    items = await agent.prompt_attachment_manager.collect_for_session("sess1")
+    first_rendered = agent.prompt_attachment_manager.render(items)
+    assert "当前模式：agent" in first_rendered
+
+    # Once the snapshot appears, its localized representation must not create
+    # a false attachment update for the same effective mode.
+    runtime_state = tmp_path / "runtime_state" / "default.yaml"
+    runtime_state.parent.mkdir(parents=True, exist_ok=True)
+    runtime_state.write_text("mode: 智能体模式\n", encoding="utf-8")
+    await runtime_rail.before_model_call(ctx)
+    items = await agent.prompt_attachment_manager.collect_for_session("sess1")
+    second_rendered = agent.prompt_attachment_manager.render(items)
+    assert second_rendered == first_rendered
+
+
+@pytest.mark.asyncio
+async def test_runtime_attachment_tracks_request_mode_change(tmp_path, monkeypatch):
+    monkeypatch.setattr(_utils_mod, "get_config_dir", lambda: tmp_path)
+    builder = SystemPromptBuilder(language="en")
+    agent = _FakeAgent(builder)
+    runtime_rail = RuntimePromptRail(language="en", channel="web")
+    runtime_rail.init(agent)
+    runtime_rail.set_mode("agent")
+    ctx = AgentCallbackContext(
+        agent=agent,
+        inputs=None,
+        session=_FakeSession(),
+        extra={},
+    )
+
+    await runtime_rail.before_model_call(ctx)
+    items = await agent.prompt_attachment_manager.collect_for_session("sess1")
+    rendered = agent.prompt_attachment_manager.render(items)
+    assert "Current mode: agent" in rendered
+
+    runtime_rail.set_mode("team")
+    await runtime_rail.before_model_call(ctx)
+    items = await agent.prompt_attachment_manager.collect_for_session("sess1")
+    rendered = agent.prompt_attachment_manager.render(items)
+    assert "Current mode: team" in rendered
+    assert "Current mode: agent" not in rendered
+
+
+@pytest.mark.asyncio
 async def test_browser_policy_is_injected_only_when_browser_agent_is_loaded():
     rail = BrowserTaskPromptRail()
     assert rail is not None
@@ -883,6 +950,7 @@ async def test_runtime_attachment_tracks_live_code_agent_mode(tmp_path, monkeypa
     agent = _FakeLiveModeAgent(builder, mode="plan")
     runtime_rail = RuntimePromptRail(language="en", channel="tui")
     runtime_rail.init(agent)
+    runtime_rail.set_mode("code.normal")
     ctx = AgentCallbackContext(
         # Inner ReactAgent callbacks do not expose DeepAgent.load_state().
         agent=SimpleNamespace(),
@@ -955,7 +1023,7 @@ async def test_runtime_git_status_is_stable_system_context_for_one_invoke(tmp_pa
 
 
 @pytest.mark.asyncio
-async def test_runtime_prompt_uses_runtime_cwd_over_stale_trusted_dir(tmp_path, monkeypatch):
+async def test_runtime_prompt_distinguishes_cwd_from_project_dir(tmp_path, monkeypatch):
     builder = SystemPromptBuilder(language="en")
     agent = _FakeAgent(builder)
     stale_dir = tmp_path / "missing-worktree"
@@ -992,18 +1060,105 @@ async def test_runtime_prompt_uses_runtime_cwd_over_stale_trusted_dir(tmp_path, 
     assert "# Directory and File-Operation Boundaries" in prompt
     assert "# Runtime Directory Context" not in prompt
     assert "# Working Directory Runtime Values" not in prompt
-    assert "The project directory is your current workspace" in prompt
+    assert "The project directory is the project root and project-context boundary" in prompt
     assert f"the current project directory is: `{project_dir}`" in prompt
+    assert (
+        f"The current working directory (cwd, relative-path base, and Bash default) is: `{current_dir}`"
+        in prompt
+    )
+    assert "Resolve relative paths in user tasks against the current working directory" in prompt
     assert "Agent internal data directory" in prompt
     assert "## JiuwenSwarm Internal Directories" in prompt
     assert str(project_dir) in prompt
-    assert str(current_dir) not in prompt
+    assert str(current_dir) in prompt
     assert str(stale_dir) not in prompt
     assert str(extra_dir) not in prompt
     assert "System directory" not in prompt
 
     items = await agent.prompt_attachment_manager.list_by_filter(session_id="sess1")
     assert [item.id for item in items if item.id.endswith(".trusted_dirs_policy")] == []
+
+
+@pytest.mark.asyncio
+async def test_runtime_prompt_distinguishes_cwd_from_project_dir_in_chinese(
+    tmp_path, monkeypatch
+):
+    builder = SystemPromptBuilder(language="cn")
+    agent = _FakeAgent(builder)
+    project_dir = tmp_path / "project"
+    current_dir = tmp_path / "task"
+    agent_data_dir = tmp_path / "agent-data"
+    project_dir.mkdir()
+    current_dir.mkdir()
+    agent_data_dir.mkdir()
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.harness.common.rails.runtime_prompt_rail.get_agent_workspace_dir",
+        lambda: agent_data_dir,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.harness.common.rails.runtime_prompt_rail.get_user_workspace_dir",
+        lambda: tmp_path / "jiuwenswarm-data",
+    )
+
+    runtime_rail = RuntimePromptRail(language="cn", channel="tui")
+    runtime_rail.init(agent)
+    runtime_rail.set_runtime_paths(cwd=str(current_dir), project_dir=str(project_dir))
+    ctx = AgentCallbackContext(
+        agent=agent,
+        inputs=None,
+        session=_FakeSession(),
+        extra={},
+    )
+
+    await runtime_rail.before_model_call(ctx)
+
+    prompt = builder.build()
+    assert "项目目录是当前项目的根目录与项目上下文边界" in prompt
+    assert f"当前项目目录是：`{project_dir}`" in prompt
+    assert (
+        f"当前工作目录（cwd、相对路径基准及 Bash 默认目录）是：`{current_dir}`" in prompt
+    )
+    assert (
+        "用户任务中的相对路径必须相对于当前工作目录路径去解析" in prompt
+    )
+
+
+@pytest.mark.asyncio
+async def test_runtime_prompt_preserves_single_directory_prompt_when_paths_match(
+    tmp_path, monkeypatch
+):
+    builder = SystemPromptBuilder(language="en")
+    agent = _FakeAgent(builder)
+    project_dir = tmp_path / "project"
+    agent_data_dir = tmp_path / "agent-data"
+    project_dir.mkdir()
+    agent_data_dir.mkdir()
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.harness.common.rails.runtime_prompt_rail.get_agent_workspace_dir",
+        lambda: agent_data_dir,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.harness.common.rails.runtime_prompt_rail.get_user_workspace_dir",
+        lambda: tmp_path / "jiuwenswarm-data",
+    )
+
+    runtime_rail = RuntimePromptRail(language="en", channel="web")
+    runtime_rail.init(agent)
+    runtime_rail.set_runtime_paths(cwd=str(project_dir), project_dir=str(project_dir))
+    ctx = AgentCallbackContext(
+        agent=agent,
+        inputs=None,
+        session=_FakeSession(),
+        extra={},
+    )
+
+    await runtime_rail.before_model_call(ctx)
+
+    prompt = builder.build()
+    assert "## Project Directory" in prompt
+    assert "## Project and Working Directories" not in prompt
+    assert f"the current project directory is: `{project_dir}`" in prompt
+    assert "Resolve relative paths in user tasks against the current project directory" in prompt
 
 
 @pytest.mark.asyncio
@@ -1223,14 +1378,9 @@ async def test_skill_retrieval_prompt_renders_directory_guidance(
     rendered = agent.prompt_attachment_manager.render(
         await agent.prompt_attachment_manager.list_by_filter(session_id="sess1")
     )
-    assert "## Skill 发现" in rendered
-    assert "## 会话 Skill 候选快照" in rendered
-    assert "会话创建时没有已启用 Skill" in rendered
-    assert "`skill_index`" in rendered
-    assert "`list`、`search`、`read`" in rendered
-    assert "在有序 `pipeline`" in rendered
-    assert "基于已返回内容完成当前回答" in rendered
-    assert "`disable_output_truncation=true`" in rendered
+    assert "## 已安装 Skill" in rendered
+    assert "当前没有可用 Skill" in rendered
+    assert "## Skill 发现" not in rendered
 
     class _AttachmentContext:
         def __init__(self):
@@ -1292,21 +1442,10 @@ async def test_skill_retrieval_prompt_renders_directory_guidance(
             ),
         ),
     )
-    indexed_guidance = rail._build_guidance("cn", indexed)
     indexed_appendix = rail._build_candidate_appendix("cn", indexed)
-    assert 'list(paths=["/OfficeDocs"], view="details")' in indexed_guidance
-    assert "普通问答、闲聊" in indexed_guidance
-    assert "`/OfficeDocs`: 办公文档处理。 Select when: 用户要处理 Word 或 PDF。" in indexed_appendix
+    assert "`OfficeDocs`: 办公文档处理。 Select when: 用户要处理 Word 或 PDF。" in indexed_appendix
     assert "Covers 8 descendant skills" not in indexed_appendix
     assert "Representative keywords" not in indexed_appendix
-
-    stale = replace(indexed, mode="indexed-stale", index_state="stale")
-    stale_chinese = rail._build_guidance("cn", stale)
-    stale_english = rail._build_guidance("en", stale)
-    assert "直接对完整目录 `/` 执行一次高信号 `search`" in stale_chinese
-    assert "沿主能力分支逐层浏览" not in stale_chinese
-    assert "full catalog `/` first" in stale_english
-    assert "do not browse the old tree first" in stale_english
 
 
 @pytest.mark.asyncio

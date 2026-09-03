@@ -39,6 +39,9 @@ class ReqMethod(Enum):
     COMMAND_SESSION = "command.session"
     COMMAND_WORKFLOWS = "command.workflows"
     COMMAND_STATUS = "command.status"
+    SWARMFLOW_PAUSE = "swarmflow.pause"
+    SWARMFLOW_RESUME = "swarmflow.resume"
+    SWARMFLOW_STOP = "swarmflow.stop"
 
     CONFIG_GET = "config.get"
     CONFIG_SET = "config.set"
@@ -126,6 +129,7 @@ class ReqMethod(Enum):
     PROJECT_GIT_REDO_TURN_CHANGES = "project.git.redo_turn_changes"
 
     PROACTIVE_TICK = "proactive.tick"  # Trigger proactive recommendation tick (from Cron)
+    PROACTIVE_FEEDBACK = "proactive.feedback"  # User feedback on proactive recommendation (like/dislike)
     COMMAND_GOAL = "command.goal"
     COMMANDS_LIST = "commands.list"
 
@@ -287,6 +291,12 @@ class ReqMethod(Enum):
     # AgentGroup selection + agent_template / plugin package catalog RPCs.
     AGENT_GROUPS_LIST = "agent_groups.list"
     AGENT_GROUPS_SHOW = "agent_groups.show"
+    AGENT_GROUPS_FILE_LIST = "agent_groups.file.list"
+    AGENT_GROUPS_FILE_READ = "agent_groups.file.read"
+    AGENT_GROUPS_CREATE = "agent_groups.create"
+    AGENT_GROUPS_IMPORT_LOCAL = "agent_groups.import_local"
+    AGENT_GROUPS_INSTALL = "agent_groups.install"
+    AGENT_GROUPS_UNINSTALL = "agent_groups.uninstall"
     AGENT_TEMPLATES_LIST = "agent_templates.list"
     AGENT_TEMPLATES_SHOW = "agent_templates.show"
     AGENT_TEMPLATES_FILE_LIST = "agent_templates.file.list"
@@ -428,7 +438,6 @@ class EventType(Enum):
     # _missing_ so every downstream channel sees HEALTH_CHECK_RELAY.
     HEARTBEAT_RELAY = "health_check.relay"
     HISTORY_GET = "history.message"
-    PROACTIVE_RECOMMENDATION = "proactive_recommendation"
 
     @classmethod
     def _missing_(cls, value):

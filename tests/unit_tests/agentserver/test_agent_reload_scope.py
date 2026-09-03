@@ -388,7 +388,7 @@ async def test_agent_reload_config_handler_warms_zen_cache_on_model_scope(monkey
     模型。这里只断言 warm 被调度（后台任务），不阻塞 reload 响应。
     """
     from jiuwenswarm.agents.harness import team as team_harness_module
-    from jiuwenswarm.server.runtime import opencode_zen
+    from jiuwenswarm.server.runtime import image_modality_warmup, opencode_zen
 
     server = agent_ws_server_module.AgentWebSocketServer()
     reload_agents = AsyncMock()
@@ -402,6 +402,11 @@ async def test_agent_reload_config_handler_warms_zen_cache_on_model_scope(monkey
         stop_paused,
     )
     monkeypatch.setattr(opencode_zen, "warm_zen_free_models", warm)
+    monkeypatch.setattr(
+        image_modality_warmup,
+        "refresh_image_modality_cache",
+        AsyncMock(),
+    )
     monkeypatch.setattr(
         agent_ws_server_module,
         "encode_agent_response_for_wire",
@@ -428,6 +433,65 @@ async def test_agent_reload_config_handler_warms_zen_cache_on_model_scope(monkey
     await asyncio.sleep(0)
 
     warm.assert_awaited_once_with(reason="agent.reload_config")
+
+
+@pytest.mark.asyncio
+async def test_multimodal_reload_refreshes_agents_without_model_probes(monkeypatch):
+    from jiuwenswarm.agents.harness import team as team_harness_module
+    from jiuwenswarm.server.runtime import image_modality_warmup, opencode_zen
+
+    server = agent_ws_server_module.AgentWebSocketServer()
+    reload_agents = AsyncMock()
+    stop_paused = AsyncMock(return_value=0)
+    refresh_image_modality = AsyncMock()
+    warm_zen = AsyncMock()
+
+    monkeypatch.setattr(server._agent_manager, "reload_agents_config", reload_agents)
+    monkeypatch.setattr(
+        team_harness_module,
+        "stop_all_paused_team_session_runtimes_across_managers",
+        stop_paused,
+    )
+    monkeypatch.setattr(
+        image_modality_warmup,
+        "refresh_image_modality_cache",
+        refresh_image_modality,
+    )
+    monkeypatch.setattr(opencode_zen, "warm_zen_free_models", warm_zen)
+    monkeypatch.setattr(
+        agent_ws_server_module,
+        "encode_agent_response_for_wire",
+        lambda resp, response_id: {
+            "response_id": response_id,
+            "ok": resp.ok,
+            "payload": resp.payload,
+        },
+    )
+
+    request = AgentRequest(
+        request_id="reload-multimodal",
+        channel_id="web",
+        req_method=ReqMethod.AGENT_RELOAD_CONFIG,
+        params={
+            "config": {"models": {"vision": {}}},
+            "env": {"VISION_ENABLED": "true"},
+            "target_channel_id": "web",
+            "reload_scopes": ["multimodal"],
+        },
+    )
+
+    ws = FakeWebSocket()
+    await server._handle_agent_reload_config(ws, request, asyncio.Lock())
+    await asyncio.sleep(0)
+
+    reload_agents.assert_awaited_once_with(
+        {"models": {"vision": {}}},
+        {"VISION_ENABLED": "true"},
+        target_channel_id="web",
+        reload_scopes={"multimodal"},
+    )
+    refresh_image_modality.assert_not_awaited()
+    warm_zen.assert_not_awaited()
 
 
 def test_deep_adapter_reload_session_scope_selects_only_target_session():

@@ -325,6 +325,28 @@ def get_progressive_tool_enabled(config: dict[str, Any] | None = None) -> bool:
     return bool(value)
 
 
+def get_endpoint_profile_overrides(config: dict[str, Any] | None = None) -> dict[str, str]:
+    """Return the user-configured ``api_base host -> endpoint_profile`` map.
+
+    Read from the top-level ``endpoint_profile_overrides`` key in
+    ``config.yaml``. Used for self-hosted gateways whose thinking-control
+    dialect (e.g. DashScope-style ``enable_thinking``) cannot be inferred
+    from the host name; no host is built into the source code. Hosts are
+    normalized to lowercase; blank entries are dropped.
+    """
+    cfg = config if isinstance(config, dict) else get_config()
+    raw = cfg.get("endpoint_profile_overrides")
+    if not isinstance(raw, dict):
+        return {}
+    overrides: dict[str, str] = {}
+    for host, profile in raw.items():
+        host_key = str(host or "").strip().lower()
+        profile_value = str(profile or "").strip()
+        if host_key and profile_value:
+            overrides[host_key] = profile_value
+    return overrides
+
+
 def get_evolution_review_feedback_min_confidence(config: dict[str, Any] | None) -> float:
     """Return the minimum confidence required for reviewer-driven evolution."""
 
@@ -825,6 +847,15 @@ def update_proactive_recommendation_in_config(updates: dict[str, Any]) -> None:
         data["proactive_recommendation"] = {}
     section = data["proactive_recommendation"]
     _merge_config_dict(section, updates)
+    dump_yaml_round_trip(CONFIG_YAML_PATH, data)
+
+
+def update_trajectory_ui_in_config(enabled: bool) -> None:
+    """Update the trajectory UI feature switch and persist config.yaml."""
+    data = load_yaml_round_trip(CONFIG_YAML_PATH)
+    if "trajectory_ui" not in data or data["trajectory_ui"] is None:
+        data["trajectory_ui"] = {}
+    data["trajectory_ui"]["enabled"] = bool(enabled)
     dump_yaml_round_trip(CONFIG_YAML_PATH, data)
 
 
@@ -1512,6 +1543,19 @@ def _transform_front_team_model_config(model_raw: dict[str, Any]) -> dict[str, A
             model_request_config["model"] = raw_model[:raw_model.rfind("#")]
         else:
             model_request_config["model"] = raw_model
+
+    if model_request_config:
+        from jiuwenswarm.common.reasoning_injector import build_reasoning_model_request_kwargs
+
+        model_request_config = build_reasoning_model_request_kwargs(
+            model_client_config=model_client_config,
+            model_config_obj=model_request_config,
+            model_name=str(
+                model_request_config.get("model")
+                or model_client_config.get("model_name")
+                or ""
+            ),
+        )
 
     transformed: dict[str, Any] = {}
     if model_client_config:
@@ -2360,6 +2404,12 @@ def migrate_config_from_template(
     # Guard against empty merged_data overwriting valid user config
     if merged_data is None or not merged_data:
         return False
+
+    # 写回程序版本号，与合并内容原子落盘；放在 diff 判断之前，
+    # 使旧 config（无版本号或版本号旧）必走写盘分支把版本号写回，
+    # 已写回的最新 config 下次启动被 ensure_config_migrated_from_template 短路。
+    from jiuwenswarm.common._build_config import VERSION
+    merged_data["config_version"] = VERSION
 
     # Only write if there are actual changes
     if merged_data != user_data:

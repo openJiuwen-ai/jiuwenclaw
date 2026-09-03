@@ -1374,8 +1374,17 @@ def test_enriched_spec_serialization_round_trip() -> None:
     assert any(not name.startswith("swarm.") for name in rail_types)
 
 
-def test_enrich_applies_agent_group_as_hybrid_member_snapshots() -> None:
+def test_enrich_applies_agent_group_as_hybrid_member_snapshots(monkeypatch) -> None:
     """AgentGroup prompts stay Team-owned while capabilities use snapshots."""
+    from jiuwenswarm.server.runtime import extension_package_manager as package_manager
+
+    resources = package_manager.get_equipment_resources_agent_groups_dir()
+    assert resources is not None
+    monkeypatch.setattr(
+        package_manager,
+        "resolve_agent_group_dir",
+        lambda _name: resources / "sample-expert-group",
+    )
     spec = _make_team_spec()
     spec.leader.prompt = "existing leader agreement"
 
@@ -1688,6 +1697,7 @@ def test_video_tool_gated_by_config(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         tools, "complete_multimodal_model_configured", lambda cfg, kind: True
     )
+    monkeypatch.setattr(tools, "multimodal_model_enabled", lambda cfg, kind: True)
     monkeypatch.setenv("VIDEO_API_KEY", "k")
     monkeypatch.setenv("VIDEO_API_BASE", "https://video.example/v1")
     monkeypatch.setenv("VIDEO_MODEL_NAME", "video-model")
@@ -1785,8 +1795,9 @@ def test_vision_model_config_params_gating(monkeypatch: pytest.MonkeyPatch) -> N
     assert tools.vision_model_config_params({}) == {}
 
     monkeypatch.setattr(
-        tools, "dedicated_multimodal_model_configured", lambda cfg, kind: True
+        tools, "complete_multimodal_model_configured", lambda cfg, kind: True
     )
+    monkeypatch.setattr(tools, "multimodal_model_enabled", lambda cfg, kind: True)
     monkeypatch.setattr(tools, "apply_vision_model_config_from_yaml", lambda cfg: None)
     monkeypatch.setenv("VISION_API_KEY", "key")
     monkeypatch.setenv("VISION_BASE_URL", "https://vision.example")
