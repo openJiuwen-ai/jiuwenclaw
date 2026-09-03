@@ -51,6 +51,7 @@ from jiuwenswarm.agents.harness.common.rails.read_file_validation import (
 )
 from jiuwenswarm.agents.harness.common.rails.task_execution_rail import (
     SKILL_TURBO_OUTER_TODO_ACTIVE_EXTRA_KEY,
+    extract_effective_project_dir,
 )
 from jiuwenswarm.common.tool_display import (
     build_tool_display_name,
@@ -1263,9 +1264,9 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
                 set_effective_request_workspace_dir,
                 set_interactive_ask,
             )
-            _epd = _md.get("effective_project_dir")
-            if isinstance(_epd, str) and _epd.strip():
-                ws_token = set_effective_request_workspace_dir(_epd.strip())
+            _epd = extract_effective_project_dir(_md)
+            if _epd is not None:
+                ws_token = set_effective_request_workspace_dir(_epd)
                 ctx.extra[_SKILL_TURBO_WORKSPACE_TOKEN_EXTRA_KEY] = ws_token
             _ia = _md.get("interactive_ask")
             if _ia is not None:
