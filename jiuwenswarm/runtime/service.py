@@ -396,9 +396,10 @@ class AgentRuntime:
         """
         if self._closed:
             raise RuntimeStateError("runtime is already closed")
+        excluded = None if exclude_session_ids is None else set(exclude_session_ids)
         await self._agent_manager.cancel_all_inflight_work(
             reason,
-            exclude_session_ids=exclude_session_ids,
+            exclude_session_ids=excluded,
         )
 
     async def invoke(

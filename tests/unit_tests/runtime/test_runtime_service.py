@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Iterable
 from types import SimpleNamespace
+from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -274,7 +276,56 @@ async def test_cancel_all_inflight_work_delegates_without_starting_runtime() -> 
     )
 
     assert manager.cancel_calls == ["[gateway ws closed] "]
-    assert manager.cancel_exclusion_calls == [excluded]
+    assert manager.cancel_exclusion_calls == [{"heartbeat-session"}]
+    assert runtime.started is False
+    initializer.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_cancel_all_materializes_generator_for_every_agent() -> None:
+    from jiuwenswarm.server.runtime.agent_manager import AgentManager
+
+    class RecordingCancelAgent:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, set[str]]] = []
+
+        async def cancel_inflight_work(
+            self,
+            reason: str,
+            *,
+            exclude_session_ids: Iterable[str] | None = None,
+        ) -> None:
+            self.calls.append((reason, set(exclude_session_ids or ())))
+
+    first = RecordingCancelAgent()
+    second = RecordingCancelAgent()
+    manager = AgentManager()
+    manager.agents = cast(
+        Any,
+        {
+            "tui": {
+                "first": first,
+                "second": second,
+            }
+        },
+    )
+    initializer = AsyncMock()
+    runtime = AgentRuntime(agent_manager=manager, initializer=initializer)
+    exclusions = (session_id for session_id in ("heartbeat-1", "heartbeat-2"))
+
+    await runtime.cancel_all_inflight_work(
+        reason="[gateway ws closed] ",
+        exclude_session_ids=exclusions,
+    )
+
+    expected = [
+        (
+            "[gateway ws closed] ",
+            {"heartbeat-1", "heartbeat-2"},
+        )
+    ]
+    assert first.calls == expected
+    assert second.calls == expected
     assert runtime.started is False
     initializer.assert_not_awaited()
 
