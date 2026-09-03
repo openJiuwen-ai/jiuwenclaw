@@ -1,8 +1,14 @@
 import { connectorApi } from '../../services/connectorApi';
 import { webRequest } from '../../services/webClient';
-import { AgentInstallPendingError, AgentManagementError, type AgentManagementClient } from './port';
+import {
+  AgentInstallPendingError,
+  AgentManagementError,
+  type AgentCatalogListOptions,
+  type AgentManagementClient,
+} from './port';
 import { getAgentManagementLocale } from './locale';
 import { resolveAgentTagPayload } from './tagOptions';
+import { invalidateAgentCatalog } from '../../stores/agentCatalogStore';
 import {
   normalizeAgentFileContent,
   normalizeAgentFileTree,
@@ -19,7 +25,7 @@ import type {
 } from './raw';
 
 export { AgentManagementError } from './port';
-export type { AgentInstallResult, AgentManagementClient } from './port';
+export type { AgentCatalogListOptions, AgentInstallResult, AgentManagementClient } from './port';
 
 function rethrowAgentError(error: unknown): never {
   if (error instanceof AgentManagementError) {
@@ -84,12 +90,13 @@ async function enrichCatalogTags(items: ReturnType<typeof normalizeAgentTemplate
 export function createLiveAgentManagementClient(): AgentManagementClient {
   return {
     source: 'live',
-    async listCatalog() {
+    async listCatalog(options: AgentCatalogListOptions = {}) {
       try {
         const payload = await webRequest<RawAgentListPayload>('agent_templates.list', {});
-        return enrichCatalogTags(
-          (payload.templates || []).map((item) => normalizeAgentTemplateListItem(item, getAgentManagementLocale())),
+        const items = (payload.templates || []).map((item) =>
+          normalizeAgentTemplateListItem(item, getAgentManagementLocale()),
         );
+        return options.enrichTags === false ? items : enrichCatalogTags(items);
       } catch (error) {
         return rethrowAgentError(error);
       }
@@ -165,6 +172,7 @@ export function createLiveAgentManagementClient(): AgentManagementClient {
           mcps: draft.mcpRefs,
           quickInputs: draft.suggestedPrompts.filter(prompt => prompt.trim().length > 0),
         });
+        invalidateAgentCatalog();
       } catch (error) {
         return rethrowAgentError(error);
       }
@@ -175,6 +183,7 @@ export function createLiveAgentManagementClient(): AgentManagementClient {
         if (!payload?.id) {
           throw new AgentManagementError('Imported Agent id is empty', 'agent_import_empty', false);
         }
+        invalidateAgentCatalog();
         return { id: payload.id };
       } catch (error) {
         return rethrowAgentError(error);
@@ -183,6 +192,7 @@ export function createLiveAgentManagementClient(): AgentManagementClient {
     async installDefinition(id) {
       try {
         await webRequest('agent_templates.install', { id });
+        invalidateAgentCatalog();
         return { kind: 'ok' };
       } catch (error) {
         const pendingConnectors = extractPendingConnectors(error);
@@ -197,7 +207,9 @@ export function createLiveAgentManagementClient(): AgentManagementClient {
     },
     async uninstallDefinition(id) {
       try {
-        return (await webRequest<{ notice?: string }>('agent_templates.uninstall', { id })) || {};
+        const result = (await webRequest<{ notice?: string }>('agent_templates.uninstall', { id })) || {};
+        invalidateAgentCatalog();
+        return result;
       } catch (error) {
         return rethrowAgentError(error);
       }

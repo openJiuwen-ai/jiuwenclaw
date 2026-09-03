@@ -25,6 +25,7 @@ import {
 } from './modelListOperations';
 
 const EMPTY_VENDOR_CATALOG: VendorPresetMap = {
+  reasoning: null,
   token_plan: [],
   coding_plan: [],
   custom_api: [],
@@ -55,7 +56,8 @@ function parseModelsPayload(payload: unknown): { models: ModelEntry[]; activeMod
         typeof (model as ModelEntry).model_name === 'string' &&
         typeof (model as ModelEntry).api_base === 'string' &&
         typeof (model as ModelEntry).api_key === 'string' &&
-        typeof (model as ModelEntry).model_provider === 'string',
+        typeof (model as ModelEntry).model_provider === 'string' &&
+        typeof (model as ModelEntry).reasoning_level === 'string',
     )
   ) {
     throw new Error('INVALID_MODELS_LIST');

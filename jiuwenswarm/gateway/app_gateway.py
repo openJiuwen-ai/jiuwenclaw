@@ -28,7 +28,6 @@ from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable
 from urllib.parse import parse_qs, urlparse
 
-from openjiuwen.core.common.logging import LogManager
 from websockets.exceptions import ConnectionClosed, ConnectionClosedError
 
 from jiuwenswarm.common.ws_diagnostics import format_ws_diagnostics, describe_ws_peer, describe_ws_exception
@@ -40,9 +39,16 @@ from jiuwenswarm.common.media_capability_config import (
 _SAFE_USER_ID_RE = re.compile(r"^[a-zA-Z0-9_-]+$")
 # --- Early --dotenv parsing (before jiuwenswarm imports) ---
 from jiuwenswarm.dotenv_early import parse_dotenv_early, load_dotenv_runtime
-from jiuwenswarm.gateway.channel_manager.base import BaseWebChannel
 
 parse_dotenv_early("jiuwenswarm-gateway")
+
+# Repair package-data leftovers before imports that may build OpenJiuwen's
+# recursive tool-description index.
+from jiuwenswarm.common.utils import cleanup_stale_openjiuwen_descs
+cleanup_stale_openjiuwen_descs()
+
+from openjiuwen.core.common.logging import LogManager  # pylint: disable=wrong-import-order
+from jiuwenswarm.gateway.channel_manager.base import BaseWebChannel
 
 # --- Now safe to import jiuwenswarm modules ---
 from jiuwenswarm.gateway.channel_manager.protocol.acp.acp_connect import AcpGatewayBridge
@@ -51,6 +57,7 @@ from jiuwenswarm.common.security.ws_origin import get_header_value
 from jiuwenswarm.gateway.routing.route_binding import GatewayRouteBinding
 from jiuwenswarm.common.debug_dump import install_async_dump_handler
 from jiuwenswarm.common.utils import (
+    apply_free_search_runtime_defaults,
     ensure_config_migrated_from_template,
     ensure_default_builtin_skills,
     get_cron_jobs_path,
@@ -58,7 +65,6 @@ from jiuwenswarm.common.utils import (
     get_root_dir,
     get_user_workspace_dir,
     prepare_workspace,
-    reset_free_search_runtime_flags,
 )
 from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
 from jiuwenswarm.common.schema.message import ReqMethod, Message, Mode
@@ -103,7 +109,7 @@ else:
 _env_file = get_env_file()
 load_dotenv_runtime(dotenv_path=_env_file, override=True)
 migrate_media_capability_switches(_env_file)
-reset_free_search_runtime_flags()
+apply_free_search_runtime_defaults()
 
 logger = logging.getLogger("jiuwenswarm.gateway")
 

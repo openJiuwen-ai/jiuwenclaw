@@ -12,6 +12,7 @@ import yaml
 
 from jiuwenswarm.common import config as config_module
 from jiuwenswarm.common.config import (
+    _transform_front_team_model_config,
     get_configured_read_image_multimodal,
     get_config_raw,
     get_evolution_auto_save_enabled,
@@ -520,6 +521,60 @@ react:
         assert migrate_config_from_template(template_path, user_config_path) is False
         assert get_skill_evolution_enabled(migrated) is True
         assert get_evolution_auto_save_enabled(migrated) is True
+
+    @staticmethod
+    @pytest.mark.parametrize(
+        ("user_permissions", "expected_mode"),
+        [
+            (
+                {
+                    "enabled": True,
+                    "mode": "auto",
+                    "defaults": {"*": "deny"},
+                },
+                "auto",
+            ),
+            (
+                {
+                    "enabled": True,
+                    "defaults": {"*": "deny"},
+                },
+                "manual",
+            ),
+        ],
+    )
+    def test_migrate_config_preserves_smart_approval_mode(
+        tmp_path: Path,
+        user_permissions: dict,
+        expected_mode: str,
+    ):
+        template_path = tmp_path / "template.yaml"
+        user_config_path = tmp_path / "config.yaml"
+        template_path.write_text(
+            """
+permissions:
+  enabled: false
+  mode: manual
+  defaults:
+    "*": allow
+""",
+            encoding="utf-8",
+        )
+        user_config_path.write_text(
+            yaml.safe_dump({"permissions": user_permissions}, sort_keys=False),
+            encoding="utf-8",
+        )
+
+        # The first migration also writes the missing program config version.
+        assert migrate_config_from_template(template_path, user_config_path) is True
+
+        migrated = yaml.safe_load(user_config_path.read_text(encoding="utf-8"))
+        assert migrated["permissions"] == {
+            "enabled": True,
+            "mode": expected_mode,
+            "defaults": {"*": "deny"},
+        }
+        assert migrate_config_from_template(template_path, user_config_path) is False
 
     @staticmethod
     def test_ensure_config_migrated_from_template_adds_missing_keys(
@@ -1075,6 +1130,42 @@ modes:
 
         raw = yaml.safe_load(temp_config_file.read_text(encoding="utf-8"))
         assert "team" not in raw["modes"]
+
+    @staticmethod
+    def test_transform_front_team_model_config_maps_reasoning_level(
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        monkeypatch.setattr(
+            "jiuwenswarm.common.config.get_config_raw",
+            lambda: {
+                "models": {
+                    "defaults": [
+                        {
+                            "model_client_config": {
+                                "model_name": "Deepseek-V4-Flash-0731",
+                                "client_provider": "OpenAI",
+                                "api_base": "https://example.test/v1",
+                                "api_key": "sk-test",
+                            },
+                            "model_config_obj": {
+                                "temperature": 0.95,
+                                "reasoning_level": "off",
+                            },
+                        }
+                    ]
+                }
+            },
+        )
+
+        transformed = _transform_front_team_model_config(
+            {"model": "Deepseek-V4-Flash-0731#0"}
+        )
+        request_config = transformed["model_request_config"]
+
+        assert "reasoning_level" not in request_config
+        assert request_config["reasoning"] == {"mode": "disabled"}
+        assert request_config["temperature"] == 0.95
+        assert request_config["model"] == "Deepseek-V4-Flash-0731"
 
 
 class TestUpdateXiaoyiRuntimeInConfig:

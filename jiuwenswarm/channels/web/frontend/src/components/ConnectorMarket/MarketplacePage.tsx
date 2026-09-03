@@ -99,7 +99,7 @@ function PaginationBar({ currentPage, totalPages, pageSize, totalCount, onPageCh
   const rangeEnd = showAll ? totalCount : Math.min(currentPage * pageSize, totalCount);
 
   return (
-    <div className="mt-4 flex flex-wrap items-center justify-between gap-3 text-[13px] text-text-muted">
+    <div className="mt-4 flex flex-wrap items-center justify-between gap-3 text-[13px] text-text-muted" data-testid="connector-market-pagination">
       <div className="flex items-center gap-2">
         <span>{t('connectorMarket.pagination.pageSize')}</span>
         <SimpleSelect
@@ -109,7 +109,7 @@ function PaginationBar({ currentPage, totalPages, pageSize, totalCount, onPageCh
           className="w-20"
           menuPlacement="up"
         />
-        <span>{t('connectorMarket.pagination.rangeInfo', { start: rangeStart, end: rangeEnd, total: totalCount })}</span>
+        <span data-testid="connector-market-pagination-range-info">{t('connectorMarket.pagination.rangeInfo', { start: rangeStart, end: rangeEnd, total: totalCount })}</span>
       </div>
       {totalPages > 1 && (
         <div className="flex items-center gap-1">
@@ -119,6 +119,7 @@ function PaginationBar({ currentPage, totalPages, pageSize, totalCount, onPageCh
             onClick={() => onPageChange(currentPage - 1)}
             aria-label={t('connectorMarket.pagination.prev') ?? undefined}
             className="flex h-7 w-7 items-center justify-center rounded-md border border-border text-text hover:bg-bg-hover disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent"
+            data-testid="connector-market-pagination-prev"
           >
             <ChevronLeft size={14} />
           </button>
@@ -132,6 +133,8 @@ function PaginationBar({ currentPage, totalPages, pageSize, totalCount, onPageCh
                 key={p}
                 type="button"
                 onClick={() => onPageChange(p)}
+                data-testid="connector-market-pagination-page"
+                data-variant={p}
                 className={`flex h-7 min-w-7 items-center justify-center rounded-md px-1.5 text-[13px] ${
                   p === currentPage ? 'bg-text font-bold text-text-inverse' : 'text-text hover:bg-bg-hover'
                 }`}
@@ -146,6 +149,7 @@ function PaginationBar({ currentPage, totalPages, pageSize, totalCount, onPageCh
             onClick={() => onPageChange(currentPage + 1)}
             aria-label={t('connectorMarket.pagination.next') ?? undefined}
             className="flex h-7 w-7 items-center justify-center rounded-md border border-border text-text hover:bg-bg-hover disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent"
+            data-testid="connector-market-pagination-next"
           >
             <ChevronRight size={14} />
           </button>
@@ -383,6 +387,14 @@ export function MarketplacePage({
   // 对应 store 的 isLoading 短暂置 true，10s 静默轮询不影响它（见两个 store 的 loadList 实现），
   // 用它区分空态文案该显示"加载中"还是"没有找到匹配的结果"。
   const activeIsLoading = activeKindForEmpty === 'mcp' ? connectorIsLoading : pluginIsLoading;
+  // 空状态文案分两种：有搜索词/状态筛选/分类筛选时列表为空 = "没有找到匹配的结果"；什么都没筛
+  // 却为空才是真的 "这里还没有内容"（"我的"下 = 还没创建/添加过，与安装/连接状态无关；"广场"
+  // 下 = 后端没返回可用项）。加载态分支同理按 topTab/myKind 区分，两者逻辑保持一致。
+  const activeCategoryForEmpty = activeKindForEmpty === 'mcp' ? category : pluginCategory;
+  const hasEmptyNarrowing =
+    query.trim() !== '' ||
+    statusFilter !== 'all' ||
+    (topTab !== 'my' && activeCategoryForEmpty !== 'all');
 
   // 切换 tab/子筛选/分类/状态筛选/搜索词都会让 activeList 变成一份新列表，统一重置回第1页，
   // 避免停留在一个对新列表来说已经越界的页码上看到空白（同款处理见 CronPanel/index.tsx 的
@@ -414,10 +426,10 @@ export function MarketplacePage({
   }
 
   return (
-    <div ref={scrollRef} className="relative h-full overflow-y-auto bg-card px-8 py-6">
+    <div ref={scrollRef} className="relative h-full overflow-y-auto bg-card px-8 py-6" data-testid="connector-market-marketplace">
       <div className="mb-5">
-        <h1 className="text-[18px] font-semibold leading-7 text-text">{t('connectorMarket.title')}</h1>
-        <p className="mt-0.5 text-[12px] leading-[18px] text-text-muted">{t('connectorMarket.subtitle')}</p>
+        <h1 className="text-[18px] font-semibold leading-7 text-text" data-testid="connector-market-marketplace-title">{t('connectorMarket.title')}</h1>
+        <p className="mt-0.5 text-[12px] leading-[18px] text-text-muted" data-testid="connector-market-marketplace-subtitle">{t('connectorMarket.subtitle')}</p>
       </div>
 
       <div className="mb-4 flex items-center justify-between gap-4">
@@ -429,6 +441,9 @@ export function MarketplacePage({
                 key={tab}
                 type="button"
                 onClick={() => onTopTabChange(tab)}
+                aria-pressed={active}
+                data-testid="connector-market-tab"
+                data-variant={tab}
                 className={`relative pb-2 text-[14px] leading-[22px] ${active ? 'font-semibold text-text' : 'font-normal text-text'}`}
               >
                 {t(`connectorMarket.tabs.${tab}`)}
@@ -454,6 +469,9 @@ export function MarketplacePage({
                   key={key}
                   type="button"
                   onClick={() => setStatusFilter(key)}
+                  aria-pressed={active}
+                  data-testid="connector-market-status-filter"
+                  data-variant={key}
                   className={`h-8 shrink-0 whitespace-nowrap px-3 text-[13px] font-medium ${
                     active ? 'rounded-[8px] bg-secondary text-text' : 'text-text-muted hover:text-text'
                   }`}
@@ -470,6 +488,7 @@ export function MarketplacePage({
               onChange={(event) => setQuery(event.target.value)}
               placeholder={t(`connectorMarket.search.${topTab}`)}
               className="h-8 w-full rounded-lg border border-border bg-card pl-8 pr-3 text-[12px] leading-[18px] text-text placeholder:text-[color:var(--color-text-placeholder)] outline-none focus:border-border-hover"
+              data-testid="connector-market-search"
             />
           </div>
 
@@ -478,6 +497,7 @@ export function MarketplacePage({
               <button
                 type="button"
                 onClick={() => setCreateMenuOpen((v) => !v)}
+                data-testid="connector-market-create-menu"
                 className="flex h-8 shrink-0 items-center gap-1 rounded-lg bg-text px-3 text-[12px] text-text-inverse"
               >
                 <Plus size={13} />
@@ -485,7 +505,7 @@ export function MarketplacePage({
                 <ChevronDown size={13} />
               </button>
               {createMenuOpen && (
-                <div className="absolute right-0 top-9 z-20 w-40 rounded-lg border border-border bg-card py-1 shadow-lg">
+                <div className="absolute right-0 top-9 z-20 w-40 rounded-lg border border-border bg-card py-1 shadow-lg" data-testid="connector-market-create-menu-popover">
                   {myKind === 'plugin' ? (
                     <>
                       <MenuItem label={t('connectorMarket.create.manual')} onClick={() => { setCreateMenuOpen(false); onCreateManual(); }} />
@@ -511,6 +531,8 @@ export function MarketplacePage({
               <button
                 type="button"
                 onClick={() => setCategory(tab.key)}
+                data-testid="connector-market-category-tab"
+                data-variant={tab.key}
                 className={`text-[14px] leading-[22px] ${category === tab.key ? 'font-semibold text-text' : 'font-normal text-text-muted'}`}
               >
                 {tab.label}
@@ -528,6 +550,8 @@ export function MarketplacePage({
               <button
                 type="button"
                 onClick={() => setPluginCategory(tab.key)}
+                data-testid="connector-market-plugin-category-tab"
+                data-variant={tab.key}
                 className={`text-[14px] leading-[22px] ${pluginCategory === tab.key ? 'font-semibold text-text' : 'font-normal text-text-muted'}`}
               >
                 {tab.label}
@@ -545,6 +569,8 @@ export function MarketplacePage({
               <button
                 type="button"
                 onClick={() => onMyKindChange(kind)}
+                data-testid="connector-market-my-kind-tab"
+                data-variant={kind}
                 className={`text-[14px] leading-[22px] ${myKind === kind ? 'font-semibold text-text' : 'font-normal text-text-muted'}`}
               >
                 {t(`connectorMarket.tabs.${kind}`)}
@@ -554,7 +580,7 @@ export function MarketplacePage({
         </div>
       )}
 
-      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3">
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3" data-testid="connector-market-card-list">
         {topTab === 'my' ? (
           myKind === 'mcp' ? (
             paginatedConnectors.map((connector) => {
@@ -644,7 +670,7 @@ export function MarketplacePage({
           })
         )}
         {isEmpty && (
-          <div className="col-span-full flex flex-col items-center justify-center gap-2 rounded-xl border border-dashed border-border py-16 text-[13px] text-text-muted">
+          <div className="col-span-full flex flex-col items-center justify-center gap-2 rounded-xl border border-dashed border-border py-16 text-[13px] text-text-muted" data-testid="connector-market-empty">
             {activeIsLoading
               ? t(
                   topTab === 'my'
@@ -655,9 +681,17 @@ export function MarketplacePage({
                       ? 'connectorMarket.empty.loadingMcp'
                       : 'connectorMarket.empty.loadingPlugin',
                 )
-              : topTab === 'my'
-                ? t(myKind === 'mcp' ? 'connectorMarket.empty.myMcp' : 'connectorMarket.empty.myPlugin')
-                : t('connectorMarket.empty.searchNoResult')}
+              : hasEmptyNarrowing
+                ? t('connectorMarket.empty.searchNoResult')
+                : t(
+                    topTab === 'my'
+                      ? myKind === 'mcp'
+                        ? 'connectorMarket.empty.myMcp'
+                        : 'connectorMarket.empty.myPlugin'
+                      : topTab === 'mcp'
+                        ? 'connectorMarket.empty.mcp'
+                        : 'connectorMarket.empty.plugin',
+                  )}
           </div>
         )}
       </div>

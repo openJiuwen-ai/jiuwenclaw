@@ -21,7 +21,7 @@ from openjiuwen.core.foundation.llm.schema.config import (
     ModelClientConfig,
     ModelRequestConfig,
 )
-from openjiuwen.rsi.auto_harness.schema import load_auto_harness_config
+from openjiuwen.rsi.harness_rsi.auto_harness.schema import load_auto_harness_config
 
 from jiuwenswarm.common.config import (
     get_config,
@@ -38,6 +38,10 @@ from jiuwenswarm.common.config import (
     update_swarmflow_enabled_in_config,
     update_skill_evolution_enabled_in_config,
     update_config,
+)
+from jiuwenswarm.common.reasoning_config import (
+    resolve_endpoint_profile_override,
+    validate_reasoning_level_for_model,
 )
 from jiuwenswarm.common.reasoning_injector import build_reasoning_model_request_kwargs
 from jiuwenswarm.common.context_window import resolve_context_window_tokens
@@ -245,6 +249,9 @@ CLI_FORWARD_REQ_METHODS = frozenset(
         "command.sandbox",
         "command.session",
         "command.workflows",
+        "swarmflow.pause",
+        "swarmflow.resume",
+        "swarmflow.stop",
         "command.status",
         "command.goal",
         "chat.send",
@@ -376,6 +383,9 @@ CLI_FORWARD_NO_LOCAL_HANDLER_METHODS = frozenset(
         "command.sandbox",
         "command.session",
         "command.workflows",
+        "swarmflow.pause",
+        "swarmflow.resume",
+        "swarmflow.stop",
         "command.status",
         "command.goal",
         "skills.marketplace.list",
@@ -2734,19 +2744,37 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                 client_cfg["timeout"] = 1800
             if "temperature" not in model_config_obj:
                 model_config_obj["temperature"] = 0.95
-            _reasoning_level = str(model_config_obj.get("reasoning_level", "")).strip()
-            if _reasoning_level and _reasoning_level not in {"off", "low", "medium", "high"}:
-                await channel.send_response(
-                    ws,
-                    req_id,
-                    ok=False,
-                    error="reasoning_level must be one of: off, low, medium, high",
-                )
-                return
             # target 作为 model_name 的回退：若未通过 model= 参数指定，则以 target 为准
             if not client_cfg.get("model_name"):
                 client_cfg["model_name"] = target
             effective_name = client_cfg["model_name"]
+
+            # 与 web 端 models.replace_all 一致：按 core 能力表校验具体模型
+            # 支持的思考档位，并落库规范化后的值。
+            try:
+                _normalized_reasoning = validate_reasoning_level_for_model(
+                    raw_level=model_config_obj.get("reasoning_level"),
+                    model_name=resolve_env_vars(str(effective_name)),
+                    model_provider=resolve_env_vars(str(client_cfg.get("client_provider", ""))),
+                    api_base=resolve_env_vars(str(client_cfg.get("api_base", ""))),
+                    endpoint_profile=client_cfg.get("endpoint_profile"),
+                )
+            except ValueError as _reasoning_err:
+                await channel.send_response(ws, req_id, ok=False, error=str(_reasoning_err))
+                return
+            if _normalized_reasoning:
+                # 必须带引号落库：裸 on/off 会被 YAML 1.1 加载器读成布尔。
+                model_config_obj["reasoning_level"] = DoubleQuotedScalarString(_normalized_reasoning)
+            else:
+                model_config_obj.pop("reasoning_level", None)
+            # 与 web 端一致：已知自建网关按 api_base host 推断 endpoint_profile
+            # 并落库（如 vLLM 风格端点需走 core 的 "vllm" 方言才能关思考）。
+            if not client_cfg.get("endpoint_profile"):
+                _inferred_profile = resolve_endpoint_profile_override(
+                    resolve_env_vars(str(client_cfg.get("api_base", "")))
+                )
+                if _inferred_profile:
+                    client_cfg["endpoint_profile"] = _inferred_profile
 
             # alias 为顶层字段，从 client_cfg 提取；提前算最终值，
             # 确保唯一性校验基于实际存储值
@@ -2898,9 +2926,31 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                             continue
                         else:
                             _client_cfg[mapped_k] = v
-                    _reasoning_level = str(_model_cfg_obj.get("reasoning_level", "")).strip()
-                    if _reasoning_level and _reasoning_level not in {"off", "low", "medium", "high"}:
-                        raise _ModelOpError("reasoning_level must be one of: off, low, medium, high")
+                    # 与 web 端 models.replace_all 一致：按 core 能力表校验具体模型
+                    # 支持的思考档位，并落库规范化后的值。
+                    try:
+                        _normalized_reasoning = validate_reasoning_level_for_model(
+                            raw_level=_model_cfg_obj.get("reasoning_level"),
+                            model_name=resolve_env_vars(str(_client_cfg.get("model_name", ""))),
+                            model_provider=resolve_env_vars(str(_client_cfg.get("client_provider", ""))),
+                            api_base=resolve_env_vars(str(_client_cfg.get("api_base", ""))),
+                            endpoint_profile=_client_cfg.get("endpoint_profile"),
+                        )
+                    except ValueError as _reasoning_err:
+                        raise _ModelOpError(str(_reasoning_err)) from _reasoning_err
+                    if _normalized_reasoning:
+                        # 必须带引号落库：裸 on/off 会被 YAML 1.1 加载器读成布尔。
+                        _model_cfg_obj["reasoning_level"] = DoubleQuotedScalarString(_normalized_reasoning)
+                    else:
+                        _model_cfg_obj.pop("reasoning_level", None)
+                    # 与 web 端一致：已知自建网关按 api_base host 推断
+                    # endpoint_profile 并落库。
+                    if not _client_cfg.get("endpoint_profile"):
+                        _inferred_profile = resolve_endpoint_profile_override(
+                            resolve_env_vars(str(_client_cfg.get("api_base", "")))
+                        )
+                        if _inferred_profile:
+                            _client_cfg["endpoint_profile"] = _inferred_profile
                     if "verify_ssl" not in _client_cfg:
                         _client_cfg["verify_ssl"] = False
                     if "timeout" not in _client_cfg:
@@ -2956,11 +3006,15 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
             return
 
         if action == "delete_model":
+            # 前端传 model（model_name/alias）+ index；两者均可选。
+            # 优先按 model 稳定标识（model_name 或 alias）匹配定位，index 仅作辅助与兜底。
+            # 早期实现只按 index pop，若确认页停留期间 defaults 被切换操作重排，
+            # 同一 index 会指向漂移后的另一条目，导致"删错模型"。
+            _del_target_name = str(model_name or "").strip()
             try:
-                _idx = int(model_index)
+                _idx = int(model_index) if model_index is not None else -1
             except (ValueError, TypeError):
-                await channel.send_response(ws, req_id, ok=False, error="index is required")
-                return
+                _idx = -1
             _removed_holder: dict = {}
             try:
                 def _delete_mutate(data):
@@ -2973,9 +3027,54 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                         raise _ModelOpError("model index not found")
                     if len(_raw_defs) <= 1:
                         raise _ModelOpError("Cannot delete the last model")
-                    if _idx < 0 or _idx >= len(_raw_defs) or not isinstance(_raw_defs[_idx], dict):
-                        raise _ModelOpError("model index not found")
-                    _removed_holder["entry"] = _raw_defs.pop(_idx)
+                    # 1) 按 model_name/alias 稳定匹配（同名时进一步用 provider+api_base 区分）
+                    _target_idx = None
+                    if _del_target_name:
+                        _candidates: list[tuple[int, dict]] = []
+                        for _i, _e in enumerate(_raw_defs):
+                            if not isinstance(_e, dict):
+                                continue
+                            _mcc = _e.get("model_client_config") or {}
+                            _mn = resolve_env_vars(str(_mcc.get("model_name", "")))
+                            _al = resolve_env_vars(str(_e.get("alias", ""))) if _e.get("alias") else ""
+                            if _mn == _del_target_name or _al == _del_target_name:
+                                _candidates.append((_i, _e))
+                        if len(_candidates) == 1:
+                            _target_idx = _candidates[0][0]
+                        elif len(_candidates) > 1:
+                            # 同名多条：用前端传入的 index 在候选中挑选；不在候选则报漂移
+                            if _idx >= 0:
+                                for _ci, _ce in _candidates:
+                                    if _ci == _idx:
+                                        _target_idx = _ci
+                                        break
+                            if _target_idx is None:
+                                raise _ModelOpError(
+                                    "Multiple models match '%s'; list may have changed, please refresh and retry"
+                                    % _del_target_name
+                                )
+                    # 2) 退化为纯 index：仅当前端未传 model 时使用，且仍校验越界
+                    if _target_idx is None and 0 <= _idx < len(_raw_defs) and isinstance(_raw_defs[_idx], dict):
+                        # 若前端传了 model 但与该 index 当前指向的条目不一致，说明列表已漂移，
+                        # 拒绝静默删错：要求刷新重试。
+                        if _del_target_name:
+                            _idx_mcc = _raw_defs[_idx].get("model_client_config") or {}
+                            _idx_mn = resolve_env_vars(str(_idx_mcc.get("model_name", "")))
+                            _idx_entry = _raw_defs[_idx]
+                            _idx_alias_raw = _idx_entry.get("alias", "")
+                            _idx_al = (
+                                resolve_env_vars(str(_idx_alias_raw))
+                                if _idx_alias_raw else ""
+                            )
+                            if _idx_mn != _del_target_name and _idx_al != _del_target_name:
+                                raise _ModelOpError(
+                                    "Model '%s' no longer at index %d; list may have changed, please refresh and retry"
+                                    % (_del_target_name, _idx)
+                                )
+                        _target_idx = _idx
+                    if _target_idx is None:
+                        raise _ModelOpError("model not found; list may have changed, please refresh and retry")
+                    _removed_holder["entry"] = _raw_defs.pop(_target_idx)
                     # 展示字段从锁内 data 直接取，避免事务后再开锁读取
                     _cur_mcc = (_raw_defs[0].get("model_client_config") or {}) if _raw_defs else {}
                     _removed_holder["current_name"] = resolve_env_vars(str(_cur_mcc.get("model_name", "")))

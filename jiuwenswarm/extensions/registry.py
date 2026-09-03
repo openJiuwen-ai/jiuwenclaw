@@ -1,19 +1,32 @@
-from typing import Any, Callable
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Any, Callable
 
 from openjiuwen.core.runner.callback.framework import AsyncCallbackFramework
 
-from jiuwenswarm.extensions.callback_compat import unregister_callback_sync
-from jiuwenswarm.gateway import AgentServerClient
-from jiuwenswarm.extensions.sdk.agent_server_client import AgentServerClientExtension
-from jiuwenswarm.extensions.sdk.crypto_utility import CryptoUtility
-from jiuwenswarm.extensions.sdk.third_agent import ThirdAgentExtension
-from jiuwenswarm.extensions.sdk.application_plugin import (
-    ApplicationPluginExtension,
-    ApplicationPluginServices,
-)
-from jiuwenswarm.extensions.types import ExtensionConfig
 from jiuwenswarm.common.security.base_crypto import CryptoProvider
-from jiuwenswarm.gateway.routing.third_agent import ThirdAgent
+from jiuwenswarm.extensions.callback_compat import unregister_callback_sync
+from jiuwenswarm.extensions.sdk.crypto_utility import CryptoUtility
+from jiuwenswarm.extensions.types import ExtensionConfig
+
+if TYPE_CHECKING:
+    from jiuwenswarm.extensions.sdk.agent_server_client import (
+        AgentServerClientExtension,
+    )
+    from jiuwenswarm.extensions.sdk.application_plugin import (
+        ApplicationPluginExtension,
+    )
+    from jiuwenswarm.extensions.sdk.third_agent import ThirdAgentExtension
+    from jiuwenswarm.gateway import AgentServerClient
+    from jiuwenswarm.gateway.routing.third_agent import ThirdAgent
+else:
+    # Keep runtime type-hint introspection valid without importing Gateway and
+    # transport adapters into a Runtime-direct process.
+    AgentServerClientExtension = Any
+    ApplicationPluginExtension = Any
+    ThirdAgentExtension = Any
+    AgentServerClient = Any
+    ThirdAgent = Any
 
 
 class _ApplicationPluginChannel:
@@ -128,6 +141,10 @@ class ExtensionRegistry:
         media_attachment_normalizer: Callable[[dict[str, Any], str | None], None]
         | None = None,
     ) -> None:
+        from jiuwenswarm.extensions.sdk.application_plugin import (
+            ApplicationPluginServices,
+        )
+
         services = ApplicationPluginServices(
             agent_client=agent_client,
             media_attachment_normalizer=media_attachment_normalizer,

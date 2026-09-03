@@ -1184,6 +1184,82 @@ def cleanup_team_files(workspace_dir: Path) -> None:
                 logger.warning(f"[Cleanup] Failed to remove legacy team database file: {e}")
 
 
+def _is_windows_frozen_bundle() -> bool:
+    """Return whether this process is a packaged Windows application."""
+    return sys.platform == "win32" and bool(getattr(sys, "frozen", False))
+
+
+def cleanup_stale_openjiuwen_descs() -> None:
+    """Remove flat OpenJiuwen descriptions left by a layout migration.
+
+    New OpenJiuwen releases store tool descriptions below domain directories,
+    while an in-place upgrade can leave the former flat files beside them. The
+    recursive description index treats both files as the same key and refuses
+    to start. A flat file is removed only when a non-fragment nested file with
+    the same stem exists, so flat-only layouts and fragment files remain intact.
+
+    Windows frozen bundles skip runtime cleanup because their installer repairs
+    the installed package data before offering to launch the application.
+
+    Raises:
+        RuntimeError: If a confirmed stale file cannot be removed.
+    """
+    if _is_windows_frozen_bundle():
+        logger.info(
+            "[Cleanup] Skipping OpenJiuwen description cleanup in frozen Windows "
+            "bundle; the installer performs upgrade cleanup."
+        )
+        return
+
+    try:
+        import openjiuwen
+    except ModuleNotFoundError as exc:
+        if exc.name == "openjiuwen":
+            return
+        raise
+
+    package_file = getattr(openjiuwen, "__file__", None)
+    if not package_file:
+        return
+
+    descs_dir = (
+        Path(package_file).parent
+        / "agent_teams"
+        / "tools"
+        / "locales"
+        / "descs"
+    )
+    if not descs_dir.is_dir():
+        return
+
+    for lang_dir in sorted(path for path in descs_dir.iterdir() if path.is_dir()):
+        nested_stems = set()
+        for desc_path in lang_dir.rglob("*.md"):
+            if desc_path.parent == lang_dir:
+                continue
+            if "fragments" in desc_path.relative_to(lang_dir).parts:
+                continue
+            nested_stems.add(desc_path.stem)
+
+        for flat_md in sorted(lang_dir.glob("*.md")):
+            if flat_md.stem not in nested_stems:
+                continue
+            try:
+                flat_md.unlink()
+                logger.info(
+                    f"[Cleanup] Removed stale flat OpenJiuwen description: {flat_md}"
+                )
+            except FileNotFoundError:
+                # Another process may have completed the same idempotent cleanup.
+                continue
+            except OSError as exc:
+                raise RuntimeError(
+                    "Failed to remove stale OpenJiuwen description "
+                    f"'{flat_md}'. Ensure the Python environment is writable "
+                    "or reinstall OpenJiuwen in a clean environment."
+                ) from exc
+
+
 def prepare_workspace(
     overwrite: bool = True,
     preferred_language: Optional[str] = None,
@@ -1478,6 +1554,15 @@ def _read_zip_index_version(zip_path: Path) -> str | None:
         return None
 
 
+def _print_console_progress(message: str) -> None:
+    """Print progress without letting a legacy console encoding abort startup."""
+    try:
+        print(message)
+    except UnicodeEncodeError:
+        escaped = message.encode("ascii", errors="backslashreplace").decode("ascii")
+        print(escaped)
+
+
 def _ensure_mcp_builtins(
     template_agent_workspace: Path,
     mcp_builtins_dir: Path,
@@ -1523,7 +1608,7 @@ def _ensure_mcp_builtins(
         "[mcp_builtins] %s: seed=%s local=%s -> extract %s",
         action, seed_version, local_version, seed_zip.name,
     )
-    print(
+    _print_console_progress(
         f"[jiuwenswarm-init] MCP 预置包 {action} (v{seed_version or '?'}) "
         f"<- {seed_zip.name}"
     )
@@ -2485,10 +2570,14 @@ def env_url(name: str, default: str) -> str:
     return os.environ.get(name, "").strip() or default
 
 
-def reset_free_search_runtime_flags() -> None:
-    """Start each process with free-search engines disabled unless reopened via config UI."""
-    os.environ["FREE_SEARCH_DDG_ENABLED"] = "false"
-    os.environ["FREE_SEARCH_BING_ENABLED"] = "false"
+def apply_free_search_runtime_defaults() -> None:
+    """Disable free-search engines for this process unless the flags are already set.
+
+    A value from ``.env``, the config UI, or the shell environment wins, so an
+    explicit opt-in survives process start.
+    """
+    os.environ.setdefault("FREE_SEARCH_DDG_ENABLED", "false")
+    os.environ.setdefault("FREE_SEARCH_BING_ENABLED", "false")
 
 
 def get_config_file() -> Path:

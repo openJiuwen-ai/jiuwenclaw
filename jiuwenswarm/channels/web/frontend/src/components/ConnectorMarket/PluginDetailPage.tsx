@@ -141,13 +141,14 @@ export function PluginDetailPage({ id, onBack, fromMy, onDeleted, onUse, onUseEx
   }
 
   return (
-    <div className="relative h-full overflow-y-auto bg-card px-8 py-6">
+    <div className="relative h-full overflow-y-auto bg-card px-8 py-6" data-testid="connector-market-plugin-detail">
       {/* 用户明确要求：去掉路径说明（原来的"插件/插件详情"面包屑），返回挪到整个页面最顶行，
           图标+文字（黑色），不再是原来那个跟扩展图标同排的圆形纯图标按钮。 */}
       <button
         type="button"
         onClick={onBack}
         className="mb-4 flex items-center gap-1 text-[14px] leading-[22px] text-text hover:opacity-70"
+        data-testid="connector-market-plugin-detail-back"
       >
         <ChevronLeft size={16} />
         {t('connectorMarket.common.back')}
@@ -165,7 +166,7 @@ export function PluginDetailPage({ id, onBack, fromMy, onDeleted, onUse, onUseEx
             {detail.tags.length > 0 && (
               <div className="mt-0.5 flex flex-wrap gap-1">
                 {detail.tags.map((tag) => (
-                  <span key={localizedText(tag, i18n.language)} className="inline-block rounded-[2px] bg-connector-tag-surface px-1.5 py-0.5 text-[12px] leading-[18px] text-text">
+                  <span key={localizedText(tag, i18n.language)} data-testid="connector-market-plugin-detail-tag" data-variant={localizedText(tag, i18n.language)} className="inline-block rounded-[2px] bg-connector-tag-surface px-1.5 py-0.5 text-[12px] leading-[18px] text-text">
                     {localizedText(tag, i18n.language)}
                   </span>
                 ))}
@@ -174,7 +175,7 @@ export function PluginDetailPage({ id, onBack, fromMy, onDeleted, onUse, onUseEx
           </div>
         </div>
 
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-3" data-testid="connector-market-plugin-detail-actions">
           {/* 自定义插件（source==='local'）的编辑——后端 plugin_packages.* 目前只有
               list/show/create/install/uninstall，没有任何 update/编辑接口（create 对已存在 id
               会直接拒绝，不是隐式 upsert，见 backend-requests.md 需求13），先做降级占位：按钮
@@ -208,6 +209,7 @@ export function PluginDetailPage({ id, onBack, fromMy, onDeleted, onUse, onUseEx
               onClick={handleUse}
               disabled={!linked || reconnectFlow.active}
               className="flex items-center gap-1 text-[13px] text-text hover:text-[color:var(--color-chat-accent)] disabled:cursor-not-allowed disabled:opacity-60"
+              data-testid="connector-market-plugin-detail-use"
             >
               <NewConversationIcon size={14} />
               {t('connectorMarket.card.use')}
@@ -224,7 +226,7 @@ export function PluginDetailPage({ id, onBack, fromMy, onDeleted, onUse, onUseEx
           McpDetailPage.tsx 断联 banner 那一版视觉（浅红底 #FCE3E1 + 红圆底白X图标 + accent蓝
           链接文字），不用这里原来的纯文字+danger红。 */}
       {installed && !linked && (
-        <div className="mb-6 flex items-center gap-1.5 rounded-lg bg-[#FCE3E1] px-3 py-2 text-[13px] text-text-muted">
+        <div className="mb-6 flex items-center gap-1.5 rounded-lg bg-[#FCE3E1] px-3 py-2 text-[13px] text-text-muted" data-testid="connector-market-plugin-detail-disconnect-banner">
           <span className="flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded-full bg-danger">
             <X size={9} strokeWidth={3} className="text-text-inverse" />
           </span>
@@ -234,6 +236,7 @@ export function PluginDetailPage({ id, onBack, fromMy, onDeleted, onUse, onUseEx
             disabled={reconnectFlow.active}
             className="flex items-center gap-0.5 font-medium text-[color:var(--color-chat-accent)] hover:opacity-80 disabled:opacity-60"
             onClick={() => reconnectFlow.start(detail.pendingConnectors ?? [])}
+            data-testid="connector-market-plugin-detail-connect-mcp"
           >
             {t('connectorMarket.detail.connectMcp')}
             <ExternalLink size={12} />
@@ -262,7 +265,7 @@ export function PluginDetailPage({ id, onBack, fromMy, onDeleted, onUse, onUseEx
       {detail.quickInputs && detail.quickInputs.length > 0 && (
         <div className="mb-6">
           <h2 className="mb-3 text-[14px] font-semibold leading-[22px] text-text">{t('connectorMarket.detail.sections.examples')}</h2>
-          <div className="flex flex-wrap gap-2">
+          <div className="flex flex-wrap gap-2" data-testid="connector-market-plugin-detail-examples">
             {detail.quickInputs.map((quickInput) => {
               const text = localizedText(quickInput, i18n.language);
               return onUseExample && linked ? (
@@ -270,6 +273,8 @@ export function PluginDetailPage({ id, onBack, fromMy, onDeleted, onUse, onUseEx
                   key={text}
                   type="button"
                   onClick={() => onUseExample(text, id)}
+                  data-testid="connector-market-plugin-detail-example"
+                  data-variant={text}
                   className="flex items-center gap-1.5 rounded-full border border-border bg-bg-muted px-3 py-1 text-[12px] leading-[18px] text-text-muted transition-colors hover:border-[color:var(--color-chat-accent)] hover:text-[color:var(--color-chat-accent)]"
                 >
                   <NewConversationIcon size={12} />
@@ -278,6 +283,8 @@ export function PluginDetailPage({ id, onBack, fromMy, onDeleted, onUse, onUseEx
               ) : (
                 <span
                   key={text}
+                  data-testid="connector-market-plugin-detail-example"
+                  data-variant={text}
                   className="rounded-full border border-border bg-bg-muted px-3 py-1 text-[12px] leading-[18px] text-text-muted"
                 >
                   {text}

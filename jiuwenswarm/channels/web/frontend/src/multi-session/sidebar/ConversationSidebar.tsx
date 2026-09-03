@@ -12,7 +12,7 @@ import {
   filterJobsForProject,
   type SidebarCronJob,
 } from '../../stores';
-import type { ProjectInfo, Session } from '../../types';
+import type { AgentMode, ProjectInfo, Session } from '../../types';
 import {
   getConversationMenuItems,
   getProjectNewLabel,
@@ -65,6 +65,12 @@ export type NewConversationOptions = {
    * 见 App.tsx enterNewConversation。 */
   initialEnabledPlugins?: string[];
   initialEnabledMcps?: string[];
+  /**
+   * 强制新会话进入指定模式，覆盖"继承当前活动会话模式"的默认行为，也覆盖未发送的临时新会话
+   * 草稿里残留的模式。用于扩展页"使用插件/使用 MCP/试试这样用"这类入口——插件/MCP 不支持
+   * 集群模式，跳转会话时必须回到单 agent 模式（bug003）。见 App.tsx enterNewConversation。
+   */
+  forceMode?: AgentMode;
 };
 
 function isDefaultProject(project: ProjectInfo): boolean {
