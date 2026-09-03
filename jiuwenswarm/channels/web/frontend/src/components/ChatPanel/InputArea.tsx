@@ -2519,9 +2519,11 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
             </button>
           )} */}
 
+          {/* 集群模式与单 agent 模式共用模型选择器：defaults / agentos 条目均可选，
+              选中值经 chat.send 的 model_name 参数下发，由后端 team 路径的
+              _resolve_default_model_config 按合并候选列表（defaults + agentos）解析。 */}
           <ModelSelector
-            disabled={isTeamMode || isProcessing}
-            lockedToDefault={isTeamMode}
+            disabled={isProcessing}
           />
 
           <button
@@ -2824,10 +2826,8 @@ function ComposerSuggestionMenu({
 
 function ModelSelector({
   disabled = false,
-  lockedToDefault = false,
 }: {
   disabled?: boolean;
-  lockedToDefault?: boolean;
 }) {
   const chatAvailableModels = useSessionStore((s) => s.chatAvailableModels);
   const activeSessionId = useChatStore((s) => s.activeSessionId);
@@ -2856,9 +2856,8 @@ function ModelSelector({
 
   if (chatAvailableModels.length === 0) return null;
 
-  // 集群模式下 UI 禁止手动改模型（见下方 disabled/tooltip），但显示仍应优先反映
-  // 该会话实际记录的模型（如定时任务在集群模式下显式指定了非默认模型，后端也确实
-  // 按该模型执行——见 bug002 回归），而不是不管三七二十一恒显示全局默认模型；
+  // 显示应优先反映该会话实际记录的模型（如定时任务显式指定了非默认模型，
+  // 后端也确实按该模型执行——见 bug002 回归），而不是恒显示全局默认模型；
   // 从未指定过模型的会话 selectedModelName 本就兜底等于默认模型，行为不变。
   // 与实际发给后端的 model_name（sessionStore.getEffectiveModelName）复用同一套解析逻辑，
   // 避免模型改名/改别名后 UI 显示值和实际请求参数走出两份不同的兜底结果（bug003）。
@@ -2885,7 +2884,7 @@ function ModelSelector({
       <button
         type="button"
         className="chat-mode-select__trigger"
-        title={t(lockedToDefault ? 'chat.modelSelector.clusterLockedTooltip' : 'chat.modelSelector.tooltip')}
+        title={t('chat.modelSelector.tooltip')}
         onClick={() => {
           if (disabled) return;
           if (!isOpen && menuRef.current) {

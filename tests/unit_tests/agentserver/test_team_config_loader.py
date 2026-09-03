@@ -931,3 +931,156 @@ def test_load_team_spec_dict_preserves_arbitrary_team_top_level_fields(monkeypat
         "retry_limit": 5,
     }
     assert spec["custom_labels"] == ["a", "b"]
+
+
+def _agentos_test_config() -> dict:
+    """Config with one defaults entry and one agentos backup entry."""
+    return {
+        "models": {
+            "defaults": [
+                {
+                    "model_client_config": {
+                        "api_base": "https://defaults.example.test/v1",
+                        "api_key": "sk-defaults",
+                        "model_name": "defaults-model",
+                        "client_provider": "OpenAI",
+                    },
+                    "model_config_obj": {"temperature": 0.1},
+                    "is_default": True,
+                },
+            ],
+            "agentos": [
+                {
+                    "model_client_config": {
+                        "api_base": "https://agentos.example.test/v1",
+                        "api_key": "sk-agentos",
+                        "model_name": "agentos-model",
+                        "client_provider": "OpenAI",
+                    },
+                    "model_config_obj": {
+                        "temperature": 0.7,
+                        "context_window": 128000,
+                    },
+                },
+            ],
+        },
+        **_wrap_modes_team(
+            {
+                "demo_team": {
+                    "team_name": "demo_team",
+                    "agents": {
+                        "leader": {},
+                        "teammate": {},
+                    },
+                }
+            }
+        ),
+    }
+
+
+def test_load_team_spec_dict_without_agentos_keeps_defaults_first_entry():
+    """No agentos field: skip it and keep the first defaults entry as default."""
+    config = _agentos_test_config()
+    config["models"].pop("agentos")
+
+    spec = load_team_spec_dict(config_base=config)
+
+    model = spec["agents"]["leader"]["model"]
+    assert model["model_client_config"]["model_name"] == "defaults-model"
+    assert model["model_client_config"]["api_base"] == "https://defaults.example.test/v1"
+
+
+def test_load_team_spec_dict_defaults_first_entry_wins_over_agentos():
+    """With agentos present but no requested model, defaults still wins the default."""
+    config = _agentos_test_config()
+
+    spec = load_team_spec_dict(config_base=config)
+
+    model = spec["agents"]["leader"]["model"]
+    assert model["model_client_config"]["model_name"] == "defaults-model"
+
+
+def test_load_team_spec_dict_requested_agentos_model_by_name():
+    """Page-selected agentos model name should drive team member fallback model."""
+    config = _agentos_test_config()
+
+    spec = load_team_spec_dict(
+        config_base=config,
+        requested_model_name="agentos-model",
+    )
+
+    model = spec["agents"]["leader"]["model"]
+    assert model["model_client_config"]["api_base"] == "https://agentos.example.test/v1"
+    assert model["model_client_config"]["api_key"] == "sk-agentos"
+    assert model["model_client_config"]["model_name"] == "agentos-model"
+    assert model["model_request_config"]["model"] == "agentos-model"
+    assert model["model_request_config"]["temperature"] == 0.7
+    assert model["model_request_config"]["context_window"] == 128000
+
+
+def test_load_team_spec_dict_requested_agentos_model_by_origin_index():
+    """``{model_name}#{origin_index}`` keys from the chat page resolve positionally.
+
+    origin_index follows ``get_default_models`` numbering: defaults entries
+    first (index 0), agentos entries appended after (index 1 here).
+    """
+    config = _agentos_test_config()
+
+    spec = load_team_spec_dict(
+        config_base=config,
+        requested_model_name="agentos-model#1",
+    )
+
+    model = spec["agents"]["leader"]["model"]
+    assert model["model_client_config"]["model_name"] == "agentos-model"
+    assert model["model_client_config"]["api_base"] == "https://agentos.example.test/v1"
+
+
+def test_load_team_spec_dict_requested_model_by_alias():
+    """Pure alias keys from the chat page should match the aliased entry."""
+    config = _agentos_test_config()
+    config["models"]["defaults"][0]["alias"] = "Dv4"
+
+    spec = load_team_spec_dict(config_base=config, requested_model_name="Dv4")
+
+    model = spec["agents"]["leader"]["model"]
+    assert model["model_client_config"]["model_name"] == "defaults-model"
+
+
+def test_load_team_spec_dict_unknown_requested_model_falls_back_to_defaults():
+    """Unknown requested model falls back to the first defaults entry, not agentos."""
+    config = _agentos_test_config()
+
+    spec = load_team_spec_dict(
+        config_base=config,
+        requested_model_name="missing-model#9",
+    )
+
+    model = spec["agents"]["leader"]["model"]
+    assert model["model_client_config"]["model_name"] == "defaults-model"
+
+
+def test_load_team_spec_dict_agentos_only_config_uses_agentos_as_default():
+    """When no defaults/legacy default is configured, agentos supplies the model."""
+    config = _agentos_test_config()
+    config["models"].pop("defaults")
+
+    spec = load_team_spec_dict(config_base=config)
+
+    model = spec["agents"]["leader"]["model"]
+    assert model["model_client_config"]["model_name"] == "agentos-model"
+    assert model["model_client_config"]["api_base"] == "https://agentos.example.test/v1"
+
+
+def test_load_team_spec_dict_same_name_defaults_entry_shadows_agentos():
+    """A pure-name request matching both defaults and agentos picks the defaults one."""
+    config = _agentos_test_config()
+    config["models"]["agentos"][0]["model_client_config"]["model_name"] = "defaults-model"
+
+    spec = load_team_spec_dict(
+        config_base=config,
+        requested_model_name="defaults-model",
+    )
+
+    model = spec["agents"]["leader"]["model"]
+    assert model["model_client_config"]["api_base"] == "https://defaults.example.test/v1"
