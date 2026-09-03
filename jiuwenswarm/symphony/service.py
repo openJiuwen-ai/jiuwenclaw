@@ -7,13 +7,12 @@ from concurrent.futures import Future as ConcurrentFuture
 import inspect
 import json
 import logging
-import re
 from datetime import datetime, timezone
 from pathlib import Path
 from threading import Lock
 from typing import Any, Callable
 
-from openjiuwen.symphony import SymphonyRuntime
+from openjiuwen.symphony import SymphonyRuntime, normalize_name_key
 
 from jiuwenswarm.common.config import get_config
 from jiuwenswarm.server.runtime.skill import load_execution_disabled_skills
@@ -643,7 +642,7 @@ def _capability_id(value: Any) -> str:
 
 
 def _normalize_capability_ref(value: Any) -> str:
-    return re.sub(r"[^a-z0-9]+", "-", _capability_id(value).strip().lower()).strip("-")
+    return normalize_name_key(_capability_id(value))
 
 
 def _resolve_orchestration_language(value: Any = None) -> str:
