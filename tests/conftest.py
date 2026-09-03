@@ -6,14 +6,44 @@ import inspect
 import sys
 import tempfile
 import warnings
-from importlib import import_module
+from importlib import import_module, invalidate_caches
 from pathlib import Path
 from types import ModuleType
 from typing import Generator
 
 import pytest
 
-from jiuwenswarm.common.openjiuwen_rail_compat import install_evolution_rail_kwargs_compat
+
+def _prefer_current_checkout() -> None:
+    """Keep an editable install from another worktree out of this test run."""
+    repo_root = Path(__file__).resolve().parent.parent
+    package_root = (repo_root / "jiuwenswarm").resolve()
+    repo_root_s = str(repo_root)
+    if not sys.path or sys.path[0] != repo_root_s:
+        sys.path.insert(0, repo_root_s)
+
+    loaded = sys.modules.get("jiuwenswarm")
+    loaded_file = getattr(loaded, "__file__", None)
+    if loaded_file is None:
+        return
+    if Path(loaded_file).resolve().is_relative_to(package_root):
+        return
+
+    stale_modules = [
+        name
+        for name in sys.modules
+        if name == "jiuwenswarm" or name.startswith("jiuwenswarm.")
+    ]
+    for name in sorted(stale_modules, key=lambda item: item.count("."), reverse=True):
+        sys.modules.pop(name, None)
+    invalidate_caches()
+
+
+_prefer_current_checkout()
+
+install_evolution_rail_kwargs_compat = import_module(
+    "jiuwenswarm.common.openjiuwen_rail_compat"
+).install_evolution_rail_kwargs_compat
 
 
 def _install_missing_trajectory_processor_stub() -> None:
