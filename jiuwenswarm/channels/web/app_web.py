@@ -1366,12 +1366,15 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
                 return
             self._serve_verified_local_download(str(file_path), inline=True)
             return
+        verified_download_name: str | None = None
         if payload is not None:
             # 本进程 secret 能校验并不意味着 token 的路径位于 Gateway 宿主机。
             # AgentOS 的部署与用户 AgentServer 可能共用下载密钥；此时 token
             # 仍可被 Gateway 验证，但 ``path`` 是用户容器内路径，必须先按 token
             # 携带的 bridge 地址代理给目标 AgentServer，不能在这里误判 404。
             file_path = str(payload.get("path") or "")
+            if payload.get("kind") == "verified_asset_v1":
+                verified_download_name = str(payload.get("name") or "")
             has_target_bridge = bool(
                 str(payload.get("download_http_base") or "").strip()
             )
@@ -1389,7 +1392,10 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
                     raw_inline = raw_inline[0] if raw_inline else ""
                 inline = str(raw_inline or "").strip().lower() in {"1", "true"}
                 _SpaStaticHandler._serve_verified_local_download(
-                    self, file_path, inline=inline
+                    self,
+                    file_path,
+                    inline=inline,
+                    download_name=verified_download_name,
                 )
                 return
 
@@ -1409,18 +1415,29 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
         # the same secret, but it must never fall back to the Gateway directory.
         if payload is not None and os.path.isfile(file_path):
             _SpaStaticHandler._serve_verified_local_download(
-                self, file_path, inline=inline
+                self,
+                file_path,
+                inline=inline,
+                download_name=verified_download_name,
             )
             return
 
         self.logger.warning("[file-api/download] 目标 AgentServer 不可达: token=%s...", token[:8])
         self._write_json(503, {"error": "agent_server_unavailable"})
 
-    def _serve_verified_local_download(self, file_path: str, *, inline: bool) -> None:
+    def _serve_verified_local_download(
+        self,
+        file_path: str,
+        *,
+        inline: bool,
+        download_name: str | None = None,
+    ) -> None:
         """Stream a token-verified legacy single-user file with Range support."""
         try:
             file_size = os.path.getsize(file_path)
-            file_name = os.path.basename(file_path)
+            file_name = os.path.basename(str(download_name or "").replace("\\", "/"))
+            if not file_name:
+                file_name = os.path.basename(file_path)
             mime_type = mimetypes.guess_type(file_name)[0] or "application/octet-stream"
             byte_range = None
             range_header = self.headers.get("Range")
