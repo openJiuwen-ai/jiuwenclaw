@@ -149,7 +149,7 @@ interface CronPanelProps {
    * 传 Session 对象（如"触发的会话"列表里已有完整数据）或直接传 session_id 字符串
    * （如立即执行返回的 session_id，还没有完整 Session 数据）。
    */
-  onSelectSession: (session: Session | string) => void;
+  onSelectSession: (session: Session) => void;
 }
 
 type TabKey = 'list' | 'template' | 'history';
@@ -464,7 +464,7 @@ export default function CronPanel({ sessionId, onCreateViaChat, onSelectSession 
 
   useEffect(() => {
     if (!success) return;
-    const timer = window.setTimeout(() => setSuccess(null), 2000);
+    const timer = window.setTimeout(() => { setSuccess(null); }, 2000);
     return () => window.clearTimeout(timer);
   }, [success]);
 
@@ -664,18 +664,18 @@ export default function CronPanel({ sessionId, onCreateViaChat, onSelectSession 
       });
       // proactive.tick 的"立即执行"不跳转：后端返回的 session_id 是 cron 执行会话
       // （cron_<ts>_<jobid>，空的），而推荐消息实际投递到 most_recent_active_session
-      // （用户当前会话）。跳过去看到的是空欢迎页，推荐却在原会话——跳转无意义且打断用户。
-      // 推荐消息会自然出现在用户当前会话里，无需主动跳转。
+      // （用户当前会话）。普通定时任务的跳转由 App.tsx onCronResultArrived 在 cron 广播到达时处理，
+      // 不在这里直接跳转——避免后端 session 尚未就绪时创建占位会话。
       const isProactiveJob = confirmState.job.id === PROACTIVE_AUTO_JOB_ID;
       if (result.session_id && !isProactiveJob) {
         useCronStore.getState().setLastRunSessionId(confirmState.job.id, result.session_id);
-        onSelectSession(result.session_id);
       }
       setSuccess(t('cron.success.runNow'));
-      // 刷新左侧栏该定时任务下展开的 session 列表（project.get_cron_sessions）
+      // 刷新左侧栏该定时任务下展开的 session 列表（project.get_cron_sessions）。
+      // 延迟 2 秒再刷新：后端刚触发立即执行，cron 会话可能尚未落盘，立即查拿不到。
       const { id: cronId, projectId } = confirmState.job;
       if (cronId && projectId) {
-        void loadCronSessions(projectId, cronId);
+        setTimeout(() => void loadCronSessions(projectId, cronId), 2000);
       }
     } catch (runNowError) {
       const message = runNowError instanceof Error ? runNowError.message : t('cron.errors.runNowFailed');
@@ -1050,7 +1050,7 @@ export default function CronPanel({ sessionId, onCreateViaChat, onSelectSession 
                             >
                               {t('cron.table.runNow')}
                             </span>
-                          ) : (
+                         ) : (
                             <button
                               onClick={() => setConfirmState({ type: 'runNow', job })}
                               data-testid="cron-job-run-now-btn"

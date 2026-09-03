@@ -2071,7 +2071,7 @@ export function SkillPanel({
               </div>
             </div>
 
-            <div data-testid="skill-panel-marketplace-list" data-variant={viewMode} className={`mt-4 flex-1 min-h-0 overflow-y-auto ${viewMode === "grid" && marketplaceSubTab === "builtin" ? "flex flex-wrap gap-4 content-start" : "space-y-3"}`}>
+            <div data-testid="skill-panel-marketplace-list" data-variant={viewMode} className={`mt-4 flex-1 min-h-0 overflow-y-auto ${viewMode === 'grid' ? 'card-grid-auto' : 'flex flex-col gap-2'}`}>
               {marketplaceSubTab === "builtin" && (
                 <>
                   {listState === "loading" && (

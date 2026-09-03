@@ -769,16 +769,13 @@ function AppContent() {
       handleModelsRefresh();
     },
     onCronResultArrived: (cronSessionId: string, cronJobId: string) => {
-      // 仅当用户当前停留在该任务的"立即执行"页面时才自动跳转：
-      // - 多个任务同时返回结果时，不会互相跳转覆盖
-      // - 用户已手动切走时不打扰
-      // - 定时调度（非"立即执行"）不自动跳转
-      // lastRunSessionId[jobId] 是点击"立即执行"时存入的会话 ID，
-      // sessionIdRef.current 是当前会话，两者一致说明用户还在等这个任务的结果。
+      // cron 广播到达，session 已被后端创建，走正常恢复流程加载完整内容（标题、历史消息）
       if (cronJobId) {
         const lastSid = useCronStore.getState().lastRunSessionId[cronJobId] ?? '';
-        if (lastSid && sessionIdRef.current === lastSid) {
+        if (lastSid) {
           void handleRestoreSession(cronSessionId);
+          // 清除 lastRunSessionId，避免定时调度也触发跳转
+          useCronStore.getState().setLastRunSessionId(cronJobId, '');
         }
       }
     },
@@ -2751,29 +2748,7 @@ function AppContent() {
               <CronPanel
                 sessionId={sessionId}
                 onCreateViaChat={(initialInputValue) => requestSessionNavigation('new', { initialInputValue })}
-                onSelectSession={(session) => {
-                  if (typeof session === 'string') {
-                    // 立即执行返回的 session_id 可能还未在后端创建（agent 刚开始执行），
-                    // 构造最小 Session 占位对象，让 upsertSessionMetadata 直接加入会话列表，
-                    // 避免 loadSessionMetadata 立即失败导致"对话不存在或已删除"。
-                    // 后续 cron 广播到达时会刷新会话列表补全完整元数据。
-                    // 跳过初始历史加载：session 是全新的，空响应的 replaceHistoryMessages
-                    // 会覆盖后续到达的广播消息。
-                    void handleRestoreSession(session, undefined, {
-                      session_id: session,
-                      title: '',
-                      project_id: '',
-                      project_dir: '',
-                      mode: 'agent',
-                      status: 'active',
-                      message_count: 0,
-                      created_at: new Date().toISOString(),
-                      updated_at: new Date().toISOString(),
-                    }, { skipHistoryLoad: true });
-                    return;
-                  }
-                  requestSessionNavigation(session);
-                }}
+                onSelectSession={(session) => requestSessionNavigation(session)}
               />
             </div>
           </div>

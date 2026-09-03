@@ -1480,7 +1480,7 @@
       "updated": "Task updated successfully",
       "deleted": "Task deleted successfully",
       "statusUpdated": "Task status updated successfully",
-      "runNow": "Task triggered successfully"
+      "runNow": "Task triggered, will redirect shortly"
     },
     "preview": {
       "loading": "Loading next runs...",
