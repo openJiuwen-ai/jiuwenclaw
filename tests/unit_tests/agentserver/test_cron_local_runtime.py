@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -8,10 +9,14 @@ from jiuwenclaw.agentserver.cron_local_runtime import (
     AgentCronRegistry,
     InProcessAgentServerClient,
     NopCronMessageHandler,
+    RelayCronMessageHandler,
     resolve_agent_side_cron_deps,
 )
-from jiuwenclaw.agentserver.tools.cron_tools import CronTools
+from jiuwenclaw.agentserver.tools.cron_tools import CronToolRoute, CronTools
 from jiuwenclaw.e2a.gateway_normalize import e2a_from_agent_fields
+from jiuwenclaw.gateway.cron.models import CronRunState
+from jiuwenclaw.gateway.cron.scheduler import CronSchedulerService
+from jiuwenclaw.gateway.cron.store import CronJobStore
 from jiuwenclaw.schema.agent import AgentResponse
 from jiuwenclaw.schema.message import ReqMethod
 
@@ -50,10 +55,129 @@ async def test_nop_message_handler_swallows_publish() -> None:
     await NopCronMessageHandler().publish_robot_messages(MagicMock(channel_id="web"))
 
 
-def test_resolve_deps_defaults_to_inprocess_and_nop() -> None:
+def test_resolve_deps_defaults_to_inprocess_and_relay_push() -> None:
     client, handler = resolve_agent_side_cron_deps()
     assert isinstance(client, InProcessAgentServerClient)
-    assert isinstance(handler, NopCronMessageHandler)
+    assert isinstance(handler, RelayCronMessageHandler)
+
+
+@pytest.mark.asyncio
+async def test_relay_message_handler_forwards_web_cron_result() -> None:
+    pushed: list[dict] = []
+
+    class _CapturePush:
+        async def send_push(self, payload: dict) -> None:
+            pushed.append(payload)
+
+    handler = RelayCronMessageHandler(gateway_push=_CapturePush())
+    await handler.publish_robot_messages(
+        SimpleNamespace(
+            channel_id="web",
+            metadata={
+                "officeclaw_cron_route": {
+                    "user_id": "user-1",
+                    "thread_id": "thread-1",
+                    "agent_id": "office",
+                }
+            },
+            payload={
+                "content": "任务完成",
+                "cron": {"job_id": "job-1", "run_id": "run-1", "is_placeholder": False},
+            },
+        )
+    )
+
+    assert pushed == [
+        {
+            "request_id": "cron-delivery:job-1:run-1:final",
+            "channel_id": "officeclaw",
+            "payload": {
+                "event_type": "chat.cron_delivery",
+                "content": "任务完成",
+                "cron": {"job_id": "job-1", "run_id": "run-1", "is_placeholder": False},
+            },
+            "metadata": {
+                "officeclaw_cron_route": {
+                    "user_id": "user-1",
+                    "thread_id": "thread-1",
+                    "agent_id": "office",
+                }
+            },
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_cron_tools_persists_officeclaw_delivery_route(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr("jiuwenclaw.utils.get_user_workspace_dir", lambda: tmp_path)
+
+    class _CapturePush:
+        async def send_push(self, _payload: dict) -> None:
+            return None
+
+    tools = CronTools(gateway_push=_CapturePush(), service_id="default", agent_id="office")
+    token = tools.push_cron_route(
+        CronToolRoute(
+            channel_id="officeclaw",
+            relay_user_id="user-1",
+            relay_thread_id="thread-1",
+            relay_agent_id="office",
+        )
+    )
+    try:
+        job = await tools.create_job(
+            {
+                "name": "daily",
+                "cron_expr": "0 9 * * *",
+                "timezone": "Asia/Shanghai",
+                "targets": "web",
+            }
+        )
+    finally:
+        tools.reset_cron_route(token)
+
+    assert job["relay_delivery"] == {
+        "user_id": "user-1",
+        "thread_id": "thread-1",
+        "agent_id": "office",
+    }
+
+
+@pytest.mark.asyncio
+async def test_scheduler_passes_persisted_relay_route_to_agentserver_handler(tmp_path) -> None:
+    store = CronJobStore(path=tmp_path / "cron_jobs.json")
+    job = await store.create_job(
+        job_id="job-1",
+        name="daily",
+        cron_expr="0 9 * * *",
+        timezone="Asia/Shanghai",
+        description="任务完成",
+        targets="web",
+        relay_delivery={"user_id": "user-1", "thread_id": "thread-1", "agent_id": "office"},
+    )
+    messages = []
+
+    class _CaptureHandler:
+        async def publish_robot_messages(self, message) -> None:
+            messages.append(message)
+
+    scheduler = CronSchedulerService(
+        store=store,
+        agent_client=MagicMock(),
+        message_handler=_CaptureHandler(),
+    )
+    await scheduler._push_to_targets(
+        job,
+        CronRunState(run_id="run-1", job_id="job-1", wake_at_iso="", push_at_iso=""),
+        text="任务完成",
+        is_placeholder=False,
+    )
+
+    assert messages[0].metadata["officeclaw_cron_route"] == {
+        "user_id": "user-1",
+        "thread_id": "thread-1",
+        "agent_id": "office",
+    }
 
 
 @pytest.mark.asyncio

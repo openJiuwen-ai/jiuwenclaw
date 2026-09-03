@@ -129,6 +129,26 @@ def _normalize_targets_str(raw: str) -> str:
     return normalize_target_channel_id(raw, default=CronTargetChannel.WEB.value)
 
 
+def normalize_relay_delivery(raw: Any) -> dict[str, str] | None:
+    """Validate the local Relay delivery route persisted with a web cron job."""
+    if not isinstance(raw, dict):
+        return None
+    out: dict[str, str] = {}
+    for wire_key, field_name in (
+        ("user_id", "user_id"),
+        ("thread_id", "thread_id"),
+        ("agent_id", "agent_id"),
+    ):
+        value = raw.get(wire_key)
+        if not isinstance(value, str):
+            return None
+        normalized = value.strip()
+        if not normalized or len(normalized) > 512:
+            return None
+        out[field_name] = normalized
+    return out
+
+
 @dataclass(frozen=True)
 class CronTarget:
     """Where to push cron results."""
@@ -180,6 +200,10 @@ class CronJob:
     delete_after_run: bool = False
     service_id: str = "default"
     agent_id: str = "default"
+    # Local Relay route for AgentServer-only web delivery. It is intentionally
+    # persisted beside the job because the scheduler runs after the request
+    # websocket has completed.
+    relay_delivery: dict[str, str] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         d: dict[str, Any] = {
@@ -205,6 +229,8 @@ class CronJob:
             d["mode"] = self.mode
         if self.delete_after_run:
             d["delete_after_run"] = bool(self.delete_after_run)
+        if self.relay_delivery:
+            d["relay_delivery"] = dict(self.relay_delivery)
         return d
 
     @staticmethod
@@ -279,6 +305,7 @@ class CronJob:
 
         job_service_id = str(data.get("service_id") or "default").strip() or "default"
         job_agent_id = str(data.get("agent_id") or "default").strip() or "default"
+        relay_delivery = normalize_relay_delivery(data.get("relay_delivery"))
 
         return CronJob(
             id=job_id,
@@ -298,6 +325,7 @@ class CronJob:
             delete_after_run=delete_after_run,
             service_id=job_service_id,
             agent_id=job_agent_id,
+            relay_delivery=relay_delivery,
         )
 
 

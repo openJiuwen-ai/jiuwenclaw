@@ -42,6 +42,9 @@ class CronToolRoute:
     chat_type: str | None = None  # "group" 表示群聊, "p2p" 或 None 表示私聊
     service_id: str = "default"
     agent_id: str = "default"
+    relay_user_id: str | None = None
+    relay_thread_id: str | None = None
+    relay_agent_id: str | None = None
 
 
 def resolve_cron_jobs_path(service_id: str, agent_id: str) -> Path:
@@ -264,6 +267,21 @@ class CronTools:
             return ""
         return request_id.rsplit(":", 1)[0].strip()
 
+    def _relay_delivery_from_route(self) -> dict[str, str] | None:
+        route = self._route()
+        if str(route.channel_id or "").strip().lower() != "officeclaw":
+            return None
+        user_id = str(route.relay_user_id or "").strip()
+        thread_id = str(route.relay_thread_id or "").strip()
+        agent_id = str(route.relay_agent_id or "").strip()
+        if not user_id or not thread_id or not agent_id:
+            return None
+        return {
+            "user_id": user_id,
+            "thread_id": thread_id,
+            "agent_id": agent_id,
+        }
+
     def _normalize_targets_param(self, raw: Any) -> str:
         target = str(raw or "").strip()
         if self._is_valid_target(target):
@@ -334,6 +352,11 @@ class CronTools:
         chat_type = self._route().chat_type
         if chat_type:
             session_kw["chat_type"] = chat_type
+        relay_delivery = (
+            self._relay_delivery_from_route()
+            if str(targets_str).strip() == CronTargetChannel.WEB.value
+            else None
+        )
         job = await self._local_store.create_job(
             job_id=str(normalized.get("id") or "").strip() or None,
             name=str(normalized.get("name") or "").strip(),
@@ -348,6 +371,7 @@ class CronTools:
             # ``route.service_id or self._service_id`` would never fall back.
             service_id=self._service_id,
             agent_id=self._agent_id,
+            relay_delivery=relay_delivery,
             **session_kw,
         )
         try:
@@ -375,6 +399,11 @@ class CronTools:
                     normalized_patch["session_id"] = sid.strip()
             else:
                 normalized_patch["session_id"] = None
+            normalized_patch["relay_delivery"] = (
+                self._relay_delivery_from_route()
+                if t == CronTargetChannel.WEB.value
+                else None
+            )
         chat_type = self._route().chat_type
         normalized_patch["chat_type"] = chat_type if chat_type else None
         job = await self._local_store.update_job(job_id, normalized_patch)
