@@ -3,6 +3,7 @@
  */
 import { useCallback, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { executeDesktopSave, type DesktopSaveApiResult } from '../../../utils/desktopSave';
 import type { RsiTaskGetResult, RsiReportGetResult } from '../types';
 import {
   actionsForStatus,
@@ -19,8 +20,17 @@ import {
   rsiTrainingResume,
   rsiTrainingStart,
   rsiTrainingTerminate,
+  rsiArtifactDownload,
   rsiArtifactDownloadUrl,
 } from '../rsiApi';
+
+type DownloadCapableWindow = Window & {
+  pywebview?: {
+    api?: {
+      download_file?: (url: string, filename: string) => DesktopSaveApiResult;
+    };
+  };
+};
 
 interface RsiDetailHeaderProps {
   task: RsiTaskGetResult;
@@ -57,7 +67,16 @@ export function RsiDetailHeader({ task, report, liveCost, createdAt, onOpenConfi
           patchTaskStatus(task.task_id, res.status);
         } else if (action === 'download') {
           const artifactId = report?.metrics.best_artifact_id ?? undefined;
-          window.open(rsiArtifactDownloadUrl(task.task_id, artifactId), '_blank');
+          const artifact = await rsiArtifactDownload(task.task_id, artifactId);
+          const downloadUrl = rsiArtifactDownloadUrl(artifact);
+          if (!downloadUrl) throw new Error('RSI 产物下载链接不可用');
+          const pywebviewApi = (window as DownloadCapableWindow).pywebview?.api;
+          if (pywebviewApi?.download_file) {
+            const outcome = await executeDesktopSave(() => pywebviewApi.download_file!(downloadUrl, artifact.filename));
+            if (outcome === 'failed') window.alert(t('artifacts.downloadFailed', { name: artifact.filename }));
+          } else {
+            window.open(downloadUrl, '_blank', 'noopener,noreferrer');
+          }
         } else if (action === 'install') {
           // 复用 harness.packages.*（§12）：安装插件由既有插件面板承接，
           // 这里触发跳转到插件管理，避免在 RSI 内重复实现安装流程。
@@ -69,7 +88,7 @@ export function RsiDetailHeader({ task, report, liveCost, createdAt, onOpenConfi
         setBusy(false);
       }
     },
-    [task.task_id, report, patchTaskStatus, onOpenConfig],
+    [task.task_id, report, patchTaskStatus, onOpenConfig, t],
   );
 
   const actions = actionsForStatus(task.status, task.scenario);

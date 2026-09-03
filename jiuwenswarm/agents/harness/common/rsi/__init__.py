@@ -21,11 +21,25 @@ from jiuwenswarm.agents.harness.common.rsi.errors import (
     RsiTaskStateConflict,
 )
 from jiuwenswarm.agents.harness.common.rsi.events import EngineEvent
+from jiuwenswarm.agents.harness.common.rsi.harness_adapter import (
+    HarnessEngineAdapter,
+    HarnessEngineRequest,
+    HarnessProviderContract,
+)
+from jiuwenswarm.agents.harness.common.rsi.mock_harness_provider import MockHarnessProvider
 from jiuwenswarm.agents.harness.common.rsi.models import RsiTask, RsiTaskView, TaskStatus
+from jiuwenswarm.agents.harness.common.rsi.provider_factory import (
+    build_mock_rsi_adapters,
+    build_rsi_adapters,
+)
 
 __all__ = [
     "EngineEvent",
     "ArtifactEngineAdapter",
+    "HarnessEngineAdapter",
+    "HarnessEngineRequest",
+    "HarnessProviderContract",
+    "MockHarnessProvider",
     "RsiArtifactNotFound",
     "RsiBadRequest",
     "RsiDatasetInvalid",
@@ -41,5 +55,7 @@ __all__ = [
     "RsiTaskStateConflict",
     "RsiTaskView",
     "TaskStatus",
+    "build_mock_rsi_adapters",
+    "build_rsi_adapters",
     "build_rsi_service_context",
 ]

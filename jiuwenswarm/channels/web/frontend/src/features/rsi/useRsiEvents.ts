@@ -4,8 +4,12 @@
 import { useEffect } from 'react';
 import { webClient } from '../../services/webClient';
 import { useRsiStore } from './rsiStore';
-import { RSI_EVENTS } from './rsiApi';
-import type { RsiTrainingStatusChangedPayload, RsiTrainingProgressPayload, RsiTrainingTreeDeltaPayload } from './types';
+import {
+  RSI_EVENTS,
+  normalizeRsiProgressPayload,
+  normalizeRsiStatusChangedPayload,
+  normalizeRsiTreeDeltaPayload,
+} from './rsiApi';
 
 /**
  * 订阅 RSI 三个推送事件。仅在 RSI 页面挂载期间生效，组件卸载自动解订。
@@ -17,14 +21,17 @@ export function useRsiEvents(enabled: boolean): void {
 
   useEffect(() => {
     if (!enabled) return;
-    const offStatus = webClient.on<RsiTrainingStatusChangedPayload>(RSI_EVENTS.statusChanged, ({ payload }) => {
-      if (payload?.task_id) applyStatusChanged(payload);
+    const offStatus = webClient.on(RSI_EVENTS.statusChanged, ({ payload }) => {
+      const normalized = normalizeRsiStatusChangedPayload(payload);
+      if (normalized) applyStatusChanged(normalized);
     });
-    const offProgress = webClient.on<RsiTrainingProgressPayload>(RSI_EVENTS.progress, ({ payload }) => {
-      if (payload?.task_id) applyProgress(payload);
+    const offProgress = webClient.on(RSI_EVENTS.progress, ({ payload }) => {
+      const normalized = normalizeRsiProgressPayload(payload);
+      if (normalized) applyProgress(normalized);
     });
-    const offTree = webClient.on<RsiTrainingTreeDeltaPayload>(RSI_EVENTS.treeDelta, ({ payload }) => {
-      if (payload?.task_id) applyTreeDelta(payload);
+    const offTree = webClient.on(RSI_EVENTS.treeDelta, ({ payload }) => {
+      const normalized = normalizeRsiTreeDeltaPayload(payload);
+      if (normalized) applyTreeDelta(normalized);
     });
     return () => {
       offStatus();

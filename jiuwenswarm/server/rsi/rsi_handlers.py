@@ -75,7 +75,14 @@ class RsiAgentServerHandlers:
         handler = getattr(self, f"_do_{handler_name}", None)
         if handler is None:
             return {"ok": False, "error": f"handler not implemented: {method}", "code": "INTERNAL_ERROR"}
-        params = request.params if isinstance(request.params, dict) else {}
+        raw_params = request.params if isinstance(request.params, dict) else {}
+        # Keep the AgentRequest transport session separate from the public
+        # method payload.  The task service stores this private marker so
+        # later Provider events can be sent to the originating WebSocket.
+        params = dict(raw_params)
+        request_session_id = str(getattr(request, "session_id", None) or "").strip()
+        if request_session_id:
+            params.setdefault("_rsi_session_id", request_session_id)
         try:
             payload = handler(params)
             return {"ok": True, "payload": payload}
@@ -199,15 +206,24 @@ class RsiAgentServerHandlers:
     def _push(self, event_type: str, payload: dict[str, Any]) -> None:
         """统一推送出口（复用 E2A server_push；零改动）。"""
         try:
-            result = self.send_push(
-                {
-                    "channel_id": self.default_channel_id,
-                    "payload": {
-                        "event_type": event_type,
-                        **payload,
-                    },
-                }
-            )
+            message: dict[str, Any] = {
+                "channel_id": self.default_channel_id,
+                "payload": {
+                    "event_type": event_type,
+                    **payload,
+                },
+            }
+            task_id = str(payload.get("task_id") or "").strip()
+            if task_id:
+                try:
+                    task = self.context.store.get(task_id)
+                    config = task.config if isinstance(task.config, dict) else {}
+                    session_id = str(config.get("rsi_session_id") or "").strip()
+                    if session_id:
+                        message["session_id"] = session_id
+                except Exception:  # noqa: BLE001 - a late push must not break worker
+                    pass
+            result = self.send_push(message)
             if not inspect.isawaitable(result):
                 return
             try:

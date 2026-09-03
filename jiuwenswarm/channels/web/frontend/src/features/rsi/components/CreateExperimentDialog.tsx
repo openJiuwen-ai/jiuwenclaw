@@ -6,7 +6,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import clsx from 'clsx';
 import { useTranslation } from 'react-i18next';
-import { rsiDatasetValidate, rsiTaskCreate, rsiTrainingStart } from '../rsiApi';
+import { rsiDatasetValidate, rsiTaskCreate, rsiTaskList, rsiTrainingStart } from '../rsiApi';
 import type { RsiScenario, RsiArtifactType, RsiTaskListItem } from '../types';
 import { selectLocalFiles } from '../../../features/workspace/localFilePicker';
 import { useSessionStore } from '../../../stores/sessionStore';
@@ -68,7 +68,11 @@ export function CreateExperimentDialog({ open, onClose, onCreated }: CreateExper
       return;
     }
     let cancelled = false;
-    void rsiDatasetValidate({ dataset_file: form.datasetFile })
+    void rsiDatasetValidate({
+      dataset_file: form.datasetFile,
+      scenario: form.scenario,
+      artifact_type: form.scenario === 'artifact' ? form.artifactType : undefined,
+    })
       .then((res) => {
         if (!cancelled) setDatasetValid({ valid: res.valid, count: res.sample_count });
       })
@@ -79,7 +83,7 @@ export function CreateExperimentDialog({ open, onClose, onCreated }: CreateExper
     return () => {
       cancelled = true;
     };
-  }, [form.datasetFile]);
+  }, [form.datasetFile, form.scenario, form.artifactType]);
 
   useEffect(() => {
     const dialog = dialogRef.current;
@@ -176,26 +180,38 @@ export function CreateExperimentDialog({ open, onClose, onCreated }: CreateExper
         ...(form.artifactPath ? { artifact_path: form.artifactPath } : {}),
       });
       // 创建成功后立即启动训练（created → running）
+      let startStatus = res.status;
       try {
-        await rsiTrainingStart(res.task_id);
+        startStatus = (await rsiTrainingStart(res.task_id)).status;
       } catch {
         /* 启动失败不阻断创建反馈 */
       }
 
-      const item: RsiTaskListItem = {
-        task_id: res.task_id,
-        name: form.name.trim(),
-        scenario: res.scenario,
-        artifact_type: res.artifact_type,
-        status: 'queued',
-        iter: { current: 0, total: form.maxIterations },
-        score: null,
-        best: null,
-        base: null,
-        gain: null,
-        running: false,
-        created_at: new Date().toISOString(),
-      };
+      // 让后端列表成为创建后的权威快照；若 worker 已经很快完成，也能直接显示终态。
+      let item: RsiTaskListItem | undefined;
+      try {
+        item = (await rsiTaskList()).find((candidate) => candidate.task_id === res.task_id);
+      } catch {
+        // The create/start response is still useful when the follow-up list
+        // snapshot is temporarily unavailable.
+      }
+      if (!item) {
+        const fallback: RsiTaskListItem = {
+          task_id: res.task_id,
+          name: form.name.trim(),
+          scenario: res.scenario,
+          artifact_type: res.artifact_type,
+          status: startStatus,
+          iter: { current: 0, total: form.maxIterations },
+          score: null,
+          best: null,
+          base: null,
+          gain: null,
+          running: startStatus === 'running',
+          created_at: new Date().toISOString(),
+        };
+        item = fallback;
+      }
       onCreated(item);
       onClose();
       setForm(defaultForm());

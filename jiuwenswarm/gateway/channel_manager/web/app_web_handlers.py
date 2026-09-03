@@ -7076,12 +7076,18 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             await channel.send_response(ws, req_id, ok=False, error="invalid req_method", code="INTERNAL_ERROR")
             return
 
+        request_params = dict(params if isinstance(params, dict) else {})
+        if str(req_method.value).startswith("rsi."):
+            request_params["session_id"] = session_id
+            if req_method is ReqMethod.RSI_ARTIFACT_DOWNLOAD and user_id:
+                request_params["_download_user_id"] = user_id
+
         await proxy_unary_request(
             channel=channel,
             agent_client=_resolve(agent_client),
             ws=ws,
             req_id=req_id,
-            params=params if isinstance(params, dict) else {},
+            params=request_params,
             session_id=session_id,
             user_id=user_id,
             req_method=req_method,

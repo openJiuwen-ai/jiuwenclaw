@@ -1041,6 +1041,9 @@ class AgentWebSocketServer:
         self._agent_manager = AgentManager()
         # RSI 服务域分发句柄（懒加载，见 _get_rsi_handlers）
         self._rsi_handlers = None
+        # Optional production Provider injection point.  The concrete class is
+        # supplied by the composition root once it is available.
+        self._rsi_harness_provider: Any = None
         self._heartbeat_runtime = HeartbeatRailRuntime(self)
         self._agent_manager.set_heartbeat_service(self._heartbeat_runtime)
         # Gateway user-business RPCs execute in the current AgentServer's
@@ -1097,6 +1100,13 @@ class AgentWebSocketServer:
     def set_proactive_engine(self, engine: Any) -> None:
         """Store the proactive engine instance for debug trigger interface."""
         self._proactive_engine = engine
+
+    def set_rsi_harness_provider(self, provider: Any) -> None:
+        """Install the production ``HarnessProvider`` at the RSI seam."""
+        self._rsi_harness_provider = provider
+        handlers = self._rsi_handlers
+        if handlers is not None:
+            handlers.context.register_harness_provider(provider)
 
     @staticmethod
     def _ws_capabilities_key(ws: Any) -> int:
@@ -10564,18 +10574,30 @@ class AgentWebSocketServer:
         from jiuwenswarm.server.rsi import RsiAgentServerHandlers
 
         context = build_rsi_service_context(None)
-        # Mock Providers are an explicit local/test seam.  Production must
-        # register the concrete program/paper Providers at this boundary.
-        if os.environ.get("RSI_USE_MOCK_PROVIDER", "").strip().lower() == "true":
-            from jiuwenswarm.agents.harness.common.rsi.mock_artifact_provider import (
-                build_mock_artifact_adapters,
+        # Provider selection is deliberately kept at this composition root.
+        # ``HarnessProvider`` will be injected here when the production
+        # implementation is ready; mock mode closes all three RSI execution
+        # paths without requiring model credentials.
+        provider_mode = os.environ.get("RSI_PROVIDER_MODE", "").strip().lower()
+        if not provider_mode:
+            provider_mode = (
+                "mock"
+                if os.environ.get("RSI_USE_MOCK_PROVIDER", "").strip().lower() == "true"
+                else "real"
             )
+        if provider_mode == "mock":
+            from jiuwenswarm.agents.harness.common.rsi.provider_factory import build_rsi_adapters
+
             context.register_adapters(
-                build_mock_artifact_adapters(
+                build_rsi_adapters(
                     context.tasks_root,
+                    mode="mock",
                     model_resolver=self._resolve_model,
                 )
             )
+        harness_provider = getattr(self, "_rsi_harness_provider", None)
+        if harness_provider is not None:
+            context.register_harness_provider(harness_provider)
         handlers = RsiAgentServerHandlers(
             context,
             send_push=self.send_push,

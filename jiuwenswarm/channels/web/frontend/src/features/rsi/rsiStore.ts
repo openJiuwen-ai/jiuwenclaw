@@ -29,6 +29,8 @@ interface RsiDetailState {
     baseline: number | null;
     usageCost: number | null;
   } | null;
+  // P3 可能先于首次 tree.get 到达；先缓存，避免丢掉实时节点。
+  pendingTreeNodes: RsiTrainingTreeDeltaPayload['nodes'];
 }
 
 interface RsiState {
@@ -71,6 +73,7 @@ function emptyDetail(): RsiDetailState {
     tree: null,
     selectedNodeId: null,
     liveProgress: null,
+    pendingTreeNodes: [],
   };
 }
 
@@ -107,12 +110,17 @@ export const useRsiStore = create<RsiState>((set, get) => ({
     set({ detailLoading: true });
     try {
       const [{ rsiTaskGet, rsiReportGet, rsiUsageGet, rsiTreeGet }] = await Promise.all([import('./rsiApi')]);
-      const [task, report, usage, tree] = await Promise.all([
+      const [taskResult, reportResult, usageResult, treeResult] = await Promise.allSettled([
         rsiTaskGet(taskId),
         rsiReportGet(taskId),
         rsiUsageGet(taskId),
         rsiTreeGet(taskId),
       ]);
+      if (taskResult.status === 'rejected') throw taskResult.reason;
+      const task = taskResult.value;
+      const report = reportResult.status === 'fulfilled' ? reportResult.value : null;
+      const usage = usageResult.status === 'fulfilled' ? usageResult.value : null;
+      const tree = treeResult.status === 'fulfilled' ? treeResult.value : null;
       set((state) => ({
         detail: {
           ...state.detail,
@@ -121,7 +129,8 @@ export const useRsiStore = create<RsiState>((set, get) => ({
             task,
             report,
             usage,
-            tree,
+            tree: tree ? mergeTree(tree, state.detail[taskId]?.pendingTreeNodes ?? []) : null,
+            pendingTreeNodes: tree ? [] : state.detail[taskId]?.pendingTreeNodes ?? [],
           },
         },
         detailLoading: false,
@@ -219,17 +228,19 @@ export const useRsiStore = create<RsiState>((set, get) => ({
     const tid = payload.task_id;
     set((state) => {
       const cur = state.detail[tid] ?? emptyDetail();
-      if (!cur.tree) return state;
-      // 增量节点与全量节点按 node_id 去重合并（同源投影，覆盖更新）
-      const map = new Map(cur.tree.nodes.map((n) => [n.node_id, n]));
-      for (const delta of payload.nodes) {
-        map.set(delta.node_id, { ...map.get(delta.node_id), ...delta } as never);
+      if (!cur.tree) {
+        const map = new Map(cur.pendingTreeNodes.map((node) => [node.node_id, node]));
+        for (const node of payload.nodes) map.set(node.node_id, node);
+        return {
+          detail: {
+            ...state.detail,
+            [tid]: { ...cur, pendingTreeNodes: [...map.values()] },
+          },
+        };
       }
-      const nodes = [...map.values()];
-      const depth = nodes.reduce((m, n) => Math.max(m, n.iteration), cur.tree.depth);
-      const tree: RsiTreeGetResult = { nodes, depth, iteration: depth };
+      const tree = mergeTree(cur.tree, payload.nodes);
       return {
-        detail: { ...state.detail, [tid]: { ...cur, tree } },
+        detail: { ...state.detail, [tid]: { ...cur, tree, pendingTreeNodes: [] } },
       };
     });
   },
@@ -245,3 +256,18 @@ export const useRsiStore = create<RsiState>((set, get) => ({
     });
   },
 }));
+
+function mergeTree(base: RsiTreeGetResult, deltas: RsiTrainingTreeDeltaPayload['nodes']): RsiTreeGetResult {
+  if (deltas.length === 0) return base;
+  // 增量节点与全量节点按 node_id 去重合并（同源投影，覆盖更新）。
+  const map = new Map(base.nodes.map((node) => [node.node_id, node]));
+  for (const delta of deltas) {
+    map.set(delta.node_id, { ...map.get(delta.node_id), ...delta });
+  }
+  const nodes = [...map.values()].sort((left, right) => left.iteration - right.iteration);
+  return {
+    nodes,
+    depth: nodes.reduce((max, node) => Math.max(max, node.iteration), base.depth),
+    iteration: Math.max(base.iteration, ...nodes.map((node) => node.iteration)),
+  };
+}
