@@ -323,6 +323,7 @@ function AppContent({
   const [securityAlertContent, setSecurityAlertContent] = useState('');
   const [externalCliInstallDialogOpen, setExternalCliInstallDialogOpen] = useState(false);
   const [externalCliInstallStatuses, setExternalCliInstallStatuses] = useState<ExternalCliInstallStatuses>({});
+  const [hasVisitedAgents, setHasVisitedAgents] = useState(false);
   const [hasVisitedSkills, setHasVisitedSkills] = useState(false);
   const [requestedSettingsModuleId, setRequestedSettingsModuleId] =
     useState<SettingsModuleTarget | null>(null);
@@ -2848,6 +2849,7 @@ function AppContent({
         setRequestedSettingsModuleId('models');
         setModelSetupGuideStep(2);
       }
+      if (nav === 'agents') setHasVisitedAgents(true);
       if (nav === 'skills') setHasVisitedSkills(true);
     },
     [activeNav, isMobile, modelSetupGuideStep, setSingleAgentPanelExpanded, setTeamAreaExpanded, setToolPanelHidden, t],
@@ -3189,15 +3191,17 @@ const showWorkspaceDivider = effectiveTeamAreaExpanded && !showConversationNotFo
             </div>
           </>
         )}
-        {activeNav === 'agents' && (
-          <AgentManagementPanel
-            onUseAgent={handleUseAgent}
-            onUsePrompt={handleUseAgentPrompt}
-            onCreateViaChat={() => requestSessionNavigation('new', {
-              initialInputValue: t('agentManagement.actions.createViaChatPrompt'),
-              initialSelectedSkills: ['agent-creator'],
-            })}
-          />
+        {hasVisitedAgents && (
+          <div className={`app-section min-h-0 ${activeNav === 'agents' ? '' : 'is-hidden'}`}>
+            <AgentManagementPanel
+              onUseAgent={handleUseAgent}
+              onUsePrompt={handleUseAgentPrompt}
+              onCreateViaChat={() => requestSessionNavigation('new', {
+                initialInputValue: t('agentManagement.actions.createViaChatPrompt'),
+                initialSelectedSkills: ['agent-creator'],
+              })}
+            />
+          </div>
         )}
         {activeNav === 'sessions' && (
           <div className="app-section">

@@ -427,7 +427,7 @@ export function MarketplacePage({
   }
 
   return (
-    <div ref={scrollRef} className="relative flex min-h-0 flex-1 flex-col overflow-y-auto" data-testid="connector-market-marketplace">
+    <div className="relative flex min-h-0 flex-1 flex-col overflow-hidden" data-testid="connector-market-marketplace">
       <PageHeader title={t('connectorMarket.title')} subtitle={t('connectorMarket.subtitle')} />
 
       <div className="page-toolbar" data-testid="page-toolbar">
@@ -547,7 +547,7 @@ export function MarketplacePage({
         </div>
       )}
 
-      <div className="card-grid-auto" data-testid="connector-market-card-list">
+      <div ref={scrollRef} className="card-grid-auto min-h-0 overflow-y-auto" data-testid="connector-market-card-list">
         {topTab === 'my' ? (
           myKind === 'mcp' ? (
             paginatedConnectors.map((connector) => {

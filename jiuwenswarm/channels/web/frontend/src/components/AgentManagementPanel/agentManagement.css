@@ -1,4 +1,4 @@
-[data-testid="agent-management-panel"] {
+.page-content[data-testid="agent-management-panel"] {
   --agent-content-max: 1400px;
   --agent-page-gutter: 32px;
   --agent-radius-chip: 4px;
@@ -8,9 +8,15 @@
   --agent-opacity-visible: 1;
   min-width: 0;
   flex: 1 1 auto;
-  overflow: auto;
+  overflow-x: hidden;
+  overflow-y: auto;
   background: var(--color-surface-content);
   color: var(--color-text-primary);
+}
+
+.page-content[data-testid="agent-management-panel"][data-variant="catalog"],
+.page-content[data-testid="agent-management-panel"][data-variant="mine"] {
+  overflow-y: hidden;
 }
 
 [data-testid="agent-management-panel"][data-variant="create"] .agent-management-editor,
@@ -586,20 +592,6 @@
 .agent-management-pagination__buttons button:disabled {
   cursor: not-allowed;
   opacity: var(--agent-opacity-disabled);
-}
-
-.agent-management-card--skeleton {
-  background: var(--color-action-secondary);
-  animation: agent-management-pulse 1.2s ease-in-out infinite alternate;
-}
-
-@keyframes agent-management-pulse {
-  from {
-    opacity: var(--agent-opacity-muted);
-  }
-  to {
-    opacity: var(--agent-opacity-visible);
-  }
 }
 
 .agent-management-detail,

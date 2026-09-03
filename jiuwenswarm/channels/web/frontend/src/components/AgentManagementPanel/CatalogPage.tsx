@@ -29,10 +29,6 @@ type CatalogPageProps = {
   onCreate: () => void;
 };
 
-function SkeletonCard() {
-  return <div className="agent-management-card agent-management-card--skeleton" aria-hidden="true" />;
-}
-
 type CategoryRowProps = {
   category: string;
   onChange: (value: string) => void;
@@ -156,63 +152,59 @@ export function CatalogPage({
         </div>
       ) : null}
 
-      {status === 'loading' ? (
-        <div className="card-grid-auto" style={{ paddingTop: '16px' }} aria-label={t('common.loading')}>
-          {Array.from({ length: PAGE_SIZE }, (_, index) => (
-            <SkeletonCard key={index} />
-          ))}
-        </div>
-      ) : status === 'error' ? (
-        <div className="agent-management-state agent-management-state--error" role="alert">
-          <p>{error || t('agentManagement.states.loadError')}</p>
-          <button type="button" className="agent-management-button agent-management-button--secondary" onClick={onRetry}>
-            {t('common.retry')}
-          </button>
-        </div>
-      ) : isEmpty ? (
-        <div className="agent-management-state">
-          <p>{hasQuery ? t('agentManagement.states.noMatch') : t(isMine ? 'agentManagement.states.mineEmpty' : 'agentManagement.states.catalogEmpty')}</p>
-          {isMine && !hasQuery ? (
-            <button type="button" className="agent-management-button agent-management-button--primary" onClick={onCreate}>
-              {t('agentManagement.actions.createFirst')}
+      <div className="min-h-0 flex-1 overflow-y-auto" data-testid="agent-management-catalog-content">
+        {status === 'loading' && totalItems === 0 ? null : status === 'error' ? (
+          <div className="agent-management-state agent-management-state--error" role="alert">
+            <p>{error || t('agentManagement.states.loadError')}</p>
+            <button type="button" className="agent-management-button agent-management-button--secondary" onClick={onRetry}>
+              {t('common.retry')}
             </button>
-          ) : null}
-        </div>
-      ) : (
-        <>
-          <div className="card-grid-auto" style={{ paddingTop: '16px' }}>
-            {items.map(item => (
-              <DefinitionCard
-                key={item.id}
-                item={item}
-                scope={scope}
-                busy={busyId === item.id}
-                onOpen={onOpen}
-                onUse={onUse}
-                onReconnect={onReconnect}
-                onInstall={onInstall}
-                onUninstall={onUninstall}
-              />
-            ))}
           </div>
-          {totalPages > 1 ? (
-            <div className="agent-management-pagination" aria-label={t('agentManagement.pagination.label')}>
-              <span>
-                {t('agentManagement.pagination.range', { start: (page - 1) * PAGE_SIZE + 1, end: Math.min(page * PAGE_SIZE, totalItems), total: totalItems })}
-              </span>
-              <div className="agent-management-pagination__buttons">
-                <button type="button" disabled={page <= 1} onClick={() => onPageChange(page - 1)} aria-label={t('agentManagement.pagination.previous')}>
-                  <ChevronLeft size={16} aria-hidden="true" />
-                </button>
-                <span>{t('agentManagement.pagination.page', { page, total: totalPages })}</span>
-                <button type="button" disabled={page >= totalPages} onClick={() => onPageChange(page + 1)} aria-label={t('agentManagement.pagination.next')}>
-                  <ChevronRight size={16} aria-hidden="true" />
-                </button>
-              </div>
+        ) : isEmpty ? (
+          <div className="agent-management-state">
+            <p>{hasQuery ? t('agentManagement.states.noMatch') : t(isMine ? 'agentManagement.states.mineEmpty' : 'agentManagement.states.catalogEmpty')}</p>
+            {isMine && !hasQuery ? (
+              <button type="button" className="agent-management-button agent-management-button--primary" onClick={onCreate}>
+                {t('agentManagement.actions.createFirst')}
+              </button>
+            ) : null}
+          </div>
+        ) : (
+          <>
+            <div className="card-grid-auto" style={{ paddingTop: '16px' }}>
+              {items.map(item => (
+                <DefinitionCard
+                  key={item.id}
+                  item={item}
+                  scope={scope}
+                  busy={busyId === item.id}
+                  onOpen={onOpen}
+                  onUse={onUse}
+                  onReconnect={onReconnect}
+                  onInstall={onInstall}
+                  onUninstall={onUninstall}
+                />
+              ))}
             </div>
-          ) : null}
-        </>
-      )}
+            {totalPages > 1 ? (
+              <div className="agent-management-pagination" aria-label={t('agentManagement.pagination.label')}>
+                <span>
+                  {t('agentManagement.pagination.range', { start: (page - 1) * PAGE_SIZE + 1, end: Math.min(page * PAGE_SIZE, totalItems), total: totalItems })}
+                </span>
+                <div className="agent-management-pagination__buttons">
+                  <button type="button" disabled={page <= 1} onClick={() => onPageChange(page - 1)} aria-label={t('agentManagement.pagination.previous')}>
+                    <ChevronLeft size={16} aria-hidden="true" />
+                  </button>
+                  <span>{t('agentManagement.pagination.page', { page, total: totalPages })}</span>
+                  <button type="button" disabled={page >= totalPages} onClick={() => onPageChange(page + 1)} aria-label={t('agentManagement.pagination.next')}>
+                    <ChevronRight size={16} aria-hidden="true" />
+                  </button>
+                </div>
+              </div>
+            ) : null}
+          </>
+        )}
+      </div>
     </>
   );
 }

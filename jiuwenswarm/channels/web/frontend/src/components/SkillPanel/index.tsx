@@ -781,9 +781,10 @@ export function SkillPanel({
     setHubLoading(true);
     try {
       // 后端 PR#5336: skills.swarmskillshub.recommend → POST /api/v1/recommend
-      // 支持 category_id、plugin_type、top_k 参数
+      // 支持 category_id、plugin_type、top_k、market_url 参数
       const params = withSession({
         top_k: 50,
+        market_url: 'http://119.8.233.112:8080',
         ...(category !== 'all' ? { category_id: category } : {}),
       });
       const data = await webRequest<{
@@ -2911,7 +2912,7 @@ export function SkillPanel({
                   </div>
                 ) : null}
                 {listState !== "success" || mySkillsFiltered.length > 0 ? (
-                <div className="card-grid-auto" style={{ paddingTop: '16px' }}>
+                <div className="card-grid-auto flex-1 min-h-0 overflow-y-auto" style={{ paddingTop: '16px' }}>
                     {listState === "loading" && (
                       <div className="col-span-3 flex items-center justify-center h-full text-text-muted">{t('common.loading')}</div>
                     )}
