@@ -270,7 +270,7 @@ async def test_runtime_env_section_includes_message_rules_subsections():
     # per-mode prompt builders (code/design) into the shared Runtime
     # Environment ``env`` section so all three modes (office/code/design)
     # receive the same output-efficiency guidance.
-    assert "# Text output (does not apply to tool calls)" in prompt
+    assert "## Text output (does not apply to tool calls)" in prompt
     assert "Go straight to the point." in prompt
 
 

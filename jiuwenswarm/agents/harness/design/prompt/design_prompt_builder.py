@@ -16,7 +16,7 @@ from enum import IntEnum
 
 from openjiuwen.harness.prompts import PromptSection, SystemPromptBuilder
 
-from jiuwenswarm.agents.harness.common.prompt import safety_override  # noqa: F401  — patches openjiuwen SAFETY_PROMPT
+from jiuwenswarm.agents.harness.common.prompt import safety_override
 from jiuwenswarm.agents.harness.common.prompt import skills_goal_override  # noqa: F401  — patches openjiuwen Skills + Goal sections
 from jiuwenswarm.agents.harness.common.prompt.prompt_builder import (
     build_shared_content_policy_section,
@@ -29,8 +29,9 @@ from jiuwenswarm.agents.harness.common.prompt.prompt_builder import (
 
 
 class DesignPromptPriority(IntEnum):
-    INTRO = 13
-    SYSTEM = 14
+    SAFETY = 13
+    INTRO = 14
+    SYSTEM = 15
     CORE_CAPABILITIES = 19
     TONE_AND_STYLE = 45
 
@@ -55,6 +56,18 @@ def _design_intro_prompt() -> PromptSection:
         name="design_intro",
         content={"en": content},
         priority=DesignPromptPriority.INTRO,
+    )
+
+
+# ─── Safety ────────────────────────────────────────
+
+
+def _design_safety_prompt() -> PromptSection:
+    content = safety_override.SAFETY_PROMPT_EN
+    return PromptSection(
+        name="safety",
+        content={"en": content},
+        priority=DesignPromptPriority.SAFETY,
     )
 
 
@@ -179,6 +192,7 @@ _DESIGN_SECTION_GENERATORS = [
     build_shared_identity_section,
     build_shared_content_policy_section,
     build_shared_regional_conventions_section,
+    _design_safety_prompt,
     _design_intro_prompt,
     _design_core_capabilities_prompt,
     _design_system_prompt,

@@ -34,7 +34,7 @@ from jiuwenswarm.agents.harness.common.prompt.prompt_builder import _runtime_env
 # Runtime Environment (``env``) section so all modes receive the same
 # output-efficiency guidance. Relocated from the per-mode prompt builders
 # (code_prompt_builder / design_prompt_builder) to keep the wording in sync.
-_TEXT_OUTPUT = """# Text output (does not apply to tool calls)
+_TEXT_OUTPUT = """## Text output (does not apply to tool calls)
 
 Assume users can't see most tool calls or thinking — only your text output.
 Before your first tool call, state in one sentence what you're about to do.

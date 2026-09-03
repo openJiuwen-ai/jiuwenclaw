@@ -10,7 +10,7 @@ from typing import Optional
 from openjiuwen.harness.prompts import PromptSection, SystemPromptBuilder, resolve_language
 
 from jiuwenswarm.common.utils import logger
-from jiuwenswarm.agents.harness.common.prompt import safety_override  # noqa: F401  — patches openjiuwen SAFETY_PROMPT
+from jiuwenswarm.agents.harness.common.prompt import safety_override
 from jiuwenswarm.agents.harness.common.prompt import skills_goal_override  # noqa: F401  — patches openjiuwen Skills + Goal sections
 
 
@@ -20,7 +20,8 @@ class PromptPriority(IntEnum):
     IDENTITY = 10
     CONTENT_POLICY = 11
     REGIONAL_CONVENTIONS = 12
-    TASK_EXECUTION = 13
+    SAFETY = 13
+    TASK_EXECUTION = 14
     SKILLS = 40
     MEMORY = 55
     INPUT = 60
@@ -64,6 +65,15 @@ def build_shared_content_policy_section() -> PromptSection:
         name="content_policy",
         content={"en": content},
         priority=PromptPriority.CONTENT_POLICY,
+    )
+
+
+def _safety_prompt() -> PromptSection:
+    content = safety_override.SAFETY_PROMPT_EN
+    return PromptSection(
+        name="safety",
+        content={"en": content},
+        priority=PromptPriority.SAFETY,
     )
 
 
@@ -205,6 +215,7 @@ def build_agent_identity_prompt(language: str) -> str:
     builder.add_section(_identity_prompt())
     builder.add_section(_content_policy_prompt())
     builder.add_section(_regional_conventions_prompt())
+    builder.add_section(_safety_prompt())
     builder.add_section(_task_execution_prompt())
     return builder.build()
 
@@ -231,6 +242,7 @@ __all__ = [
     "PromptPriority",
     "_identity_prompt",
     "_content_policy_prompt",
+    "_safety_prompt",
     "_regional_conventions_prompt",
     "_task_execution_prompt",
     "_runtime_env_message_rules_text",

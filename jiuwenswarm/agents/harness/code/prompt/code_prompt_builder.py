@@ -15,7 +15,7 @@ from enum import IntEnum
 
 from openjiuwen.harness.prompts import PromptSection, SystemPromptBuilder
 
-from jiuwenswarm.agents.harness.common.prompt import safety_override  # noqa: F401  — patches openjiuwen SAFETY_PROMPT
+from jiuwenswarm.agents.harness.common.prompt import safety_override
 from jiuwenswarm.agents.harness.common.prompt import skills_goal_override  # noqa: F401  — patches openjiuwen Skills + Goal sections
 from jiuwenswarm.agents.harness.common.prompt.prompt_builder import (
     build_shared_content_policy_section,
@@ -28,7 +28,8 @@ from jiuwenswarm.agents.harness.common.prompt.prompt_builder import (
 
 
 class CodePromptPriority(IntEnum):
-    INTRO = 13
+    SAFETY = 13
+    INTRO = 14
     SYSTEM = 15
     DOING_TASKS = 25
     USING_YOUR_TOOLS = 31
@@ -63,6 +64,18 @@ def _code_intro_prompt() -> PromptSection:
         name="code_intro",
         content={"en": content},
         priority=CodePromptPriority.INTRO,
+    )
+
+
+# ─── Safety ────────────────────────────────────────
+
+
+def _code_safety_prompt() -> PromptSection:
+    content = safety_override.SAFETY_PROMPT_EN
+    return PromptSection(
+        name="safety",
+        content={"en": content},
+        priority=CodePromptPriority.SAFETY,
     )
 
 
@@ -542,6 +555,7 @@ _CODE_SECTION_GENERATORS = [
     build_shared_identity_section,
     build_shared_content_policy_section,
     build_shared_regional_conventions_section,
+    _code_safety_prompt,
     _code_intro_prompt,
     _code_system_prompt,
     _code_session_guidance_prompt,
