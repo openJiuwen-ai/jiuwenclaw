@@ -141,7 +141,7 @@ deploy_gateway() {
     exec_cmd kubectl apply -f "${env_yaml_file}"
     exec_cmd kubectl apply -f "${conf_yaml_file}"
 
-    if [[ "${mount_type}" == "pvc" && "${is_external_pvc}" == "false" ]]; then
+    if [[ "${mount_type}" == "pvc" && "${is_external_pvc}" == "false" && -f "${pvc_file}" ]]; then
         exec_cmd kubectl apply -f "${pvc_file}"
     fi
 

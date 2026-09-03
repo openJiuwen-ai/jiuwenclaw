@@ -105,34 +105,9 @@ render_patch_file() {
     success "AgentServer configuration rendered"
 }
 
-# agentserver-env ConfigMap：主容器 envFrom 必引用（含 AGENT_HTTP_*），与 APPLY_PATCH 无关。
-# APPLY_PATCH 只控制是否把 agentserver.json / 模型模板 curl 下发给 runtime。
-install_agentserver_env_configmap() {
-    if [[ "${DEPLOY_VARS["RENDER_ONLY"]}" == "true" ]]; then
-        return
-    fi
 
-    local yaml_file="${CONFIG["AS_ENV_YAML_FILE"]}"
-    if [[ ! -f "${yaml_file}" ]]; then
-        error "AgentServer env ConfigMap YAML missing (run render first): ${yaml_file}"
-    fi
-    info "Applying AgentServer env ConfigMap: ${DEPLOY_VARS["AGENT_SERVER_ENV_CM_NAME"]}"
-    exec_cmd kubectl apply -f "${yaml_file}"
-}
 
 install_agentserver_patch() {
-    if [[ "${DEPLOY_VARS["RENDER_ONLY"]}" == "true" ]]; then
-        return
-    fi
-
-    ensure_secret_configmap
-    install_agentserver_env_configmap
-
-    if [[ "${DEPLOY_VARS["APPLY_PATCH"]}" == "false" ]]; then
-        info "APPLY_PATCH=false: skip pushing AgentServer config_sync template"
-        return
-    fi
-
     local runtime_port="${DEPLOY_VARS["AGENT_RUNTIME_NODE_PORT"]}"
     local host="${DEPLOY_VARS["CURRENT_NODE_IP"]:-127.0.0.1}"
     local json_file="${CONFIG["AS_JSON_FILE"]}"
@@ -146,10 +121,6 @@ install_agentserver_patch() {
 }
 
 install_model_patch() {
-    if [[ "${DEPLOY_VARS["RENDER_ONLY"]}" == "true" || "${DEPLOY_VARS["APPLY_PATCH"]}" == "false" ]]; then
-        return
-    fi
-
     local gw_node_port="${DEPLOY_VARS["GATEWAY_CONFIG_HTTP_NODE_PORT"]:-}"
     local host="${DEPLOY_VARS["CURRENT_NODE_IP"]:-127.0.0.1}"
     local bot_id="${MODEL_BOT_ID:-default}"
@@ -195,6 +166,10 @@ install_model_patch() {
 
 install_patch()
 {
+    if [[ "${DEPLOY_VARS["RENDER_ONLY"]}" == "true" || "${DEPLOY_VARS["APPLY_PATCH"]}" == "false" ]]; then
+        return
+    fi
+
     install_agentserver_patch
     install_model_patch
 }

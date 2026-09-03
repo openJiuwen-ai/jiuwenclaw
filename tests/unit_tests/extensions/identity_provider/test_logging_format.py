@@ -48,3 +48,49 @@ def test_text_output_null_identity():
     IdentityFieldFilter().filter(r)
     out = fmt.format(r)
     assert "user_id=null" in out and "domain_id=null" in out and "app_id=null" in out
+
+
+def test_identity_built_before_sensitive_filter(monkeypatch):
+    """IdentityFieldFilter 先拼 identity，SensitiveDataFilter 再脱敏 msg + identity。"""
+    from jiuwenswarm.common.utils import SensitiveDataFilter
+    from jiuwenswarm.infrastructure.log_masking.engine import LogMaskingEngine
+
+    IdentityStore.set_test_state(None)
+    LogMaskingEngine.reset_for_tests()
+    LogMaskingEngine.reload_from_rows(
+        [
+            {
+                "id": 6,
+                "rule_id": "custom_app",
+                "rule_name": "app_id=",
+                "pattern": "app_id=",
+                "replacement": "app_id=test",
+                "priority": 0,
+                "enabled": True,
+            },
+        ],
+        db_authoritative=True,
+    )
+    monkeypatch.setattr("jiuwenswarm.common.utils.is_enterprise", lambda: True)
+
+    r = logging.LogRecord("t", logging.INFO, "", 0, "hello app_id=foo", (), None)
+    IdentityFieldFilter().filter(r)
+    assert "app_id=null" in r.identity
+
+    SensitiveDataFilter().filter(r)
+
+    assert "app_id=testnull" in r.identity
+    assert "app_id=testfoo" in r.getMessage()
+
+    fmt = IdentityTextFormatter(fmt="%(identity)s%(message)s")
+    out = fmt.format(r)
+    assert "app_id=testnull" in out
+    assert "app_id=testfoo" in out
+    LogMaskingEngine.reset_for_tests()
+
+
+def test_identity_field_filter_sets_identity_attr():
+    IdentityStore.set_test_state(IdentityInfo(user_id="u1", domain_id="d1", app_id="a1"))
+    r = logging.LogRecord("t", logging.INFO, "", 0, "msg", (), None)
+    IdentityFieldFilter().filter(r)
+    assert r.identity == " user_id=u1 domain_id=d1 app_id=a1 "

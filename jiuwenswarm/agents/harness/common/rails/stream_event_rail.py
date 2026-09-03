@@ -1513,9 +1513,14 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
     ) -> None:
         """Emit chat.ask_user_question for SkillTurbo nested ask_user HITL.
 
-        Questions come from the inner ask_user tool_call; request_id is the
-        outer skill_acceleration_exec tool_call.id so OfficeClaw resume keeps
-        matching harness interrupt keys (e.g. call_c2967...).
+        request_id is the inner ask_user tool_call.id (unique per ask_user),
+        NOT the outer skill_acceleration_exec id. This ensures sequential
+        ask_user cards within the same skill_acceleration_exec have distinct
+        request_ids, so the frontend shows each as a separate card.
+
+        SkillTurbo resume (_resume_user_input_from_raw) extracts the user's
+        answer via ``next(iter(user_inputs.values()))`` — it ignores the key,
+        so using the inner ask_user id does not break resume.
         """
         inner_tc = getattr(skill_turbo_tic, "tool_call", None)
         payload = _ask_user_question_payload_from_interrupt(
@@ -1527,19 +1532,14 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
                 "[StreamEventRail] SkillTurbo HITL ask_user payload unavailable"
             )
             return
-        # OfficeClaw resume matches harness interrupt keys on the outer
-        # skill_acceleration_exec id. Emitting with the nested ask_user id is
-        # worse than skipping: the UI would show a question that cannot resume.
-        harness_id = str(getattr(outer_tool_call, "id", "") or "").strip()
-        if not harness_id:
+        inner_request_id = str(payload.get("request_id") or "").strip()
+        if not inner_request_id:
             logger.warning(
                 "[StreamEventRail] SkillTurbo HITL ask_user skipped: "
-                "outer skill_acceleration_exec tool_call.id unavailable "
-                "(would mismatch harness interrupt key); inner_request_id=%s",
-                payload.get("request_id"),
+                "inner ask_user request_id unavailable; harness_id=%s",
+                getattr(outer_tool_call, "id", ""),
             )
             return
-        payload["request_id"] = harness_id
         try:
             await session.write_stream(
                 OutputSchema(
@@ -1550,8 +1550,9 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
             )
             logger.info(
                 "[StreamEventRail] SkillTurbo HITL emitted chat.ask_user_question "
-                "request_id=%s",
-                payload.get("request_id"),
+                "request_id=%s harness_id=%s",
+                inner_request_id,
+                getattr(outer_tool_call, "id", ""),
             )
         except Exception:
             logger.debug(

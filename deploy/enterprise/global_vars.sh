@@ -37,6 +37,8 @@ declare -A CONFIG=(
 
     ["JINA_TEMPLATE_FILE"]="${TEMPLATE_DIR}/jina.template.yaml"
     ["JINA_FILE"]="${CONFIG_DIR}/jina.yaml"
+    ["PROXY_TEMPLATE_FILE"]="${TEMPLATE_DIR}/proxy.template.yaml"
+    ["PROXY_FILE"]="${CONFIG_DIR}/proxy.yaml"
 
     ["SECRET_CM_TEMPLATE_FILE"]="${TEMPLATE_DIR}/configmap-secret.template.yaml"
     ["SECRET_CM_FILE"]="${CONFIG_DIR}/configmap-secret.yaml"
@@ -93,7 +95,7 @@ declare -A ARGS=(
 
 
 # ==== All available modules ====
-declare -ga ALL_MODULES=("NFS" "NFS-SC" "RABBITMQ" "MYSQL" "POSTGRESQL" "MINIO" "LOG" "JINA" "GATEWAY" "WEB" "MANAGER" "RUNTIME")
+declare -ga ALL_MODULES=("NFS" "NFS-SC" "RABBITMQ" "MYSQL" "POSTGRESQL" "MINIO" "LOG" "JINA" "PROXY" "GATEWAY" "WEB" "MANAGER" "RUNTIME")
 
 declare -ga MODULES=()
 
@@ -159,6 +161,10 @@ declare -A DEPLOY_VARS=(
     ["JINA_READER_IMAGE"]="ghcr.1ms.run/jina-ai/reader:latest"
     ["JINA_READER_ENDPOINT"]="https://r.jinaai.cn"
     ["JINA_READER_NUM"]="2"
+    ["PROXY_NAME"]="proxy"
+    ["PROXY_IMAGE"]="nginx:alpine"
+    ["PROXY_PORT"]="18080"
+    ["PROXY_UPSTREAM"]=""
     ["FLUENT_BIT_IMAGE"]="fluent/fluent-bit:3.0.0"
     ["MANAGER_REST_PORT"]="8765"
     ["MANAGER_SERVER_NAME"]="jiuwenclaw-manager-server"
@@ -214,6 +220,7 @@ declare -A DEPLOY_VARS=(
     ["REDIS_MODE"]="standalone"
     ["RENDER_ONLY"]="false"
     ["SECRET_CM_NAME"]="jiuwenclaw-secret-configmap"
+    ["SKILL_AUTHORIZATION_ENABLED"]="false"
     ["TIMEZONE"]="Asia/Shanghai"
     ["VECTOR_NAME"]="vector-receiver"
     ["VECTOR_IMAGE"]="timberio/vector:0.40.0-alpine"
@@ -240,6 +247,7 @@ declare -A DEPLOY_VARS=(
     ["AGENT_SERVER_SERVICE_CONCURRENCY"]="10"
     ["AGENT_SERVER_SESSION_CONCURRENCY"]="10"
     ["AGENT_SERVER_SESSION_TTL"]="60"
+    ["GATEWAY_WEB_SESSION_STORAGE"]="remote"
     ["AGENT_SERVER_REACT_MAX_ITER"]="10"
     ["AGENT_SERVER_ENV_CM_NAME"]="jiuwenclaw-agentserver-env"
     ["JIUWENBOX_NAME"]="jiuwenbox"

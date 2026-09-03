@@ -11,7 +11,6 @@ if TYPE_CHECKING:
     from jiuwenswarm.gateway.config.enterprise.repository import EnterpriseRecordRepository
     from jiuwenswarm.gateway.config.logging.repository import LoggingConfigRepository
     from jiuwenswarm.gateway.config.memory.repository import MemoryConfigRepository
-    from jiuwenswarm.gateway.config.permissions.repository import PermissionsConfigRepository
 
 
 def require_enterprise_repository(store_name: str) -> EnterpriseRecordRepository:
@@ -60,20 +59,6 @@ def require_channel_repository() -> ChannelConfigRepository:
     return repo
 
 
-def require_permissions_repository() -> PermissionsConfigRepository:
-    from jiuwenswarm.gateway.config.permissions.access import (
-        get_permissions_config_repository,
-    )
-    from jiuwenswarm.gateway.config.permissions.repository import (
-        PermissionsConfigRepository,
-    )
-
-    repo = get_permissions_config_repository()
-    if repo is None:
-        raise RuntimeError("PermissionsConfigRepository is not wired")
-    return repo
-
-
 def require_logging_repository() -> LoggingConfigRepository:
     from jiuwenswarm.gateway.config.logging.access import get_logging_config_repository
     from jiuwenswarm.gateway.config.logging.repository import LoggingConfigRepository
@@ -100,5 +85,4 @@ __all__ = [
     "require_enterprise_repository",
     "require_logging_repository",
     "require_memory_repository",
-    "require_permissions_repository",
 ]

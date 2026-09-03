@@ -308,7 +308,11 @@ from jiuwenswarm.agents.harness.common.rails.permissions.tool_permission_context
 from jiuwenswarm.agents.harness.common.rails.permissions.config_loader import (
     get_base_permissions_config,
     get_effective_permissions_config,
+    merge_session_permissions_overlay,
+    reset_permissions_agent_base,
     reset_permissions_session_scope,
+    resolve_permissions_body_from_enterprise,
+    setup_permissions_agent_base,
     setup_permissions_session_scope,
 )
 from jiuwenswarm.server.runtime.session.session_metadata import build_server_push_message
@@ -2057,6 +2061,10 @@ class JiuWenSwarmDeepAdapter:
         self._disabled_tools_rail: DisabledToolsRail | None = None
         self._skill_rail: SkillUseRail | None = None
         self._enabled_skills: list[str] | None = None
+        self._skill_authorization_rail: Any = None
+        # 企业预置 Skill 名快照（安装账本 source_type=prebuilt），供动态授权
+        # trust 判定使用；由白名单同步/热刷新/_refresh_skill_identity 维护。
+        self._prebuilt_skills: set[str] = set()
         self._stream_event_rail: JiuSwarmStreamEventRail | None = None
         self._task_execution_rail: TaskExecutionRail | None = None
         self._skill_turbo_prompt_rail: Any = None
@@ -2102,6 +2110,7 @@ class JiuWenSwarmDeepAdapter:
         self._subagent_rail: SubagentRail | None = None
         self._ask_user_rail: StructuredAskUserRail | None = None
         self._permission_rail: Any = None
+        self._agent_permissions_body: dict[str, Any] | None = None
         self._skill_active_state_rail: SkillActiveStateRail | None = None
         self._skill_credential_injection_rail: SkillCredentialInjectionRail | None = None
         self._avatar_rail: Any = None
@@ -2297,6 +2306,65 @@ class JiuWenSwarmDeepAdapter:
         if extra_skill_dir:
             skills_dirs.append(extra_skill_dir)
         return skills_dirs
+
+    def _prebuilt_skill_dirs_snapshot(self) -> list[str]:
+        """企业预置 Skill 目录快照（workspace/skills/<name>），供 trust 判定。"""
+        base = Path(self._workspace_dir) / "skills"
+        return [str(base / name) for name in sorted(self._prebuilt_skills) if name]
+
+    def _skill_installation_snapshot(self) -> list[dict[str, Any]]:
+        """读取当前 workspace 安装账本；动态授权不再依赖旧 Gateway DB。"""
+        manager = self._skill_manager
+        if manager is None:
+            return []
+        return manager.list_skill_installations()
+
+    def _refresh_prebuilt_skill_snapshot(self) -> None:
+        """从当前 workspace 安装账本同步预置 Skill 身份快照。"""
+        prebuilt: set[str] = set()
+        for row in self._skill_installation_snapshot():
+            if str(row.get("source_type") or "").strip() != "prebuilt":
+                continue
+            name = str(row.get("name") or "").strip()
+            if name:
+                prebuilt.add(name)
+        self._prebuilt_skills = prebuilt
+
+    async def _refresh_skill_identity(self, skill_name: str) -> None:
+        """按安装账本校准当前企业 Skill 的预置身份，不改变 Skill 加载集合。"""
+        if not is_skill_whitelist_tenant(self._agent_id, self._service_id):
+            return
+        name = str(skill_name or "").strip()
+        if not name or Path(name).name != name:
+            return
+
+        try:
+            installed = next(
+                (
+                    row
+                    for row in self._skill_installation_snapshot()
+                    if str(row.get("name") or "").strip() == name
+                ),
+                None,
+            )
+        except Exception:  # noqa: BLE001 — 账本查询失败保留实例已有快照
+            logger.warning(
+                "[JiuWenSwarmDeepAdapter] refresh skill identity failed "
+                "service_id=%s agent_id=%s skill=%s",
+                self._service_id,
+                self._agent_id,
+                name,
+                exc_info=True,
+            )
+            return
+
+        if (
+            installed is not None
+            and str(installed.get("source_type") or "").strip() == "prebuilt"
+        ):
+            self._prebuilt_skills.add(name)
+        else:
+            self._prebuilt_skills.discard(name)
 
     @staticmethod
     def _session_adapter_key(session_id: str | None) -> str:
@@ -4486,6 +4554,7 @@ class JiuWenSwarmDeepAdapter:
             DEFAULT_AGENT_LOAD_SLOTS,
         )
         self._enterprise_config = loaded
+        self._agent_permissions_body = resolve_permissions_body_from_enterprise(loaded)
         if loaded is not None and self._skill_manager is not None:
             try:
                 await self._skill_manager.apply_skill_source_configs(
@@ -5483,6 +5552,27 @@ class JiuWenSwarmDeepAdapter:
             return
         self._instance.resolve_subagent_model = self._resolve_model_for_subagent
 
+    def _bind_subagent_authorization_wiring(self) -> None:
+        """安装子 Agent Skill 动态授权装配（包装 create_subagent，不改 agent-core）。
+
+        仅当父 Context 为 main scope 且动态授权开关开启时，子 Agent 创建才会
+        追加 SubagentSkillAuthorizationRail + SubagentPermissionRail 委托 rail 对；
+        其余情况零侵入。装配失败不得击穿 Agent 创建。
+        """
+        if self._instance is None:
+            return
+        try:
+            from jiuwenswarm.agents.harness.common.tools.subagent_executor.authorization import (
+                install_subagent_authorization_wiring,
+            )
+
+            install_subagent_authorization_wiring(self._instance)
+        except Exception:
+            logger.warning(
+                "[JiuWenSwarmDeepAdapter] subagent authorization wiring failed",
+                exc_info=True,
+            )
+
     def _resolve_model_for_request(self, request: AgentRequest) -> Model:
         """根据请求中的 model_name 参数查找对应模型（支持别名），未匹配则回退默认模型。
 
@@ -6347,6 +6437,98 @@ class JiuWenSwarmDeepAdapter:
             skill_rail = None
         return skill_rail
 
+    def _build_skill_authorization_rail(self):
+        """Build SkillAuthorizationRail；rail 内部按实时 feature flag 惰性启停。
+
+        engine 复用 PermissionInterruptRail 实例的引擎；skill_resolver 延迟读取
+        最新 SkillUseRail（热更新/重建会替换 self._skill_rail，绑定构建期实例
+        可能拿到未扫盘的旧实例导致 manifest_unresolved）；trust 判定用 rail 默认
+        实现 + 企业预置目录快照；_refresh_skill_identity 在审批前按安装账本
+        校准预置身份（0708 607aa6146）。
+        """
+        try:
+            from openjiuwen.harness.rails.skills.skill_authorization_rail import (
+                SkillAuthorizationRail,
+                build_skill_registry_resolver,
+            )
+            from jiuwenswarm.common.utils import get_builtin_skills_dir
+
+            permission_rail = getattr(self, "_permission_rail", None)
+            registry_resolver = build_skill_registry_resolver(
+                # dev-stable SkillUseRail.skills_meta 是 property（0708 为方法）
+                lambda: (
+                    self._skill_rail.skills_meta
+                    if self._skill_rail is not None
+                    else []
+                ),
+                skill_dirs_provider=lambda: self._resolve_skill_dirs(),
+            )
+
+            def resolve_skill(skill_name: str):
+                """目录由 SkillUseRail 解析，来源/版本由 workspace 账本补强。"""
+                location = registry_resolver(skill_name)
+                if location is None:
+                    return None
+                skill_dir, fallback_source, fallback_version = location
+                try:
+                    installation = next(
+                        (
+                            row
+                            for row in self._skill_installation_snapshot()
+                            if str(row.get("name") or "").strip() == skill_name
+                        ),
+                        None,
+                    )
+                except Exception:  # noqa: BLE001 — 账本异常时保留目录身份
+                    logger.warning(
+                        "[JiuWenSwarmDeepAdapter] resolve skill ledger identity failed "
+                        "skill=%s",
+                        skill_name,
+                        exc_info=True,
+                    )
+                    installation = None
+                if installation is None:
+                    return location
+                source = str(
+                    installation.get("source_id")
+                    or installation.get("source")
+                    or installation.get("origin")
+                    or fallback_source
+                ).strip()
+                version = str(
+                    installation.get("version_id")
+                    or installation.get("version")
+                    or fallback_version
+                    or ""
+                ).strip()
+                return skill_dir, source or fallback_source, version or None
+
+            rail = SkillAuthorizationRail(
+                engine=getattr(permission_rail, "_engine", None),
+                skill_resolver=resolve_skill,
+                prebuilt_dirs_provider=self._prebuilt_skill_dirs_snapshot,
+                builtin_dirs_provider=lambda: [get_builtin_skills_dir()],
+                skill_identity_refresher=self._refresh_skill_identity,
+                config_provider=get_effective_permissions_config,
+                session_config_merger=lambda config, session_id: (
+                    merge_session_permissions_overlay(
+                        config,
+                        session_id=session_id,
+                    )
+                ),
+                scene_bypass=lambda: bool(
+                    TOOL_PERMISSION_CONTEXT.get() is not None
+                    and TOOL_PERMISSION_CONTEXT.get().scene == "group_digital_avatar"
+                ),
+            )
+            logger.info("[JiuWenSwarmDeepAdapter] SkillAuthorizationRail create success")
+            return rail
+        except Exception as exc:
+            logger.warning(
+                "[JiuWenSwarmDeepAdapter] SkillAuthorizationRail create failed: %s", exc
+            )
+            return None
+
     def _skill_rail_session_id(self) -> str | None:
         """Session id bound into skill rails for session-scoped adapters.
 
@@ -6515,6 +6697,15 @@ class JiuWenSwarmDeepAdapter:
             return
 
         self._enabled_skills = [str(name) for name in names if str(name).strip()]
+
+        # 同步刷新预置身份快照（动态授权 trust 判定）；失败保留旧快照。
+        try:
+            self._refresh_prebuilt_skill_snapshot()
+        except Exception:  # noqa: BLE001 — 身份快照刷新失败不阻断技能热刷新
+            logger.warning(
+                "[JiuWenSwarmDeepAdapter] refresh prebuilt skill identity failed",
+                exc_info=True,
+            )
 
         extra_skill_dir: str | None = None
         try:
@@ -7438,7 +7629,7 @@ class JiuWenSwarmDeepAdapter:
             _RailBuildInfo("_subagent_rail", self._build_subagent_rail),
             _RailBuildInfo(
                 "_permission_rail",
-                build_permission_rail,
+                self._build_permission_rail_for_agent,
                 {
                     "config": config_base,
                     "llm": self._model,
@@ -7448,6 +7639,8 @@ class JiuWenSwarmDeepAdapter:
                     .get("model_name", "gpt-4"),
                 },
             ),
+            # 须在 _permission_rail 之后构建：engine 复用权限 Rail 实例的引擎。
+            _RailBuildInfo("_skill_authorization_rail", self._build_skill_authorization_rail),
             _RailBuildInfo(
                 "_context_processor_rail",
                 _build_context_processor_rail,
@@ -7657,27 +7850,91 @@ class JiuWenSwarmDeepAdapter:
             completion_timeout=config.get("completion_timeout", 21600.0),
         )
 
-    def _update_permission_rail(self, config_base: dict[str, Any] | None) -> None:
-        """原地更新已有 PermissionRail 配置，或在首次启用时新建。"""
-        permission_config = (
-            get_base_permissions_config()
-            if is_enterprise()
-            else get_effective_permissions_config()
+    def _update_permission_rail(
+        self,
+        config_base: dict[str, Any] | None,
+        *,
+        session_id: str | None = None,
+    ) -> None:
+        """原地更新已有 PermissionRail 配置，或在首次启用时新建。
+
+        企业版优先使用 Agent template_ref.permissions 模板 body（与模型槽位同级）。
+        """
+        permission_config = self._resolve_permission_config_for_agent(
+            session_id=session_id
         )
         if self._permission_rail is not None:
             self._permission_rail.update_config(permission_config)
             logger.info("[JiuWenSwarmDeepAdapter] _permission_rail config hot-updated")
         elif permission_config.get("enabled", False):
             self._permission_rail = build_permission_rail(
-                config=config_base,
+                config=config_base or {},
                 llm=self._model,
                 model_name=config_base.get("models", {})
                 .get("default", {})
                 .get("model_client_config", {})
-                .get("model_name", "gpt-4"),
+                .get("model_name", "gpt-4")
+                if isinstance(config_base, dict)
+                else "gpt-4",
+                permission_config=self._agent_permissions_body,
             )
             if self._permission_rail is not None:
                 logger.info("[JiuWenSwarmDeepAdapter] _permission_rail newly created on hot-reload")
+                # 冷启动时权限系统未启用则授权 Rail 的 engine 为 None（fail-closed）；
+                # 权限 Rail 热更新建后同步引擎，恢复 DENY 预判能力。
+                # agent-core 的 SkillAuthorizationRail 未提供引擎写入口，
+                # 用 setattr 做原地同步，避免重建 rail 丢失与运行中 Agent 的绑定。
+                if self._skill_authorization_rail is not None:
+                    setattr(
+                        self._skill_authorization_rail,
+                        "_engine",
+                        getattr(self._permission_rail, "_engine", None),
+                    )
+
+    def _resolve_permission_config_for_agent(
+        self,
+        *,
+        session_id: str | None = None,
+    ) -> dict[str, Any]:
+        """解析本 Agent 生效 permissions：企业模板 body 优先，否则 yaml/DB 回落。
+
+        模板 body 仅作为本 Agent 基线，不写入进程级 permissions 缓存；
+        企业版在提供 ``session_id`` 时仍叠加会话 overlay。
+        """
+        template_body = self._agent_permissions_body
+        if template_body is None:
+            template_body = resolve_permissions_body_from_enterprise(
+                self._enterprise_config
+            )
+            if template_body is not None:
+                self._agent_permissions_body = template_body
+        if template_body is not None:
+            if is_enterprise():
+                return merge_session_permissions_overlay(
+                    template_body, session_id=session_id
+                )
+            return copy.deepcopy(template_body)
+        if is_enterprise() and session_id is None:
+            return get_base_permissions_config()
+        return get_effective_permissions_config(session_id=session_id)
+
+    def _build_permission_rail_for_agent(
+        self,
+        config: dict[str, Any] | None = None,
+        llm: Any = None,
+        model_name: str | None = None,
+    ) -> Any | None:
+        """冷启动构建 permission rail：注入 Agent 级模板 body。"""
+        return build_permission_rail(
+            config=config or {},
+            llm=llm if llm is not None else self._model,
+            model_name=model_name,
+            permission_config=self._agent_permissions_body,
+        )
+
+    def _bind_agent_permissions_base(self) -> Any:
+        """将 Agent 模板 permissions body 绑定到当前 Task（供 snapshot/生效读路径）。"""
+        return setup_permissions_agent_base(self._agent_permissions_body)
 
     def _get_current_agent_rails(
         self, config: dict[str, Any], config_base: dict[str, Any] | None = None
@@ -8273,175 +8530,190 @@ class JiuWenSwarmDeepAdapter:
                 await self._load_enterprise_config(bootstrap_request)
             config_base = merge_memory_config_into_config(config_base)
             config_base = self._merge_enterprise_models_into_config(config_base)
-            self._config_base_cache = config_base.copy()
-            self._startup_config_base = config_base.copy()
-            self._refresh_multimodal_configs(config_base)
-            config = config_base.get("react", {}).copy()
-            self._config_cache = config.copy()
-            self._agent_name = self._instance_overrides.get(
-                "agent_name", config.get("agent_name", "main_agent")
-            )
-
-            if (
-                is_skill_whitelist_tenant(self._agent_id, self._service_id)
-                and self._enterprise_config is not None
-            ):
-                enterprise_skills: list[dict[str, Any]] = (
-                    getattr(self._enterprise_config, "skill_whitelist", None) or []
-                )
-                skill_config = parse_agent_skill_whitelist(
-                    self._agent_id, self._service_id, enterprise_skills
-                )
-                sync_result = await SkillWhitelistSynchronizer(
-                    self._workspace_dir,
-                    self._service_id,
-                    self._agent_id,
-                    skill_manager=self._skill_manager,
-                ).sync(skill_config)
-                if sync_result.errors:
-                    logger.warning(
-                        "[SkillWhitelist] sync partial errors: agent_id=%s service_id=%s errors=%s",
-                        self._agent_id,
-                        self._service_id,
-                        sync_result.errors,
-                    )
-                if sync_result.enabled_skill_dirs is not None:
-                    self._enabled_skills = [
-                        str(name) for name in sync_result.enabled_skill_dirs if str(name).strip()
-                    ]
-            self._project_dir = self._instance_overrides.get(
-                "project_dir", config.get("project_dir")
-            )
-            # Keep constructor-injected tenant workspace by default.
-            # Only override when request explicitly provides workspace_dir.
-            configured_workspace = self._instance_overrides.get("workspace_dir")
-            if configured_workspace is not None:
-                self._workspace_dir = configured_workspace
-            self._prompt_attachment_loader = PromptAttachmentLoader(self._prompt_attachment_root())
-            self._prompt_attachment_loader.ensure_layout()
-
-            if self._skip_own_instance_build():
-                return
-
-            self._log_active_model_on_startup(phase=f"create_instance:{mode}")
+            # 与模型槽位一致：Agent 级 permissions 模板在构建 rail 前绑定到 Task
+            token_perm_agent = self._bind_agent_permissions_base()
             try:
-                model = self._create_model(config_base)
-            except Exception as exc:
-                logger.error(
-                    "[JiuWenSwarmDeepAdapter] create_instance 模型初始化失败(%s): %s",
-                    mode,
-                    exc,
+                self._config_base_cache = config_base.copy()
+                self._startup_config_base = config_base.copy()
+                self._refresh_multimodal_configs(config_base)
+                config = config_base.get("react", {}).copy()
+                self._config_cache = config.copy()
+                self._agent_name = self._instance_overrides.get(
+                    "agent_name", config.get("agent_name", "main_agent")
                 )
-                raise
-            if self._is_session_scoped_adapter:
-                await self._try_init_a2x_client(config_base)
-            agent_card = AgentCard(name=self._agent_name, id=self._runtime_agent_scope_id())
 
-            tool_cards = await self._get_tool_cards(self._tool_owner_id())
-            self._tool_cards = tool_cards
-            logger.info("[JiuWenSwarmDeepAdapter] Agent card id: %s", agent_card.id)
-            await asyncio.sleep(0)
+                if (
+                    is_skill_whitelist_tenant(self._agent_id, self._service_id)
+                    and self._enterprise_config is not None
+                ):
+                    enterprise_skills: list[dict[str, Any]] = (
+                        getattr(self._enterprise_config, "skill_whitelist", None) or []
+                    )
+                    skill_config = parse_agent_skill_whitelist(
+                        self._agent_id, self._service_id, enterprise_skills
+                    )
+                    sync_result = await SkillWhitelistSynchronizer(
+                        self._workspace_dir,
+                        self._service_id,
+                        self._agent_id,
+                        skill_manager=self._skill_manager,
+                    ).sync(skill_config)
+                    if sync_result.errors:
+                        logger.warning(
+                            "[SkillWhitelist] sync partial errors: agent_id=%s service_id=%s errors=%s",
+                            self._agent_id,
+                            self._service_id,
+                            sync_result.errors,
+                        )
+                    if sync_result.enabled_skill_dirs is not None:
+                        self._enabled_skills = [
+                            str(name) for name in sync_result.enabled_skill_dirs if str(name).strip()
+                        ]
+                    # 预置 Skill 名快照：供动态授权 trust 判定（approve_session 仅内置可选）。
+                    self._prebuilt_skills = {
+                        str(name).strip()
+                        for name in (sync_result.prebuilt_skill_dirs or [])
+                        if str(name).strip()
+                    }
+                self._project_dir = self._instance_overrides.get(
+                    "project_dir", config.get("project_dir")
+                )
+                # Keep constructor-injected tenant workspace by default.
+                # Only override when request explicitly provides workspace_dir.
+                configured_workspace = self._instance_overrides.get("workspace_dir")
+                if configured_workspace is not None:
+                    self._workspace_dir = configured_workspace
+                self._prompt_attachment_loader = PromptAttachmentLoader(self._prompt_attachment_root())
+                self._prompt_attachment_loader.ensure_layout()
 
-            # 权限护栏由 openjiuwen PermissionInterruptRail + ToolPermissionHost 接管；
-            # 无需初始化 jiuwenswarm 内置 PermissionEngine（已弃用）。
+                if self._skip_own_instance_build():
+                    return
 
-            rails_list = self._build_agent_rails(config, config_base, mode=mode)
+                self._log_active_model_on_startup(phase=f"create_instance:{mode}")
+                try:
+                    model = self._create_model(config_base)
+                except Exception as exc:
+                    logger.error(
+                        "[JiuWenSwarmDeepAdapter] create_instance 模型初始化失败(%s): %s",
+                        mode,
+                        exc,
+                    )
+                    raise
+                if self._is_session_scoped_adapter:
+                    await self._try_init_a2x_client(config_base)
+                agent_card = AgentCard(name=self._agent_name, id=self._runtime_agent_scope_id())
 
-            sys_operation = self._create_sys_operation()
-            if sys_operation is None:
-                raise RuntimeError("sys_operation is not available, maybe task is not running")
+                tool_cards = await self._get_tool_cards(self._tool_owner_id())
+                self._tool_cards = tool_cards
+                logger.info("[JiuWenSwarmDeepAdapter] Agent card id: %s", agent_card.id)
+                await asyncio.sleep(0)
 
-            self._sys_operation = sys_operation
-            configured_subagents, should_add_general_agent = self._build_configured_subagents(
-                model, config, config_base
-            )
-            should_enable_general_agent = should_add_general_agent and (
-                sub_mode == "plan" or (isinstance(mode, str) and mode.startswith("agent"))
-            )
-            from jiuwenswarm.agents.harness.observability_runtime import (
-                get_trajectory_span_processor,
-            )
+                # 权限护栏由 openjiuwen PermissionInterruptRail + ToolPermissionHost 接管；
+                # 无需初始化 jiuwenswarm 内置 PermissionEngine（已弃用）。
 
-            common_kwargs = dict(
-                model=model,
-                card=agent_card,
-                tool_owner_id=self._tool_owner_id(),
-                system_prompt=build_agent_identity_prompt(
-                    language=self._resolve_prompt_language(),
-                ),
-                tools=tool_cards if tool_cards else [],
-                subagents=configured_subagents,
-                rails=rails_list if rails_list else [],
-                enable_task_loop=self._resolve_enable_task_loop(config, config_base),
-                add_general_purpose_agent=should_enable_general_agent,
-                max_iterations=config.get("max_iterations", 15),
-                workspace=Workspace(
-                    root_path=self._workspace_dir or "./",
+                rails_list = self._build_agent_rails(config, config_base, mode=mode)
+
+                sys_operation = self._create_sys_operation()
+                if sys_operation is None:
+                    raise RuntimeError("sys_operation is not available, maybe task is not running")
+
+                self._sys_operation = sys_operation
+                configured_subagents, should_add_general_agent = self._build_configured_subagents(
+                    model, config, config_base
+                )
+                should_enable_general_agent = should_add_general_agent and (
+                    sub_mode == "plan" or (isinstance(mode, str) and mode.startswith("agent"))
+                )
+                from jiuwenswarm.agents.harness.observability_runtime import (
+                    get_trajectory_span_processor,
+                )
+
+                common_kwargs = dict(
+                    model=model,
+                    card=agent_card,
+                    tool_owner_id=self._tool_owner_id(),
+                    system_prompt=build_agent_identity_prompt(
+                        language=self._resolve_prompt_language(),
+                    ),
+                    tools=tool_cards if tool_cards else [],
+                    subagents=configured_subagents,
+                    rails=rails_list if rails_list else [],
+                    enable_task_loop=self._resolve_enable_task_loop(config, config_base),
+                    add_general_purpose_agent=should_enable_general_agent,
+                    max_iterations=config.get("max_iterations", 15),
+                    workspace=Workspace(
+                        root_path=self._workspace_dir or "./",
+                        language=self._resolve_runtime_language(),
+                    ),
+                    sys_operation=sys_operation,
                     language=self._resolve_runtime_language(),
-                ),
-                sys_operation=sys_operation,
-                language=self._resolve_runtime_language(),
-                auto_create_workspace=False,
-                trajectory_span_processor=get_trajectory_span_processor(),
-            )
+                    auto_create_workspace=False,
+                    trajectory_span_processor=get_trajectory_span_processor(),
+                )
 
-            # agent_ras YAML passthrough (Agent RAS owns loop detection / recovery).
-            common_kwargs.update(_agent_ras_kwargs_from_config(config_base))
+                # agent_ras YAML passthrough (Agent RAS owns loop detection / recovery).
+                common_kwargs.update(_agent_ras_kwargs_from_config(config_base))
 
-            self._instance = create_deep_agent(
-                **common_kwargs,
-                context_engine_config=_deep_agent_context_engine_config(config),
-                kv_cache_affinity_config=_deep_agent_kv_cache_affinity_config(config, model),
-                vision_model_config=self._vision_model_config,
-                audio_model_config=self._audio_model_config,
-                enable_read_image_multimodal=self._resolve_enable_read_image_multimodal(config),
-                enable_llm_retry_rail=((config_base.get("execution_guard") or {}).get("llm_retry_rail") or {}).get(
-                    "enabled", False
-                ),
-                completion_timeout=config.get("completion_timeout", 21600.0),
-            )
-            self._bind_subagent_model_resolver()
+                self._instance = create_deep_agent(
+                    **common_kwargs,
+                    context_engine_config=_deep_agent_context_engine_config(config),
+                    kv_cache_affinity_config=_deep_agent_kv_cache_affinity_config(config, model),
+                    vision_model_config=self._vision_model_config,
+                    audio_model_config=self._audio_model_config,
+                    enable_read_image_multimodal=self._resolve_enable_read_image_multimodal(config),
+                    enable_llm_retry_rail=((config_base.get("execution_guard") or {}).get("llm_retry_rail") or {}).get(
+                        "enabled", False
+                    ),
+                    completion_timeout=config.get("completion_timeout", 21600.0),
+                )
+                self._bind_subagent_model_resolver()
+                self._bind_subagent_authorization_wiring()
 
-            _apply_llm_io_trace_patch()
+                _apply_llm_io_trace_patch()
 
-            await asyncio.sleep(0)
-            await self._instance.ensure_initialized()
-            initial_runtime_workspace = self._project_dir or str(
-                get_default_project_session_workspace_dir()
-            )
-            await asyncio.to_thread(
-                self._ensure_project_gitignore_agent_history,
-                initial_runtime_workspace,
-            )
-            self._seed_runtime_cwd(initial_runtime_workspace, workspace=initial_runtime_workspace)
-            setattr(self._instance, "_jiuwenswarm_project_dir", initial_runtime_workspace)
+                await asyncio.sleep(0)
+                await self._instance.ensure_initialized()
+                initial_runtime_workspace = self._project_dir or str(
+                    get_default_project_session_workspace_dir()
+                )
+                await asyncio.to_thread(
+                    self._ensure_project_gitignore_agent_history,
+                    initial_runtime_workspace,
+                )
+                self._seed_runtime_cwd(initial_runtime_workspace, workspace=initial_runtime_workspace)
+                setattr(self._instance, "_jiuwenswarm_project_dir", initial_runtime_workspace)
 
-            self._sync_a2x_runtime_state()
-            # Cron tools belong to the agent's standing toolset, not to any one
-            # request; build them here so the first turn does not pay for it either.
-            self._ensure_cron_tools_registered(self._parent_session_id)
-            self._registered_mcp_server_ids.clear()
-            self._registered_mcp_servers.clear()
-            await self._register_mcp_servers_from_config(config_base, tag=f"agent.{mode}")
-            logger.info(
-                "[JiuWenSwarmDeepAdapter] 初始化完成: agent_name=%s, mode=%s, sub_mode=%s", self._agent_name, mode, sub_mode
-            )
-            logger.info(
-                "[latency] stage=1 name=init request_id=%s",
-                _LLM_TRACE_REQUEST_ID.get() or "-",
-            )
+                self._sync_a2x_runtime_state()
+                # Cron tools belong to the agent's standing toolset, not to any one
+                # request; build them here so the first turn does not pay for it either.
+                self._ensure_cron_tools_registered(self._parent_session_id)
+                self._registered_mcp_server_ids.clear()
+                self._registered_mcp_servers.clear()
+                await self._register_mcp_servers_from_config(config_base, tag=f"agent.{mode}")
+                logger.info(
+                    "[JiuWenSwarmDeepAdapter] 初始化完成: agent_name=%s, mode=%s, sub_mode=%s",
+                    self._agent_name,
+                    mode,
+                    sub_mode,
+                )
+                logger.info(
+                    "[latency] stage=1 name=init request_id=%s",
+                    _LLM_TRACE_REQUEST_ID.get() or "-",
+                )
 
-            # 加载已激活的 packages（skills, rails, tools）
-            await self._load_active_packages()
-            await asyncio.sleep(0)
+                # 加载已激活的 packages（skills, rails, tools）
+                await self._load_active_packages()
+                await asyncio.sleep(0)
 
-            self._sync_preinstance_runtime_tools_to_ability_manager()
-            self._sync_multimodal_tools_for_runtime()
-            await asyncio.to_thread(self._init_skill_turbo_tool)
+                self._sync_preinstance_runtime_tools_to_ability_manager()
+                self._sync_multimodal_tools_for_runtime()
+                await asyncio.to_thread(self._init_skill_turbo_tool)
 
-            # 动态加载用户自定义的 Rail 扩展
-            await self.load_user_rails()
-            self._register_extension_tools()
+                # 动态加载用户自定义的 Rail 扩展
+                await self.load_user_rails()
+                self._register_extension_tools()
+            finally:
+                reset_permissions_agent_base(token_perm_agent)
         finally:
             self._reset_request_env_bindings(ns_token, overlay_token, wk_token)
 
@@ -10287,7 +10559,11 @@ class JiuWenSwarmDeepAdapter:
         restore_steps: list[Callable[[], None]] = []
         for rail in configured or []:
             cls_name = rail.__class__.__name__
-            if cls_name not in ("PermissionInterruptRail", "SkillTurboPermissionRail"):
+            if cls_name not in (
+                "PermissionInterruptRail",
+                "SkillAuthorizationPermissionRail",
+                "SkillTurboPermissionRail",
+            ):
                 continue
             try:
                 saved_config = dict(getattr(rail, "_static_config", None) or {})
@@ -11641,6 +11917,44 @@ class JiuWenSwarmDeepAdapter:
         return mode in (InputDispatchMode.STEER, InputDispatchMode.FOLLOW_UP)
 
     @staticmethod
+    def _is_subagent_approval_answer(request_id: str, params: Any) -> bool:
+        """子代理委托审批应答：显式 source 或 request_id 前缀（兼容旧通道）。"""
+        source = str(params.get("source") or "").strip() if isinstance(params, dict) else ""
+        if source in {"subagent_skill_load", "subagent_tool_permission"}:
+            return True
+        return isinstance(request_id, str) and request_id.startswith(
+            ("subagent_skill_load_", "subagent_tool_permission_")
+        )
+
+    @staticmethod
+    def _resolve_subagent_approval_answer(
+        request: AgentRequest,
+        request_id: str,
+        answers: Any,
+    ) -> bool:
+        """把子代理委托审批应答路由回 SubagentApprovalRegistry 的 pending Future。"""
+        params = request.params if isinstance(request.params, dict) else {}
+        try:
+            from jiuwenswarm.agents.harness.common.rails.permissions.skill_authorization.runtime import (
+                resolve_subagent_approval,
+            )
+
+            return resolve_subagent_approval(
+                request_id=request_id,
+                session_id=str(request.session_id or params.get("session_id") or ""),
+                source=str(params.get("source") or ""),
+                answers=answers,
+                agent_scope_id=str(params.get("agent_scope_id") or ""),
+            )
+        except Exception:  # noqa: BLE001 — 应答路由失败不掩盖 user_answer 响应
+            logger.warning(
+                "[JiuWenSwarmDeepAdapter] subagent approval resolve failed: request_id=%s",
+                request_id,
+                exc_info=True,
+            )
+            return False
+
+    @staticmethod
     def _is_interrupt_resume_dispatch(params: Any) -> bool:
         """HITL answers must inject into the existing interaction when possible.
 
@@ -11740,6 +12054,25 @@ class JiuWenSwarmDeepAdapter:
             )
             return
         await self._halt_deep_agent_execution(intent)
+
+    @staticmethod
+    def _revoke_main_skill_authorization(
+        session_id: str | None,
+        *,
+        reason: str,
+    ) -> None:
+        """任务终止路径回收主会话动态授权（Grant 失活 + 子代理委托审批取消）。"""
+        try:
+            from jiuwenswarm.agents.harness.common.rails.permissions.skill_authorization.runtime import (
+                revoke_main_scope,
+            )
+
+            revoke_main_scope(session_id, reason=reason)
+        except Exception:  # noqa: BLE001 — 不影响原取消/异常流程
+            logger.warning(
+                "[JiuWenSwarmDeepAdapter] dynamic authorization cleanup failed",
+                exc_info=True,
+            )
 
     async def process_interrupt(self, request: AgentRequest) -> AgentResponse:
         """处理 interrupt 请求.
@@ -11874,6 +12207,10 @@ class JiuWenSwarmDeepAdapter:
                 # When inactive, another session may have just started — aborting
                 # the shared DeepAgent would kill it as collateral damage.
                 await self._abort_shared_agent_if_safe(_normalized_sid, "supplement")
+            self._revoke_main_skill_authorization(
+                request.session_id,
+                reason="task_supplemented",
+            )
             # 不清理 todo — 保留给新任务继续
             logger.info(
                 "[JiuWenSwarmDeepAdapter] interrupt(supplement): 已停止执行 request_id=%s",
@@ -11897,6 +12234,10 @@ class JiuWenSwarmDeepAdapter:
                 # When inactive, another session may have just started — aborting
                 # the shared DeepAgent would kill it as collateral damage.
                 await self._abort_shared_agent_if_safe(_normalized_sid, "cancel")
+            self._revoke_main_skill_authorization(
+                request.session_id,
+                reason="task_cancelled",
+            )
             logger.info(
                 "[JiuWenSwarmDeepAdapter] interrupt(cancel): 已设置 abort 并解除 pause 阻塞"
             )
@@ -12019,6 +12360,11 @@ class JiuWenSwarmDeepAdapter:
                 "[JiuWenSwarmDeepAdapter] interrupt(%s): interaction cancel failed",
                 intent,
             )
+        # Interaction-managed 路径是流式宿主的主取消路径，同样回收动态授权。
+        self._revoke_main_skill_authorization(
+            request.session_id,
+            reason="task_supplemented" if intent == "supplement" else "task_cancelled",
+        )
         if intent == "supplement" and isinstance(new_input, str) and new_input.strip():
             await self._clear_pending_ask_user_interrupt_for_supplement(request.session_id)
         message = "任务已切换" if intent == "supplement" else "任务已取消"
@@ -12241,6 +12587,10 @@ class JiuWenSwarmDeepAdapter:
             )
         elif self._is_regular_skill_evolution_approval_params(request.params):
             resolved = await self._handle_evolution_approval(request_id, answers)
+        elif self._is_subagent_approval_answer(request_id, request.params):
+            # 子代理委托审批（Skill 加载/工具权限）：按 source 或 request_id 前缀
+            # 路由回主会话的 SubagentApprovalRegistry pending Future。
+            resolved = self._resolve_subagent_approval_answer(request, request_id, answers)
 
         return AgentResponse(
             request_id=request.request_id,
@@ -14819,6 +15169,7 @@ class JiuWenSwarmDeepAdapter:
         token_cid = None
         token_perm = None
         token_perm_sid = None
+        token_perm_agent = None
         request_env_tokens = None
         session_active = False
         session_task_registered = False
@@ -14836,9 +15187,15 @@ class JiuWenSwarmDeepAdapter:
             token_cid = TOOL_PERMISSION_CHANNEL_ID.set((request.channel_id or "").strip())
             token_perm = setup_permission_context(request)
             token_perm_sid = setup_permissions_session_scope(session_id)
-            if self._permission_rail is not None:
-                self._permission_rail.update_config(
-                    get_effective_permissions_config(session_id=session_id),
+            token_perm_agent = self._bind_agent_permissions_base()
+            try:
+                self._update_permission_rail(
+                    self._config_base_cache, session_id=session_id
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "[JiuWenSwarmDeepAdapter] permission rail agent-level bind failed: %s",
+                    exc,
                 )
             resolved_model = self._resolve_model_for_request(request)
             self._apply_model_to_react_agent(resolved_model)
@@ -15065,10 +15422,18 @@ class JiuWenSwarmDeepAdapter:
                 request.request_id,
                 session_id,
             )
+            self._revoke_main_skill_authorization(
+                session_id,
+                reason="task_cancelled",
+            )
             raise
         except Exception as e:
             perf_summary_status = "error"
             logger.error("[JiuWenSwarmDeepAdapter] Agent 任务执行异常: %s", e)
+            self._revoke_main_skill_authorization(
+                session_id,
+                reason="task_error",
+            )
             raise
         finally:
             active_error = sys.exc_info()[1]
@@ -15140,6 +15505,13 @@ class JiuWenSwarmDeepAdapter:
                     (
                         "permission_session",
                         lambda: reset_permissions_session_scope(token_perm_sid),
+                    )
+                )
+            if token_perm_agent is not None:
+                cleanup_steps.append(
+                    (
+                        "permission_agent",
+                        lambda: reset_permissions_agent_base(token_perm_agent),
                     )
                 )
             if token_perm is not None:
@@ -15766,6 +16138,7 @@ class JiuWenSwarmDeepAdapter:
         token_cid = None
         token_perm = None
         token_perm_sid = None
+        token_perm_agent = None
         request_env_tokens = None
         session_active = False
         session_task_registered = False
@@ -15786,9 +16159,15 @@ class JiuWenSwarmDeepAdapter:
             token_cid = TOOL_PERMISSION_CHANNEL_ID.set((request.channel_id or "").strip())
             token_perm = setup_permission_context(request)
             token_perm_sid = setup_permissions_session_scope(session_id)
-            if self._permission_rail is not None:
-                self._permission_rail.update_config(
-                    get_effective_permissions_config(session_id=session_id),
+            token_perm_agent = self._bind_agent_permissions_base()
+            try:
+                self._update_permission_rail(
+                    self._config_base_cache, session_id=session_id
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "[JiuWenSwarmDeepAdapter] permission rail agent-level bind failed: %s",
+                    exc,
                 )
             # 按请求选择模型（企业配置已在 create_instance 合并）
             resolved_model = self._resolve_model_for_request(request)
@@ -16700,12 +17079,20 @@ class JiuWenSwarmDeepAdapter:
             # the frontend; user Stop already closes UI via interrupt_result.
             if _debug_logger is not None:
                 _debug_logger.end_run(status="cancelled")
+            self._revoke_main_skill_authorization(
+                session_id,
+                reason="task_cancelled",
+            )
             raise
         except Exception as exc:
             perf_summary_status = "error"
             logger.exception("[JiuWenSwarmDeepAdapter] 流式任务异常: %s", exc)
             if _debug_logger is not None:
                 _debug_logger.end_run(status="error", error=exc)
+            self._revoke_main_skill_authorization(
+                session_id,
+                reason="task_error",
+            )
             yield AgentResponseChunk(
                 request_id=rid,
                 channel_id=cid,
@@ -16817,6 +17204,13 @@ class JiuWenSwarmDeepAdapter:
                     (
                         "permission_session",
                         lambda: reset_permissions_session_scope(token_perm_sid),
+                    )
+                )
+            if token_perm_agent is not None:
+                cleanup_steps.append(
+                    (
+                        "permission_agent",
+                        lambda: reset_permissions_agent_base(token_perm_agent),
                     )
                 )
             if token_perm is not None:

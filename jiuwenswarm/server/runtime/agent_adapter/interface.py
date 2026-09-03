@@ -1842,7 +1842,46 @@ class JiuWenSwarm:
 
         value = selected_options[0] if selected_options else ""
 
-        if value in ("approve", "本次允许", "Approve", "Proceed", "批准", "开始执行"):
+        # Skill 动态授权三动作协议（SkillApprovalCard）：显式 action 原样透传，
+        # 由 SkillAuthorizationRail._parse_answer_to_action 裁决（无法识别即拒绝）。
+        is_permission_interrupt = source == "permission_interrupt"
+        explicit_action = answer.get("action") if isinstance(answer, dict) else None
+        if is_permission_interrupt and explicit_action == "approve_session":
+            confirm_payload = {
+                "action": "approve_session",
+                "approved": True,
+                "auto_confirm": False,
+                "feedback": "",
+            }
+        elif is_permission_interrupt and explicit_action == "continue_without_overlay":
+            confirm_payload = {
+                "action": "continue_without_overlay",
+                "approved": False,
+                "auto_confirm": False,
+                "feedback": custom_input or "用户选择仅加载不授权",
+            }
+        elif is_permission_interrupt and explicit_action == "approve_once":
+            confirm_payload = {
+                "action": "approve_once",
+                "approved": True,
+                "auto_confirm": False,
+                "feedback": "",
+            }
+        elif is_permission_interrupt and "会话内允许" in selected_options:
+            confirm_payload = {
+                "action": "approve_session",
+                "approved": True,
+                "auto_confirm": False,
+                "feedback": "",
+            }
+        elif is_permission_interrupt and "仅加载不授权" in selected_options:
+            confirm_payload = {
+                "action": "continue_without_overlay",
+                "approved": False,
+                "auto_confirm": False,
+                "feedback": custom_input or "用户选择仅加载不授权",
+            }
+        elif value in ("approve", "本次允许", "Approve", "Proceed", "批准", "开始执行"):
             confirm_payload = {"approved": True, "auto_confirm": False, "feedback": ""}
         elif value in ("session_allow", "会话内记住", "Session Allow"):
             confirm_payload = {

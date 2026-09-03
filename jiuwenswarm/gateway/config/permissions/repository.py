@@ -7,7 +7,6 @@ import uuid
 from typing import Any
 
 from jiuwenswarm.gateway.config.section import (
-    DbBodySectionCodec,
     SectionDocument,
     SectionDocumentRepository,
     YamlSectionCodec,
@@ -77,7 +76,7 @@ class PermissionsConfigRepository:
     def __init__(
         self,
         store: PersistentStore,
-        codec: YamlSectionCodec | DbBodySectionCodec,
+        codec: YamlSectionCodec,
         *,
         instance_id: str = "",
     ) -> None:

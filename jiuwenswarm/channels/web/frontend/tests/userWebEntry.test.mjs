@@ -28,7 +28,10 @@ const {
   isDebugContext,
   orderedContextCandidates,
 } = await import('../node_modules/.cache/user-web-entry/EnterpriseEntry.mjs');
-const { parseLoginAuthSimulate } = await import('../node_modules/.cache/user-web-entry/auth/config.js');
+const {
+  isAuthEntryPath,
+  parseLoginAuthSimulate,
+} = await import('../node_modules/.cache/user-web-entry/auth/config.js');
 const { buildSimulatedEnterpriseContext } = await import('../node_modules/.cache/user-web-entry/auth/simulate/SimulatedAuthProvider.js');
 
 function renderEntry(edition, simulate = false) {
@@ -39,6 +42,7 @@ function renderEntry(edition, simulate = false) {
 
 function resetBrowserState() {
   values.clear();
+  window.location.pathname = '/';
   window.location.search = '';
 }
 
@@ -95,6 +99,12 @@ test('LOGIN_AUTH_SIMULATE accepts only booleans and defaults to true', () => {
   assert.equal(parseLoginAuthSimulate('true'), true);
   assert.equal(parseLoginAuthSimulate(' FALSE '), false);
   assert.throws(() => parseLoginAuthSimulate('yes'), /期望 true 或 false/);
+});
+
+test('auth entry path guard stops User Web from redirecting /auth to itself', () => {
+  assert.equal(isAuthEntryPath('/auth'), true);
+  assert.equal(isAuthEntryPath('/auth/'), true);
+  assert.equal(isAuthEntryPath('/chat/'), false);
 });
 
 test('context candidates prefer URL values but retain every authorized combination', () => {

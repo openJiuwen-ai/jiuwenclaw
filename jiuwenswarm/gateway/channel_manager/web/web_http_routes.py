@@ -168,6 +168,14 @@ _A2A_OUTBOUND_ROUTES: tuple[WebHttpMappedRoute, ...] = (
     ),
     WebHttpMappedRoute(
         "GET",
+        "/a2a/outbound/dispatches",
+        "a2a.outbound.dispatch.list",
+        "a2a",
+        "列出 A2A 出站派发处理历史",
+        query_keys=("limit",),
+    ),
+    WebHttpMappedRoute(
+        "GET",
         "/a2a/outbound/dispatches/{dispatch_id}",
         "a2a.outbound.dispatch.get",
         "a2a",

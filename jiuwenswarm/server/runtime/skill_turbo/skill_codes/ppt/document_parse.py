@@ -342,6 +342,7 @@ class DocumentParseNode(PlanNode):
         doc_raw_path: Path,
     ) -> tuple[bool, str | None]:
         last_error: str | None = None
+        last_exception: Exception | None = None
 
         for attempt in range(_MAX_PARSE_ATTEMPTS):
             if attempt:
@@ -366,11 +367,18 @@ class DocumentParseNode(PlanNode):
                 if text.strip():
                     return True, None
                 last_error = "doc_raw.md 不存在或内容为空"
+                last_exception = DocumentParseError(last_error)
             except DocumentParseError as exc:
                 last_error = str(exc)
+                last_exception = exc
             except OSError as exc:
                 last_error = f"写入 doc_raw.md 失败: {exc}"
+                last_exception = exc
 
+        # 重试耗尽：raise 异常让 PlanNode.run_stream 触发 fallback 子代理兜底
+        # （子代理可尝试 read_file 以外的方式读取文档，如写脚本转换格式）
+        if last_exception is not None:
+            raise last_exception
         return False, last_error
 
     async def _infer_topic_from_doc(

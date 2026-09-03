@@ -35,6 +35,7 @@ from jiuwenswarm.common.e2a.agent_compat import e2a_to_agent_request
 from jiuwenswarm.common.e2a.constants import (
     E2A_CANCEL_SOURCE_CLIENT_DISCONNECT,
     E2A_INTERNAL_CANCEL_SOURCE_KEY,
+    E2A_RESPONSE_KIND_ACP_OUTPUT_REQUEST,
     E2A_WIRE_INTERNAL_METADATA_KEYS,
 )
 from jiuwenswarm.common.e2a.gateway_normalize import (
@@ -342,6 +343,11 @@ class AgentWebSocketServer:
         self._proactive_engine: Any = None
         get_acp_output_manager().set_send_push_callback(
             lambda msg: asyncio.create_task(self.send_push(msg))
+        )
+        get_push_registry().set_reverse_rpc_owner_lost_callback(
+            lambda: get_acp_output_manager().fail_pending_requests(
+                RuntimeError("Gateway reverse RPC connection lost")
+            )
         )
 
     def set_proactive_engine(self, engine: Any) -> None:
@@ -826,6 +832,7 @@ class AgentWebSocketServer:
             push_subscriber_id,
             _GatewayWSPushSink(ws, send_lock),
             drop_on_stall=False,
+            reverse_rpc_capable=True,
         )
 
         # 触发身份获取（写入当前连接 context；无 provider 时身份为 null，连接继续）。
@@ -1182,7 +1189,13 @@ class AgentWebSocketServer:
             应用此返回值判定成败，勿再把「仅打了 warning」当成发送成功。
         """
         registry = get_push_registry()
-        if registry.subscriber_count() == 0:
+        response_kind = str(msg.get("response_kind") or "").strip()
+        is_reverse_rpc = response_kind == E2A_RESPONSE_KIND_ACP_OUTPUT_REQUEST
+        if (
+            not registry.reverse_rpc_ready()
+            if is_reverse_rpc
+            else registry.subscriber_count() == 0
+        ):
             # 一个去处都没有：保持原有告警与早退（连 wire 都不构造）。
             logger.warning(
                 "[AgentWebSocketServer] send_push 失败: 无活跃 Gateway 连接 "
@@ -1201,7 +1214,11 @@ class AgentWebSocketServer:
             logger.warning("[AgentWebSocketServer] send_push 失败: %s", e)
             return 0
 
-        delivered = await registry.push(wire)
+        delivered = (
+            await registry.push_reverse_rpc(wire)
+            if is_reverse_rpc
+            else await registry.push(wire)
+        )
 
         if delivered == 0:
             # 两种情况都会落到这里：内容过大被降级成错误帧（sink 返回 False），
@@ -1213,7 +1230,6 @@ class AgentWebSocketServer:
             )
             return 0
 
-        response_kind = str(msg.get("response_kind") or "").strip()
         if response_kind:
             logger.info(
                 "[AgentWebSocketServer] send_push response_kind wire sent: "

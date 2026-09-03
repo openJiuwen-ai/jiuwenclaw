@@ -160,7 +160,8 @@ function getSourceLabel(source: string, t: (key: string) => string, isBuiltinSou
   if (source === "builtin") return t('skills.source.builtin');
   if (source === "clawhub") return t('skills.source.clawhub');
   if (source === "skillnet") return t('skills.source.skillnet');
-  if (source === "teamskillshub" || source === "swarmskillhub") return t('skills.source.teamskillshub');
+  if (source === "teamskillshub") return t('skills.source.teamskillshub');
+  if (source === "swarmskillhub") return t('skills.source.swarmskillhub');
   return source || t('skills.source.unknown');
 }
 
@@ -617,6 +618,8 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
   const [debouncedSearch, setDebouncedSearch] = useState("");
   const searchDebounceRef = useRef<number | null>(null);
   const prevIsActiveRef = useRef(isActive);
+  /** 首次列表加载成功后置 true：刷新失败（如瞬态 SCOPE_FULL_TIMEOUT）保留旧列表，不清空页面 */
+  const skillsLoadedRef = useRef(false);
   const [selectedSkill, setSelectedSkill] = useState<SkillDetail | null>(null);
   const [listState, setListState] = useState<LoadState>("idle");
   const [detailState, setDetailState] = useState<LoadState>("idle");
@@ -844,6 +847,7 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
       );
       setSkills((data.skills || []).map(normalizeSkillItem));
       setPlugins(data.plugins || []);
+      skillsLoadedRef.current = true;
       setListState("success");
 
       if (!readOnly) {
@@ -851,7 +855,8 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
       }
     } catch (error) {
       console.error(error);
-      setListState("error");
+      // 已有成功数据时保留旧列表（stale-while-error），避免页签切换期间瞬态失败清空整个页面
+      setListState(skillsLoadedRef.current ? "success" : "error");
     }
   }, [fetchMarketplaces, readOnly, withSession]);
 
@@ -1265,17 +1270,19 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
       setMessage(null);
       setMessageType(null);
       try {
+        // 企业版 skills.uninstall 被网关拦截，卸载用户自装技能须走 skills.enterprise.uninstall
         const data = await webRequest<{
           success: boolean;
           detail?: string;
           message?: string;
-        }>("skills.uninstall", withSession({
+          error_message?: string;
+        }>(readOnly ? "skills.enterprise.uninstall" : "skills.uninstall", withSession({
           name: pluginName,
           // 传 origin 让后端按来源精确定位目录与记录，避免重名技能误删另一个
           ...(origin ? { origin } : {}),
         }));
         if (!data.success) {
-          throw new Error(data.detail || data.message || t('skills.errors.uninstallFailed'));
+          throw new Error(data.detail || data.message || data.error_message || t('skills.errors.uninstallFailed'));
         }
         showMessage("success", t('skills.messages.uninstalled', { pluginName }));
         await fetchSkills();
@@ -1288,7 +1295,7 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
         setActionTarget(null);
       }
     },
-    [fetchSkills, handleBackToList, t, withSession]
+    [fetchSkills, handleBackToList, readOnly, t, withSession]
   );
 
   const renderActionButton = (skill: SkillItem) => {
@@ -1442,9 +1449,11 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
   };
 
   const renderStatus = (skill: SkillItem) => {
-    if (skill.installed === true) return t('skills.status.installed');
-    if (installedSkillMap.has(skill.name)) return t('skills.status.installed');
-    if (skill.source === "local") return t('skills.status.installed');
+    const installed =
+      skill.installed === true || installedSkillMap.has(skill.name) || skill.source === "local";
+    // 「全部」页签里的条目均已安装，「已安装」徽章冗余，不再展示
+    if (installed && mySkillsSubTab === "all") return "";
+    if (installed) return t('skills.status.installed');
     if (skill.is_builtin) {
       return "";
     }
@@ -2122,7 +2131,7 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
                   {listState === "success" && builtinSkills.length > 0 && (
                     builtinSkills.map((skill) => {
                       const avatar = getSkillAvatar(skill.name);
-                      const displayName = skill.display_name || skill.name;
+                      const displayName = skill.market_display_name || skill.display_name || skill.name;
                       const isDisabled = skill.enabled === false;
                       const isToggling = actionTarget === `toggle:${skill.name}`;
                       const isInstalled = skill.installed === true || installedSkillMap.has(skill.name) || skill.source === "local";
@@ -2283,7 +2292,7 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
                       </div>
                       <div>
                         <div className="text-lg font-semibold text-text-strong">
-                          {selectedSkill.display_name || selectedSkill.name}
+                          {selectedSkill.market_display_name || selectedSkill.display_name || selectedSkill.name}
                         </div>
                         <div className="text-sm text-text-muted mt-1">
                           {skillDisplayDesc(selectedSkill, t('skills.noDescription'))}
@@ -2467,7 +2476,7 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
                   {listState === "success" &&
                     pagedMySkills.map((skill) => {
                       const avatar = getSkillAvatar(skill.name);
-                      const displayName = skill.display_name || skill.name;
+                      const displayName = skill.market_display_name || skill.display_name || skill.name;
                       const isDisabled = skill.enabled === false;
                       const isToggling = actionTarget === `toggle:${skill.origin || skill.name}`;
                       return (
