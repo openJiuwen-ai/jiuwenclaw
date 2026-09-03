@@ -53,7 +53,7 @@ import {
   type DesktopLocalFilesEventDetail,
   type LocalFilePick,
 } from '../../features/workspace/localFilePicker';
-import { useDesktopLocalFilePickerReady, useMaxWidth, useWelcomeBubblePosition } from '../../hooks';
+import { useDesktopLocalFilePickerReady, useWelcomeBubblePosition } from '../../hooks';
 
 export interface ChatHistoryPagerProps {
   loadedPages: number;
@@ -842,7 +842,6 @@ export const ChatPanel = React.memo(function ChatPanel({
   const stickToBottomUntilStableRef = useRef(false);
   const [isSending, setIsSending] = React.useState(false);
   const isDesktopAttachmentDropEnabled = useDesktopLocalFilePickerReady();
-  const isMdDown = useMaxWidth('md');
   const hasTimelineContent = messages.length > 0 || toolExecutionOrder.length > 0;
   const hasConversation = Boolean(isHistoryRestoring || historyPager || hasTimelineContent);
   const historyLoadedPages = historyPager?.loadedPages ?? 0;
@@ -1443,7 +1442,6 @@ export const ChatPanel = React.memo(function ChatPanel({
             <div className="chat-welcome" data-testid="chat-panel-welcome">
               <h2
                 className="chat-welcome__heading"
-                style={isMdDown ? { fontSize: '24px', lineHeight: '30px' } : undefined}
                 data-testid="chat-panel-welcome-heading"
               ><WelcomeHeading /></h2>
               <div className="chat-welcome__composer" data-testid="chat-panel-welcome-composer">

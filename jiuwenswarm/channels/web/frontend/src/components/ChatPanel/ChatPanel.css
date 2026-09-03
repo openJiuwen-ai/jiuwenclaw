@@ -4221,6 +4221,14 @@ overflow: hidden;
   gap: 8px;
 }
 
+/* 视口 ≤930px 时缩小欢迎标题字号（原为 JS 断点 isMdDown/900px 控制，2026-09-03 改为 CSS 媒体查询并上调阈值） */
+@media (max-width: 930px) {
+  .chat-welcome__heading {
+    font-size: 24px;
+    line-height: 30px;
+  }
+}
+
 .chat-welcome__heading-highlight {
   display: inline-block;
 }
