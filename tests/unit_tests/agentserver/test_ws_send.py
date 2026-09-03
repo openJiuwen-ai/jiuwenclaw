@@ -425,6 +425,7 @@ async def test_stream_runtime_error_uses_legacy_agent_error_wire_contract() -> N
         channel_id="web",
         session_id="session-1",
         error=ValueError("boom"),
+        metadata={"trace_id": "stream-error"},
     )
 
     await server._send_runtime_event(
@@ -453,6 +454,7 @@ async def test_stream_runtime_error_uses_legacy_agent_error_wire_contract() -> N
     decoded = parse_agent_server_wire_chunk(wire)
     assert decoded.payload == {"error": "boom"}
     assert decoded.is_complete is True
+    assert decoded.metadata == {"trace_id": "stream-error"}
 
 
 @pytest.mark.asyncio
@@ -466,6 +468,7 @@ async def test_unary_runtime_error_uses_legacy_agent_error_wire_contract() -> No
         channel_id="web",
         session_id="session-1",
         error=ValueError("boom"),
+        metadata={"trace_id": "unary-error"},
     )
 
     await server._send_runtime_event(
@@ -490,6 +493,7 @@ async def test_unary_runtime_error_uses_legacy_agent_error_wire_contract() -> No
     decoded = parse_agent_server_wire_unary(wire)
     assert decoded.payload == {"error": "boom"}
     assert decoded.ok is False
+    assert decoded.metadata == {"trace_id": "unary-error"}
 
 
 @pytest.mark.asyncio
