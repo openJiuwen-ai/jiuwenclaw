@@ -1736,7 +1736,19 @@ def _snapshot_claude_dependency_install_status() -> dict[str, Any]:
     return _snapshot_external_cli_dependency_install_status("claude")
 
 
+def _activate_managed_external_cli_paths_if_needed() -> None:
+    """Expose managed SDKs only for an external-CLI configuration request."""
+    if not _is_frozen_runtime():
+        return
+    from jiuwenswarm.common.external_cli_runtime import (
+        activate_external_cli_runtime_paths,
+    )
+
+    activate_external_cli_runtime_paths()
+
+
 def _ensure_claude_dependency_available_or_start_install() -> dict[str, Any] | None:
+    _activate_managed_external_cli_paths_if_needed()
     if importlib.util.find_spec("claude_agent_sdk") is not None:
         with _CLAUDE_DEPENDENCY_INSTALL_LOCK:
             _CLAUDE_DEPENDENCY_INSTALL_STATUS.update(_external_cli_dependency_install_succeeded_updates())
@@ -1893,6 +1905,7 @@ def _append_codex_dependency_install_log(line: str) -> None:
 
 
 def _ensure_codex_dependency_available_or_start_install() -> dict[str, Any] | None:
+    _activate_managed_external_cli_paths_if_needed()
     if importlib.util.find_spec("openai_codex") is not None:
         _update_codex_dependency_install_status(_external_cli_dependency_install_succeeded_updates())
         return None

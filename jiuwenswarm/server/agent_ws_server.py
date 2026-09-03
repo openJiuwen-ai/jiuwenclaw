@@ -67,6 +67,8 @@ from jiuwenswarm.server.runtime.tokenizer_service import TokenizerService
 from jiuwenswarm.server.runtime.session.session_metadata import get_all_sessions_metadata, remove_session_metadata_cache
 from jiuwenswarm.server.runtime.session.session_history import (
     append_compact_history_records,
+    append_history_record,
+    enqueue_history_request_completion,
     history_exists,
     is_valid_session_id,
     load_history_records,
@@ -2025,6 +2027,9 @@ class AgentWebSocketServer:
                     await self._handle_history_get_stream(ws, request, send_lock)
                 else:
                     await self._handle_history_get(ws, request, send_lock)
+                return
+            if request.req_method == ReqMethod.HISTORY_APPEND_RECORD:
+                await self._handle_history_append_record(ws, request, send_lock)
                 return
             if request.req_method == ReqMethod.TEAM_SNAPSHOT:
                 await self._handle_team_snapshot(ws, request, send_lock)
@@ -5471,7 +5476,7 @@ class AgentWebSocketServer:
             if compact and direction == "from":
                 import uuid as _uuid
                 import time as _time
-                from jiuwenswarm.server.runtime.session.session_history import append_history_record
+
                 request_id = str(_uuid.uuid4())
                 now = _time.time()
 
@@ -5720,6 +5725,80 @@ class AgentWebSocketServer:
                 channel_id=request.channel_id,
                 ok=True,
                 payload=data,
+            )
+        wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
+        async with send_lock:
+            await send_wire_payload(ws, wire)
+
+    async def _handle_history_append_record(
+        self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock
+    ) -> None:
+        """Append a supplied history record without creating an Agent turn.
+
+        Cron uses this for terminal failures.  Falling through to the normal
+        request path would treat the failure text as chat input and can invoke
+        the unavailable model a second time, leaving the frontend with no
+        durable record when it reloads the execution session.
+        """
+        params = request.params if isinstance(request.params, dict) else {}
+        session_id = str(params.get("session_id") or request.session_id or "").strip()
+        content = params.get("content")
+        if not session_id or content is None:
+            wire = self._send_error_response(
+                ws, request, send_lock, "session_id and content required", "BAD_REQUEST"
+            )
+            async with send_lock:
+                await send_wire_payload(ws, wire)
+            return
+
+        request_id = str(params.get("request_id") or request.request_id or "").strip()
+        channel_id = str(params.get("channel_id") or request.channel_id or "").strip()
+        role = "assistant" if str(params.get("role") or "assistant") == "assistant" else "user"
+        event_type = str(params.get("event_type") or "").strip() or None
+        mode = str(params.get("mode") or "").strip() or None
+        try:
+            timestamp = float(params.get("timestamp") or request.timestamp or 0.0)
+        except (TypeError, ValueError):
+            timestamp = 0.0
+        if timestamp <= 0:
+            timestamp = _dt.datetime.now().timestamp()
+
+        try:
+            append_history_record(
+                session_id=session_id,
+                request_id=request_id,
+                channel_id=channel_id,
+                role=role,
+                content=content,
+                timestamp=timestamp,
+                event_type=event_type,
+                mode=mode,
+            )
+            # The history writer is asynchronous.  Wait for a FIFO completion
+            # marker so a frontend history reload immediately after this RPC
+            # observes the newly appended terminal record.
+            receipt = enqueue_history_request_completion(
+                session_id, request_id, terminal_status="failed"
+            )
+            if receipt is not None:
+                await asyncio.wait_for(asyncio.wrap_future(receipt), timeout=5.0)
+            resp = AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=True,
+                payload={"persisted": True, "session_id": session_id},
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "[AgentWebSocketServer] history.append_record failed: session_id=%s error=%s",
+                session_id,
+                exc,
+            )
+            resp = AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=False,
+                payload={"error": str(exc)},
             )
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
         async with send_lock:
