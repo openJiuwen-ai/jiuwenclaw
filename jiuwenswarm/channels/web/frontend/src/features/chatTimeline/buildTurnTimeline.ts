@@ -441,12 +441,11 @@ function assignTurnTopAvatars(items: RenderItem[], isTeamMode: boolean): void {
 }
 
 /**
- * 空窗轮起点透传给下一轮的时限：仅当下一轮首个时间戳与该起点贴近（goal 插队场景，
- * 分钟级）才并入；超过则视为上一条提问未获回复后隔了太久（如隔天再来提问），
- * 丢弃透传起点，避免把跨会话闲置时间算进新一轮「已完成」耗时。
+ * 空窗轮起点透传规则：仅当下一轮 user 消息是「设目标」消息（isGoalObjectiveMessage）时并入。
+ * goal 插队场景里「上一个提问」和「设目标」同属一次交互流程，真正承载回答的那一轮耗时
+ * 要从上一提问算起；普通新提问与上一条空窗提问无关（如隔天再来提问），不继承起点，
+ * 避免把跨会话闲置时间算进新一轮「已完成」耗时。
  */
-const EMPTY_TURN_CARRY_MAX_GAP_MS = 10 * 60 * 1000;
-
 function insertTurnSummaries(items: RenderItem[], isProcessing: boolean): RenderItem[] {
   const out: RenderItem[] = [];
   let startMs = Number.POSITIVE_INFINITY;
@@ -460,21 +459,11 @@ function insertTurnSummaries(items: RenderItem[], isProcessing: boolean): Render
   // 时间行插入点：本轮首条 assistant 内容之前（视觉上位于头像下第一行）。
   let turnContentStart = 0;
   // 空窗轮（只有 user 消息、无任何活动）透传给下一轮的起点。
-  // 先挂起，等下一轮第一个真实时间戳校验距离后再决定是否并入。
+  // 先挂起，仅并入下一轮「设目标」消息开启的轮次（见 user 消息分支），其余轮次丢弃。
   let carriedStartMs = Number.POSITIVE_INFINITY;
 
   const acc = (value: number, asWork = false) => {
     if (!Number.isFinite(value) || value <= 0) return;
-    // 空窗起点仅当与新活动贴近（goal 插队场景，分钟级）才并入本轮；
-    // 隔了太久（上一条提问未获回复、隔天再来提问）说明是跨会话空窗，
-    // 丢弃透传起点，避免把整段闲置时间算进本轮「已完成」耗时。
-    if (Number.isFinite(carriedStartMs)) {
-      const carried = carriedStartMs;
-      carriedStartMs = Number.POSITIVE_INFINITY;
-      if (value - carried <= EMPTY_TURN_CARRY_MAX_GAP_MS) {
-        acc(carried, false);
-      }
-    }
     if (value < startMs) startMs = value;
     if (value > endMs) endMs = value;
     if (asWork) {
@@ -485,8 +474,8 @@ function insertTurnSummaries(items: RenderItem[], isProcessing: boolean): Render
   const flush = (isLastTurn: boolean) => {
     const shouldShow = (isLastTurn && isProcessing) || hasActivity;
     // 整段没有任何活动（goal 插队时「上一个提问」和「设目标」两条 user 消息紧挨着，中间
-    // 空窗）：不出耗时条，起点先挂起，留给真正承载这段回答的那一轮，且仅当两轮贴近时
-    // 才并入（见 acc 内校验），否则那一轮从首次思考才开始算，耗时显示成 0s。
+    // 空窗）：不出耗时条，起点先挂起，仅并入下一轮「设目标」消息开启的轮次（见 user 消息
+    // 分支），否则那一轮从首次思考才开始算，耗时显示成 0s。
     const carryTimestamps = !hasActivity;
     if (shouldShow && Number.isFinite(startMs) && Number.isFinite(endMs)) {
       const summary: Extract<RenderItem, { type: 'turnSummary' }> = {
@@ -534,6 +523,13 @@ function insertTurnSummaries(items: RenderItem[], isProcessing: boolean): Render
     if (item.type === 'message' && item.message.role === 'user') {
       flush(false);
       turnId += 1;
+      // 空窗起点仅并入「设目标」消息开启的轮次：goal 插队时上一提问与设目标同属一次
+      // 交互流程，本轮耗时从上一提问算起；普通新提问（哪怕只隔几分钟）与上一条空窗
+      // 提问无关，不继承起点，避免把无关/跨会话等待算进本轮「已完成」耗时。
+      if (Number.isFinite(carriedStartMs) && item.message.isGoalObjectiveMessage) {
+        acc(carriedStartMs, false);
+      }
+      carriedStartMs = Number.POSITIVE_INFINITY;
       acc(toTimestampMs(item.message.timestamp), false);
       out.push(item);
       turnContentStart = out.length;

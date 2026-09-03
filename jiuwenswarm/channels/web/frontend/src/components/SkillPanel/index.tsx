@@ -14,6 +14,7 @@ import TipIcon from '../../assets/tip.svg?react';
 import UpFileIcon from '../../assets/upFile.svg?react';
 import LinkIcon from '../../assets/link.svg?react';
 import './SkillPanel.css';
+import { CategoryTabs, PageHeader, PageToolbarSearch } from '../ui';
 import { webRequest } from "../../services/webClient";
 import { SourceManagerModal } from "../../features/SourceManagerModal";
 import { SkillNetSearchModal } from "../../features/SkillNetSearchModal";
@@ -23,6 +24,7 @@ import { parseConfigBoolean } from "../../features/settings/services/settingsCon
 import { normalizeSkillNetUrl } from "../../utils/skillNetUrl";
 import { getSkillAvatar } from "../../utils/skillAvatar";
 import { computeMySkills, filterEnabledMySkills } from "../../utils/mySkills";
+import { buildSkillVersionOptions } from "./skillVersionOptions";
 import {
   getStoredOAuthToken,
   getStoredOAuthProvider,
@@ -1994,24 +1996,14 @@ export function SkillPanel({
           {cleanMessage}
         </div>
       )}
-      <div className="flex-1 flex flex-col min-w-0 min-h-0 bg-card">
+      <div className="app-page-body">
         <div
-          className="card flex-1 flex flex-col min-h-0 overflow-hidden"
+          className="page-content"
           data-testid="skill-content"
-          style={{ borderRadius: 0, maxWidth: 1400 }}
         >
           {!(activeTab === "my" && selectedSkill) && !(activeTab === "marketplace" && marketplaceSubView === 'detail') && (
           <>
-          <div className="flex items-start justify-between">
-          <div>
-            <h2 className="h-9 font-semibold text-[24px] leading-[36px]">
-              {t('skills.title')}
-            </h2>
-            <p className="text-sm text-text-muted mt-1">
-              {t('skills.subtitle')}
-            </p>
-          </div>
-          <div className="flex items-center">
+          <PageHeader title={t('skills.title')} subtitle={t('skills.subtitle')}>
             <button
               onClick={() => setSourceModalOpen(true)}
               className="flex items-center gap-1.5 px-1 py-1.5 rounded-lg text-sm text-text-muted hover:text-text hover:bg-secondary/50 "
@@ -2046,10 +2038,9 @@ export function SkillPanel({
               </svg>
               {activeTab === "graph" && graphReading ? t('skills.graph.status.reading') : t('common.refresh')}
             </button>
-          </div>
-        </div>
+          </PageHeader>
 
-        <div className="mt-8 mb-4 w-full flex items-center justify-between gap-2">
+        <div className="page-toolbar" data-testid="page-toolbar">
           <div className="chat-picker-panel__tabs">
             <button
               type="button"
@@ -2073,7 +2064,7 @@ export function SkillPanel({
               {t('skills.tabs.skillGraph')}
             </button>
           </div>
-          <div className="flex items-center gap-3 ml-auto" style={{ width:'320px', justifyContent: 'flex-end' }}>
+          <div className="flex items-center gap-3 " >
             {activeTab === "my" && (
               <>
                 {/* 已发布/未发布筛选 */}
@@ -2107,17 +2098,11 @@ export function SkillPanel({
               </>
             )}
             {(activeTab === "my" || activeTab === "marketplace") && (
-              <div className="relative flex-1 min-w-0" style={{ maxWidth: '360px' }}>
-                <svg className="absolute left-2.5 top-1/2 -translate-y-1/2 w-4 h-4 text-text-muted pointer-events-none" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M21 21l-4.35-4.35M11 19a8 8 0 100-16 8 8 0 000 16z" />
-                </svg>
-                <input
-                  value={search}
-                  onChange={(e) => setSearch(e.target.value)}
-                  placeholder={t('skills.searchPlaceholder')}
-                  className="w-full pl-8 pr-3 py-1.5 rounded-[6px] border border-border text-sm text-text placeholder:text-text-muted focus-visible:outline-none focus-visible:shadow-none"
-                />
-              </div>
+              <PageToolbarSearch
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                placeholder={t('skills.searchPlaceholder')}
+              />
             )}
             {activeTab === "my" && (
               <div className="relative">
@@ -2383,7 +2368,7 @@ export function SkillPanel({
               <div className="flex items-center justify-between mb-3">
                 <span className="font-bold text-text-strong" style={{ fontSize: '16px' }}>{t('skills.featuredTeamSkills')}</span>
               </div>
-              <div className="grid justify-center items-start gap-4 content-start" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(360px, 1fr))' }}>
+              <div className="card-grid-auto">
                 {teamSkills.map((skill) => (
                   <HubSkillCard
                     key={skill.asset_id}
@@ -2397,23 +2382,11 @@ export function SkillPanel({
           ) : (
             /* 默认列表视图 */
             <>
-              <div className="flex items-center text-[16px]">
-                {MARKETPLACE_CATEGORIES.map((cat, idx) => (
-                  <span key={cat} className="flex items-center">
-                    {idx > 0 && <span className="inline-flex items-center h-4 text-text-divider px-4">|</span>}
-                    <button
-                      onClick={() => setMarketplaceCategory(cat)}
-                      className={`${
-                        marketplaceCategory === cat
-                          ? "text-text font-bold"
-                          : "text-text-weak hover:text-text"
-                      }`}
-                    >
-                      {t(`skills.marketplaceCategories.${cat}`)}
-                    </button>
-                  </span>
-                ))}
-              </div>
+              <CategoryTabs
+                items={MARKETPLACE_CATEGORIES.map(cat => ({ value: cat, label: t(`skills.marketplaceCategories.${cat}`) }))}
+                value={marketplaceCategory}
+                onChange={setMarketplaceCategory}
+              />
 
               {hubLoading ? (
                 <div className="mt-4 text-sm text-text-muted">{t('common.loading')}</div>
@@ -2421,7 +2394,7 @@ export function SkillPanel({
                 <div className="mt-4 text-sm text-text-muted">{t('skills.noMatches')}</div>
               ) : search.trim() ? (
                 /* 搜索结果：全部罗列 */
-                <div className="mt-4 flex-1 min-h-0 overflow-y-auto grid justify-center items-start gap-4 content-start" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(360px, 1fr))' }}>
+                <div className="card-grid-auto mt-4 flex-1 min-h-0 overflow-y-auto">
                   {hubSkills.map((skill) => (
                     <HubSkillCard
                       key={skill.asset_id}
@@ -2451,7 +2424,7 @@ export function SkillPanel({
                           </button>
                         )}
                       </div>
-                      <div className="grid justify-center items-start gap-4 content-start mb-6" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(360px, 1fr))' }}>
+                      <div className="card-grid-auto mb-6">
                         {visibleTeamSkills.map((skill) => (
                           <HubSkillCard
                             key={skill.asset_id}
@@ -2470,7 +2443,7 @@ export function SkillPanel({
                       <div className="flex items-center justify-between mb-3">
                         <span className="font-bold text-text-strong" style={{ fontSize: '16px' }}>{t('skills.featuredSkills')}</span>
                       </div>
-                <div className="grid justify-center items-start gap-4 content-start" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(360px, 1fr))' }}>
+                 <div className="card-grid-auto">
                         {featuredSkills.map((skill) => (
                           <HubSkillCard
                             key={skill.asset_id}
@@ -2680,9 +2653,12 @@ export function SkillPanel({
                         className="appearance-none rounded-[6px] border border-border bg-panel text-sm text-text outline-none focus:outline-none focus:ring-0 focus:border-border"
                         style={{ width: '360px', height: '28px', paddingLeft: '12px', paddingRight: '12px' }}
                       >
-                        {skillVersions.map((v) => (
-                          <option key={v.version} value={v.version}>
-                            {v.version}{v.is_default ? ` (${t('skills.detail.defaultVersion')})` : ''}{!v.available ? ` (${t('skills.detail.unavailableVersion')})` : ''}
+                        {buildSkillVersionOptions(skillVersions, {
+                          defaultSuffix: ` (${t('skills.detail.defaultVersion')})`,
+                          unavailableSuffix: ` (${t('skills.detail.unavailableVersion')})`,
+                        }).map((option) => (
+                          <option key={option.version} value={option.version} disabled={option.disabled}>
+                            {option.label}
                           </option>
                         ))}
                       </select>
@@ -2936,7 +2912,7 @@ export function SkillPanel({
                   </div>
                 ) : null}
                 {listState !== "success" || mySkillsFiltered.length > 0 ? (
-                <div className="grid justify-center items-start gap-4 content-start" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(360px, 1fr))', paddingTop: '16px' }}>
+                <div className="card-grid-auto" style={{ paddingTop: '16px' }}>
                     {listState === "loading" && (
                       <div className="col-span-3 flex items-center justify-center h-full text-text-muted">{t('common.loading')}</div>
                     )}
@@ -2988,15 +2964,11 @@ export function SkillPanel({
                               </div>
                               <div className="mt-1 flex items-center gap-1.5 flex-wrap">
                                 <SkillTypeBadge skillType={skill.skill_type} withTruncate />
-                                {skill.published === true ? (
-                                  <span className="px-2 h-5 inline-flex items-center rounded bg-accent/10 border border-border truncate text-xs text-text-link">
-                                    {t('skills.publishFilter.published')}
-                                  </span>
-                                ) : (
+                                {activeTab === "my" ? (
                                   <span className="px-2 h-5 inline-flex items-center rounded bg-secondary border border-border truncate text-xs text-text-muted">
                                     {t('skills.publishFilter.unpublished')}
                                   </span>
-                                )}
+                                ) : null}
                               </div>
                             </div>
                             {/* 悬浮按钮 + 始终显示的启用开关 */}

@@ -1,6 +1,7 @@
 import { ChevronLeft, ChevronRight } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import type { AgentCatalogItem, RequestStatus } from '../../features/agentManagement';
+import { CategoryTabs } from '../ui';
 import { DefinitionCard } from './DefinitionCard';
 
 const PAGE_SIZE = 15;
@@ -59,37 +60,22 @@ export function CatalogPage({
   const hasQuery = query.trim().length > 0 || Boolean(category);
 
   return (
-    <section className="agent-management-catalog" data-testid={`agent-catalog-${scope}`}>
+    <>
       {!isMine ? (
-        <div className="agent-management-toolbar">
-          <div className="agent-management-category-row" role="tablist" aria-label={t('agentManagement.categoryLabel')}>
-            <button
-              type="button"
-              role="tab"
-              aria-selected={!category}
-              className={`agent-management-category${!category ? ' is-active' : ''}`}
-              onClick={() => onCategoryChange('')}
-            >
-              {t('agentManagement.categoryAll')}
-            </button>
-            {CATEGORIES.map(item => (
-              <button
-                key={item}
-                type="button"
-                role="tab"
-                aria-selected={category === item}
-                className={`agent-management-category${category === item ? ' is-active' : ''}`}
-                onClick={() => onCategoryChange(item)}
-              >
-                {t(`agentManagement.categories.${item}`, { defaultValue: item })}
-              </button>
-            ))}
-          </div>
+        <div data-testid="page-catalog">
+          <CategoryTabs
+            items={[
+              { value: '', label: t('agentManagement.categoryAll') },
+              ...CATEGORIES.map(item => ({ value: item, label: t(`agentManagement.categories.${item}`, { defaultValue: item }) })),
+            ]}
+            value={category}
+            onChange={onCategoryChange}
+          />
         </div>
       ) : null}
 
       {status === 'loading' ? (
-        <div className={`agent-management-card-grid ${isMine ? 'is-mine' : ''}`} aria-label={t('common.loading')}>
+        <div className="card-grid-auto" style={{ paddingTop: '16px' }} aria-label={t('common.loading')}>
           {Array.from({ length: PAGE_SIZE }, (_, index) => (
             <SkeletonCard key={index} />
           ))}
@@ -112,7 +98,7 @@ export function CatalogPage({
         </div>
       ) : (
         <>
-          <div className={`agent-management-card-grid ${isMine ? 'is-mine' : ''}`}>
+          <div className="card-grid-auto" style={{ paddingTop: '16px' }}>
             {items.map(item => (
               <DefinitionCard
                 key={item.id}
@@ -145,7 +131,7 @@ export function CatalogPage({
           ) : null}
         </>
       )}
-    </section>
+    </>
   );
 }
 
