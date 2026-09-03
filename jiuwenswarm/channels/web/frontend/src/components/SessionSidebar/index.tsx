@@ -55,23 +55,12 @@ const teamNavIcon = (
   </svg>
 );
 
-const historyNavIcon = (
-  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.5}>
-    <path
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      d="M3 3v5h5M3.05 13A9 9 0 1 0 6 5.3L3 8"
-    />
-  </svg>
-);
-
 const mainNavItems: NavItem[] = [
   { key: 'chat', labelKey: 'nav.work', icon: <WorkIcon aria-hidden /> },
   { key: 'skills', labelKey: 'nav.skills', icon: <SkillDesignIcon aria-hidden /> },
   { key: 'channels', labelKey: 'nav.channels', icon: <ChannelIcon aria-hidden /> },
   { key: 'agents', labelKey: 'nav.agent', icon: <AgentDesignIcon aria-hidden /> },
   { key: 'teams', labelKey: 'nav.teams', icon: teamNavIcon },
-  { key: 'history', labelKey: 'nav.history', icon: historyNavIcon },
 ];
 
 const moreNavItems: NavItem[] = [

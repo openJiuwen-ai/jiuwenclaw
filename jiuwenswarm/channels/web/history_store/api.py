@@ -110,3 +110,35 @@ def delete_session_sync(
     if st is None:
         return False
     return st.delete_session_blocking(str(session_id), user=user)
+
+
+def set_session_pinned_sync(
+    session_id: str,
+    pinned: bool,
+    store: ChatHistoryStore | None = None,
+    *,
+    user: str | None = None,
+) -> tuple[bool, int] | None:
+    """同步置顶/取消置顶会话（remote 模式 session.pin 用）。
+
+    严格版语义：store/DB 不可用抛异常（调用方区分故障与不存在）；
+    会话不存在返回 ``None``；成功返回 ``(pinned, pin_order)``。
+    """
+    if not session_id:
+        return None
+    st = _coerce_store(store)
+    if st is None:
+        raise RuntimeError("web history store unavailable")
+    return st.set_session_pinned_blocking(str(session_id), bool(pinned), user=user)
+
+
+def list_pinned_sessions_sync(
+    store: ChatHistoryStore | None = None,
+    *,
+    user: str | None = None,
+) -> list[dict[str, Any]]:
+    """同步读全部置顶会话（remote 模式 project.pinned_sessions 用）。库不可用返回空。"""
+    st = _coerce_store(store)
+    if st is None:
+        return []
+    return st.list_pinned_sessions_blocking(user=user)

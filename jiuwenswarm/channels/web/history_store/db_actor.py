@@ -103,6 +103,7 @@ class HistoryDbActor:
         await handler.init_database()
         await handler.connect()
         await init_web_history_tables(handler)
+        await self._ensure_pin_columns()
         self._handler = handler
         logger.info(
             "[history] %s store 初始化完成 %s:%s/%s%s",
@@ -221,6 +222,132 @@ class HistoryDbActor:
         )
         return {**_row_to_dict(s), "messages": [_row_to_dict(m) for m in msgs]}
 
+    async def _ensure_pin_columns(self) -> None:
+        """存量表列迁移：sessions 表补 ``pinned`` / ``pin_order`` 列（幂等）。
+
+        foundation ``init_table`` 只 create_all，不给已存在的表加列（与
+        service_config_template 缺列事故同型）；ORM 模型带上新列后，任何 SELECT
+        都会引用它们，存量表缺列会直接 UndefinedColumn。这里按方言直连 information_schema
+        探测后 ALTER 补列；失败仅告警（新库由 create_all 直接建出，不需要迁移）。
+        """
+        if self._settings is None:
+            return
+        try:
+            if self._db_type == "postgresql":
+                import asyncpg
+
+                conn = await asyncpg.connect(
+                    host=self._settings.host,
+                    port=int(self._settings.port),
+                    user=self._settings.user,
+                    password=self._settings.password,
+                    database=self._settings.database,
+                )
+                try:
+                    schema = self._settings.pg_schema or "public"
+                    rows = await conn.fetch(
+                        "SELECT column_name FROM information_schema.columns"
+                        " WHERE table_schema=$1 AND table_name='sessions'",
+                        schema,
+                    )
+                    names = {r["column_name"] for r in rows}
+                    table = f'"{schema}"."sessions"'
+                    if "pinned" not in names:
+                        await conn.execute(
+                            f'ALTER TABLE {table} ADD COLUMN "pinned" BOOLEAN NOT NULL DEFAULT FALSE'
+                        )
+                    if "pin_order" not in names:
+                        await conn.execute(
+                            f'ALTER TABLE {table} ADD COLUMN "pin_order" INTEGER NOT NULL DEFAULT 0'
+                        )
+                finally:
+                    await conn.close()
+            elif self._db_type == "mysql":
+                import aiomysql
+
+                conn = await aiomysql.connect(
+                    host=self._settings.host,
+                    port=int(self._settings.port),
+                    user=self._settings.user,
+                    password=self._settings.password,
+                    db=self._settings.database,
+                )
+                try:
+                    cur = await conn.cursor()
+                    await cur.execute(
+                        "SELECT column_name FROM information_schema.columns"
+                        " WHERE table_schema=%s AND table_name='sessions'",
+                        (self._settings.database,),
+                    )
+                    names = {r[0] for r in await cur.fetchall()}
+                    if "pinned" not in names:
+                        await cur.execute(
+                            "ALTER TABLE `sessions` ADD COLUMN `pinned` TINYINT(1) NOT NULL DEFAULT 0"
+                        )
+                    if "pin_order" not in names:
+                        await cur.execute(
+                            "ALTER TABLE `sessions` ADD COLUMN `pin_order` INT NOT NULL DEFAULT 0"
+                        )
+                    await conn.commit()
+                finally:
+                    conn.close()
+            else:
+                return
+            logger.info("[history] sessions 置顶列迁移完成 db_type=%s", self._db_type)
+        except Exception:  # noqa: BLE001
+            logger.warning("[history] sessions 置顶列迁移失败（可能已存在）", exc_info=True)
+
+    async def _set_session_pinned(
+        self, session_id: str, pinned: bool, *, user: str,
+    ) -> tuple[bool, int] | None:
+        """remote 模式置顶/取消置顶（语义与本地 ``set_session_pinned`` 一致）。
+
+        目标行不存在返回 ``None``（调用方回 NOT_FOUND）；成功返回 ``(pinned, pin_order)``。
+        重编号与目标状态写入共用 handler CRUD，pg/mysql 通用。
+        """
+        if not user:
+            user = "guest"
+        handler = await self._get_handler()
+        target = await handler.get("sessions", {"session_id": session_id, "user": user})
+        if target is None:
+            return None
+        # 1. 写目标状态：置顶保留原 pin_order 供排序（新置顶为 0 → 排最前）；取消清零
+        if pinned:
+            await handler.update("sessions", {"session_id": session_id}, {"pinned": True})
+        else:
+            await handler.update(
+                "sessions", {"session_id": session_id}, {"pinned": False, "pin_order": 0}
+            )
+        # 2. 收集该用户全部置顶会话（含刚置顶的），按 pin_order 稳定排序
+        rows = await handler.list_records(
+            "sessions", {"user": user, "pinned": True}, limit=10_000, offset=0, order_by="pin_order"
+        )
+        ordered = sorted(
+            (_row_to_dict(r) for r in rows),
+            key=lambda d: int(d.get("pin_order") or 0),
+        )
+        # 3. 紧凑重编号 1..N（幂等：已在位则跳过写）
+        new_orders: dict[str, int] = {}
+        for idx, d in enumerate(ordered, start=1):
+            sid = str(d.get("session_id") or "")
+            if int(d.get("pin_order") or 0) != idx:
+                await handler.update(
+                    "sessions", {"session_id": sid}, {"pinned": True, "pin_order": idx}
+                )
+            if sid:
+                new_orders[sid] = idx
+        return pinned, new_orders.get(session_id, 0)
+
+    async def _list_pinned_sessions(self, *, user: str) -> list[dict[str, Any]]:
+        """该用户全部置顶会话，按 pin_order 升序。"""
+        if not user:
+            user = "guest"
+        handler = await self._get_handler()
+        rows = await handler.list_records(
+            "sessions", {"user": user, "pinned": True}, limit=10_000, offset=0, order_by="pin_order"
+        )
+        return [_row_to_dict(r) for r in rows]
+
     async def record_message(self, **kw: Any) -> bool:
         return await self.run_async(self._record_message(**kw))
 
@@ -259,6 +386,22 @@ class HistoryDbActor:
 
     def delete_session_sync(self, session_id: str, *, user: str | None = None) -> bool:
         return self.run_sync(self._delete_session(session_id, user=user))
+
+    async def set_session_pinned(
+        self, session_id: str, pinned: bool, *, user: str | None = None
+    ) -> tuple[bool, int] | None:
+        return await self.run_async(self._set_session_pinned(session_id, pinned, user=user or ""))
+
+    def set_session_pinned_sync(
+        self, session_id: str, pinned: bool, *, user: str | None = None
+    ) -> tuple[bool, int] | None:
+        return self.run_sync(self._set_session_pinned(session_id, pinned, user=user or ""))
+
+    async def list_pinned_sessions(self, *, user: str | None = None) -> list[dict[str, Any]]:
+        return await self.run_async(self._list_pinned_sessions(user=user or ""))
+
+    def list_pinned_sessions_sync(self, *, user: str | None = None) -> list[dict[str, Any]]:
+        return self.run_sync(self._list_pinned_sessions(user=user or ""))
 
     def stop(self) -> None:
         if not self._started:
