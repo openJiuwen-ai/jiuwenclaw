@@ -777,11 +777,12 @@ graph TD
 # 注意：TUI 中 ~ 不会被展开，必须使用完整路径如 /root/.jiuwenswarm/agent/workspace/skills/my-swarm-skill
 # 通用命令模板：/teamskills validate <你的技能绝对路径> --type teamskills
 
-# 示例：验证系统内置的 swarmskill-creator
-/teamskills validate /root/.jiuwenswarm/agent/workspace/skills/swarmskill-creator --type teamskills
+# 示例：注意：swarmskill-creator 是单 Agent 技能，不具备 Swarm Skill 的 5 文件结构，不能作为验证目标
+# 请使用你自己创建的 Swarm Skill 路径
+/teamskills validate /root/.jiuwenswarm/agent/workspace/skills/<your-swarm-skill> --type teamskills
 
 # 方式二：终端脚本验证（shell中~可展开，已给出可运行示例）
-python3 /root/.jiuwenswarm/agent/workspace/skills/swarmskill-creator/scripts/validate_swarmskill.py /root/.jiuwenswarm/agent/workspace/skills/swarmskill-creator
+python3 /root/.jiuwenswarm/agent/workspace/skills/swarmskill-creator/scripts/validate_swarmskill.py /root/.jiuwenswarm/agent/workspace/skills/<your-swarm-skill>
 ```
 
 > **实用提示**：
