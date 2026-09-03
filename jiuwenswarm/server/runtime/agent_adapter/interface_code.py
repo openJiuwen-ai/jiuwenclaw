@@ -47,7 +47,7 @@ from openjiuwen.harness.subagents.browser_agent import build_browser_agent_confi
 from openjiuwen.harness.subagents.code_agent import build_code_agent_config
 from openjiuwen.harness.subagents.explore_agent import build_explore_agent_config
 from openjiuwen.harness.subagents.plan_agent import build_plan_agent_config
-from openjiuwen.harness.tools import WebFetchWebpageTool, WebFreeSearchTool, WebPaidSearchTool
+from openjiuwen.harness.tools import WebFetchWebpageTool, WebPaidSearchTool
 from openjiuwen.harness.tools.worktree import WorktreeConfig, WorktreeRail
 
 from jiuwenswarm.server.runtime.agent_adapter.interface_deep import (
@@ -64,6 +64,9 @@ from jiuwenswarm.server.runtime.agent_adapter.statusline_setup_agent import (
     DEFAULT_STATUSLINE_SETUP_MAX_ITERATIONS,
     STATUSLINE_SETUP_AGENT_TYPE,
     build_statusline_setup_agent_config,
+)
+from jiuwenswarm.server.runtime.agent_adapter.trusted_web_search import (
+    TrustedWebFreeSearchTool,
 )
 from jiuwenswarm.agents.harness.common.rails.interrupt.interrupt_helpers import build_permission_rail
 from jiuwenswarm.agents.harness.common.browser_defaults import (
@@ -1853,6 +1856,8 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
         workspace = self._workspace_dir or "./"
         sys_operation = self._sys_operation
         subagents: list[Any] = []
+        self._browser_runtime_settings = None
+        self._browser_runtime_security_profile = None
         self._sync_browser_runtime_environment(config_base)
 
         statusline_setup_cfg = (
@@ -1957,9 +1962,10 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
                     max_iterations=parse_int(
                         browser_agent_cfg.get("max_iterations") if isinstance(browser_agent_cfg, dict) else None,
                         DEFAULT_BROWSER_AGENT_MAX_ITERATIONS,
-                    )
+                    ),
                 )
-                browser_spec.factory_kwargs = {"auto_create_workspace": False}
+                self._prepare_browser_runtime_security(browser_spec)
+                browser_spec.factory_kwargs["auto_create_workspace"] = False
                 subagents.append(browser_spec)
 
         # ── 自定义 agent 不加入 deep_config.subagents ──
@@ -2289,7 +2295,7 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
 
     def _build_web_free_search_tool(self, agent_id: str) -> Any:
         """构建 web_free_search 工具."""
-        return WebFreeSearchTool(
+        return TrustedWebFreeSearchTool(
             language=self._resolve_runtime_language(), agent_id=agent_id
         )
 

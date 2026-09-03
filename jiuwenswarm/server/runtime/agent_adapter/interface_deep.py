@@ -22,7 +22,7 @@ import time
 from collections import Counter
 from collections.abc import Mapping
 from contextvars import ContextVar, Token
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from shutil import which
 from typing import TYPE_CHECKING, Any, AsyncIterator, Callable, List, Optional, Tuple
@@ -102,7 +102,6 @@ from openjiuwen.harness.subagent_runtime import (
 )
 from openjiuwen.harness.tools import (
     WebFetchWebpageTool,
-    WebFreeSearchTool,
     WebPaidSearchTool,
     create_audio_tools,
     create_vision_tools,
@@ -112,6 +111,12 @@ from openjiuwen.harness.schema.interaction import (
     InteractionEventType,
     InputDispatchMode,
     SendInputRequest,
+)
+from openjiuwen.harness.schema.task import TodoStatus
+from openjiuwen.harness.workspace.workspace import Workspace, WorkspaceNode
+
+from jiuwenswarm.server.runtime.agent_adapter.trusted_web_search import (
+    TrustedWebFreeSearchTool,
 )
 
 GOAL_UPDATED_EVENT_TYPE = InteractionEventType.GOAL_UPDATED.value
@@ -165,9 +170,6 @@ except ImportError:  # Compatibility with older agent-core versions.
                     return True
             return False
 
-
-from openjiuwen.harness.schema.task import TodoStatus
-from openjiuwen.harness.workspace.workspace import Workspace, WorkspaceNode
 
 from jiuwenswarm.server.runtime.tokenizer_service import (
     configured_tokenizer_profiles,
@@ -386,6 +388,10 @@ from jiuwenswarm.server.runtime.agent_adapter.sysop_builder import (
     build_filesystem_policy,
     create_local_sysop_card,
     create_sandbox_sysop_card,
+)
+from jiuwenswarm.server.runtime.agent_adapter.browser_runtime_security import (
+    BrowserRuntimeSecurityProfile,
+    apply_browser_runtime_security_profile,
 )
 from jiuwenswarm.server.runtime.agent_adapter.user_turn import TEAM_USER_TURN_KEY, UserTurn
 from jiuwenswarm.agents.harness.common.auto_harness.service import _HARNESS_PACKAGES_FILE
@@ -1588,6 +1594,10 @@ class JiuWenSwarmDeepAdapter:
         self._subagent_rail: SubagentRail | None = None
         self._ask_user_rail: StructuredAskUserRail | None = None
         self._permission_rail: Any = None
+        self._browser_runtime_settings: Any | None = None
+        self._browser_runtime_security_profile: BrowserRuntimeSecurityProfile | None = (
+            None
+        )
         self._avatar_rail: Any = None
         self._memory_forbidden_rail: Any = None
         self._tool_cards = None
@@ -3531,6 +3541,40 @@ class JiuWenSwarmDeepAdapter:
             chrome_path or "<auto>",
         )
 
+    def _prepare_browser_runtime_security(
+        self,
+        browser_spec: Any,
+    ) -> None:
+        """Guard the settings already owned by one browser subagent spec."""
+
+        self._browser_runtime_settings = None
+        self._browser_runtime_security_profile = None
+        try:
+            factory_kwargs = getattr(browser_spec, "factory_kwargs", None)
+            settings = (
+                factory_kwargs.get("settings")
+                if isinstance(factory_kwargs, dict)
+                else None
+            )
+            mcp_cfg = getattr(settings, "mcp_cfg", None)
+            if not isinstance(mcp_cfg, McpServerConfig):
+                raise TypeError("browser_runtime_settings_missing_mcp_config")
+            guarded_cfg, profile = apply_browser_runtime_security_profile(mcp_cfg)
+            self._browser_runtime_security_profile = profile
+            if profile.network_guard_enforced:
+                guarded_settings = replace(settings, mcp_cfg=guarded_cfg)
+                self._browser_runtime_settings = guarded_settings
+                factory_kwargs["settings"] = guarded_settings
+        except Exception:
+            logger.exception(
+                "[%s] browser runtime security preparation failed",
+                type(self).__name__,
+            )
+            self._browser_runtime_security_profile = BrowserRuntimeSecurityProfile(
+                failure_reason="browser_runtime_security_preparation_failed",
+                egress_guard_failure_reason="egress_guard_unverified",
+            )
+
     @staticmethod
     def _is_subagent_enabled(subagent_cfg: Any) -> bool:
         """Treat only explicit `enabled: true` as enabled."""
@@ -3613,6 +3657,8 @@ class JiuWenSwarmDeepAdapter:
 
         # Swarm members and the main browser subagent read these variables when
         # their browser runtimes are built.
+        self._browser_runtime_settings = None
+        self._browser_runtime_security_profile = None
         self._sync_browser_runtime_environment(config_base)
         # Skill-only MCPs' bundled scripts read tokens from os.environ (BashTool
         # inherits it). Sync now so a freshly built agent process has the
@@ -3627,22 +3673,22 @@ class JiuWenSwarmDeepAdapter:
                     "[JiuWenSwarmDeepAdapter] browser subagent enabled without BROWSER_DRIVER; "
                     "defaulting to managed mode"
                 )
-            subagents.append(
-                build_browser_agent_config(
-                    model,
-                    workspace=workspace,
-                    sys_operation=sys_operation,
-                    language=resolved_language,
-                    max_iterations=parse_int(
-                        (
-                            browser_agent_cfg.get("max_iterations")
-                            if isinstance(browser_agent_cfg, dict)
-                            else None
-                        ),
-                        DEFAULT_BROWSER_AGENT_MAX_ITERATIONS,
+            browser_spec = build_browser_agent_config(
+                model,
+                workspace=workspace,
+                sys_operation=sys_operation,
+                language=resolved_language,
+                max_iterations=parse_int(
+                    (
+                        browser_agent_cfg.get("max_iterations")
+                        if isinstance(browser_agent_cfg, dict)
+                        else None
                     ),
-                )
+                    DEFAULT_BROWSER_AGENT_MAX_ITERATIONS,
+                ),
             )
+            self._prepare_browser_runtime_security(browser_spec)
+            subagents.append(browser_spec)
         elif (
             isinstance(subagents_cfg, dict)
             and isinstance(browser_agent_cfg, dict)
@@ -7618,7 +7664,7 @@ class JiuWenSwarmDeepAdapter:
             tool_cards.append(self._paid_search_tool.card)
             self._paid_search_registered = True
 
-        for tool_cls in [WebFreeSearchTool, WebFetchWebpageTool]:
+        for tool_cls in [TrustedWebFreeSearchTool, WebFetchWebpageTool]:
             tool_instance = tool_cls(agent_id=agent_id)
             self._register_agent_owned_tool(tool_instance, agent_id)
             tool_cards.append(tool_instance.card)
