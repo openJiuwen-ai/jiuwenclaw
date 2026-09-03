@@ -2356,7 +2356,8 @@
         "idInvalid": "只能使用字母、数字、点、下划线和连字符",
         "nameRequired": "请输入专家名称",
         "descriptionRequired": "请输入能力介绍",
-        "personaRequired": "请输入专家人设"
+        "personaRequired": "请输入专家人设",
+        "nameTooLong": "名称不能超过 {{max}} 个字符"
       }
     }
   },

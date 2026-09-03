@@ -2368,7 +2368,8 @@
         "idInvalid": "Use only letters, numbers, dots, underscores and hyphens",
         "nameRequired": "Enter an Expert name",
         "descriptionRequired": "Enter a capability description",
-        "personaRequired": "Enter a persona"
+        "personaRequired": "Enter a persona",
+        "nameTooLong": "Name must not exceed {{max}} characters"
       }
     }
   },

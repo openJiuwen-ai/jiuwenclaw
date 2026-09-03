@@ -34,6 +34,8 @@ const MCP_TYPE_OPTIONS = [
   ['skill-only', 'connectorMarket.detail.integrationType.skillOnly'],
 ] as const;
 
+const AGENT_NAME_MAX_LENGTH = 30;
+
 export function AgentEditor({
   draft,
   skillOptions,
@@ -74,7 +76,11 @@ export function AgentEditor({
 
   const errors = useMemo(
     () => ({
-      name: !draft.name.trim() ? t('agentManagement.form.errors.nameRequired') : '',
+      name: !draft.name.trim()
+        ? t('agentManagement.form.errors.nameRequired')
+        : draft.name.length > AGENT_NAME_MAX_LENGTH
+          ? t('agentManagement.form.errors.nameTooLong', { max: AGENT_NAME_MAX_LENGTH })
+          : '',
       description: !draft.description.trim() ? t('agentManagement.form.errors.descriptionRequired') : '',
       persona: !draft.persona.trim() ? t('agentManagement.form.errors.personaRequired') : '',
     }),
@@ -229,6 +235,7 @@ export function AgentEditor({
               value={draft.name}
               onChange={event => update({ name: event.target.value })}
               placeholder={t('agentManagement.form.namePlaceholder')}
+              maxLength={AGENT_NAME_MAX_LENGTH}
               aria-invalid={Boolean(touched && errors.name)}
             />
             {touched && errors.name ? <small className="agent-management-field-error">{errors.name}</small> : null}
