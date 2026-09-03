@@ -7,7 +7,7 @@
 #   3. pip install -r requirements-minimal.txt   （phase-1 逐包 + import 验证，含传递依赖）
 #   4. pip install openjiuwen-harmonyos --no-deps  （git 或本地 agent-core/harmonyos）
 #   5. pip install agentcore-minimal 补依赖      （harmonyos/pyproject.toml − Phase 1，含传递依赖）
-#   6. pip install openjiuwen_deepsearch          （本地源码或固定 Git 分支，含依赖）
+#   6. pip install openjiuwen_deepsearch --no-deps（鸿蒙无 pypdfium2 wheel；通用依赖由 phase-1 提供）
 #   7. pip install --no-deps -e .                 （jiuwenclaw 本体）
 #
 # 用法（鸿蒙 HiShell）:
@@ -27,6 +27,7 @@
 #   OPENJIUWEN_GIT_REPO / OPENJIUWEN_GIT_REF  默认 openJiuwen/agent-core @ enterprise-dev
 #   DEEPSEARCH_PATH     本地 deepsearch 仓库（优先于 Git；仓库根或 deepsearch/ 子项目）
 #   DEEPSEARCH_GIT_REPO / DEEPSEARCH_GIT_REF  默认 openJiuwen/deepsearch @ enterprise_dev
+#   DEEPSEARCH_NO_DEPS=1  鸿蒙默认不安装 DeepSearch 的桌面端传递依赖（设为 0 可恢复完整依赖安装）
 #   SKIP_DEEPSEARCH=0   显式安装 DeepSearch（鸿蒙默认跳过，基础对话不依赖它）
 #   REUSE_INSTALLED=1   import 正常时跳过已安装依赖和运行时（默认 1）
 #   FORCE_REINSTALL=1   忽略复用检查，强制重新安装
@@ -68,6 +69,7 @@ DEEPSEARCH_PATH=${DEEPSEARCH_PATH:-}
 DEEPSEARCH_GIT_REPO=${DEEPSEARCH_GIT_REPO:-https://gitcode.com/openJiuwen/deepsearch.git}
 DEEPSEARCH_GIT_REF=${DEEPSEARCH_GIT_REF:-enterprise_dev}
 DEEPSEARCH_SRC_DIR=${DEEPSEARCH_SRC_DIR:-$REPO_ROOT/.cache/deepsearch-src}
+DEEPSEARCH_NO_DEPS=${DEEPSEARCH_NO_DEPS:-1}
 SKIP_DEEPSEARCH=${SKIP_DEEPSEARCH:-1}
 REUSE_INSTALLED=${REUSE_INSTALLED:-1}
 FORCE_REINSTALL=${FORCE_REINSTALL:-0}
@@ -323,9 +325,18 @@ install_deepsearch() {
 
   _install=$(resolve_deepsearch_install_dir "$_src") \
     || die "openjiuwen_deepsearch package metadata not found under: $_src"
-  log "pip install $EDITABLE_FLAG $_install (including runtime dependencies)"
-  pip_in_venv $EDITABLE_FLAG "$_install" \
-    || die "openjiuwen_deepsearch install failed"
+  if [ "$DEEPSEARCH_NO_DEPS" = "1" ]; then
+    # pypdfium2 currently has no OpenHarmony wheel and its source build pulls
+    # desktop-only pdfium/Chromium sources. Keep the OHOS bundle installable;
+    # shared pure-Python dependencies come from requirements-minimal.txt.
+    log "pip install --no-deps $EDITABLE_FLAG $_install (OHOS-compatible runtime)"
+    pip_in_venv --no-deps $EDITABLE_FLAG "$_install" \
+      || die "openjiuwen_deepsearch install failed"
+  else
+    log "pip install $EDITABLE_FLAG $_install (including runtime dependencies)"
+    pip_in_venv $EDITABLE_FLAG "$_install" \
+      || die "openjiuwen_deepsearch install failed"
+  fi
 
   if ! "$PYTHON" -c "import openjiuwen_deepsearch; from openjiuwen_deepsearch.config.config import Config" >/dev/null 2>&1; then
     die "openjiuwen_deepsearch import verification failed after installation"
