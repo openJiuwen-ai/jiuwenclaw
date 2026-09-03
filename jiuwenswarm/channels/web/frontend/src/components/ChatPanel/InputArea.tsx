@@ -580,8 +580,8 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
   const showWorkContextRow = !isEnterprise() && activeSessionId === NEW_CONVERSATION_ID;
   const enterpriseLocked = isEnterprise();
   const modeLocked = enterpriseLocked || hasHistory || isProcessing;
-  /** Goal 入口是否适用于当前上下文（agent 模式 + 已接入 onSetGoal，如欢迎页新会话就不适用） */
-  const canUseGoalMenu = isAgentMode && Boolean(onSetGoal);
+  /** Goal 入口仅个人版展示；企业版用户面隐藏，个人版保持原有可用条件。 */
+  const canUseGoalMenu = !enterpriseLocked && isAgentMode && Boolean(onSetGoal);
   // 只跟 armed 挂钩：这个 tag 是"下一条消息将用于设置目标"的过渡态指示，发送后 armed 变 false
   // 就该跟着消失，不能靠"目标是否存在"续命——目标存在与否、当前状态、编辑/暂停/删除，已经由
   // 输入框上方常驻的 GoalBar 完整覆盖，工具栏这里再挂一份重复的常驻入口只会显得"选择没解除"。
