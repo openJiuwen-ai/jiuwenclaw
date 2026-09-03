@@ -346,6 +346,139 @@ async def test_cancel_all_inflight_work_rejects_closed_runtime() -> None:
 
 
 @pytest.mark.asyncio
+async def test_cancel_all_team_stream_tasks_delegates_without_starting_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from jiuwenswarm.agents.harness import team as team_module
+
+    helper = AsyncMock()
+    monkeypatch.setattr(
+        team_module,
+        "cancel_all_team_stream_tasks_across_managers",
+        helper,
+    )
+    initializer = AsyncMock()
+    runtime = AgentRuntime(agent_manager=FakeAgentManager(), initializer=initializer)
+
+    await runtime.cancel_all_team_stream_tasks(
+        reason="[gateway ws closed] ",
+        exclude_session_ids=("heartbeat-session",),
+    )
+
+    helper.assert_awaited_once_with(
+        reason="[gateway ws closed] ",
+        exclude_session_ids={"heartbeat-session"},
+    )
+    assert runtime.started is False
+    initializer.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_cancel_all_team_stream_tasks_preserves_none_exclusions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from jiuwenswarm.agents.harness import team as team_module
+
+    helper = AsyncMock()
+    monkeypatch.setattr(
+        team_module,
+        "cancel_all_team_stream_tasks_across_managers",
+        helper,
+    )
+    runtime = AgentRuntime(agent_manager=FakeAgentManager(), initializer=AsyncMock())
+
+    await runtime.cancel_all_team_stream_tasks(
+        reason="cancel all teams",
+        exclude_session_ids=None,
+    )
+
+    helper.assert_awaited_once_with(
+        reason="cancel all teams",
+        exclude_session_ids=None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_cancel_all_team_stream_tasks_materializes_generator_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from jiuwenswarm.agents.harness import team as team_module
+
+    helper = AsyncMock()
+    monkeypatch.setattr(
+        team_module,
+        "cancel_all_team_stream_tasks_across_managers",
+        helper,
+    )
+    runtime = AgentRuntime(agent_manager=FakeAgentManager(), initializer=AsyncMock())
+    consumed: list[str] = []
+
+    def exclusions() -> Iterable[str]:
+        for session_id in ("heartbeat-1", "heartbeat-2"):
+            consumed.append(session_id)
+            yield session_id
+
+    excluded = exclusions()
+    await runtime.cancel_all_team_stream_tasks(
+        exclude_session_ids=excluded,
+    )
+
+    helper.assert_awaited_once_with(
+        reason="[runtime cancel all team streams] ",
+        exclude_session_ids={"heartbeat-1", "heartbeat-2"},
+    )
+    assert consumed == ["heartbeat-1", "heartbeat-2"]
+    assert list(excluded) == []
+
+
+@pytest.mark.asyncio
+async def test_cancel_all_team_stream_tasks_rejects_closed_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from jiuwenswarm.agents.harness import team as team_module
+
+    helper = AsyncMock()
+    monkeypatch.setattr(
+        team_module,
+        "cancel_all_team_stream_tasks_across_managers",
+        helper,
+    )
+    runtime = AgentRuntime(agent_manager=FakeAgentManager(), initializer=AsyncMock())
+    await runtime.close()
+
+    with pytest.raises(RuntimeStateError, match="runtime is already closed"):
+        await runtime.cancel_all_team_stream_tasks()
+
+    helper.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_cancel_all_team_stream_tasks_propagates_helper_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from jiuwenswarm.agents.harness import team as team_module
+
+    helper = AsyncMock(side_effect=RuntimeError("team cancel failed"))
+    monkeypatch.setattr(
+        team_module,
+        "cancel_all_team_stream_tasks_across_managers",
+        helper,
+    )
+    runtime = AgentRuntime(agent_manager=FakeAgentManager(), initializer=AsyncMock())
+
+    with pytest.raises(RuntimeError, match="team cancel failed"):
+        await runtime.cancel_all_team_stream_tasks(
+            reason="disconnect",
+            exclude_session_ids=("heartbeat-session",),
+        )
+
+    helper.assert_awaited_once_with(
+        reason="disconnect",
+        exclude_session_ids={"heartbeat-session"},
+    )
+
+
+@pytest.mark.asyncio
 async def test_cancel_resolves_same_composed_mode_and_project_as_execution() -> None:
     class RecordingManager(FakeAgentManager):
         def __init__(self) -> None:

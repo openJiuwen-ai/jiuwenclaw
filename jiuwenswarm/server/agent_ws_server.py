@@ -774,6 +774,7 @@ class AgentWebSocketServer:
         self._previous_runtime_push_handler = None
         self._heartbeat_runtime = HeartbeatRailRuntime(self)
         self._runtime.set_admission_controller(self._heartbeat_runtime.admission)
+        self._runtime.set_session_delete_lifecycle(self._heartbeat_runtime)
         self._agent_manager.set_heartbeat_service(self._heartbeat_runtime)
         # Gateway user-business RPCs execute in the current AgentServer's
         # injected data directory. Register adapters once per server; request
@@ -1440,6 +1441,7 @@ class AgentWebSocketServer:
             self._agent_manager = self._runtime.agent_manager
             self._heartbeat_runtime = HeartbeatRailRuntime(self)
             self._runtime.set_admission_controller(self._heartbeat_runtime.admission)
+            self._runtime.set_session_delete_lifecycle(self._heartbeat_runtime)
             self._agent_manager.set_heartbeat_service(self._heartbeat_runtime)
             self._adapter_registry = AdapterRegistry()
             for adapter in (
@@ -1545,9 +1547,7 @@ class AgentWebSocketServer:
             except Exception:
                 logger.exception("[AgentWebSocketServer] scheduler stop failed")
             try:
-                from jiuwenswarm.agents.harness.team import cancel_all_team_stream_tasks_across_managers
-
-                await cancel_all_team_stream_tasks_across_managers(
+                await self._execution_runtime().cancel_all_team_stream_tasks(
                     reason=f"[gateway ws closed {remote}] ",
                     exclude_session_ids=(
                         self._heartbeat_runtime.execution.active_session_ids()
@@ -2962,6 +2962,11 @@ class AgentWebSocketServer:
                     "admission",
                     None,
                 ),
+                session_delete_lifecycle=getattr(
+                    self,
+                    "_heartbeat_runtime",
+                    None,
+                ),
                 enable_kvc_tracking=True,
             )
             self._runtime = runtime
@@ -4225,240 +4230,31 @@ class AgentWebSocketServer:
 
     async def _handle_session_delete(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
         """Delete a single session and its recoverable runtime state."""
-        from openjiuwen.core.runner import Runner
-        from jiuwenswarm.server.runtime.session.session_metadata import get_session_metadata
-        from jiuwenswarm.agents.harness.team import get_team_manager
-
         params = request.params if isinstance(request.params, dict) else {}
         target = str(params.get("session_id") or "").strip()
-        if not target:
+        result = await self._execution_runtime().delete_session(
+            channel_id=request.channel_id or "",
+            session_id=target,
+        )
+        if result.ok:
+            resp = AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=True,
+                payload={"session_id": result.session_id},
+                metadata=request.metadata,
+            )
+        else:
             resp = AgentResponse(
                 request_id=request.request_id,
                 channel_id=request.channel_id,
                 ok=False,
-                payload={"error": "session_id is required", "code": "BAD_REQUEST"},
+                payload={
+                    "error": result.error_message,
+                    "code": result.error_code,
+                },
                 metadata=request.metadata,
             )
-        else:
-            from jiuwenswarm.server.runtime.session.session_history import resolve_session_dir
-
-            session_dir, invalid_reason = resolve_session_dir(
-                target, sessions_root=get_agent_sessions_dir()
-            )
-            if session_dir is None:
-                resp = AgentResponse(
-                    request_id=request.request_id,
-                    channel_id=request.channel_id,
-                    ok=False,
-                    payload={"error": invalid_reason or "invalid session_id", "code": "BAD_REQUEST"},
-                    metadata=request.metadata,
-                )
-            elif not session_dir.exists():
-                resp = AgentResponse(
-                    request_id=request.request_id,
-                    channel_id=request.channel_id,
-                    ok=False,
-                    payload={"error": "session not found", "code": "NOT_FOUND"},
-                    metadata=request.metadata,
-                )
-            elif not session_dir.is_dir():
-                resp = AgentResponse(
-                    request_id=request.request_id,
-                    channel_id=request.channel_id,
-                    ok=False,
-                    payload={"error": "session is not a directory", "code": "BAD_REQUEST"},
-                    metadata=request.metadata,
-                )
-            else:
-                checkpoint_resp = await self._ensure_persistent_checkpointer_response(request)
-                if checkpoint_resp is not None:
-                    resp = checkpoint_resp
-                else:
-                    metadata = get_session_metadata(target)
-                    is_team_session = self._is_team_metadata_mode(metadata)
-                    team_name = str(metadata.get("team_name") or "").strip()
-                    channel_id = str(metadata.get("channel_id") or request.channel_id or "").strip() or None
-                    heartbeat_delete_prepared = False
-                    trajectory_delete_prepared = False
-                    try:
-                        from jiuwenswarm.server.runtime.session.kv_cache.kv_cache_product_hooks import (
-                            mark_session_deleted,
-                        )
-
-                        mark_session_deleted(
-                            session_id=target,
-                            channel_id=channel_id or "default",
-                            is_team=is_team_session,
-                        )
-                    except Exception as exc:
-                        logger.warning(
-                            "[AgentWebSocketServer] KVC delete tombstone failed; "
-                            "preserving product delete: session_id=%s error=%s",
-                            target,
-                            exc,
-                        )
-                    try:
-                        if not is_team_session:
-                            from jiuwenswarm.observability.session_delete import (
-                                begin_trajectory_session_delete,
-                            )
-
-                            begin_trajectory_session_delete(target)
-                            trajectory_delete_prepared = True
-                        await self._heartbeat_runtime.begin_session_delete(target)
-                        heartbeat_delete_prepared = True
-                        if is_team_session:
-                            team_manager = get_team_manager(channel_id)
-                            deleted = await team_manager.delete_session_runtime(
-                                target,
-                                reason="session.delete: ",
-                            )
-                        else:
-                            agent = self._agent_manager.get_agent_nowait(channel_id=channel_id)
-                            if agent is not None:
-                                adapter = self._resolve_adapter(agent)
-                                release_runtime = getattr(
-                                    adapter,
-                                    "release_subagent_runtime_for_session",
-                                    None,
-                                )
-                                if callable(release_runtime):
-                                    await release_runtime(
-                                        target,
-                                        reason="session_deleted",
-                                    )
-                            await self._execution_runtime().cleanup_session(
-                                channel_id=channel_id or "",
-                                session_id=target,
-                                # Product deletion is transactional beyond
-                                # Runtime draining.  Preserve plan state until
-                                # the later delete commit succeeds.
-                                reset_plan_state=False,
-                            )
-
-                            from jiuwenswarm.server.runtime.session.kv_cache.kv_cache_product_hooks import (
-                                evict_plan_session,
-                            )
-
-                            await evict_plan_session(
-                                session_id=target,
-                                agent_manager=self._agent_manager,
-                                channel_id=channel_id,
-                            )
-                            await Runner.release(target)
-                            deleted = True
-                        if deleted:
-                            shutil.rmtree(session_dir)
-                    except Exception as exc:
-                        logger.warning(
-                            "[AgentWebSocketServer] session.delete runtime cleanup failed: session_id=%s error=%s",
-                            target,
-                            exc,
-                        )
-                        deleted = False
-
-                    if not deleted:
-                        if trajectory_delete_prepared:
-                            try:
-                                from jiuwenswarm.observability.session_delete import (
-                                    abort_trajectory_session_delete,
-                                )
-
-                                abort_trajectory_session_delete(target)
-                            except Exception as exc:  # noqa: BLE001
-                                logger.warning(
-                                    "[AgentWebSocketServer] trajectory delete rollback failed: "
-                                    "session_id=%s error=%s",
-                                    target,
-                                    exc,
-                                )
-                        if heartbeat_delete_prepared:
-                            try:
-                                await self._heartbeat_runtime.abort_session_delete(
-                                    target,
-                                    channel_id=channel_id or "",
-                                )
-                            except Exception as exc:  # noqa: BLE001
-                                logger.warning(
-                                    "[AgentWebSocketServer] heartbeat delete rollback failed: "
-                                    "session_id=%s error=%s",
-                                    target,
-                                    exc,
-                                )
-                        try:
-                            from jiuwenswarm.server.runtime.session.kv_cache.kv_cache_product_hooks import (
-                                restore_session_after_failed_delete,
-                            )
-
-                            restore_session_after_failed_delete(target)
-                        except Exception as exc:
-                            logger.warning(
-                                "[AgentWebSocketServer] KVC failed-delete rollback failed; "
-                                "preserving delete response: session_id=%s error=%s",
-                                target,
-                                exc,
-                            )
-                        resp = AgentResponse(
-                            request_id=request.request_id,
-                            channel_id=request.channel_id,
-                            ok=False,
-                            payload={"error": "session runtime cleanup failed", "code": "DELETE_FAILED"},
-                            metadata=request.metadata,
-                        )
-                    else:
-                        if trajectory_delete_prepared:
-                            try:
-                                from jiuwenswarm.observability.session_delete import (
-                                    commit_trajectory_session_delete,
-                                )
-
-                                commit_trajectory_session_delete(target)
-                            except Exception as exc:  # noqa: BLE001
-                                logger.warning(
-                                    "[AgentWebSocketServer] trajectory delete commit failed; "
-                                    "session_id=%s error=%s",
-                                    target,
-                                    exc,
-                                )
-                        try:
-                            await self._heartbeat_runtime.commit_session_delete(target)
-                        except Exception as exc:  # noqa: BLE001
-                            # The product Session is already gone. Resume the
-                            # scheduler so its missing-session path retries the
-                            # idempotent policy transition instead of leaving a
-                            # permanently suspended job.
-                            logger.warning(
-                                "[AgentWebSocketServer] heartbeat delete commit failed; "
-                                "session_id=%s error=%s",
-                                target,
-                                exc,
-                            )
-                        _plan_exited_sessions.discard(target)
-                        _plan_active_sessions.discard(target)
-                        remove_session_metadata_cache(target)
-                        if is_team_session:
-                            try:
-                                from jiuwenswarm.server.runtime.team_binding_store import get_team_binding_store
-
-                                get_team_binding_store().unbind_session(
-                                    team_name=team_name or None,
-                                    session_id=target,
-                                )
-                            except Exception as exc:  # noqa: BLE001
-                                logger.warning(
-                                    "[AgentWebSocketServer] failed to unbind deleted team session: "
-                                    "session_id=%s team_name=%s error=%s",
-                                    target,
-                                    team_name,
-                                    exc,
-                                )
-                        resp = AgentResponse(
-                            request_id=request.request_id,
-                            channel_id=request.channel_id,
-                            ok=True,
-                            payload={"session_id": target},
-                            metadata=request.metadata,
-                        )
 
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
         async with send_lock:

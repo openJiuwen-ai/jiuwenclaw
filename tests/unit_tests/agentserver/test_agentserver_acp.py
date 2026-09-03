@@ -3014,6 +3014,7 @@ async def test_handle_session_delete_initializes_persistent_checkpointer(monkeyp
             heartbeat_deleted.append(session_id)
 
     server._heartbeat_runtime = HeartbeatRuntime()
+    server.get_runtime().set_session_delete_lifecycle(server._heartbeat_runtime)
 
     async def fake_ensure_persistent_checkpointer():
         ensure_calls.append("called")
@@ -3027,8 +3028,7 @@ async def test_handle_session_delete_initializes_persistent_checkpointer(monkeyp
         fake_encode_agent_response_for_wire,
     )
     monkeypatch.setattr(
-        agent_ws_server_module,
-        "get_agent_sessions_dir",
+        "jiuwenswarm.common.utils.get_agent_sessions_dir",
         lambda: sessions_root,
     )
     monkeypatch.setattr(
@@ -3045,8 +3045,7 @@ async def test_handle_session_delete_initializes_persistent_checkpointer(monkeyp
         fake_release,
     )
     monkeypatch.setattr(
-        agent_ws_server_module,
-        "remove_session_metadata_cache",
+        "jiuwenswarm.server.runtime.session.session_metadata.remove_session_metadata_cache",
         lambda session_id: cleared_metadata_cache.append(session_id),
     )
 
@@ -3091,6 +3090,9 @@ async def test_handle_session_delete_drains_runtime_before_kvc_and_checkpoint_cl
         def get_agent_nowait(self, *args, **kwargs):
             return None
 
+        async def release_subagent_runtime_for_session(self, **kwargs):
+            return False
+
         async def cleanup_session_runtime(self, *, channel_id="", session_id: str):
             events.append(("runtime", channel_id, session_id))
             return True
@@ -3114,8 +3116,7 @@ async def test_handle_session_delete_drains_runtime_before_kvc_and_checkpoint_cl
         fake_encode_agent_response_for_wire,
     )
     monkeypatch.setattr(
-        agent_ws_server_module,
-        "get_agent_sessions_dir",
+        "jiuwenswarm.common.utils.get_agent_sessions_dir",
         lambda: sessions_root,
     )
     monkeypatch.setattr(
@@ -3175,6 +3176,9 @@ async def test_handle_session_delete_keeps_state_when_cleanup_fails(
         def get_agent_nowait(self, *args, **kwargs):
             return None
 
+        async def release_subagent_runtime_for_session(self, **kwargs):
+            return False
+
         async def cleanup_session_runtime(self, *, channel_id="", session_id: str):
             if failure_stage == "runtime":
                 raise RuntimeError("session runtime is still active")
@@ -3203,8 +3207,7 @@ async def test_handle_session_delete_keeps_state_when_cleanup_fails(
         fake_encode_agent_response_for_wire,
     )
     monkeypatch.setattr(
-        agent_ws_server_module,
-        "get_agent_sessions_dir",
+        "jiuwenswarm.common.utils.get_agent_sessions_dir",
         lambda: sessions_root,
     )
     monkeypatch.setattr(
@@ -3283,8 +3286,7 @@ async def test_handle_session_delete_unbinds_team_session(monkeypatch, tmp_path)
         fake_encode_agent_response_for_wire,
     )
     monkeypatch.setattr(
-        agent_ws_server_module,
-        "get_agent_sessions_dir",
+        "jiuwenswarm.common.utils.get_agent_sessions_dir",
         lambda: sessions_root,
     )
     monkeypatch.setattr(
@@ -3309,8 +3311,7 @@ async def test_handle_session_delete_unbinds_team_session(monkeypatch, tmp_path)
         lambda: binding_store,
     )
     monkeypatch.setattr(
-        agent_ws_server_module,
-        "remove_session_metadata_cache",
+        "jiuwenswarm.server.runtime.session.session_metadata.remove_session_metadata_cache",
         lambda session_id: cleared_metadata_cache.append(session_id),
     )
 
@@ -3361,8 +3362,7 @@ async def test_handle_session_delete_rejects_when_checkpointer_unavailable(monke
         fake_encode_agent_response_for_wire,
     )
     monkeypatch.setattr(
-        agent_ws_server_module,
-        "get_agent_sessions_dir",
+        "jiuwenswarm.common.utils.get_agent_sessions_dir",
         lambda: sessions_root,
     )
     monkeypatch.setattr(

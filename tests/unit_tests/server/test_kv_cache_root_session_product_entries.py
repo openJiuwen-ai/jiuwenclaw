@@ -31,6 +31,7 @@ class _AgentServer(agent_ws_server_module.AgentWebSocketServer):
         self.team_session_ids: list[str] = []
         self._agent_manager = SimpleNamespace(
             get_agent_nowait=lambda *args, **kwargs: None,
+            release_subagent_runtime_for_session=AsyncMock(return_value=False),
             cleanup_session_runtime=AsyncMock(return_value=False),
         )
 
@@ -68,9 +69,15 @@ async def test_plan_agentserver_delete_evicts_self_parent_and_preserves_release(
     async def fake_release(session_id: str) -> None:
         release_calls.append(session_id)
 
-    monkeypatch.setattr(agent_ws_server_module, "get_agent_sessions_dir", lambda: sessions_root)
+    monkeypatch.setattr(
+        "jiuwenswarm.common.utils.get_agent_sessions_dir",
+        lambda: sessions_root,
+    )
     monkeypatch.setattr(agent_ws_server_module, "encode_agent_response_for_wire", _wire_response)
-    monkeypatch.setattr(agent_ws_server_module, "remove_session_metadata_cache", lambda _sid: None)
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.session.session_metadata.remove_session_metadata_cache",
+        lambda _sid: None,
+    )
     monkeypatch.setattr(
         "jiuwenswarm.server.runtime.session.session_metadata.get_session_metadata",
         lambda _sid: {"mode": "agent.plan", "channel_id": "web"},
@@ -125,9 +132,15 @@ async def test_team_session_delete_delegates_terminal_kvc_to_agent_core(
 
     monkeypatch.setattr(manager, "_resolve_delete_session_team_name", lambda _sid: "demo-team")
     monkeypatch.setattr(manager, "stop_session_runtime", AsyncMock(return_value=True))
-    monkeypatch.setattr(agent_ws_server_module, "get_agent_sessions_dir", lambda: sessions_root)
+    monkeypatch.setattr(
+        "jiuwenswarm.common.utils.get_agent_sessions_dir",
+        lambda: sessions_root,
+    )
     monkeypatch.setattr(agent_ws_server_module, "encode_agent_response_for_wire", _wire_response)
-    monkeypatch.setattr(agent_ws_server_module, "remove_session_metadata_cache", lambda _sid: None)
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.session.session_metadata.remove_session_metadata_cache",
+        lambda _sid: None,
+    )
     monkeypatch.setattr(
         "jiuwenswarm.server.runtime.session.session_metadata.get_session_metadata",
         lambda _sid: {"mode": "team", "channel_id": "web"},

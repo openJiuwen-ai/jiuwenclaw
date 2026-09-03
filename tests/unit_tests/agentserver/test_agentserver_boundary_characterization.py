@@ -284,6 +284,25 @@ class PortableRuntime:
             exclude_session_ids=exclude_session_ids,
         )
 
+    async def cancel_all_team_stream_tasks(
+        self,
+        reason: str,
+        *,
+        exclude_session_ids: set[str] | tuple[str, ...] | None = None,
+    ) -> None:
+        from jiuwenswarm.agents.harness.team import (
+            cancel_all_team_stream_tasks_across_managers,
+        )
+
+        await cancel_all_team_stream_tasks_across_managers(
+            reason=reason,
+            exclude_session_ids=(
+                None
+                if exclude_session_ids is None
+                else set(exclude_session_ids)
+            ),
+        )
+
     async def cleanup_session(self, *, channel_id: str, session_id: str) -> bool:
         return await self.agent_manager.cleanup_session_runtime(
             channel_id=channel_id,
@@ -891,10 +910,10 @@ async def test_physical_disconnect_keeps_ack_only_and_cleanup_order(
     async def cancel_team_streams(
         *,
         reason: str,
-        exclude_session_ids: tuple[str, ...],
+        exclude_session_ids: set[str],
     ) -> None:
         assert "gateway ws closed" in reason
-        assert exclude_session_ids == ("heartbeat-session",)
+        assert exclude_session_ids == {"heartbeat-session"}
         trace.append("team_streams.cancel_all")
 
     monkeypatch.setattr(
@@ -990,10 +1009,10 @@ async def test_physical_disconnect_runtime_cancel_failure_keeps_cleaning_up(
     async def cancel_team_streams(
         *,
         reason: str,
-        exclude_session_ids: tuple[str, ...],
+        exclude_session_ids: set[str],
     ) -> None:
         assert "gateway ws closed" in reason
-        assert exclude_session_ids == ("heartbeat-session",)
+        assert exclude_session_ids == {"heartbeat-session"}
         trace.append("team_streams.cancel_all")
 
     monkeypatch.setattr(server, "_handle_message", blocking_handler)
