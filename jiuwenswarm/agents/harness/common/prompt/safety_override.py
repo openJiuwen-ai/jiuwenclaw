@@ -152,7 +152,7 @@ def build_safety_section(language: str = "en") -> Optional[PromptSection]:
     return PromptSection(
         name=SectionName.SAFETY,
         content={language: content},
-        priority=20,
+        priority=12,
     )
 
 

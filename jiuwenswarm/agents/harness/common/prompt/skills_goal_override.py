@@ -60,6 +60,22 @@ _STATIC_SKILL_NAMES = frozenset(
 
 _DYNAMIC_START_INDEX = len(_STATIC_SKILL_NAMES) + 1  # static catalogue then dynamic entries
 
+# Legacy non-"-win" folder names that are the same skill as a renamed
+# static entry. Used only for de-duplication so old deployments (where the
+# folder was installed without the "-win" suffix) don't re-appear as
+# "Additional installed skills" duplicates.
+_LEGACY_DEDUP_ALIASES = frozenset(
+    {
+        "xiaoyi-web-search",
+        "xiaoyi-ppt",
+        "skill-creator",
+        "xiaoyi-pdf",
+        "xiaoyi-image-understanding",
+    }
+)
+
+_DEDUP_NAMES = _STATIC_SKILL_NAMES | _LEGACY_DEDUP_ALIASES
+
 _STATIC_BLOCK_EN = """## Skills
 
 Prefer the skills and tools below; call `skill_tool` to retrieve the full `SKILL.md` for a skill.
@@ -240,7 +256,7 @@ def _dedupe_and_renumber(skill_lines: str, start_index: int) -> str:
     out: List[str] = []
     idx = start_index
     for entry in entries:
-        if _entry_name(entry) in _STATIC_SKILL_NAMES:
+        if _entry_name(entry) in _DEDUP_NAMES:
             continue
         main_line = entry[0]
         rest = entry[1:]
