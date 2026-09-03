@@ -482,7 +482,9 @@ export function ModelDialog({
       name: 'reasoning_level',
       label: t('settingsPanel.fields.reasoning_level.title'),
       component: 'select',
-      options: buildReasoningOptions(reasoning, t('settingsPanel.models.reasoning.auto')),
+      options: buildReasoningOptions(reasoning, t('settingsPanel.models.reasoning.auto'), (value) =>
+        t(`settingsPanel.models.reasoning.options.${value}`, { defaultValue: value }),
+      ),
       onChange: invalidateConnectionState,
     });
   }

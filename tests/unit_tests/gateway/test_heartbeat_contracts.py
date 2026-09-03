@@ -150,6 +150,7 @@ async def test_gateway_proxy_uses_one_unary_heartbeat_rpc() -> None:
 
 async def test_gateway_proxy_roundtrips_over_real_agentserver_websocket() -> None:
     calls: list[tuple[str, dict, dict]] = []
+    cancel_calls: list[dict] = []
 
     class Execution:
         @staticmethod
@@ -167,6 +168,7 @@ async def test_gateway_proxy_roundtrips_over_real_agentserver_websocket() -> Non
 
     class Manager:
         async def cancel_all_inflight_work(self, **kwargs):  # noqa: ANN003
+            cancel_calls.append(kwargs)
             return None
 
     server = AgentWebSocketServer.__new__(AgentWebSocketServer)
@@ -215,6 +217,10 @@ async def test_gateway_proxy_roundtrips_over_real_agentserver_websocket() -> Non
         listener.close()
         await listener.wait_closed()
         await asyncio.sleep(0)
+
+    assert len(cancel_calls) == 1
+    assert "gateway ws closed" in cancel_calls[0]["reason"]
+    assert cancel_calls[0]["exclude_session_ids"] == set()
 
 
 @pytest.mark.parametrize(

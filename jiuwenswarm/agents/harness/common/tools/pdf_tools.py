@@ -19,8 +19,6 @@ from typing import Any
 
 from openjiuwen.core.foundation.tool import tool
 
-from jiuwenswarm.common.utils import get_agent_workspace_dir
-
 logger = logging.getLogger(__name__)
 
 DEFAULT_MAX_CHARS = 50_000
@@ -86,18 +84,21 @@ def _parse_page_ranges(value: Any) -> tuple[int, ...] | None:
 
 
 def _resolve_pdf_path(value: str) -> Path:
-    """Resolve ``pdf_path`` like other always-on tools (see wiki_ingest).
-
-    Relative paths anchor to the agent workspace, never the process CWD.
-    Absolute paths are accepted as-is — local file access is gated by the
-    permission rail, matching read_file / wiki_ingest's trust model.
-    """
+    """Resolve ``pdf_path`` against Core's current primary workspace."""
     text = (value or "").strip()
     if not text:
         raise ValueError("pdf_path cannot be empty")
     path = Path(text).expanduser()
     if not path.is_absolute():
-        path = get_agent_workspace_dir() / path
+        try:
+            from openjiuwen.core.sys_operation.cwd import get_workspace
+
+            workspace = get_workspace()
+        except Exception:
+            workspace = None
+        if not workspace:
+            raise ValueError("read_pdf runtime workspace is unavailable")
+        path = Path(workspace) / path
     path = path.resolve()
     if not path.exists():
         raise FileNotFoundError(f"PDF file does not exist: {path}")
@@ -109,7 +110,7 @@ def _resolve_pdf_path(value: str) -> Path:
 
 
 def _normalize_request(inputs: dict[str, Any]) -> ReadPdfRequest:
-    pdf_path = str(inputs.get("pdf_path", "") or inputs.get("path", "") or "").strip()
+    pdf_path = str(inputs.get("pdf_path", "") or "").strip()
     if not pdf_path:
         raise ValueError("pdf_path cannot be empty.")
     pages = _parse_page_ranges(inputs.get("pages"))
@@ -225,10 +226,21 @@ def _format_page_list(pages: list[int] | tuple[int, ...]) -> str:
         "as likely scanned images."
     ),
 )
-async def read_pdf(inputs: dict[str, Any], **kwargs) -> str:
+async def read_pdf(
+    pdf_path: str,
+    pages: Any = None,
+    max_chars: int = DEFAULT_MAX_CHARS,
+    **kwargs: Any,
+) -> str:
     _ = kwargs
     try:
-        req = _normalize_request(inputs or {})
+        req = _normalize_request(
+            {
+                "pdf_path": pdf_path,
+                "pages": pages,
+                "max_chars": max_chars,
+            }
+        )
         logger.info("[read_pdf] path=%s pages=%s max_chars=%s", req.pdf_path, req.pages, req.max_chars)
         return await asyncio.to_thread(_read_pdf_sync, req)
     except Exception as exc:

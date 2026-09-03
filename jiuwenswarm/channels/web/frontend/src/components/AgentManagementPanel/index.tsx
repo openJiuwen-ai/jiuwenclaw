@@ -1,7 +1,7 @@
 import { ChevronDown } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import SearchIcon from '../../assets/agent-management/agent-search.svg?react';
+import { PageHeader, PageToolbarSearch } from '../ui';
 import { CatalogPage, PAGE_SIZE } from './CatalogPage';
 import { AgentEditor } from './AgentEditor';
 import { DefinitionDetailPage } from './DefinitionDetailPage';
@@ -33,6 +33,7 @@ type AgentManagementPanelProps = {
   onUseAgent?: (id: string) => void;
   onUsePrompt?: (id: string, prompt: string) => void;
   onCreateViaChat?: () => void;
+  onViewChange?: (view: PanelView) => void;
 };
 
 const EMPTY_DRAFT: AgentDraft = {
@@ -110,11 +111,12 @@ function deriveAgentId(name: string): string {
   return slug.length >= 3 ? slug.slice(0, 50) : `agent-${Date.now().toString(36)}`;
 }
 
-export function AgentManagementPanel({ onUseAgent, onUsePrompt, onCreateViaChat }: AgentManagementPanelProps) {
+export function AgentManagementPanel({ onUseAgent, onUsePrompt, onCreateViaChat, onViewChange }: AgentManagementPanelProps) {
   const { t } = useTranslation();
   const client = useMemo<AgentManagementClient>(() => createAgentManagementClient(), []);
   const [state, dispatch] = useReducer(agentManagementReducer, initialAgentManagementState);
   const [view, setView] = useState<PanelView>('catalog');
+  useEffect(() => { onViewChange?.(view); }, [view, onViewChange]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [detailTab, setDetailTab] = useState<'content' | 'files'>('content');
   const [query, setQuery] = useState('');
@@ -510,204 +512,182 @@ export function AgentManagementPanel({ onUseAgent, onUsePrompt, onCreateViaChat 
     />
   ) : null;
 
-  if (view === 'detail') {
-    return (
-      <>
-        <main className="agent-management-panel agent-management-panel--detail" data-source={client.source} data-testid="agent-management-panel" data-variant="detail">
-          <DefinitionDetailPage
-            detail={state.detail}
-            detailStatus={state.detailStatus}
-            detailError={state.detailError}
-            detailTab={detailTab}
-            files={state.files}
-            filesStatus={state.filesStatus}
-            filesError={state.filesError}
-            selectedFilePath={state.selectedFilePath}
-            fileContent={state.fileContent}
-            fileStatus={state.fileStatus}
-            fileError={state.fileError}
-            actionError={actionError}
-            actionNotice={actionNotice}
-            busy={busyId === selectedId}
-            onBack={goBackToCatalog}
-            onRetry={() => selectedId && void openDetail(selectedId)}
-            onTabChange={handleTabChange}
-            onRetryFiles={() =>
-              selectedId &&
-              (state.detail?.source === 'local' || state.detail?.installed === true) &&
-              void loadFiles(selectedId).then(files => {
-                const firstPreviewableFile = files ? findFirstPreviewableFile(files) : null;
-                if (firstPreviewableFile) void handleSelectFile(firstPreviewableFile);
-              })
-            }
-            onSelectFile={handleSelectFile}
-            onUse={handleUse}
-            onUsePrompt={onUsePrompt}
-            onReconnect={handleReconnect}
-            onInstall={handleInstall}
-            onUninstall={handleUninstall}
-          />
-        </main>
-        {pendingConnectorModals}
-        {uploadDialog}
-      </>
-    );
-  }
-
-  if (view === 'create') {
-    return (
-      <>
-        <main className="agent-management-panel agent-management-panel--create" data-source={client.source} data-testid="agent-management-panel" data-variant="create">
-          <AgentEditor
-            draft={draft}
-            skillOptions={state.skillOptions}
-            skillsStatus={state.skillsStatus}
-            mcpOptions={mcpOptions}
-            mcpStatus={mcpStatus}
-            saving={saving}
-            error={createError}
-            onChange={setDraft}
-            onReloadSkills={loadSkills}
-            onReloadMcps={loadMcps}
-            onCancel={() => {
-              setActionError(null);
-              setActionNotice(null);
-              setView('mine');
-            }}
-            onSave={handleCreate}
-          />
-        </main>
-        {pendingConnectorModals}
-        {uploadDialog}
-      </>
-    );
-  }
-
   const isMine = view === 'mine';
+  const panelViewClass = view === 'detail' ? 'detail' : view === 'create' ? 'create' : isMine ? 'mine' : 'catalog';
   return (
-    <main className={`agent-management-panel agent-management-panel--${isMine ? 'mine' : 'catalog'}`} data-source={client.source} data-testid="agent-management-panel" data-variant={isMine ? 'mine' : 'catalog'}>
-      <header className="agent-management-header" data-testid="agent-management-header">
-        <div>
-          <h1 data-testid="agent-management-title">{t('agentManagement.title')}</h1>
-          <p data-testid="agent-management-subtitle">{t('agentManagement.subtitle')}</p>
-        </div>
-      </header>
-      <div className="agent-management-primary-row" data-testid="agent-management-primary-row">
-        <nav className="agent-management-primary-tabs" role="tablist" aria-label={t('agentManagement.tabsLabel')} data-testid="agent-management-primary-tabs">
-          <button
-            type="button"
-            role="tab"
-            aria-selected={!isMine}
-            data-testid="agent-management-primary-tab"
-            data-variant="catalog"
-            className={!isMine ? 'is-active' : ''}
-            onClick={() => {
-              setCreateMenuOpen(false);
-              setActionError(null);
-              setActionNotice(null);
-              setView('catalog');
-            }}
-          >
-            {t('agentManagement.tabs.catalog')}
-          </button>
-          <button
-            type="button"
-            role="tab"
-            aria-selected={isMine}
-            data-testid="agent-management-primary-tab"
-            data-variant="mine"
-            className={isMine ? 'is-active' : ''}
-            onClick={() => {
-              setCreateMenuOpen(false);
-              setActionError(null);
-              setActionNotice(null);
-              setView('mine');
-            }}
-          >
-            {t('agentManagement.tabs.mine')}
-          </button>
-        </nav>
-        <div className="agent-management-primary-actions" data-testid="agent-management-primary-actions">
-          <label className="agent-management-search" data-testid="agent-management-search">
-            <SearchIcon aria-hidden="true" />
-            <input
-              type="search"
-              name="agent-management-search"
-              aria-label={t('agentManagement.searchLabel')}
-              autoComplete="off"
-              disabled={connectorFlowId !== null}
-              value={isMine ? mineQuery : query}
-              onChange={event => (isMine ? (setMineQuery(event.target.value), setMinePage(1)) : (setQuery(event.target.value), setCatalogPage(1)))}
-              placeholder={t(isMine ? 'agentManagement.searchMine' : 'agentManagement.searchCatalog')}
-              data-testid="agent-management-search-input"
-            />
-          </label>
-          {isMine ? (
-            <div className="agent-management-create-menu" data-testid="agent-management-create-menu">
+    <div className="app-page-body">
+      <div className="page-content" data-testid="agent-management-panel" data-variant={panelViewClass} data-source={client.source}>
+      {(view === 'mine' || view === 'catalog') && (
+        <>
+          <PageHeader title={t('agentManagement.title')} subtitle={t('agentManagement.subtitle')} />
+          <div className="page-toolbar" data-testid="page-toolbar">
+            <div className="chat-picker-panel__tabs" data-testid="agent-management-primary-tabs">
               <button
                 type="button"
-                className="agent-management-button agent-management-button--primary agent-management-create"
-                aria-haspopup="menu"
-                aria-expanded={createMenuOpen}
-                data-testid="agent-management-create-button"
-                onClick={() => setCreateMenuOpen(open => !open)}
+                data-testid="agent-management-primary-tab"
+                data-variant="catalog"
+                className={!isMine ? 'is-active' : ''}
+                onClick={() => {
+                  setCreateMenuOpen(false);
+                  setActionError(null);
+                  setActionNotice(null);
+                  setView('catalog');
+                }}
               >
-                {t('agentManagement.actions.create')}
-                <ChevronDown size={15} aria-hidden="true" />
+                {t('agentManagement.tabs.catalog')}
               </button>
-              {createMenuOpen ? (
-                <div className="agent-management-create-menu__popover" role="menu" data-testid="agent-management-create-menu-popover">
-                  <button type="button" role="menuitem" data-testid="agent-management-create-menu-item" data-variant="create-first" onClick={openCreate}>
-                    {t('agentManagement.actions.createFirst')}
+              <button
+                type="button"
+                data-testid="agent-management-primary-tab"
+                data-variant="mine"
+                className={isMine ? 'is-active' : ''}
+                onClick={() => {
+                  setCreateMenuOpen(false);
+                  setActionError(null);
+                  setActionNotice(null);
+                  setView('mine');
+                }}
+              >
+                {t('agentManagement.tabs.mine')}
+              </button>
+            </div>
+            <div className="agent-management-primary-actions" data-testid="agent-management-primary-actions">
+              <PageToolbarSearch
+                wrapperTestId="agent-management-search"
+                inputTestId="agent-management-search-input"
+                type="search"
+                name="agent-management-search"
+                aria-label={t('agentManagement.searchLabel')}
+                autoComplete="off"
+                disabled={connectorFlowId !== null}
+                value={isMine ? mineQuery : query}
+                onChange={event => (isMine ? (setMineQuery(event.target.value), setMinePage(1)) : (setQuery(event.target.value), setCatalogPage(1)))}
+                placeholder={t(isMine ? 'agentManagement.searchMine' : 'agentManagement.searchCatalog')}
+              />
+              {isMine ? (
+                <div className="agent-management-create-menu" data-testid="agent-management-create-menu">
+                  <button
+                    type="button"
+                    className="agent-management-button agent-management-button--primary agent-management-create"
+                    aria-haspopup="menu"
+                    aria-expanded={createMenuOpen}
+                    data-testid="agent-management-create-button"
+                    onClick={() => setCreateMenuOpen(open => !open)}
+                  >
+                    {t('agentManagement.actions.create')}
+                    <ChevronDown size={15} aria-hidden="true" />
                   </button>
-                  <button type="button" role="menuitem" data-testid="agent-management-create-menu-item" data-variant="create-by-chat" onClick={() => { setCreateMenuOpen(false); onCreateViaChat?.(); }}>
-                    {t('agentManagement.actions.createByChat')}
-                  </button>
-                  <button type="button" role="menuitem" onClick={openUpload}>
-                    {t('agentManagement.actions.createByUpload')}
-                  </button>
+                  {createMenuOpen ? (
+                    <div className="agent-management-create-menu__popover" role="menu" data-testid="agent-management-create-menu-popover">
+                      <button type="button" role="menuitem" data-testid="agent-management-create-menu-item" data-variant="create-first" onClick={openCreate}>
+                        {t('agentManagement.actions.createFirst')}
+                      </button>
+                      <button type="button" role="menuitem" data-testid="agent-management-create-menu-item" data-variant="create-by-chat" onClick={() => { setCreateMenuOpen(false); onCreateViaChat?.(); }}>
+                        {t('agentManagement.actions.createByChat')}
+                      </button>
+                      <button type="button" role="menuitem" onClick={openUpload}>
+                        {t('agentManagement.actions.createByUpload')}
+                      </button>
+                    </div>
+                  ) : null}
                 </div>
               ) : null}
             </div>
+          </div>
+          {actionError ? (
+            <div className="agent-management-inline-error" role="alert" data-testid="agent-management-inline-error">
+              {actionError}
+            </div>
           ) : null}
-        </div>
-      </div>
-      {actionError ? (
-        <div className="agent-management-inline-error" role="alert" data-testid="agent-management-inline-error">
-          {actionError}
-        </div>
-      ) : null}
-      {actionNotice ? (
-        <div className="agent-management-inline-notice" role="status" data-testid="agent-management-inline-notice">
-          {actionNotice}
-        </div>
-      ) : null}
-      <CatalogPage
-        scope={isMine ? 'mine' : 'catalog'}
-        items={isMine ? mineView.items : catalogView.items}
-        totalItems={isMine ? mineView.totalItems : catalogView.totalItems}
-        page={isMine ? mineView.page : catalogView.page}
-        totalPages={isMine ? mineView.totalPages : catalogView.totalPages}
-        query={isMine ? mineQuery : query}
-        category={category}
-        status={state.catalogStatus}
-        error={state.catalogError}
-        busyId={busyId}
-        onCategoryChange={value => {
-          setCategory(value);
-          setCatalogPage(1);
-        }}
-        onPageChange={value => (isMine ? setMinePage(value) : setCatalogPage(value))}
-        onRetry={loadCatalog}
-        onOpen={openDetail}
-        onUse={handleUse}
-        onReconnect={handleReconnect}
-        onInstall={handleInstall}
-        onUninstall={handleUninstall}
-        onCreate={openCreate}
-      />
+          {actionNotice ? (
+            <div className="agent-management-inline-notice" role="status" data-testid="agent-management-inline-notice">
+              {actionNotice}
+            </div>
+          ) : null}
+          <CatalogPage
+            scope={isMine ? 'mine' : 'catalog'}
+            items={isMine ? mineView.items : catalogView.items}
+            totalItems={isMine ? mineView.totalItems : catalogView.totalItems}
+            page={isMine ? mineView.page : catalogView.page}
+            totalPages={isMine ? mineView.totalPages : catalogView.totalPages}
+            query={isMine ? mineQuery : query}
+            category={category}
+            status={state.catalogStatus}
+            error={state.catalogError}
+            busyId={busyId}
+            onCategoryChange={value => {
+              setCategory(value);
+              setCatalogPage(1);
+            }}
+            onPageChange={value => (isMine ? setMinePage(value) : setCatalogPage(value))}
+            onRetry={loadCatalog}
+            onOpen={openDetail}
+            onUse={handleUse}
+            onReconnect={handleReconnect}
+            onInstall={handleInstall}
+            onUninstall={handleUninstall}
+            onCreate={openCreate}
+          />
+        </>
+      )}
+      {view === 'detail' && (
+        <DefinitionDetailPage
+          detail={state.detail}
+          detailStatus={state.detailStatus}
+          detailError={state.detailError}
+          detailTab={detailTab}
+          files={state.files}
+          filesStatus={state.filesStatus}
+          filesError={state.filesError}
+          selectedFilePath={state.selectedFilePath}
+          fileContent={state.fileContent}
+          fileStatus={state.fileStatus}
+          fileError={state.fileError}
+          actionError={actionError}
+          actionNotice={actionNotice}
+          busy={busyId === selectedId}
+          onBack={goBackToCatalog}
+          onRetry={() => selectedId && void openDetail(selectedId)}
+          onTabChange={handleTabChange}
+          onRetryFiles={() =>
+            selectedId &&
+            (state.detail?.source === 'local' || state.detail?.installed === true) &&
+            void loadFiles(selectedId).then(files => {
+              const firstPreviewableFile = files ? findFirstPreviewableFile(files) : null;
+              if (firstPreviewableFile) void handleSelectFile(firstPreviewableFile);
+            })
+          }
+          onSelectFile={handleSelectFile}
+          onUse={handleUse}
+          onUsePrompt={onUsePrompt}
+          onReconnect={handleReconnect}
+          onInstall={handleInstall}
+          onUninstall={handleUninstall}
+        />
+      )}
+      {view === 'create' && (
+        <AgentEditor
+          draft={draft}
+          skillOptions={state.skillOptions}
+          skillsStatus={state.skillsStatus}
+          mcpOptions={mcpOptions}
+          mcpStatus={mcpStatus}
+          saving={saving}
+          error={createError}
+          onChange={setDraft}
+          onReloadSkills={loadSkills}
+          onReloadMcps={loadMcps}
+          onCancel={() => {
+            setActionError(null);
+            setActionNotice(null);
+            setView('mine');
+          }}
+          onSave={handleCreate}
+        />
+      )}
       {pendingConnectorModals}
       {uploadDialog}
-    </main>
+    </div>
+    </div>
   );
 }

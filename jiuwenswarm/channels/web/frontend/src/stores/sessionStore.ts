@@ -5,7 +5,11 @@
  */
 
 import { create } from 'zustand';
-import { parseContextUsageSnapshot } from '../features/contextUsage/contextUsageModel';
+import {
+  isSingleAgentContextUsageSnapshot,
+  isTeamLeaderContextUsageSnapshot,
+  parseContextUsageSnapshot,
+} from '../features/contextUsage/contextUsageModel';
 import {
   Session,
   AgentMode,
@@ -743,6 +747,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
             mode: normalizedMode,
             // Clear stale Auto route when the user picks a concrete (or new Auto) mode.
             lastMacroRoutedMode: null,
+            contextUsageSnapshot: runtime.mode === normalizedMode ? runtime.contextUsageSnapshot : null,
             agentSelectionIntent,
             ...(closingSwarmflow
               ? { enableSwarmflow: false, swarmflowBudget: null }
@@ -802,11 +807,16 @@ export const useSessionStore = create<SessionState>((set, get) => ({
 
   receiveContextUsage: (payload) => {
     const snapshot = parseContextUsageSnapshot(payload);
-    if (!snapshot || snapshot.depth !== 0 || snapshot.team_id !== null || snapshot.member_name !== null) return;
+    if (!snapshot) return;
     const sessionId = snapshot.product_session_id;
     set((state) => {
       const runtime = state.runtimes[sessionId];
-      if (!runtime || runtime.mode !== 'agent') return state;
+      if (!runtime) return state;
+      const isEligible =
+        runtime.mode === 'agent'
+          ? isSingleAgentContextUsageSnapshot(snapshot)
+          : runtime.mode === 'team' && isTeamLeaderContextUsageSnapshot(snapshot);
+      if (!isEligible) return state;
       const incomingTimestamp = contextUsageTimestamp(snapshot);
       const currentTimestamp = contextUsageTimestamp(runtime.contextUsageSnapshot);
       // history.get pages are loaded newest-first. Keep an older page from

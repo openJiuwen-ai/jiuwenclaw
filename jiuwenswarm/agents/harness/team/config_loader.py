@@ -4,6 +4,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 from copy import deepcopy
 from pathlib import Path
@@ -11,7 +13,7 @@ from typing import Any
 
 from openjiuwen.agent_teams.paths import get_agent_teams_home
 
-from jiuwenswarm.common.config import get_config
+from jiuwenswarm.common.config import get_config, get_default_models
 from jiuwenswarm.common.reasoning_injector import build_reasoning_model_request_kwargs
 from jiuwenswarm.server.runtime.opencode_zen import get_zen_free_model_entries
 
@@ -207,27 +209,18 @@ def resolve_team_sqlite_db_path(config_base: dict[str, Any] | None = None) -> Pa
     return get_agent_teams_home() / conn_str
 
 
-def _resolve_default_model_config(
-    config_base: dict[str, Any],
+def _select_default_model_config(
+    configured_entries: list[dict[str, Any]],
     *,
     requested_model_name: str | None = None,
 ) -> dict[str, Any]:
-    models_raw = config_base.get("models", {})
-    if not isinstance(models_raw, dict):
-        models_raw = {}
-
-    defaults_raw = models_raw.get("defaults")
-    defaults_list = defaults_raw if isinstance(defaults_raw, list) else []
-
     requested = (requested_model_name or "").strip()
     if requested:
         # When the caller (chat page) provides a requested model name, prefer
         # the entry whose ``model_client_config.model_name`` matches it so
         # team members without an explicit ``modes.team.agents.*.model`` fall
         # back to the page-selected model instead of the first list item.
-        for item in defaults_list:
-            if not isinstance(item, dict):
-                continue
+        for item in configured_entries:
             mcc = item.get("model_client_config") or {}
             if isinstance(mcc, dict) and mcc.get("model_name") == requested:
                 return item
@@ -241,15 +234,22 @@ def _resolve_default_model_config(
             if isinstance(mcc, dict) and mcc.get("model_name") == requested:
                 return item
 
-    for item in defaults_list:
-        if isinstance(item, dict):
-            return item
-
-    legacy_default = models_raw.get("default")
-    if isinstance(legacy_default, dict):
-        return legacy_default
+    if configured_entries:
+        return configured_entries[0]
 
     return {}
+
+
+def _resolve_default_model_config(
+    config_base: dict[str, Any],
+    *,
+    requested_model_name: str | None = None,
+) -> dict[str, Any]:
+    """Resolve the selected model from normalized executable entries."""
+    return _select_default_model_config(
+        get_default_models(config_base),
+        requested_model_name=requested_model_name,
+    )
 
 
 def _sanitize_team_member_model(model: dict[str, Any]) -> dict[str, Any]:
@@ -282,6 +282,62 @@ def _sanitize_team_member_model(model: dict[str, Any]) -> dict[str, Any]:
         model_name=declared_model or str(model_client_config.get("model_name") or ""),
     )
     return sanitized
+
+
+def _model_entry_fingerprint(entry: dict[str, Any]) -> str:
+    """Return a fingerprint of all request-affecting model configuration."""
+    model_client_config = deepcopy(entry.get("model_client_config") or {})
+    model_name = str(model_client_config.get("model_name") or "").strip()
+    provider = str(model_client_config.get("client_provider") or "").strip().casefold()
+    api_base = str(model_client_config.get("api_base") or "").strip().rstrip("/")
+    model_client_config["model_name"] = model_name
+    model_client_config["client_provider"] = provider
+    model_client_config["api_base"] = api_base
+    payload = {
+        "model_client_config": model_client_config,
+        "model_config_obj": entry.get("model_config_obj") or {},
+    }
+    serialized = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
+def _merge_effective_model_entries(
+    configured_entries: list[dict[str, Any]],
+    selected_entry: dict[str, Any] | None,
+) -> list[dict[str, Any]]:
+    """Merge executable entries without collapsing distinct endpoints."""
+    candidates = list(configured_entries)
+    if selected_entry:
+        candidates.append(selected_entry)
+    merged: list[dict[str, Any]] = []
+    fingerprints: set[str] = set()
+    for entry in candidates:
+        model_client_config = entry.get("model_client_config") or {}
+        if not isinstance(model_client_config, dict) or not model_client_config.get("model_name"):
+            continue
+        fingerprint = _model_entry_fingerprint(entry)
+        if fingerprint in fingerprints:
+            continue
+        fingerprints.add(fingerprint)
+        merged.append(deepcopy(entry))
+    return merged
+
+
+def get_effective_team_model_entries(
+    config_base: dict[str, Any],
+    *,
+    requested_model_name: str | None = None,
+) -> list[dict[str, Any]]:
+    """Return configured models plus the effective page-selected model."""
+    configured_entries = get_default_models(config_base)
+    selected_entry = _select_default_model_config(
+        configured_entries,
+        requested_model_name=requested_model_name,
+    )
+    return _merge_effective_model_entries(
+        configured_entries,
+        selected_entry,
+    )
 
 
 def _build_default_model_dict(
