@@ -2867,8 +2867,9 @@ class SkillTurboExecutor:
 
         events_queue.append(self._build_task_update_event(task_states))
 
+    @staticmethod
     def _build_task_update_event(
-        self, task_states: dict[str, dict[str, Any]]
+        task_states: dict[str, dict[str, Any]]
     ) -> dict[str, Any]:
         """构建 task.update 事件（不入队）。"""
         # 深拷贝任务状态（避免后续修改影响已发送的事件）；按 index 排序保证前端稳定
