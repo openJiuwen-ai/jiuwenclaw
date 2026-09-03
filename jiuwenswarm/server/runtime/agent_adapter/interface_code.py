@@ -86,7 +86,6 @@ from jiuwenswarm.agents.harness.common.rails.skill_retrieval_prompt_rail import 
 )
 from jiuwenswarm.agents.harness.common.memory.config import is_memory_enabled
 from jiuwenswarm.agents.harness.common.tools import (
-    SkillRetrievalToolkit,
     SkillToolkit,
 )
 from jiuwenswarm.agents.harness.common.tools.acp_chat import acp_chat
@@ -2370,19 +2369,7 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
         self,
     ) -> SkillRetrievalPromptRail | None:
         """Build prompt guidance from the active Code Spec snapshot."""
-        if not self._skill_retrieval_tools_enabled_for_runtime():
-            return None
-        try:
-            return SkillRetrievalPromptRail(
-                manager=self._skill_manager,
-                visible_skill_names=self._visible_skill_names_for_list_skill,
-            )
-        except Exception as exc:  # noqa: BLE001
-            logger.warning(
-                "[JiuwenSwarmCodeAdapter] SkillRetrievalPromptRail build failed: %s",
-                exc,
-            )
-            return None
+        return super()._build_skill_retrieval_prompt_rail()
 
     def _build_skill_retrieval_toolkit(self, agent_id: str) -> list[Any] | None:
         """构建 SkillRetrievalToolkit 工具（不注册到 Runner，由 _get_tool_cards 统一注册）."""
@@ -2390,11 +2377,7 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
             logger.info("[JiuwenSwarmCodeAdapter] SkillRetrievalToolkit skipped: disabled")
             return None
         try:
-            toolkit = SkillRetrievalToolkit(
-                manager=self._skill_manager,
-                visible_skill_names=self._visible_skill_names_for_list_skill,
-            )
-            tools = mark_stateless(toolkit.get_tools())
+            tools = self._create_skill_retrieval_tools()
             self._skill_retrieval_tools = tools
             self._skill_retrieval_tools_registered = bool(tools)
             logger.info(
