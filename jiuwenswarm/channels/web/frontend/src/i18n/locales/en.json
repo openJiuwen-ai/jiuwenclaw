@@ -1673,7 +1673,11 @@
       "errorInvalidVersion": "Version format should be x.y.z (e.g. 1.0.0)",
       "errorDisplayNameTooLong": "Display name cannot exceed {{max}} characters",
       "pathNotFound": "Unable to determine skill directory",
-      "forceOverwrite": "Force overwrite (overwrite existing plugin when version exists)"
+      "forceOverwrite": "Force overwrite (overwrite existing plugin when version exists)",
+      "skillNameTooltip": "Field name: name. Lowercase letters, digits, and hyphens; must match the skill root folder naming rule inside the package, e.g. my-demo-skill.",
+      "displayNameTooltip": "Field name: display_name. The name shown in skill lists and details.",
+      "descriptionTooltip": "Field name: description. When empty, the marketplace summary uses the description from the YAML header in SKILL.md. If filled, it is written to plugin.yaml and overrides the file header.",
+      "tagsTooltip": "Field name: tags. Separate multiple tags with commas."
     },
     "oauthLogin": {
       "title": "Login to Publish Skill",
@@ -1733,7 +1737,7 @@
     "contentPreview": "Content Preview",
     "noDescription": "No description",
     "noContent": "No content",
-    "searchPlaceholder": "Search skill names, descriptions, or tags",
+    "searchPlaceholder": "Search skill names",
     "totalCount": "{{count}} total",
     "listError": "Failed to load skills. Please check the backend service.",
     "featuredTeamSkills": "Featured Team Skills",
@@ -1757,6 +1761,9 @@
       "noPreview": "Unable to preview this file",
       "contentPreview": "Content Preview",
       "selectFileToPreview": "Select a file on the left to preview",
+      "defaultVersion": "Default",
+      "unavailableVersion": "Unavailable",
+      "notPreviewable": "Not previewable",
       "tabs": {
         "contentDetail": "Content Details",
         "filePreview": "File Preview",
@@ -2129,7 +2136,10 @@
       "packFailed": "Packaging failed",
       "downloadFailed": "Failed to download package file",
       "published": "Skill {{name}} published successfully",
-      "publishFailed": "Publishing failed"
+      "publishFailed": "Publishing failed",
+      "rebuilding": "Rebuilding skill, please wait…",
+      "rebuildCompleted": "Skill rebuild completed",
+      "rebuildFailed": "Rebuild failed: {{detail}}"
     },
     "errors": {
       "installFailed": "Install failed",

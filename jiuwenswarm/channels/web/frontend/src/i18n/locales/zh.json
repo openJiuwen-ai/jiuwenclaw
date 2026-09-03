@@ -1661,7 +1661,11 @@
       "errorInvalidVersion": "版本号格式应为 x.y.z（如 1.0.0）",
       "errorDisplayNameTooLong": "显示名不能超过 {{max}} 个字符",
       "pathNotFound": "无法确定技能目录",
-      "forceOverwrite": "强制覆盖（版本已存在时覆盖原插件）"
+      "forceOverwrite": "强制覆盖（版本已存在时覆盖原插件）",
+      "skillNameTooltip": "字段名:name。小写字母、数字与连字符，须与目录内skill根文件夹命名规则一致，例如my-demo-skill。",
+      "displayNameTooltip": "字段名:display_name。在技能列表与详情中展示的名称。",
+      "descriptionTooltip": "字段名:description。留空时，市场简介将使用 SKILL.md中 YAML头部的description。填写则写入plugin.yaml，可覆盖为与文件头不同的文案。",
+      "tagsTooltip": "字段名:tags。多个标签用英文或中文逗号分隔。"
     },
     "oauthLogin": {
       "title": "登录以发布技能",
@@ -1721,7 +1725,7 @@
     "contentPreview": "内容预览",
     "noDescription": "暂无描述",
     "noContent": "暂无内容",
-    "searchPlaceholder": "搜索技能名称、描述或标签",
+    "searchPlaceholder": "搜索技能",
     "totalCount": "共 {{count}} 个",
     "listError": "获取技能失败，请检查后端服务",
     "featuredTeamSkills": "精选团队技能",
@@ -1745,6 +1749,9 @@
       "noPreview": "无法预览此文件",
       "contentPreview": "内容预览",
       "selectFileToPreview": "请选择左侧文件进行预览",
+      "defaultVersion": "默认",
+      "unavailableVersion": "不可用",
+      "notPreviewable": "不可预览",
       "tabs": {
         "contentDetail": "内容详情",
         "filePreview": "文件预览",
@@ -2117,7 +2124,10 @@
       "packFailed": "打包失败",
       "downloadFailed": "下载打包文件失败",
       "published": "技能 {{name}} 发布成功",
-      "publishFailed": "发布失败"
+      "publishFailed": "发布失败",
+      "rebuilding": "正在重建技能，请耐心等待",
+      "rebuildCompleted": "技能重建完成",
+      "rebuildFailed": "重建失败: {{detail}}"
     },
     "errors": {
       "installFailed": "安装失败",

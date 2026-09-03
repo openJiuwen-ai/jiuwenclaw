@@ -122,7 +122,7 @@ export function DefinitionCard({ item, scope, busy, onOpen, onUse, onReconnect, 
   const avatarUrl = getAgentAvatarUrl(item);
 
   return (
-    <article className={`agent-management-card agent-management-card--${scope}`} data-testid={`agent-card-${item.id}`}>
+    <article className={`agent-management-card page-card agent-management-card--${scope}`} data-testid={`agent-card-${item.id}`}>
       <button
         type="button"
         className="agent-management-card__body"

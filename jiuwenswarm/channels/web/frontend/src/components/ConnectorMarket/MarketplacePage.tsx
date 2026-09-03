@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Search, Plus, ChevronDown, ChevronLeft, ChevronRight } from 'lucide-react';
+import { Plus, ChevronDown, ChevronLeft, ChevronRight } from 'lucide-react';
 import { useConnectorStore } from '../../stores/connectorStore';
 import { usePluginPackageStore } from '../../stores/pluginPackageStore';
 import { localizedText } from '../../types/pluginPackage';
@@ -13,6 +13,7 @@ import type { ConnectorConnectResponse } from '../../types/connector';
 import { deriveCardState, derivePluginCardState, deriveMcpAvailability, cardStateToStatusFilter } from './mcpState';
 import { useClickOutside } from './useClickOutside';
 import { usePendingConnectorFlow, PendingConnectorModals } from './usePendingConnectorFlow';
+import { CategoryTabs, PageHeader, PageToolbarSearch } from '../ui';
 import SimpleSelect from '../CronPanel/SimpleSelect';
 
 export type MarketKind = 'plugin' | 'mcp';
@@ -420,14 +421,11 @@ export function MarketplacePage({
   }
 
   return (
-    <div ref={scrollRef} className="relative h-full overflow-y-auto bg-card px-8 py-6">
-      <div className="mb-5">
-        <h1 className="text-[18px] font-semibold leading-7 text-text">{t('connectorMarket.title')}</h1>
-        <p className="mt-0.5 text-[12px] leading-[18px] text-text-muted">{t('connectorMarket.subtitle')}</p>
-      </div>
+    <div ref={scrollRef} className="relative flex min-h-0 flex-1 flex-col overflow-y-auto" data-testid="connector-market-marketplace">
+      <PageHeader title={t('connectorMarket.title')} subtitle={t('connectorMarket.subtitle')} />
 
-      <div className="mb-4 flex items-center justify-between gap-4">
-        <div className="flex items-center gap-6">
+      <div className="page-toolbar" data-testid="page-toolbar">
+        <div className="chat-picker-panel__tabs">
           {(['plugin', 'mcp', 'my'] as const).map((tab) => {
             const active = topTab === tab;
             return (
@@ -435,16 +433,18 @@ export function MarketplacePage({
                 key={tab}
                 type="button"
                 onClick={() => onTopTabChange(tab)}
-                className={`relative pb-2 text-[14px] leading-[22px] ${active ? 'font-semibold text-text' : 'font-normal text-text'}`}
+                aria-pressed={active}
+                data-testid="connector-market-tab"
+                data-variant={tab}
+                className={active ? 'is-active' : ''}
               >
                 {t(tab === 'my' ? 'connectorMarket.tabs.my' : `connectorMarket.tabs.${tab}Market`)}
-                {active && <span className="absolute inset-x-0 -bottom-px h-0.5 rounded-full bg-text" />}
               </button>
             );
           })}
         </div>
 
-        <div className="flex shrink-0 items-center gap-2">
+        <div className="flex items-center gap-3">
           <div className="flex items-center gap-1">
             {(['all', 'available', 'pending'] as const).map((key) => {
               const active = statusFilter === key;
@@ -462,15 +462,13 @@ export function MarketplacePage({
               );
             })}
           </div>
-          <div className="relative w-80">
-            <Search size={14} strokeWidth={2} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-[color:var(--color-text-placeholder)]" />
-            <input
-              value={query}
-              onChange={(event) => setQuery(event.target.value)}
-              placeholder={t(`connectorMarket.search.${topTab}`)}
-              className="h-8 w-full rounded-lg border border-border bg-card pl-8 pr-3 text-[12px] leading-[18px] text-text placeholder:text-[color:var(--color-text-placeholder)] outline-none focus:border-border-hover"
-            />
-          </div>
+          <PageToolbarSearch
+            wrapperTestId="connector-market-search"
+            inputTestId="connector-market-search-input"
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+            placeholder={t(`connectorMarket.search.${topTab}`)}
+          />
 
           {topTab === 'my' && (
             <div className="relative" ref={createMenuRef}>
@@ -503,57 +501,36 @@ export function MarketplacePage({
 
       {/* 2026-08-29 MCP 广场目前都不带 tag（category 多为空），分类 tab 行先隐藏——去掉 false 即恢复 */}
       {false && topTab === 'mcp' && categoryTabs.length > 1 && (
-        <div className="mb-5 flex flex-wrap items-center">
-          {categoryTabs.map((tab, index) => (
-            <span key={tab.key} className="flex items-center">
-              {index > 0 && <span className="mx-3 text-[14px] leading-[22px] text-border-strong">|</span>}
-              <button
-                type="button"
-                onClick={() => setCategory(tab.key)}
-                className={`text-[14px] leading-[22px] ${category === tab.key ? 'font-semibold text-text' : 'font-normal text-text-muted'}`}
-              >
-                {tab.label}
-              </button>
-            </span>
-          ))}
+        <div className="mb-5">
+          <CategoryTabs
+            items={categoryTabs.map((tab) => ({ value: tab.key, label: tab.label }))}
+            value={category}
+            onChange={setCategory}
+          />
         </div>
       )}
 
       {topTab === 'plugin' && pluginCategoryTabs.length > 1 && (
-        <div className="mb-5 flex flex-wrap items-center">
-          {pluginCategoryTabs.map((tab, index) => (
-            <span key={tab.key} className="flex items-center">
-              {index > 0 && <span className="mx-3 text-[14px] leading-[22px] text-border-strong">|</span>}
-              <button
-                type="button"
-                onClick={() => setPluginCategory(tab.key)}
-                className={`text-[14px] leading-[22px] ${pluginCategory === tab.key ? 'font-semibold text-text' : 'font-normal text-text-muted'}`}
-              >
-                {tab.label}
-              </button>
-            </span>
-          ))}
+        <div className="mb-5">
+          <CategoryTabs
+            items={pluginCategoryTabs.map((tab) => ({ value: tab.key, label: tab.label }))}
+            value={pluginCategory}
+            onChange={setPluginCategory}
+          />
         </div>
       )}
 
       {topTab === 'my' && (
-        <div className="mb-5 flex flex-wrap items-center">
-          {(['plugin', 'mcp'] as const).map((kind, index) => (
-            <span key={kind} className="flex items-center">
-              {index > 0 && <span className="mx-3 text-[14px] leading-[22px] text-border-strong">|</span>}
-              <button
-                type="button"
-                onClick={() => onMyKindChange(kind)}
-                className={`text-[14px] leading-[22px] ${myKind === kind ? 'font-semibold text-text' : 'font-normal text-text-muted'}`}
-              >
-                {t(`connectorMarket.tabs.${kind}`)}
-              </button>
-            </span>
-          ))}
+        <div className="mb-5">
+          <CategoryTabs
+            items={(['plugin', 'mcp'] as const).map((kind) => ({ value: kind, label: t(`connectorMarket.tabs.${kind}`) }))}
+            value={myKind}
+            onChange={onMyKindChange}
+          />
         </div>
       )}
 
-      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3">
+      <div className="card-grid-auto" data-testid="connector-market-card-list">
         {topTab === 'my' ? (
           myKind === 'mcp' ? (
             paginatedConnectors.map((connector) => {

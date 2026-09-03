@@ -1944,6 +1944,7 @@ overflow: hidden;
   flex-direction: column;
   gap: 4px;
   overflow-y: auto;
+  margin-top: 8px;
   /* 显式声明，不能省略——只设 overflow-y 时 overflow-x 的计算值不是默认的 visible，浏览器会把
      它强制变成 auto（CSS2.1 overflow 规则：两轴只要有一个不是 visible，另一个 visible 就会被
      隐式改成 auto），一旦内容有任何轻微溢出就会莫名多出一条横向滚动条（2026-08-18 用户反馈）。 */
@@ -2038,6 +2039,7 @@ overflow: hidden;
      且 tabs 上方位置为小数还会连带下方 search-inner 的下划线发虚。溢出一律由列表
      （min-height:0 + overflow-y:auto）消化。 */
   flex-shrink: 0;
+  margin-bottom: 16px;
 }
 
 /* 底边 1px 分隔线用伪元素缩放法绘制：2px 高 scaleY(0.5)。直接写 1px border 时，面板起始
@@ -2053,6 +2055,7 @@ overflow: hidden;
   background: var(--color-border-default);
   content: '';
   transform: scaleY(0.5);
+  z-index: -1;
   transform-origin: bottom;
 }
 
@@ -2095,9 +2098,9 @@ overflow: hidden;
    （#f0f0f0，token: --color-settings-border） */
 .chat-picker-panel__search {
   display: flex;
-  height: 32px;
+  height: 22px;
   align-items: center;
-  margin: 8px 0 6px;
+  margin: 0 0 8px;
   color: var(--color-text-secondary);
   padding: 0 8px;
   flex-shrink: 0;
@@ -2107,6 +2110,7 @@ overflow: hidden;
   width: 16px;
   height: 16px;
   flex: 0 0 auto;
+  margin-top: 1px;
 }
 
 .chat-picker-panel__search-inner {
@@ -2114,7 +2118,7 @@ overflow: hidden;
   display: flex;
   flex: 1 1 auto;
   min-width: 0;
-  align-items: center;
+  align-items: flex-start;
   gap: 6px;
   height: 100%;
 }
@@ -2163,7 +2167,7 @@ overflow: hidden;
   position: relative;
   display: flex;
   width: 100%;
-  min-height: 40px;
+  min-height: 38px;
   align-items: center;
   gap: 8px;
   border: 0;
@@ -2217,21 +2221,6 @@ overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   font-size: 12px;
-}
-
-.chat-agent-picker__tooltip {
-  position: fixed;
-  z-index: 10000;
-  width: 240px;
-  border: 1px solid var(--color-border-default);
-  border-radius: 8px;
-  background: var(--color-surface-card);
-  box-shadow: var(--effect-shadow-md);
-  color: var(--color-text-primary);
-  padding: 8px 10px;
-  pointer-events: none;
-  font-size: 12px;
-  line-height: 18px;
 }
 
 .chat-agent-tag {
@@ -3319,8 +3308,8 @@ overflow: hidden;
   display: flex;
   align-items: center;
   gap: 8px;
-  height: 50px;
-  padding: 4px 8px;
+  height: 56px;
+  padding: 6px 8px;
   border: 0;
   border-radius: 8px;
   background: transparent;
@@ -3409,8 +3398,8 @@ overflow: hidden;
 
 .chat-extension-picker__item {
   height: auto;
-  min-height: 44px;
-  gap: 10px;
+  min-height: 38px;
+  gap: 8px;
   cursor: default;
 }
 
@@ -3419,9 +3408,9 @@ overflow: hidden;
    限定在 .chat-extension-picker__item 下的覆盖，不改共享基类，旧版技能下拉（InputArea.tsx 的
    .chat-skill-select__menu）不受影响。 */
 .chat-extension-picker__item .chat-skill-select__avatar {
-  width: 24px;
-  height: 24px;
-  border-radius: 7px;
+  width: 16px;
+  height: 16px;
+  border-radius: 4px;
   font-size: 11px;
 }
 
@@ -3444,30 +3433,6 @@ overflow: hidden;
 /* 连接按钮样式改成直接复用 ConnectorMarket 卡片同款（connector-market-icon-btn + Tailwind
    工具类，见 ExtensionPickerPanel.tsx），跟"扩展管理"广场卡片上的 + 号视觉对齐（用户 2026-08-18
    反馈），不再单独维护一套。 */
-
-/* 条目描述 / 连接按钮的 hover 提示框（ExtensionPickerPanel.tsx 的 ItemTooltipPortal）。
-   跟 ConnectorMarket.css 里 .connector-market-desc-tooltip 视觉同款（同一套 popover/border/
-   shadow token），但这里不能复用那个 class 本身——那个是给 [data-tooltip]:hover::after 这种
-   "伪元素挂在被 hover 元素自己身上"的用法设计的，本组件的触发元素在 overflow-y:auto 的可滚动
-   列表内部，伪元素会被记入该滚动容器的 scrollHeight，一旦触发滚动条就会引发 hover 状态被
-   滚动条挤出触发区域 → 提示消失 → 滚动条消失 → 内容排版复位 → 又重新 hover 上的闪烁循环，
-   见 ExtensionPickerPanel.tsx ItemDescCell 头注释。这里改成 JS 控制的独立 DOM 节点，用
-   createPortal 挂到 document.body、position:fixed 定位，彻底脱离滚动容器。 */
-.chat-extension-picker__tooltip {
-  box-sizing: border-box;
-  width: max-content;
-  max-width: 320px;
-  padding: 8px 12px;
-  border-radius: 8px;
-  background: var(--color-surface-popover);
-  border: 1px solid var(--color-border-default);
-  box-shadow: var(--effect-shadow-lg);
-  color: var(--color-text-primary);
-  font-size: 12px;
-  line-height: 18px;
-  white-space: normal;
-  pointer-events: none;
-}
 
 /* 原 .chat-extension-picker__toggle*（MenuToggleSwitch 专属样式）已删除：2026-08-19 用户
    明确要求开关统一复用已有的 components/Switch，不要再维护第二套开关视觉，插件/MCP 面板和
@@ -4197,7 +4162,7 @@ overflow: hidden;
 }
 
 .chat-welcome__banner--bubble {
-  top: -30px;
+  top: -155px;
   right: -114px;
   z-index: 12;
   background: var(--color-surface-card);
@@ -4250,16 +4215,25 @@ overflow: hidden;
   margin: 0 0 20px 0;
   text-align: left;
   align-self: flex-start;
+  width: calc(100% - 160px);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
 }
 
-@container (max-width: 799px) {
-  .chat-welcome__heading-highlight {
-    display: block;
-  }
-  .chat-welcome__banner--bubble {
-    top: 18px;
+/* 视口 ≤930px 时缩小欢迎标题字号（原为 JS 断点 isMdDown/900px 控制，2026-09-03 改为 CSS 媒体查询并上调阈值） */
+@media (max-width: 930px) {
+  .chat-welcome__heading {
+    font-size: 24px;
+    line-height: 30px;
   }
 }
+
+.chat-welcome__heading-highlight {
+  display: inline-block;
+}
+
+
 
 .chat-welcome__subtext {
   font-size: 16px;
