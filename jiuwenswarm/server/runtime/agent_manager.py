@@ -671,6 +671,45 @@ class AgentManager:
             )
         return cleaned
 
+    async def release_subagent_runtime_for_session(
+        self,
+        *,
+        channel_id: str | None,
+        session_id: str,
+        reason: str = "session_deleted",
+    ) -> bool:
+        """Release subagent control owned by the channel's existing Agent.
+
+        Product Session deletion historically performed this lookup in
+        AgentServer.  Keeping it here preserves the same first-Agent lookup and
+        adapter selection while hiding Agent/Adapter internals behind the
+        Runtime-owned manager boundary.
+        """
+        agent = self.get_agent_nowait(channel_id=channel_id or "")
+        adapter = self._resolve_runtime_adapter(agent)
+        release_runtime = getattr(
+            adapter,
+            "release_subagent_runtime_for_session",
+            None,
+        )
+        if not callable(release_runtime):
+            return False
+        await release_runtime(session_id, reason=reason)
+        return True
+
+    @staticmethod
+    def _resolve_runtime_adapter(agent: Any) -> Any:
+        """Resolve the same adapter shape used by the legacy Server path."""
+        if agent is None:
+            return None
+        for attr in ("_adapter", "adapter", "_active_adapter"):
+            inner = getattr(agent, attr, None)
+            if inner is not None and hasattr(inner, "apply_sandbox_runtime_patch"):
+                return inner
+        if hasattr(agent, "apply_sandbox_runtime_patch"):
+            return agent
+        return None
+
     async def apply_mcp_change(
         self, name: str, action: str, *, enabled: bool = True,
         target_channel_id: str | None = None,

@@ -356,8 +356,8 @@ from jiuwenswarm.agents.harness.common.tools.xiaoyi_phone_tools import (
 )
 from jiuwenswarm.common.config import (
     get_config,
-    get_model_names,
     get_default_models,
+    get_model_names,
     get_evolution_auto_save_enabled,
     get_progressive_tool_enabled,
     get_skill_evolution_enabled,
@@ -5732,6 +5732,7 @@ class JiuWenSwarmDeepAdapter:
                 model_name=model.model_config.model_name,
                 context_window_tokens=self._selected_model_context_window_tokens,
             )
+        self._model_client_config = model.model_client_config
         self._model_request_config = model.model_config
         # 记录最近一次解析并应用的模型，供 ask_user_interrupt 等不带 model_name
         # 的中断恢复请求回退使用，避免回退到 config.yaml 默认占位模型。
