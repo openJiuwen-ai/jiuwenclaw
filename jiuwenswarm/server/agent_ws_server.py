@@ -984,6 +984,12 @@ class AgentWebSocketServer:
             logger.warning("[AgentWebSocketServer] 服务端已在运行")
             return
 
+        from jiuwenswarm.server.runtime.session.kv_cache.kv_cache_application_runtime import (
+            get_kv_cache_runtime,
+        )
+
+        get_kv_cache_runtime()
+
         # Reset harness package state to native on service startup
         reset_harness_packages_state()
 
@@ -1455,6 +1461,12 @@ class AgentWebSocketServer:
         )
 
         await cancel_pending_tasks()
+
+        from jiuwenswarm.server.runtime.session.kv_cache.kv_cache_application_runtime import (
+            close_kv_cache_runtime,
+        )
+
+        await close_kv_cache_runtime()
 
         try:
             await self._runtime.close()
@@ -2225,7 +2237,6 @@ class AgentWebSocketServer:
                 session_id=str(request.session_id or params.get("session_id") or "").strip(),
                 params=params,
                 channel_id=str(request.channel_id or "default"),
-                agent_manager=self._agent_manager,
             )
         except Exception as exc:
             logger.warning(
@@ -2235,8 +2246,8 @@ class AgentWebSocketServer:
                 exc,
             )
 
+    @staticmethod
     def _record_kvc_chat_finished(
-        self,
         request: AgentRequest,
         *,
         succeeded: bool,
@@ -2250,7 +2261,6 @@ class AgentWebSocketServer:
             record_chat_finished(
                 session_id=str(request.session_id or params.get("session_id") or "").strip(),
                 succeeded=succeeded,
-                agent_manager=self._agent_manager,
             )
         except Exception as exc:
             logger.warning(
@@ -3488,9 +3498,7 @@ class AgentWebSocketServer:
         channel_id: str,
         target_session_id: str,
         previous_session_id: str,
-        reason: str,
         context: Any,
-        team_manager: Any,
         dispatch_signals: Any,
         view_id: str = "default-view",
     ) -> None:
@@ -3499,12 +3507,9 @@ class AgentWebSocketServer:
             return
         await dispatch_signals(
             context=context,
-            agent_manager=self._agent_manager,
             channel_id=channel_id,
-            team_manager=team_manager,
             target_session_id=target_session_id,
             previous_session_id=previous_session_id,
-            reason=reason,
             view_id=view_id,
         )
 
@@ -3537,7 +3542,6 @@ class AgentWebSocketServer:
                     intent_id=intent_id,
                     channel_id=str(request.channel_id or "default"),
                     params=params,
-                    agent_manager=self._agent_manager,
                 )
                 logger.info(
                     "[AgentWebSocketServer] session.kvc.prepare processed: "
@@ -3627,9 +3631,7 @@ class AgentWebSocketServer:
                     "channel_id": channel_id,
                     "target_session_id": target,
                     "previous_session_id": previous_session_id,
-                    "reason": "session.switch: ",
                     "context": context,
-                    "team_manager": team_manager,
                     "dispatch_signals": dispatch_signals,
                     "view_id": str(params.get("view_id") or f"ws:{id(ws)}"),
                 }
@@ -4312,15 +4314,28 @@ class AgentWebSocketServer:
                         resp = checkpoint_resp
                     else:
                         from jiuwenswarm.agents.harness.team import (
-                            kv_cache_hooks as team_kv_cache_hooks,
+                            kv_cache_team_delete_guard,
                         )
 
                         for team_session_id in team_session_ids:
-                            await team_kv_cache_hooks.stop_runtime_before_terminal_delete(
+                            await kv_cache_team_delete_guard.stop_runtime_before_terminal_delete(
                                 stop_team_session_runtime_across_managers,
                                 session_id=team_session_id,
                                 reason="team.delete: ",
                             )
+                            if kv_cache_team_delete_guard.is_enabled():
+                                from openjiuwen.core.session.agent_team import (
+                                    create_agent_team_session,
+                                )
+                                from jiuwenswarm.server.runtime.session.kv_cache.kv_cache_application_runtime import (
+                                    get_kv_cache_runtime,
+                                )
+
+                                session = create_agent_team_session(
+                                    session_id=team_session_id,
+                                    kv_cache_runtime=get_kv_cache_runtime(),
+                                )
+                                await session.release_kvc()
 
                         runtime_deleted = await Runner.delete_agent_team(
                             team_name=team_name,
@@ -4357,6 +4372,11 @@ class AgentWebSocketServer:
                                         failed_session_ids.append(team_session_id)
                                         continue
                                 remove_session_metadata_cache(team_session_id)
+                                from jiuwenswarm.server.runtime.session.kv_cache.kv_cache_product_hooks import (
+                                    forget_deleted_session,
+                                )
+
+                                forget_deleted_session(team_session_id)
 
                             if failed_session_ids:
                                 resp = AgentResponse(
@@ -9889,9 +9909,7 @@ class AgentWebSocketServer:
                         channel_id=channel_id,
                         target_session_id=session_id,
                         previous_session_id=previous_session_id,
-                        reason=lifecycle_reason,
                         context=switch_context,
-                        team_manager=team_manager,
                         dispatch_signals=dispatch_signals,
                         view_id=str(params.get("view_id") or f"ws:{id(ws)}"),
                     ),

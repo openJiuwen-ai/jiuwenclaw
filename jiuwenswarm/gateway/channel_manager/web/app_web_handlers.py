@@ -64,7 +64,6 @@ from jiuwenswarm.common.config import (
     update_default_model_provider_in_config,
     update_kv_cache_affinity_enabled_in_config,
     validate_persisted_kv_cache_affinity,
-    update_kv_cache_release_enabled_in_config,
     update_skill_retrieval_in_config,
     update_symphony_in_config,
     update_permissions_enabled_in_config,
@@ -84,7 +83,8 @@ from jiuwenswarm.common.config import (
 from jiuwenswarm.common.kv_cache_affinity_config import (
     ASCEND_AFFINITY_PROVIDER,
     KVC_CONFIG_KEYS,
-    default_model_provider_from_entries,
+    default_model_client_config_from_entries,
+    has_kv_cache_affinity_capability,
     is_affinity_enabled,
     normalize_affinity_request,
     parse_bool as parse_kvc_bool,
@@ -1056,7 +1056,6 @@ CONFIG_KEYS = tuple(_CONFIG_SET_ENV_MAP.keys())
 # 来自 config.yaml 的配置项（前端 param 名 -> config.yaml 路径）
 _CONFIG_YAML_KEYS = frozenset({
     "context_engine_enabled",
-    "kv_cache_release_enabled",
     "kv_cache_affinity_enabled",
     "permissions_enabled",
     "memory_forbidden_enabled",
@@ -2830,13 +2829,9 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                     payload[key] = ExtensionRegistry.get_instance().get_crypto_provider().decrypt(val)
             react_cfg = raw.get("react") or {}
             ctx_cfg = react_cfg.get("context_engine_config") or {}
-            kv_cfg = react_cfg.get("kv_cache_affinity_config") or {}
             payload["context_engine_enabled"] = "true" if ctx_cfg.get("enabled", False) else "false"
-            payload["kv_cache_release_enabled"] = (
-                "true" if kv_cfg.get("enable_kv_cache_release", False) else "false"
-            )
             payload["kv_cache_affinity_enabled"] = (
-                "true" if kv_cfg.get("enable_kv_cache_affinity", False) else "false"
+                "true" if is_affinity_enabled(raw) else "false"
             )
             perm_cfg = raw.get("permissions") or {}
             payload["permissions_enabled"] = "true" if perm_cfg.get("enabled", False) else "false"
@@ -2872,7 +2867,6 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             payload["enable_free_models"] = "true" if models_cfg.get("enable_free_models", True) else "false"
         except Exception:  # noqa: BLE001
             payload.setdefault("context_engine_enabled", "false")
-            payload.setdefault("kv_cache_release_enabled", "false")
             payload.setdefault("kv_cache_affinity_enabled", "false")
             payload.setdefault("permissions_enabled", "false")
             payload.setdefault("setup_guide_enabled", "true")
@@ -3099,8 +3093,6 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             try:
                 if param_key == "context_engine_enabled":
                     update_context_engine_enabled_in_config(parsed)
-                elif param_key == "kv_cache_release_enabled":
-                    update_kv_cache_release_enabled_in_config(parsed)
                 elif param_key == "kv_cache_affinity_enabled":
                     update_kv_cache_affinity_enabled_in_config(parsed)
                 elif param_key == "permissions_enabled":
@@ -3694,10 +3686,11 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             return
         try:
             new_models = _build_models_defaults_from_frontend(params.get("models"))
-            default_provider = default_model_provider_from_entries(new_models)
             if (
                 is_affinity_enabled(get_config_raw())
-                and default_provider != ASCEND_AFFINITY_PROVIDER
+                and not has_kv_cache_affinity_capability(
+                    default_model_client_config_from_entries(new_models)
+                )
             ):
                 update_kv_cache_affinity_enabled_in_config(False)
             update_default_models_in_config(new_models)
@@ -3767,10 +3760,11 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 apply_result = _ConfigApplyResult({}, [])
 
             if new_models is not None:
-                default_provider = default_model_provider_from_entries(new_models)
                 if (
                     is_affinity_enabled(get_config_raw())
-                    and default_provider != ASCEND_AFFINITY_PROVIDER
+                    and not has_kv_cache_affinity_capability(
+                        default_model_client_config_from_entries(new_models)
+                    )
                 ):
                     update_kv_cache_affinity_enabled_in_config(False)
                     yaml_updated.append("kv_cache_affinity_enabled")

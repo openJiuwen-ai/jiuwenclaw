@@ -762,7 +762,7 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
             language=self._resolve_runtime_language(),
             context_engine_config=context_engine_config,
             kv_cache_affinity_config=_deep_agent_kv_cache_affinity_config(
-                config, model
+                config_base, model
             ),
             enable_read_image_multimodal=(
                 self._resolve_enable_read_image_multimodal(config)

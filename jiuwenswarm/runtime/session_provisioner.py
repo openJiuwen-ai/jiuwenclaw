@@ -357,8 +357,6 @@ class RuntimeSessionProvisioner:
 
         await evict_plan_session(
             session_id=result.session_id,
-            agent_manager=self._agent_manager,
-            channel_id=result.channel_id,
         )
         from openjiuwen.core.runner import Runner
 
