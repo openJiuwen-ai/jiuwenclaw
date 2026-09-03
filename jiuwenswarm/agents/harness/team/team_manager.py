@@ -40,6 +40,7 @@ from jiuwenswarm.common.utils import get_user_workspace_dir
 configure_agent_teams_home()
 
 from jiuwenswarm.agents.harness.team.config_loader import (
+    get_effective_team_model_entries,
     load_team_spec_dict,
 )
 from jiuwenswarm.agents.harness.team.distributed_runtime import (
@@ -62,7 +63,6 @@ from jiuwenswarm.agents.harness.team import kv_cache_hooks
 from jiuwenswarm.agents.harness.team.remote_member_bootstrap import release_a2x_reservations_for_session
 from jiuwenswarm.common.config import (
     get_config,
-    get_default_models,
     get_evolution_auto_save_enabled,
     get_skill_evolution_enabled,
 )
@@ -913,15 +913,18 @@ class TeamManager:
         if TeamManager._is_distributed_mode(config_base):
             spec_dict = TeamManager._normalize_distributed_transport_fields(config_base, spec_dict)
 
-        # When models.defaults has more than one entry, populate model_pool
-        # and set model_pool_strategy to by_model_name so team members
-        # can be assigned different model endpoints from the pool.
-        default_models = get_default_models(config_base)
-        if len(default_models) > 1:
+        # Populate the pool from valid configured entries plus the effective
+        # page-selected model. The latter may be an in-memory Zen model that
+        # is intentionally absent from config.yaml.
+        effective_models = get_effective_team_model_entries(
+            config_base,
+            requested_model_name=requested_model_name,
+        )
+        if effective_models:
             from openjiuwen.agent_teams.schema.team import ModelPoolEntry
 
             pool_entries: list[dict] = []
-            for entry in default_models:
+            for entry in effective_models:
                 mcc = entry.get("model_client_config") or {}
                 mco = entry.get("model_config_obj") or {}
                 if not mcc.get("model_name"):

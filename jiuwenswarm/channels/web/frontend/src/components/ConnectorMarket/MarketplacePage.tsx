@@ -442,7 +442,7 @@ export function MarketplacePage({
                 data-variant={tab}
                 className={active ? 'is-active' : ''}
               >
-                {t(`connectorMarket.tabs.${tab}`)}
+                {t(tab === 'my' ? 'connectorMarket.tabs.my' : `connectorMarket.tabs.${tab}Market`)}
               </button>
             );
           })}

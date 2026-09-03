@@ -99,6 +99,7 @@ import { CodeBranchSelector } from '../../features/code-mode/CodeBranchSelector'
 import { generateUuidV4 } from '../../utils/uuid';
 import { createAgentManagementClient, getAgentAvatarUrl, type AgentCatalogItem } from '../../features/agentManagement';
 import { ContextUsageIndicator } from './ContextUsageIndicator';
+import { isImeCompositionKey } from './imeComposition';
 
 /** 输入栏下拉所需的最小技能数据结构（与 SkillPanel 中的 SkillItem 保持一致） */
 type InputAreaSkillItem = {
@@ -2105,7 +2106,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
         }
 
         if ((e.key === 'Enter' || e.key === 'Tab') && !e.shiftKey) {
-          if (isComposingRef.current || e.nativeEvent.isComposing) return;
+          if (isImeCompositionKey(e.nativeEvent, isComposingRef.current)) return;
           e.preventDefault();
           const item = composerSuggestionItems[composerSuggestionIndex];
           if (item) {
@@ -2122,7 +2123,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
       }
 
       if (e.key !== 'Enter' || e.shiftKey) return;
-      if (isComposingRef.current || e.nativeEvent.isComposing) return;
+      if (isImeCompositionKey(e.nativeEvent, isComposingRef.current)) return;
       e.preventDefault();
       handleSubmit();
     },

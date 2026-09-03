@@ -9,12 +9,13 @@ import unicodedata
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import unquote
 
 WORKSPACE_CURRENT_URI = "workspace://current"
 WORKSPACE_CURRENT_URI_PREFIX = f"{WORKSPACE_CURRENT_URI}/"
 STALE_SANDBOX_ARTIFACT_PATH = "[stale sandbox artifact path redacted]"
+SanitizeVisibleMode = Literal["workspace_visible", "review_ui"]
 
 _PATH_KEYS = frozenset(
     {
@@ -46,6 +47,14 @@ _SANDBOX_ARTIFACT_PATTERN = re.compile(
     r"[^'\"<>)\],;:\s\r\n]*"
     r"\.sandbox-artifacts/[^'\"<>)\],;:\r\n]+"
     r"(?:/[^'\"<>)\],;:\r\n]*)?"
+)
+_REVIEW_UI_POSIX_ABSOLUTE_PATH_PATTERN = re.compile(
+    r"(?<![\w:/*])/(?!/)[^'\"<>)\],;:\s\r\n]+"
+    r"(?:/[^'\"<>)\],;:\s\r\n]+)*"
+)
+_REVIEW_UI_HOME_PATH_PATTERN = re.compile(r"(?<![\w])~(?:/[^'\"<>)\],;:\s\r\n]+)+")
+_REVIEW_UI_WINDOWS_ABSOLUTE_PATH_PATTERN = re.compile(
+    r"\b[A-Za-z]:[\\/][^'\";|&<>`,，。；、\r\n\s]+"
 )
 
 
@@ -210,11 +219,20 @@ def display_workspace_path(
 def sanitize_visible_text(
     value: str,
     workspace_root: str | Path | None,
+    *,
+    mode: SanitizeVisibleMode = "workspace_visible",
+    max_length: int = 60000,
 ) -> str:
     """Sanitize text emitted to UI/reviewer/model-visible tool messages."""
 
     if not value:
         return value
+    if mode == "review_ui":
+        return _sanitize_review_ui_text(
+            value,
+            workspace_root,
+            max_length=max_length,
+        )
     sanitized = str(value)
     return _SANDBOX_ARTIFACT_PATTERN.sub(
         lambda match: _sandbox_artifact_replacement(match.group(0)),
@@ -225,22 +243,31 @@ def sanitize_visible_text(
 def sanitize_visible_value(
     value: Any,
     workspace_root: str | Path | None,
+    *,
+    mode: SanitizeVisibleMode = "workspace_visible",
+    max_length: int = 60000,
 ) -> Any:
     if isinstance(value, str):
         return sanitize_visible_text(
             value,
             workspace_root,
+            mode=mode,
+            max_length=max_length,
         )
     if isinstance(value, Mapping):
         return {
             sanitize_visible_text(
                 key,
                 workspace_root,
+                mode=mode,
+                max_length=max_length,
             )
             if isinstance(key, str)
             else key: sanitize_visible_value(
                 item,
                 workspace_root,
+                mode=mode,
+                max_length=max_length,
             )
             for key, item in value.items()
         }
@@ -249,6 +276,8 @@ def sanitize_visible_value(
             sanitize_visible_value(
                 item,
                 workspace_root,
+                mode=mode,
+                max_length=max_length,
             )
             for item in value
         ]
@@ -257,10 +286,26 @@ def sanitize_visible_value(
             sanitize_visible_value(
                 item,
                 workspace_root,
+                mode=mode,
+                max_length=max_length,
             )
             for item in value
         )
     return value
+
+
+def sanitize_review_ui_value(
+    value: Any,
+    workspace_root: str | Path | None,
+    *,
+    max_length: int = 60000,
+) -> Any:
+    return sanitize_visible_value(
+        value,
+        workspace_root,
+        mode="review_ui",
+        max_length=max_length,
+    )
 
 
 def resolve_workspace_path_arguments(
@@ -335,3 +380,136 @@ def _sandbox_artifact_replacement(matched: str) -> str:
     if matched.startswith(WORKSPACE_CURRENT_URI):
         return matched
     return STALE_SANDBOX_ARTIFACT_PATH
+
+
+def _sanitize_review_ui_text(
+    value: str,
+    workspace_root: str | Path | None,
+    *,
+    max_length: int,
+) -> str:
+    sanitized = _relativize_workspace_root_prefixes(str(value), workspace_root)
+    sanitized = _REVIEW_UI_HOME_PATH_PATTERN.sub(
+        lambda match: _review_ui_path_replacement(match.group(0), workspace_root),
+        sanitized,
+    )
+    sanitized = _REVIEW_UI_WINDOWS_ABSOLUTE_PATH_PATTERN.sub(
+        lambda match: _review_ui_path_replacement(match.group(0), workspace_root),
+        sanitized,
+    )
+    sanitized = _REVIEW_UI_POSIX_ABSOLUTE_PATH_PATTERN.sub(
+        lambda match: _review_ui_path_replacement(match.group(0), workspace_root),
+        sanitized,
+    )
+    return _redact_review_ui_secrets(sanitized, max_length=max_length)
+
+
+def _relativize_workspace_root_prefixes(
+    value: str,
+    workspace_root: str | Path | None,
+) -> str:
+    root = normalize_workspace_root(workspace_root)
+    if root is None:
+        return value
+
+    root_forms = {root.as_posix(), str(root)}
+    home = Path.home().expanduser().resolve(strict=False)
+    try:
+        relative_to_home = root.relative_to(home)
+    except ValueError:
+        pass
+    else:
+        root_forms.add(f"~/{relative_to_home.as_posix()}")
+
+    sanitized = value
+    for root_form in sorted(root_forms, key=len, reverse=True):
+        if not root_form:
+            continue
+        root_pattern = re.escape(root_form)
+        traversal_starts = _workspace_root_traversal_starts(sanitized, root_form)
+        sanitized = re.sub(
+            rf"(?<![\w./:-]){root_pattern}"
+            rf"(?![\\/]\.\.(?:[\\/]|$))[\\/]",
+            lambda match: match.group(0) if match.start() in traversal_starts else "",
+            sanitized,
+        )
+        sanitized = re.sub(
+            rf"(?<![\w./:-]){root_pattern}(?=$|[\s'\"<>)\],;:])",
+            ".",
+            sanitized,
+        )
+    return sanitized
+
+
+def _workspace_root_traversal_starts(value: str, root_form: str) -> set[int]:
+    """Return current-workspace root offsets whose path contains ``..``.
+
+    This intentionally uses bounded token scanning rather than a nested regex:
+    tool payloads are agent-controlled and must not make review rendering incur
+    unbounded regex backtracking.
+    """
+
+    starts: set[int] = set()
+    search_from = 0
+    while True:
+        start = value.find(root_form, search_from)
+        if start < 0:
+            return starts
+        search_from = start + 1
+        if start and _is_local_path_prefix_character(value[start - 1]):
+            continue
+        if _path_from_root_has_parent_segment(value, start + len(root_form)):
+            starts.add(start)
+
+
+def _path_from_root_has_parent_segment(value: str, root_end: int) -> bool:
+    """Scan slash-delimited path segments after a root without backtracking."""
+
+    position = root_end
+    value_length = len(value)
+    while position < value_length and value[position] in "/\\":
+        position += 1
+        segment_start = position
+        while position < value_length:
+            current = value[position]
+            if current in "/\\":
+                break
+            if current in "'\";|&<>`,，。；、\r\n":
+                return False
+            position += 1
+        if value[segment_start:position] == "..":
+            return True
+    return False
+
+
+def _is_local_path_prefix_character(character: str) -> bool:
+    return character.isalnum() or character == "_" or character in "./:-"
+
+
+def _review_ui_path_replacement(
+    matched: str,
+    workspace_root: str | Path | None,
+) -> str:
+    if not matched:
+        return matched
+    root = normalize_workspace_root(workspace_root)
+    try:
+        path = Path(matched).expanduser().resolve(strict=False)
+    except (OSError, ValueError):
+        return matched
+    if root is None:
+        return matched
+    try:
+        relative = path.relative_to(root)
+    except ValueError:
+        return matched
+    relative_text = relative.as_posix()
+    return "." if relative_text in ("", ".") else relative_text
+
+
+def _redact_review_ui_secrets(value: str, *, max_length: int) -> str:
+    from jiuwenswarm.agents.harness.common.rails.permissions.reviewer_redaction import (
+        redact_secret_values_preserve_format,
+    )
+
+    return redact_secret_values_preserve_format(value, max_length=max_length)
