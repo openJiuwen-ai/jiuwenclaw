@@ -390,37 +390,37 @@ def _dispatch() -> int | None:
         sys.argv.pop(1)
         from jiuwenswarm.init_workspace import main as init_main
         init_main()
-        return
+        return None
     # 子命令：CLI 命令分发
     if len(sys.argv) >= 2 and sys.argv[1].lower() == "acp":
         from jiuwenswarm.channels.acp.app_acp import main as acp_main
         acp_main()
-        return
+        return None
     if _pop_flag("--desktop-run-app"):
         from jiuwenswarm.app import main as app_main
         app_main()
-        return
+        return None
     if _pop_flag("--desktop-run-web"):
         from jiuwenswarm.channels.web.app_web import main as web_main
         web_main()
-        return
+        return None
     if _pop_flag(_DESKTOP_RUN_AGENT):
         from jiuwenswarm.server.app_agentserver import main as agent_main
         agent_main()
-        return
+        return None
     if _pop_flag(_DESKTOP_RUN_GATEWAY):
         from jiuwenswarm.gateway.app_gateway import main as gateway_main
         gateway_main()
-        return
+        return None
     if _pop_flag(_DESKTOP_RUN_JIUWENBOX):
         _run_jiuwenbox_server()
-        return
+        return None
     if _pop_flag(_DESKTOP_RUN_WIN_SETUP):
         return _run_win_setup()
     if _DESKTOP_INSTALL_UPDATE in sys.argv:
         from jiuwenswarm.channels.desktop.desktop_app import main as desktop_main
         desktop_main()
-        return
+        return None
     # 子进程模式：argv 有任何参数（.py 脚本或 -m 等），不检查单实例锁
     if getattr(sys, "frozen", False) and len(sys.argv) >= 2:
         script_path = next((arg for arg in sys.argv[1:] if arg.endswith(".py") or arg.endswith(".pyw")), None)
@@ -465,6 +465,7 @@ def _dispatch() -> int | None:
         desktop_main()
     finally:
         _release_single_instance_lock()
+    return None
 
 
 if __name__ == "__main__":
