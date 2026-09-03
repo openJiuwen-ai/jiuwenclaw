@@ -668,7 +668,7 @@
       "detailTitle": "上下文用量",
       "systemPrompt": "系统提示词",
       "messages": "对话消息",
-      "tools": "工具及MCP",
+      "tools": "工具及连接器",
       "skills": "技能",
       "notReported": "未报告",
       "close": "关闭上下文详情",
@@ -700,7 +700,7 @@
     "extensionEmpty": "暂无内容",
     "extensionConnect": "连接",
     "extensionManagePlugins": "管理我的插件",
-    "extensionManageMcps": "管理我的MCP",
+    "extensionManageMcps": "管理我的连接器",
     "extensionMore": "更多",
     "recentTasks": "进度",
     "contextCompressionCommandRunning": "正在压缩上下文",
@@ -2215,13 +2215,13 @@
       "agentUnavailable": "该专家已不存在，请刷新列表后重试。",
       "agentDefinitionUnavailable": "该专家定义不完整，暂时无法使用。",
       "skillUnavailable": "所选技能已不可用，请刷新技能列表后重试。",
-      "mcpUnavailable": "所选 MCP 已不可用，请刷新 MCP 列表后重试。",
+      "mcpUnavailable": "所选连接器已不可用，请刷新连接器列表后重试。",
       "promptInvalid": "推荐问题内容有误，请删除空白问题后重试。",
       "tagInvalid": "领域标签信息有误，请重新选择后重试。",
       "formInvalid": "表单信息不完整，请检查后重试。",
       "authRequired": "该专家需要完成认证后才能安装",
-      "connectionUnavailable": "依赖的 MCP 尚未连接，请先连接后再使用",
-      "connectorUnavailableNamed": "该专家依赖的 MCP「{{connector}}」尚未连接，请先完成连接后再重试安装。",
+      "connectionUnavailable": "依赖的连接器尚未连接，请先连接后再使用",
+      "connectorUnavailableNamed": "该专家依赖的连接器「{{connector}}」尚未连接，请先完成连接后再重试安装。",
       "uploadSuccess": "专家包 {{id}} 已导入，请在我的专家中查看",
       "uploadError": "上传并导入专家失败，请检查文件后重试",
       "newVersion": "该专家有新版本，可更新",
@@ -2245,7 +2245,7 @@
       "skills": "调用技能",
       "tools": "工具",
       "rails": "Rail",
-      "mcps": "MCP 能力",
+      "mcps": "连接器能力",
       "quickInputs": "这样问我试试看",
       "usePrompt": "使用问题：{{prompt}}",
       "tabsLabel": "专家详情内容",
@@ -2323,18 +2323,18 @@
       "refreshSkills": "刷新技能",
       "skillsError": "技能列表加载失败，请重试。",
       "skillsEmpty": "暂无可用技能",
-      "mcpLabel": "MCP 配置（可选）",
-      "mcpToggle": "收起或展开 MCP 配置",
-      "addMcp": "添加 MCP",
-      "removeMcp": "移除 MCP {{name}}",
-      "selectMcp": "选择 MCP",
-      "myMcp": "我的 MCP",
-      "mcpMarket": "MCP 广场",
+      "mcpLabel": "连接器配置（可选）",
+      "mcpToggle": "收起或展开连接器配置",
+      "addMcp": "添加连接器",
+      "removeMcp": "移除连接器 {{name}}",
+      "selectMcp": "选择连接器",
+      "myMcp": "我的连接器",
+      "mcpMarket": "连接器广场",
       "selectionSearchPlaceholder": "请输入关键字搜索",
-      "mcpTypeFilter": "MCP 类型",
+      "mcpTypeFilter": "连接器类型",
       "mcpTypeAll": "全部类型",
-      "mcpError": "MCP 列表加载失败，请重试。",
-      "mcpEmpty": "暂无可用 MCP",
+      "mcpError": "连接器列表加载失败，请重试。",
+      "mcpEmpty": "暂无可用连接器",
       "promptsLabel": "这样问我试试看（可选）",
       "promptsToggle": "收起或展开推荐问题",
       "promptPlaceholder": "输入推荐问题",
@@ -2863,10 +2863,12 @@
   },
   "connectorMarket": {
     "title": "扩展",
-    "subtitle": "创建并管理插件、MCP",
+    "subtitle": "创建并管理插件、连接器",
     "tabs": {
       "plugin": "插件",
-      "mcp": "MCP",
+      "mcp": "连接器",
+      "pluginMarket": "插件广场",
+      "mcpMarket": "连接器广场",
       "my": "我的扩展"
     },
     "categories": {
@@ -2882,7 +2884,7 @@
     },
     "search": {
       "plugin": "搜索插件",
-      "mcp": "搜索MCP",
+      "mcp": "搜索连接器",
       "my": "搜索我的扩展"
     },
     "statusFilter": {
@@ -2895,7 +2897,7 @@
       "manual": "手动创建",
       "withSkill": "通过聊天创建",
       "withUpload": "上传文件创建",
-      "registerMcp": "配置MCP",
+      "registerMcp": "配置连接器",
       "basicInfo": "基本信息",
       "uploadHint": "支持上传png、jpeg、gif、jpg格式图片，限200Kb内",
       "avatarNotPersisted": "头像暂时只能本地预览，还无法保存（等待后端支持）",
@@ -2906,10 +2908,10 @@
       "description": "插件描述",
       "skillsOptional": "技能配置（可选）",
       "addSkill": "添加技能",
-      "mcpOptional": "MCP配置（可选）",
-      "addMcp": "添加MCP",
+      "mcpOptional": "连接器配置（可选）",
+      "addMcp": "添加连接器",
       "pickSkillTitle": "选择技能",
-      "pickMcpTitle": "选择MCP",
+      "pickMcpTitle": "选择连接器",
       "submitError": "创建失败，请检查填写内容后重试",
       "fieldRequired": "该项为必填项，请填写",
       "withSkillNotWired": "该入口尚未接入聊天面板，需先在聊天输入框完成对接"
@@ -2918,8 +2920,8 @@
       "createPlugin": "帮我创建一个xxx插件，擅长xxx"
     },
     "errors": {
-      "runtimeMissing": "该 MCP 依赖的运行环境缺失，请先安装对应运行环境后再使用",
-      "runtimeMissingNamed": "该 MCP 依赖 {{runtime}} 运行环境，请先安装 {{runtime}} 后再使用",
+      "runtimeMissing": "该连接器依赖的运行环境缺失，请先安装对应运行环境后再使用",
+      "runtimeMissingNamed": "该连接器依赖 {{runtime}} 运行环境，请先安装 {{runtime}} 后再使用",
       "installNetwork": "依赖下载失败，请检查网络连接后重试",
       "cliIncomplete": "CLI 安装不完整或版本过低，请重新连接以重试",
       "cliIncompleteNamed": "CLI 安装不完整或版本过低，请手动执行以下命令安装或升级后重试：{{command}}"
@@ -2942,23 +2944,23 @@
     "detail": {
       "breadcrumbMy": "我的扩展",
       "breadcrumbPlugin": "插件详情",
-      "breadcrumbMcp": "MCP详情",
-      "mcpDisconnectedBanner": "当前插件未连接MCP无法正常使用",
-      "mcpDisconnectedBannerSelf": "当前MCP未连接无法正常使用",
-      "connectMcp": "连接MCP",
+      "breadcrumbMcp": "连接器详情",
+      "mcpDisconnectedBanner": "当前插件依赖的连接器未连接，无法正常使用",
+      "mcpDisconnectedBannerSelf": "当前连接器未连接，无法正常使用",
+      "connectMcp": "点击连接",
       "sections": {
         "basicInfo": "基本信息",
         "skills": "技能",
         "tools": "工具",
         "rails": "Rail",
-        "mcps": "MCP",
+        "mcps": "连接器",
         "connectionConfig": "连接配置",
         "examples": "试试这样用"
       },
       "integrationType": {
         "cli": "CLI 授权",
-        "stdioMcp": "本地 MCP",
-        "remoteMcp": "远程 MCP",
+        "stdioMcp": "本地连接器",
+        "remoteMcp": "远程连接器",
         "skillOnly": "仅技能"
       },
       "cliSpecPresentHint": "支持命令行驱动",
@@ -2972,29 +2974,29 @@
     },
     "confirmUninstall": {
       "title": "卸载{{name}}？",
-      "message": "卸载后该 MCP 将变为不可用状态，需要重新联接才能继续使用。"
+      "message": "卸载后该连接器将变为不可用状态，需要重新联接才能继续使用。"
     },
     "confirmUnbind": {
       "title": "解绑{{name}}？",
-      "message": "解绑后将清除本地凭证并断开连接，该 MCP 会变为不可用状态。保留的定义可重新连接，重连需重新填写凭证。"
+      "message": "解绑后将清除本地凭证并断开连接，该连接器会变为不可用状态。保留的定义可重新连接，重连需重新填写凭证。"
     },
     "confirmDeleteMcp": {
       "title": "彻底删除{{name}}？",
-      "message": "删除后该自定义 MCP 的配置、凭证与技能将被彻底清除，不可恢复；如果只是想以后还能重连，请用解绑而不是删除。"
+      "message": "删除后该自定义连接器的配置、凭证与技能将被彻底清除，不可恢复；如果只是想以后还能重连，请用解绑而不是删除。"
     },
     "confirmUninstallPlugin": {
       "message": "卸载后该插件将变为不可用状态，可以重新安装。"
     },
     "empty": {
-      "myMcp": "暂无我的 MCP",
+      "myMcp": "暂无我的连接器",
       "myPlugin": "暂无我的插件",
-      "mcp": "暂无可用的 MCP",
+      "mcp": "暂无可用的连接器",
       "plugin": "暂无可用的插件",
       "searchNoResult": "没有找到匹配的结果",
       "loadingPlugin": "加载插件中...",
-      "loadingMcp": "加载MCP中...",
+      "loadingMcp": "加载连接器中...",
       "loadingMyPlugin": "加载我的插件中...",
-      "loadingMyMcp": "加载我的MCP中..."
+      "loadingMyMcp": "加载我的连接器中..."
     },
     "pagination": {
       "pageSize": "每页显示",
@@ -3004,9 +3006,9 @@
       "next": "下一页"
     },
     "toast": {
-      "mcpConnected": "MCP已连接成功。",
-      "mcpCreated": "MCP已创建成功。",
-      "mcpCreatedAndConnected": "MCP已创建并连接成功。",
+      "mcpConnected": "连接器已连接成功。",
+      "mcpCreated": "连接器已创建成功。",
+      "mcpCreatedAndConnected": "连接器已创建并连接成功。",
       "pluginInstalled": "插件安装成功。",
       "pluginUninstalled": "插件卸载成功。"
     },
@@ -3028,8 +3030,8 @@
       "timeout": "等待授权超时，请重新打开授权页面重试"
     },
     "registerMcp": {
-      "title": "配置MCP",
-      "editTitle": "编辑MCP",
+      "title": "配置连接器",
+      "editTitle": "编辑连接器",
       "creating": "创建中",
       "saving": "保存中",
       "name": "名称",

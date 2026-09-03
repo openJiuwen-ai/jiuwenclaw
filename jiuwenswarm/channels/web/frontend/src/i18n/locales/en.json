@@ -680,7 +680,7 @@
       "detailTitle": "Context usage",
       "systemPrompt": "System prompt",
       "messages": "Conversation messages",
-      "tools": "Tools & MCP",
+      "tools": "Tools & Connectors",
       "skills": "Skills",
       "notReported": "Not reported",
       "close": "Close context details",
@@ -712,7 +712,7 @@
     "extensionEmpty": "No results",
     "extensionConnect": "Connect",
     "extensionManagePlugins": "Manage My Plugins",
-    "extensionManageMcps": "Manage My MCPs",
+    "extensionManageMcps": "Manage My Connectors",
     "extensionMore": "More",
     "recentTasks": "Progress",
     "contextCompressionCommandRunning": "Compressing context",
@@ -2227,13 +2227,13 @@
       "agentUnavailable": "This Expert is no longer available. Refresh the list and try again.",
       "agentDefinitionUnavailable": "This Expert definition is incomplete and cannot be used right now.",
       "skillUnavailable": "A selected skill is no longer available. Refresh the skill list and try again.",
-      "mcpUnavailable": "The selected MCP is no longer available. Refresh the MCP list and try again.",
+      "mcpUnavailable": "The selected connector is no longer available. Refresh the connector list and try again.",
       "promptInvalid": "A suggested question is invalid. Remove any blank question and try again.",
       "tagInvalid": "The domain tags are invalid. Select them again and try again.",
       "formInvalid": "Some form information is incomplete. Check the form and try again.",
       "authRequired": "This Expert requires authentication before it can be installed",
-      "connectionUnavailable": "Required MCP connectors are not connected yet. Connect them before use.",
-      "connectorUnavailableNamed": "This Expert requires the MCP connector “{{connector}}”, which is not connected. Connect it and try again.",
+      "connectionUnavailable": "Required connectors are not connected yet. Connect them before use.",
+      "connectorUnavailableNamed": "This Expert requires the connector “{{connector}}”, which is not connected. Connect it and try again.",
       "uploadSuccess": "Expert package {{id}} was imported. Review it in My Experts.",
       "uploadError": "Unable to upload and import the Expert package. Check the file and try again.",
       "newVersion": "This Expert has a new version available",
@@ -2257,7 +2257,7 @@
       "skills": "Skills",
       "tools": "Tools",
       "rails": "Rail",
-      "mcps": "MCP capabilities",
+      "mcps": "Connector capabilities",
       "quickInputs": "Try asking me",
       "usePrompt": "Use prompt: {{prompt}}",
       "tabsLabel": "Expert detail content",
@@ -2335,18 +2335,18 @@
       "refreshSkills": "Refresh skills",
       "skillsError": "Unable to load the skill list. Try again.",
       "skillsEmpty": "No skills available",
-      "mcpLabel": "MCP configuration (optional)",
-      "mcpToggle": "Collapse or expand MCP configuration",
-      "addMcp": "Add MCP",
-      "removeMcp": "Remove MCP {{name}}",
-      "selectMcp": "Select MCPs",
-      "myMcp": "My MCP",
-      "mcpMarket": "MCP market",
+      "mcpLabel": "Connector configuration (optional)",
+      "mcpToggle": "Collapse or expand connector configuration",
+      "addMcp": "Add connector",
+      "removeMcp": "Remove connector {{name}}",
+      "selectMcp": "Select connectors",
+      "myMcp": "My connectors",
+      "mcpMarket": "Connector market",
       "selectionSearchPlaceholder": "Search by keyword",
-      "mcpTypeFilter": "MCP type",
+      "mcpTypeFilter": "Connector type",
       "mcpTypeAll": "All types",
-      "mcpError": "Unable to load the MCP list. Try again.",
-      "mcpEmpty": "No MCPs available",
+      "mcpError": "Unable to load the connector list. Try again.",
+      "mcpEmpty": "No connectors available",
       "promptsLabel": "Try asking me (optional)",
       "promptsToggle": "Collapse or expand suggested questions",
       "promptPlaceholder": "Enter a suggested question",
@@ -2882,10 +2882,12 @@
   },
   "connectorMarket": {
     "title": "Extensions",
-    "subtitle": "Create and manage plugins and MCPs",
+    "subtitle": "Create and manage plugins and connectors",
     "tabs": {
       "plugin": "Plugins",
-      "mcp": "MCP",
+      "mcp": "Connector",
+      "pluginMarket": "Plugin Marketplace",
+      "mcpMarket": "Connector Marketplace",
       "my": "My Extensions"
     },
     "categories": {
@@ -2901,7 +2903,7 @@
     },
     "search": {
       "plugin": "Search plugins",
-      "mcp": "Search MCP",
+      "mcp": "Search connectors",
       "my": "Search my extensions"
     },
     "statusFilter": {
@@ -2914,7 +2916,7 @@
       "manual": "Create manually",
       "withSkill": "Create via chat",
       "withUpload": "Create from file",
-      "registerMcp": "Configure MCP",
+      "registerMcp": "Configure connector",
       "basicInfo": "Basic info",
       "uploadHint": "Supports png, jpeg, gif, jpg, up to 200Kb",
       "avatarNotPersisted": "Local preview only for now, can't be saved yet (awaiting backend support)",
@@ -2925,10 +2927,10 @@
       "description": "Plugin description",
       "skillsOptional": "Skills (optional)",
       "addSkill": "Add skill",
-      "mcpOptional": "MCP (optional)",
-      "addMcp": "Add MCP",
+      "mcpOptional": "Connector (optional)",
+      "addMcp": "Add connector",
       "pickSkillTitle": "Select skills",
-      "pickMcpTitle": "Select MCP",
+      "pickMcpTitle": "Select connector",
       "submitError": "Creation failed. Please check your input and try again.",
       "fieldRequired": "This field is required",
       "withSkillNotWired": "This entry point isn't wired to the chat panel yet"
@@ -2937,8 +2939,8 @@
       "createPlugin": "Help me create a xxx plugin that's great at xxx"
     },
     "errors": {
-      "runtimeMissing": "This MCP requires a runtime environment that isn't installed. Please install it before using this MCP.",
-      "runtimeMissingNamed": "This MCP requires {{runtime}}. Please install {{runtime}} before using this MCP.",
+      "runtimeMissing": "This connector requires a runtime environment that isn't installed. Please install it before using this connector.",
+      "runtimeMissingNamed": "This connector requires {{runtime}}. Please install {{runtime}} before using this connector.",
       "installNetwork": "Failed to download a dependency. Please check your network connection and retry.",
       "cliIncomplete": "The CLI is incomplete or outdated. Please reconnect to retry.",
       "cliIncompleteNamed": "The CLI is incomplete or outdated. Please run the following command to install or upgrade it, then retry: {{command}}"
@@ -2961,23 +2963,23 @@
     "detail": {
       "breadcrumbMy": "My Extensions",
       "breadcrumbPlugin": "Plugin details",
-      "breadcrumbMcp": "MCP details",
-      "mcpDisconnectedBanner": "This plugin's MCP isn't connected, so it can't be used normally",
-      "mcpDisconnectedBannerSelf": "This MCP isn't connected, so it can't be used normally",
-      "connectMcp": "Connect MCP",
+      "breadcrumbMcp": "Connector details",
+      "mcpDisconnectedBanner": "This plugin's connector isn't connected, so it can't be used normally",
+      "mcpDisconnectedBannerSelf": "This connector isn't connected, so it can't be used normally",
+      "connectMcp": "Connect",
       "sections": {
         "basicInfo": "Basic info",
         "skills": "Skills",
         "tools": "Tools",
         "rails": "Rails",
-        "mcps": "MCP",
+        "mcps": "Connectors",
         "connectionConfig": "Connection config",
         "examples": "Try it like this"
       },
       "integrationType": {
         "cli": "CLI authorization",
-        "stdioMcp": "Local MCP",
-        "remoteMcp": "Remote MCP",
+        "stdioMcp": "Local Connector",
+        "remoteMcp": "Remote Connector",
         "skillOnly": "Skills only"
       },
       "cliSpecPresentHint": "Supports CLI-driven setup",
@@ -2991,29 +2993,29 @@
     },
     "confirmUninstall": {
       "title": "Uninstall {{name}}?",
-      "message": "This MCP will become unavailable until you connect it again."
+      "message": "This connector will become unavailable until you connect it again."
     },
     "confirmUnbind": {
       "title": "Disconnect {{name}}?",
-      "message": "Disconnecting will clear the local credentials and disconnect this MCP, making it unavailable. The definition is kept so you can reconnect — you'll need to re-enter credentials to reconnect."
+      "message": "Disconnecting will clear the local credentials and disconnect this connector, making it unavailable. The definition is kept so you can reconnect — you'll need to re-enter credentials to reconnect."
     },
     "confirmDeleteMcp": {
       "title": "Permanently delete {{name}}?",
-      "message": "Deleting this custom MCP removes its configuration, credentials, and skills for good — this cannot be undone. If you just want to reconnect later, disconnect instead of deleting."
+      "message": "Deleting this custom connector removes its configuration, credentials, and skills for good — this cannot be undone. If you just want to reconnect later, disconnect instead of deleting."
     },
     "confirmUninstallPlugin": {
       "message": "This plugin will become unavailable — you can reinstall it anytime."
     },
     "empty": {
-      "myMcp": "No MCPs yet",
+      "myMcp": "No connectors yet",
       "myPlugin": "No plugins yet",
-      "mcp": "No MCPs available",
+      "mcp": "No connectors available",
       "plugin": "No plugins available",
       "searchNoResult": "No matches found",
       "loadingPlugin": "Loading plugins...",
-      "loadingMcp": "Loading MCPs...",
+      "loadingMcp": "Loading connectors...",
       "loadingMyPlugin": "Loading my plugins...",
-      "loadingMyMcp": "Loading my MCPs..."
+      "loadingMyMcp": "Loading my connectors..."
     },
     "pagination": {
       "pageSize": "Rows per page",
@@ -3023,9 +3025,9 @@
       "next": "Next page"
     },
     "toast": {
-      "mcpConnected": "MCP connected successfully.",
-      "mcpCreated": "MCP created successfully.",
-      "mcpCreatedAndConnected": "MCP created and connected successfully.",
+      "mcpConnected": "Connector connected successfully.",
+      "mcpCreated": "Connector created successfully.",
+      "mcpCreatedAndConnected": "Connector created and connected successfully.",
       "pluginInstalled": "Plugin installed successfully.",
       "pluginUninstalled": "Plugin uninstalled successfully."
     },
@@ -3047,8 +3049,8 @@
       "timeout": "Authorization timed out, please reopen the page and retry"
     },
     "registerMcp": {
-      "title": "Configure MCP",
-      "editTitle": "Edit MCP",
+      "title": "Configure connector",
+      "editTitle": "Edit connector",
       "creating": "Creating...",
       "saving": "Saving...",
       "name": "Name",

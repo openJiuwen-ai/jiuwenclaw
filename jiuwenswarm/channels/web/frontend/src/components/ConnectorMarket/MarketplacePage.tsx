@@ -444,7 +444,7 @@ export function MarketplacePage({
                 data-variant={tab}
                 className={`relative pb-2 text-[14px] leading-[22px] ${active ? 'font-semibold text-text' : 'font-normal text-text'}`}
               >
-                {t(`connectorMarket.tabs.${tab}`)}
+                {t(tab === 'my' ? 'connectorMarket.tabs.my' : `connectorMarket.tabs.${tab}Market`)}
                 {active && <span className="absolute inset-x-0 -bottom-px h-0.5 rounded-full bg-text" />}
               </button>
             );
