@@ -13,7 +13,6 @@ import UpImgIcon from '../../assets/upImg.svg?react';
 import TipIcon from '../../assets/tip.svg?react';
 import UpFileIcon from '../../assets/upFile.svg?react';
 import LinkIcon from '../../assets/link.svg?react';
-import './SkillPanel.css';
 import { CategoryTabs, PageHeader, PageToolbarSearch } from '../ui';
 import { webRequest } from "../../services/webClient";
 import { SourceManagerModal } from "../../features/SourceManagerModal";
@@ -45,7 +44,7 @@ const SKILLS_FETCH_TIMEOUT_REFRESH_MS = 60_000;
 const SKILLS_FETCH_TIMEOUT_NORMAL_MS = 30_000;
 const GRAPH_READING_MIN_VISIBLE_MS = 500;
 
-const CARD_CLASS = "skill-card group relative text-left border border-border bg-panel hover:bg-card cursor-pointer rounded-[8px] pt-6 pb-4 px-4 flex flex-col min-w-0 overflow-visible";
+const CARD_CLASS = "page-card h-40 group relative text-left border border-border bg-panel hover:bg-card cursor-pointer rounded-[8px] pt-6 pb-4 px-4 flex flex-col overflow-visible";
 
 // ── 发布表单校验（与 skillhub 对齐） ──
 // 技能名：小写字母开头，小写字母/数字/连字符，最长 64

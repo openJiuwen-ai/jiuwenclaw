@@ -433,6 +433,18 @@ body.workspace-resize-active iframe {
     grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));
   }
 
+  /* 共享页面卡片（skill / agent / connector 各内容页卡片统一的宽度约束），
+     目前只收宽度，边框/圆角/阴影等公共外观后续逐步扩展 */
+  .page-card {
+    min-width: 360px;
+  }
+
+  @media (min-width: 1600px) {
+    .page-card {
+      max-width: 456px;
+    }
+  }
+
   .page-content {
     display: flex;
     flex: 1 1 0%;
