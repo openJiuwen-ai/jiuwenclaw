@@ -273,12 +273,15 @@ class SymphonyOrchestrationRail(DeepAgentRail):
 Before executing Skills or answering, you MUST call `symphony_compose_graph`
 with the original user task as `query` when ANY of these conditions is true:
 
-1. The user explicitly requests using, selecting, combining, or orchestrating
-   Skills, including requests that mention skill(s) or 技能.
+1. The user explicitly requests combining, orchestrating, or chaining
+   multiple Skills. Merely mentioning a skill or using a single skill for
+   a simple task does not require orchestration.
 2. The task requires two or more specialized capabilities or an ordered
    toolchain.
 3. You have identified, inspected, selected, invoked, or recommended any
-   installed Skill for the task.
+   installed Skill for the task, and the task is not a straightforward
+   single-Skill operation (e.g., reading a Skill, answering a question
+   about a Skill, or running a simple Skill command).
 
 Calling `skill_branch_explore` creates a mandatory orchestration follow-up. After
 calling it, select only the few Skills relevant to the original user task and
@@ -306,7 +309,10 @@ not call `symphony_compose_graph` or `symphony_refresh_graph` again in the
 current round. Tell the user to build the graph manually instead.
 
 Skip skill orchestration only when none of the three trigger conditions is true
-and `skill_branch_explore` was not called in the current round.
+and `skill_branch_explore` was not called in the current round. Simple tasks
+that involve only a single Skill (e.g., reading a Skill, answering a question
+about a Skill, or running a straightforward Skill command) do not require
+orchestration even if a Skill is mentioned or used.
 """
 
     @staticmethod
