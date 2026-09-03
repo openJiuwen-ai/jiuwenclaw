@@ -1230,13 +1230,19 @@ class MessageHandler(ABC):
 
         payload = resp.payload if isinstance(resp.payload, dict) else {}
         if payload.get("event_type") == "chat.interrupt_result":
+            # resp.ok only reflects transport-level success; the payload's own
+            # "success" (e.g. AgentServer found nothing to cancel) determines
+            # whether the interrupt actually happened. Only treat a missing/True
+            # value as success so callers don't get a false-positive ack.
+            interrupt_succeeded = bool(resp.ok) and payload.get("success") is not False
             if not publish_interrupt_result:
                 logger.info(
-                    "[MessageHandler] 已静默 AgentServer 中断结果: request_id=%s ok=%s",
+                    "[MessageHandler] 已静默 AgentServer 中断结果: request_id=%s ok=%s success=%s",
                     resp.request_id,
                     resp.ok,
+                    interrupt_succeeded,
                 )
-                return bool(resp.ok)
+                return interrupt_succeeded
             out = self._response_to_message(
                 resp,
                 sid_for_agent,
@@ -1245,16 +1251,17 @@ class MessageHandler(ABC):
             )
             await self.publish_robot_messages(out)
             logger.info(
-                "[MessageHandler] 已转发 AgentServer 中断结果: request_id=%s ok=%s",
+                "[MessageHandler] 已转发 AgentServer 中断结果: request_id=%s ok=%s success=%s",
                 resp.request_id,
                 resp.ok,
+                interrupt_succeeded,
             )
 
             # 发送被中断工具的 tool_result 给前端
             await self._send_cancelled_tool_results(
                 msg.channel_id, sid_for_agent, payload, msg.metadata
             )
-            return bool(resp.ok)
+            return interrupt_succeeded
 
         error_message = "任务终止失败"
         if isinstance(payload, dict):

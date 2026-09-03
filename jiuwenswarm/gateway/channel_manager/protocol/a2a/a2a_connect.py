@@ -856,7 +856,14 @@ class A2AChannel(BaseChannel):
 
     @staticmethod
     def map_a2a_parts_to_params(a2a_message: Any) -> tuple[str, list[dict[str, Any]]]:
-        """Map text parts only; inbound file tasks are outside this product boundary."""
+        """Map text parts only.
+
+        Breaking change vs. earlier batches: file/binary parts (url/data/raw) from
+        inbound A2A messages are intentionally dropped rather than forwarded as
+        `files`, since accepting arbitrary URLs/base64 blobs from external A2A
+        callers is outside the current ingress security scope. Always returns
+        ``files=[]``; see test_map_a2a_parts_to_params_forwards_text_but_drops_files.
+        """
         if a2a_message is None:
             return "", []
 

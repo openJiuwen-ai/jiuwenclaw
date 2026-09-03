@@ -147,8 +147,8 @@ class _TestMessageHandler(MessageHandler):
         *,
         publish_interrupt_result: bool = True,
         agent_notify: str = "await",
-    ) -> None:
-        await self._cancel_agent_work_for_session(
+    ) -> bool:
+        return await self._cancel_agent_work_for_session(
             msg,
             old_sid,
             publish_interrupt_result=publish_interrupt_result,
@@ -1116,6 +1116,20 @@ async def test_default_cancel_publishes_interrupt_result() -> None:
     out = await handler.consume_robot_messages(timeout=0)
     assert out is not None
     assert out.payload == _FakeAgentClient.response_payload
+
+
+@pytest.mark.asyncio
+async def test_cancel_ack_checks_payload_success_not_just_transport_ok() -> None:
+    """Regression: AgentServer HTTP 200 (resp.ok) with payload success=False
+    (e.g. nothing to cancel) must not be reported as a successful interrupt."""
+    handler = _TestMessageHandler.create()
+
+    cancelled = await handler.cancel_agent_work_for_session(
+        _control_message(), "sess-1"
+    )
+
+    assert _FakeAgentClient.response_payload["success"] is False
+    assert cancelled is False
 
 
 @pytest.mark.asyncio
