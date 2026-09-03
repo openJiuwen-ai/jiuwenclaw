@@ -576,10 +576,11 @@ export default function HeartbeatPanel({ sessionId, onClose }: HeartbeatPanelPro
                       </button>
                       {(() => {
                         const isTerminal = job.status === 'completed' || job.status === 'expired';
+                        const canEnable = canHeartbeatToggleEnable(job.status, job.maxRuns, job.runCount);
                         const toggleBtn = (
                           <button
                             type="button"
-                            disabled={actingJobId === job.id || (!job.enabled && !canHeartbeatToggleEnable(job.status))}
+                            disabled={actingJobId === job.id || (!job.enabled && !canEnable)}
                             onClick={() => void handleToggle(job)}
                             className="inline-flex items-center gap-1 rounded-full border border-border px-3 py-1 text-xs text-text hover:bg-bg-hover disabled:cursor-not-allowed disabled:opacity-40"
                             aria-pressed={job.enabled}
@@ -590,7 +591,7 @@ export default function HeartbeatPanel({ sessionId, onClose }: HeartbeatPanelPro
                           </button>
                         );
                         // disabled 按钮本身不触发 hover tooltip，终态时用外层 span 承载"如何重新激活"的提示
-                        return isTerminal ? (
+                        return isTerminal && !canEnable ? (
                           <span className="inline-flex" title={t('heartbeat.panel.resumeFromCompletedHint')}>
                             {toggleBtn}
                           </span>
