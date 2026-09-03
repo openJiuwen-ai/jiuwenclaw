@@ -365,17 +365,31 @@ def rename_needed(elf: Elf, old: str, new: str) -> int:
 
 
 # ----------------------------------------------------------------- signing
+# Signing is sub-second in practice; this is only a hang guard (e.g. the
+# tool deadlocking or waiting for interactive input).
+SIGN_TIMEOUT = 60  # seconds
+
+
 def sign(path: str, sign_tool: str) -> bool:
     out = path + ".signed"
-    r = subprocess.run(
-        [
-            sign_tool, "sign", "-selfSign", "1",
-            "-inFile", path, "-outFile", out,
-            "-signAlg", "SHA256withECDSA",
-            "-keyAlias", "default",
-        ],
-        capture_output=True, text=True,
-    )
+    try:
+        r = subprocess.run(
+            [
+                sign_tool, "sign", "-selfSign", "1",
+                "-inFile", path, "-outFile", out,
+                "-signAlg", "SHA256withECDSA",
+                "-keyAlias", "default",
+            ],
+            capture_output=True, text=True, timeout=SIGN_TIMEOUT,
+        )
+    except subprocess.TimeoutExpired:
+        if os.path.exists(out):
+            os.remove(out)  # partial output left by the killed tool
+        info(f"  !! sign timed out for {path} (>{SIGN_TIMEOUT}s)")
+        return False
+    except OSError as exc:
+        info(f"  !! sign could not run {sign_tool}: {exc}")
+        return False
     if r.returncode != 0 or not os.path.exists(out):
         info(f"  !! sign failed for {path}: {r.stdout.strip()} {r.stderr.strip()}")
         return False
@@ -474,10 +488,14 @@ def convert_wheel(src: str, dst: str, sign_tool: str, libpython: str, renames=()
         info(f"processed {n_ok}/{len(so_files)} .so files")
 
         # 5. retag WHEEL + rename dist-info if tag in name
+        # (WHEEL/RECORD are UTF-8 text per PEP 427; be explicit about it so
+        # the conversion does not depend on the platform default encoding)
         wheel_p = os.path.join(dist_info, "WHEEL")
-        wm = open(wheel_p).read()
+        with open(wheel_p, encoding="utf-8") as f:
+            wm = f.read()
         wm = re.sub(r"Tag: .*musllinux_\d+_\d+_aarch64", f"Tag: {new_tag}", wm)
-        open(wheel_p, "w").write(wm)
+        with open(wheel_p, "w", encoding="utf-8") as f:
+            f.write(wm)
 
         # 6. regenerate RECORD
         record = os.path.join(dist_info, "RECORD")
@@ -494,7 +512,8 @@ def convert_wheel(src: str, dst: str, sign_tool: str, libpython: str, renames=()
                 lines.append(f"{r},,")
             else:
                 lines.append(f"{r},{record_hash(p)},{os.path.getsize(p)}")
-        open(record, "w").write("\n".join(lines) + "\n")
+        with open(record, "w", encoding="utf-8") as f:
+            f.write("\n".join(lines) + "\n")
 
         # 7. rezip
         if os.path.exists(out_path):
