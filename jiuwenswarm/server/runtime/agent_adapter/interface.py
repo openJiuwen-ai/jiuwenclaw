@@ -2991,37 +2991,80 @@ class JiuWenSwarm:
                             ("chunk", _duplicate_permission_chunk(request))
                         )
                         return
-                    async for chunk in adapter.process_message_stream_impl(request, inputs):
-                        _put_count += 1
-                        _pl = getattr(chunk, "payload", None) or {}
-                        _et = _pl.get("event_type", "") if isinstance(_pl, dict) else ""
-                        # 前 3 个 chunk 全量打点；task.* 无论序号都打点，便于确认首跑
-                        # SkillTurbo write_stream 路径是否把任务列表推到外层流。
-                        if _put_count <= 3 or (
-                            isinstance(_et, str) and _et.startswith("task.")
-                        ):
-                            _n_tasks = 0
-                            if isinstance(_pl, dict) and isinstance(_pl.get("tasks"), list):
-                                _n_tasks = len(_pl["tasks"])
-                            logger.info(
-                                "[JiuWenSwarm] run_stream_task chunk #%s: request_id=%s event_type=%s%s",
-                                _put_count,
-                                rid,
-                                _et,
-                                f" tasks={_n_tasks}" if _n_tasks else "",
+                    stream_iter = adapter.process_message_stream_impl(request, inputs)
+                    _pending_error: Exception | None = None
+                    try:
+                        async for chunk in stream_iter:
+                            # 协作式取消检查点：adapter 流积压排空期间 __anext__
+                            # 与无界队列的 put 均不会真正挂起，pending 的
+                            # task.cancel() 无法注入，producer 会变成永不收尾的
+                            # 僵尸（其 finally 里的租约释放/round abort 永不执行）。
+                            # 每逢 chunk 显式让出一次事件循环，保证取消在一个
+                            # chunk 内送达。
+                            await asyncio.sleep(0)
+                            _put_count += 1
+                            _pl = getattr(chunk, "payload", None) or {}
+                            _et = _pl.get("event_type", "") if isinstance(_pl, dict) else ""
+                            # 前 3 个 chunk 全量打点；task.* 无论序号都打点，便于确认首跑
+                            # SkillTurbo write_stream 路径是否把任务列表推到外层流。
+                            if _put_count <= 3 or (
+                                isinstance(_et, str) and _et.startswith("task.")
+                            ):
+                                _n_tasks = 0
+                                if isinstance(_pl, dict) and isinstance(_pl.get("tasks"), list):
+                                    _n_tasks = len(_pl["tasks"])
+                                logger.info(
+                                    "[JiuWenSwarm] run_stream_task chunk #%s: request_id=%s event_type=%s%s",
+                                    _put_count,
+                                    rid,
+                                    _et,
+                                    f" tasks={_n_tasks}" if _n_tasks else "",
+                                )
+                            if _put_count == 1:
+                                logger.info(
+                                    "[latency] stage=4 name=first_token request_id=%s",
+                                    rid,
+                                )
+                            await stream_queue.put(("chunk", chunk))
+                    except asyncio.CancelledError as _cancel_err:
+                        logger.info("[JiuWenSwarm] 流式任务被取消: request_id=%s session_id=%s", rid, session_id)
+                        _pending_error = _cancel_err
+                    except Exception as exc:
+                        logger.exception("[JiuWenSwarm] 流式任务异常: %s", exc)
+                        _pending_error = exc
+                    finally:
+                        # 显式关闭 adapter 生成器：其 finally 会 close
+                        # interaction_stream（abort_active_round=True），同步释放
+                        # 输出租约并中止 round。不依赖 GC 的 asyncgen finalizer
+                        # （时机不确定）。取消/异常/正常结束三条路径都要走。
+                        #
+                        # 关键：aclose 必须先于 stream_queue.put(("error", ...))
+                        # 执行。若先唤醒消费者，消费者可能立刻发新请求，其
+                        # attach_output 会撞上尚未释放的租约，被迫走 ACK-only 兜底
+                        # （即 09-02 线上静默完成事故的竞态窗口）。先释放租约、再
+                        # 通知消费者，把窗口压到接近零。
+                        try:
+                            await asyncio.wait_for(stream_iter.aclose(), timeout=3)
+                        except asyncio.CancelledError:
+                            raise
+                        except asyncio.TimeoutError:
+                            # aclose 超时：生成器仍未关闭，租约可能仍被占。打点
+                            # 便于线上发现僵尸收尾链路（adapter 的 close 阻塞在远端
+                            # 或死锁）。此处不强行 cancel_round——上下文不足且可能
+                            # 误杀；由后续请求的 _reattach_interrupt_output 兜底。
+                            logger.error(
+                                "[JiuWenSwarm][metric] adapter stream aclose timeout: "
+                                "request_id=%s session_id=%s total_chunks=%s",
+                                rid, session_id, _put_count,
                             )
-                        if _put_count == 1:
-                            logger.info(
-                                "[latency] stage=4 name=first_token request_id=%s",
+                        except Exception:
+                            logger.warning(
+                                "[JiuWenSwarm] adapter stream aclose failed: request_id=%s",
                                 rid,
+                                exc_info=True,
                             )
-                        await stream_queue.put(("chunk", chunk))
-                except asyncio.CancelledError:
-                    logger.info("[JiuWenSwarm] 流式任务被取消: request_id=%s session_id=%s", rid, session_id)
-                    await stream_queue.put(("error", asyncio.CancelledError()))
-                except Exception as exc:
-                    logger.exception("[JiuWenSwarm] 流式任务异常: %s", exc)
-                    await stream_queue.put(("error", exc))
+                        if _pending_error is not None:
+                            await stream_queue.put(("error", _pending_error))
                 finally:
                     if permission_reservation is not None:
                         permission_reservation.complete()

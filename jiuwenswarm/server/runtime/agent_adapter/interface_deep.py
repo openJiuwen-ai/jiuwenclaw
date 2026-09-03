@@ -11725,15 +11725,15 @@ class JiuWenSwarmDeepAdapter:
             interaction_stream = await self._instance.attach_output()
             if interaction_stream is not None:
                 logger.info(
-                    "[JiuWenSwarmDeepAdapter] interrupt output reattached: "
+                    "[JiuWenSwarmDeepAdapter][metric] output_lease_reattach: "
                     "session_id=%s attempts=%s elapsed_ms=%.1f",
                     session_id,
                     attempt,
                     (time.monotonic() - started) * 1000,
                 )
                 return interaction_stream
-        logger.info(
-            "[JiuWenSwarmDeepAdapter] interrupt output still leased; returning ACK: "
+        logger.warning(
+            "[JiuWenSwarmDeepAdapter][metric] output_lease_reattach_failed: "
             "session_id=%s attempts=%s elapsed_ms=%.1f",
             session_id,
             _INTERRUPT_OUTPUT_ATTACH_RETRY_COUNT,
@@ -16433,6 +16433,20 @@ class JiuWenSwarmDeepAdapter:
                     return
             else:
                 interaction_stream = await self._instance.attach_output()
+                if interaction_stream is None:
+                    # 被中断的 producer 可能仍在收尾（Fix A 的 finally 里
+                    # wait_for(stream_iter.aclose(), 3s) 还没跑完，租约尚未释放）。
+                    # 给前代消费者一次有界回收机会（复用 interrupt reattach），
+                    # 与 inject 分支的竞态窗口处理保持一致。
+                    #
+                    # 不在此自动 cancel_round：此处无法区分"真孤儿租约"与"暂无
+                    # 消费者但 round 仍正当活跃"（如 subagent / HITL round），强杀
+                    # 会误中止有副作用的 round。Fix A 已保证 producer 在被取消后
+                    # 同步释放租约，1s 有界重试足以覆盖该窗口；若重试仍拿不到
+                    # 租约，按 ACK-only 兜底，由用户重试触发下一轮。
+                    interaction_stream = await self._reattach_interrupt_output(
+                        request.session_id or "default"
+                    )
                 if interaction_stream is None:
                     async for chunk in _yield_runtime_accepted():
                         yield chunk

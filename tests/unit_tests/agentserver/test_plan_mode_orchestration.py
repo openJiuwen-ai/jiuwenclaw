@@ -435,6 +435,48 @@ async def test_interrupt_output_reattach_retries_until_lease_is_released(
     assert sleep.await_count == 3
 
 
+@pytest.mark.asyncio
+async def test_interrupt_output_reattach_returns_none_when_lease_never_freed(
+    monkeypatch, caplog
+) -> None:
+    """重试到底仍未拿到租约 → 返回 None（走 ACK-only 兜底），并打 warning 级 metrics。
+
+    回归 Fix C 删除 cancel_round 后的兜底语义：不再强杀 round，而是让上层
+    按 ACK-only 路径返回，由用户重试触发下一轮。
+    """
+    import logging
+    from jiuwenswarm.server.runtime.agent_adapter import interface_deep
+
+    adapter = JiuWenSwarmDeepAdapter.__new__(JiuWenSwarmDeepAdapter)
+    adapter._instance = SimpleNamespace(
+        attach_output=AsyncMock(return_value=None)
+    )
+    sleep = AsyncMock()
+    monkeypatch.setattr(asyncio, "sleep", sleep)
+    # jiuwenswarm logger 的 propagate=False（用 QueueHandler），caplog 默认挂在
+    # root 上抓不到。临时打开传播并挂上 caplog handler。
+    monkeypatch.setattr(interface_deep.logger, "propagate", True)
+    interface_deep.logger.addHandler(caplog.handler)
+
+    try:
+        with caplog.at_level(logging.WARNING, logger=interface_deep.logger.name):
+            result = await adapter._reattach_interrupt_output("sess-stale")
+    finally:
+        interface_deep.logger.removeHandler(caplog.handler)
+
+    assert result is None
+    # 确认走了完整重试次数（_INTERRUPT_OUTPUT_ATTACH_RETRY_COUNT），不是早退
+    from jiuwenswarm.server.runtime.agent_adapter.interface_deep import (
+        _INTERRUPT_OUTPUT_ATTACH_RETRY_COUNT,
+    )
+    assert adapter._instance.attach_output.await_count == _INTERRUPT_OUTPUT_ATTACH_RETRY_COUNT
+    # 失败 metrics 命中
+    assert any(
+        "output_lease_reattach_failed" in rec.getMessage()
+        for rec in caplog.records
+    ), "reattach 失败未打 metrics 日志"
+
+
 def test_plan_exit_fallback_content_follows_runtime_language() -> None:
     adapter = JiuWenSwarmDeepAdapter.__new__(JiuWenSwarmDeepAdapter)
     adapter._resolve_runtime_language = MagicMock(return_value="en")
