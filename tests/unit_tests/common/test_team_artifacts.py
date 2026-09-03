@@ -15,6 +15,24 @@ from jiuwenswarm.common.team_artifacts import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _isolate_sessions_dir(tmp_path, monkeypatch):
+    """Point session-metadata lookup at an empty temp directory.
+
+    The allocator derives the task date from the session's creation
+    timestamp (metadata.json, falling back to the directory's ctime).
+    Without isolation a session id that happens to match a real leftover
+    directory under ``~/.jiuwenswarm/agent/sessions`` pins the task date
+    to that directory's date instead of today.
+    """
+    sessions_dir = tmp_path / "agent" / "sessions"
+    sessions_dir.mkdir(parents=True)
+    monkeypatch.setattr(
+        "jiuwenswarm.common.utils.get_agent_sessions_dir",
+        lambda: sessions_dir,
+    )
+
+
 def test_artifacts_dir_under_team_workspace(tmp_path):
     """The artifacts root sits under the team workspace."""
     root = get_team_artifacts_dir(str(tmp_path / "team-workspace"))
