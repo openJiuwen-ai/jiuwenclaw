@@ -221,7 +221,7 @@ def _unshadow_frozen_jiuwenbox_namespace() -> None:
         pass
 
 
-def _run_win_setup() -> None:
+def _run_win_setup() -> int:
     """安装器已提权时调用: 在本进程内跑 win_setup, 不再 ShellExecuteW(runas)."""
     # import 失败时也能确认安装器调到了这里.
     try:
@@ -235,7 +235,7 @@ def _run_win_setup() -> None:
     _unshadow_frozen_jiuwenbox_namespace()
     from jiuwenbox.supervisor.win_setup import _main as win_setup_main
 
-    raise SystemExit(win_setup_main(sys.argv[1:]))
+    return win_setup_main(sys.argv[1:])
 
 
 def _run_jiuwenbox_server() -> None:
@@ -259,7 +259,7 @@ def _run_jiuwenbox_server() -> None:
 
 def main() -> None:
     try:
-        _dispatch()
+        code = _dispatch()
     except SystemExit:
         # SystemExit 是正常的退出请求（如 sys.exit()），直接传递，不弹窗
         raise
@@ -270,6 +270,8 @@ def main() -> None:
         # 其他未捕获异常：记录日志后静默退出，避免 PyInstaller exe 弹窗
         _write_child_error(exc)
         raise SystemExit(1) from None
+    if code is not None:
+        raise SystemExit(code)
 
 
 def _find_bundled_binary(name: str) -> str | None:
@@ -379,7 +381,7 @@ def _ensure_stdio() -> None:
             pass
 
 
-def _dispatch() -> None:
+def _dispatch() -> int | None:
     # frozen exe (console=False) 主进程的 sys.stdout/stderr 可能为 None
     if getattr(sys, "frozen", False):
         _ensure_stdio()
@@ -414,8 +416,7 @@ def _dispatch() -> None:
         _run_jiuwenbox_server()
         return
     if _pop_flag(_DESKTOP_RUN_WIN_SETUP):
-        _run_win_setup()
-        return
+        return _run_win_setup()
     if _DESKTOP_INSTALL_UPDATE in sys.argv:
         from jiuwenswarm.channels.desktop.desktop_app import main as desktop_main
         desktop_main()
