@@ -64,3 +64,49 @@ def get_session_detail_sync(
     if st is None:
         return None
     return st.get_session_detail_blocking(str(session_id), user=user)
+
+
+def count_sessions_sync(
+    store: ChatHistoryStore | None = None,
+    *,
+    user: str | None = None,
+) -> int:
+    """同步统计会话总数（分页 total 用）。
+
+    与 list_sessions_sync 不同：store/DB 不可用时抛异常，调用方据此区分
+    "确实为空"与"库故障"。
+    """
+    st = _coerce_store(store)
+    if st is None:
+        raise RuntimeError("web history store unavailable")
+    return st.count_sessions_blocking(user=user)
+
+
+def get_session_detail_strict_sync(
+    session_id: str,
+    store: ChatHistoryStore | None = None,
+    *,
+    user: str | None = None,
+) -> dict[str, Any] | None:
+    """同步读会话详情（严格版）：store/DB 故障抛异常，None 仅表示会话不存在。"""
+    if not session_id:
+        return None
+    st = _coerce_store(store)
+    if st is None:
+        raise RuntimeError("web history store unavailable")
+    return st.get_session_detail_strict_blocking(str(session_id), user=user)
+
+
+def delete_session_sync(
+    session_id: str,
+    store: ChatHistoryStore | None = None,
+    *,
+    user: str | None = None,
+) -> bool:
+    """同步删除会话（sessions 行 + messages 行）。"""
+    if not session_id:
+        return False
+    st = _coerce_store(store)
+    if st is None:
+        return False
+    return st.delete_session_blocking(str(session_id), user=user)

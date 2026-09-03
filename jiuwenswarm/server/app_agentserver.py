@@ -275,7 +275,6 @@ async def _run_with_telemetry(host: str, port: int, telemetry_lifecycle) -> None
         from jiuwenswarm.infrastructure.log_masking.engine import LogMaskingEngine
 
         await LogMaskingEngine.reload_log_masking_rule()
-        logger.info("[AgentServer] log masking rules loaded from Gateway DB (if any)")
     except Exception:  # noqa: BLE001
         logger.warning("[AgentServer] log_masking_rule cold load skipped", exc_info=True)
 
@@ -317,9 +316,9 @@ async def _run_with_telemetry(host: str, port: int, telemetry_lifecycle) -> None
             )
 
             await reload_permissions_from_gateway_db()
-            logger.info("[AgentServer] permissions config loaded from Gateway DB (if any)")
+            logger.info("[AgentServer] permissions config refreshed from yaml fallback")
         except Exception:  # noqa: BLE001
-            logger.warning("[AgentServer] permissions_config cold load skipped", exc_info=True)
+            logger.warning("[AgentServer] permissions config cold load skipped", exc_info=True)
 
     # 会话 metadata 的字段补全已改为惰性迁移:读取时按需推断并写回磁盘
     # (见 session_metadata._apply_metadata_defaults_with_inference),无需启动全量扫描。

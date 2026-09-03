@@ -2709,15 +2709,24 @@ async def test_outline_resume_starts_from_stage_three_without_replaying_prior_st
             ),
         )
 
-    transition_payloads = [
+    payloads = [
         call.args[0]["payload"]
         for call in push.send_push.await_args_list
-        if call.args[0]["payload"].get("event_type") == "chat.delta"
-        and "[DeepResearch 阶段切换]" in call.args[0]["payload"].get("content", "")
     ]
-    assert [payload["task_id"] for payload in transition_payloads] == [
-        "deepresearch_stage_3"
-    ]
+    assert not any(
+        payload.get("event_type") == "chat.delta"
+        and "[DeepResearch 阶段" in payload.get("content", "")
+        for payload in payloads
+    )
+    assert any(
+        any(
+            task.get("task_id") == "deepresearch_stage_3"
+            and task.get("status") == "in_progress"
+            for task in payload.get("tasks", [])
+        )
+        for payload in payloads
+        if payload.get("event_type") == "task.update"
+    )
 
 
 @pytest.mark.asyncio
@@ -2766,14 +2775,24 @@ async def test_user_feedback_resume_can_complete_final_report_without_section_re
             )
         )
     assert outcome["status"] == "completed"
-    transition_task_ids = [
-        call.args[0]["payload"]["task_id"]
+    payloads = [
+        call.args[0]["payload"]
         for call in push.send_push.await_args_list
-        if call.args[0]["payload"].get("event_type") == "chat.delta"
-        and "[DeepResearch 阶段切换]"
-        in call.args[0]["payload"].get("content", "")
     ]
-    assert transition_task_ids == ["deepresearch_stage_4"]
+    assert not any(
+        payload.get("event_type") == "chat.delta"
+        and "[DeepResearch 阶段" in payload.get("content", "")
+        for payload in payloads
+    )
+    assert any(
+        any(
+            task.get("task_id") == "deepresearch_stage_4"
+            and task.get("status") == "in_progress"
+            for task in payload.get("tasks", [])
+        )
+        for payload in payloads
+        if payload.get("event_type") == "task.update"
+    )
 
 
 def test_artifact_bundle_ignores_blank_and_unapproved_companions():

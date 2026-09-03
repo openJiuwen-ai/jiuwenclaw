@@ -63,6 +63,38 @@ def has_interrupt_resume_payload(params: Any) -> bool:
     return isinstance(answers, list) and bool(answers)
 
 
+def _has_active_skill_overlay() -> bool:
+    """当前 Skill 授权上下文是否存在 ACTIVE Grant（owner_scopes allow 回落判定）。
+
+    判定失败按存在处理（返回 True，强制回落 engine），不放宽权限。
+    """
+    try:
+        from jiuwenswarm.agents.harness.common.rails.permissions.config_loader import (
+            get_effective_permissions_config,
+        )
+        from openjiuwen.harness.security.skill_authorization import (
+            get_skill_authorization_context,
+            get_skill_grant_store,
+            is_skill_authorization_enabled,
+        )
+
+        if not is_skill_authorization_enabled(get_effective_permissions_config()):
+            return False
+        authz = get_skill_authorization_context()
+        if authz is None or not authz.session_id or not authz.agent_scope_id:
+            return False
+        return (
+            get_skill_grant_store().get_active(authz.session_id, authz.agent_scope_id)
+            is not None
+        )
+    except Exception:  # noqa: BLE001 — 不确定时不允许绕过引擎
+        logger.warning(
+            "[InterruptHelpers] active Skill lookup failed; owner allow falls through to engine",
+            exc_info=True,
+        )
+        return True
+
+
 def is_interrupt_resume_payload(params: Any) -> bool:
     if not has_interrupt_resume_payload(params):
         return False
@@ -82,6 +114,7 @@ def build_permission_rail(
     config: dict[str, Any],
     llm: Any = None,
     model_name: str | None = None,
+    permission_config: dict[str, Any] | None = None,
 ) -> Any | None:
     """Build openjiuwen PermissionInterruptRail for tool permission checks.
 
@@ -89,6 +122,8 @@ def build_permission_rail(
         config: Agent config dict containing permissions section
         llm: LLM instance for risk assessment
         model_name: Model name for risk assessment
+        permission_config: Optional Agent-level permissions body (enterprise template).
+            When omitted, falls back to effective/global permissions config.
 
     Returns:
         PermissionInterruptRail instance or None if disabled
@@ -109,12 +144,24 @@ def build_permission_rail(
     from jiuwenswarm.agents.harness.common.rails.permissions.config_loader import (
         get_base_permissions_config,
         get_effective_permissions_config,
+        merge_session_permissions_overlay,
     )
 
-    permission_config = get_effective_permissions_config()
+    if isinstance(permission_config, dict):
+        # Agent 模板 body：企业版仍叠加当前会话 overlay（若有）。
+        permission_config = (
+            merge_session_permissions_overlay(permission_config)
+            if is_enterprise()
+            else copy.deepcopy(permission_config)
+        )
+        config_source = "agent_template"
+    else:
+        permission_config = get_effective_permissions_config()
+        config_source = "effective"
     logger.info(
-        "[InterruptHelpers] build_permission_rail called: enabled=%s",
-        permission_config.get("enabled", False)
+        "[InterruptHelpers] build_permission_rail called: enabled=%s source=%s",
+        permission_config.get("enabled", False),
+        config_source,
     )
 
     if not permission_config.get("enabled", False):
@@ -394,10 +441,21 @@ def build_permission_rail(
             if owner_level is None:
                 return None
             if owner_level == "allow":
+                # 有 ACTIVE Skill overlay 时强制走 engine，避免 owner allow 绕过 overlay 收紧。
+                if _has_active_skill_overlay():
+                    return None
                 return ("approve",)
             return ("reject", f"[PERMISSION_DENIED] 该工具未被授权 (owner_scopes: {owner_level})")
 
         def _get_permissions_snapshot():
+            # 企业版 Agent 模板 rail：工具校验跑在 DeepAgent supervisor Task
+            # （start_interaction 时 create_task），不会继承请求 Task 上的
+            # PERMISSIONS_AGENT_BASE；若这里再走 get_effective_permissions_config()
+            # 会回落 yaml（常为 enabled:false）并覆盖模板配置。
+            # 返回 None → 使用 _static_config（请求开头 _update_permission_rail
+            # 与 persist 的 update_config 会刷新它）。
+            if is_enterprise() and config_source == "agent_template":
+                return None
             return get_effective_permissions_config()
 
         host = ToolPermissionHost(
@@ -409,8 +467,24 @@ def build_permission_rail(
             permission_scene_hook=_permission_scene_hook,
         )
 
-        # skill_turbo 启用时使用子类，定制 skill_acceleration_exec 审批消息
+        # Skill 动态授权协调：默认权限 Rail 叠加 gate-handled 短路
+        # （skill_tool/skill_complete 由 SkillAuthorizationRail 专属裁决，避免重复弹卡）。
         rail_cls = PermissionInterruptRail
+        try:
+            from jiuwenswarm.agents.harness.common.rails.permissions.skill_authorization_permission_rail import (
+                SkillAuthorizationPermissionRail,
+            )
+
+            rail_cls = SkillAuthorizationPermissionRail
+        except Exception:
+            logger.debug(
+                "[InterruptHelpers] SkillAuthorizationPermissionRail switch failed, "
+                "fallback to PermissionInterruptRail",
+                exc_info=True,
+            )
+
+        # skill_turbo 启用时使用子类，定制 skill_acceleration_exec 审批消息
+        # （SkillTurboPermissionRail 继承 SkillAuthorizationPermissionRail，两种定制叠加）
         try:
             from jiuwenswarm.common.config import get_config as _get_cfg
             _cfg = _get_cfg()
@@ -645,6 +719,16 @@ def convert_interactions_to_ask_user_question(state_outputs: list) -> dict | Non
             "questions": [question_data],
             "source": source,
         }
+        # Skill 动态授权审批卡：随事件顶层透传给前端结构化渲染（契约键冻结）。
+        payload_schema = _read_value_field(value_obj, "payload_schema", None)
+        if isinstance(payload_schema, dict):
+            from openjiuwen.harness.security.skill_authorization import (
+                SKILL_APPROVAL_CARD_EXTENSION_KEY,
+            )
+
+            card = payload_schema.get(SKILL_APPROVAL_CARD_EXTENSION_KEY)
+            if isinstance(card, dict):
+                payload[SKILL_APPROVAL_CARD_EXTENSION_KEY] = card
         if (
             source == "confirm_interrupt"
             and tool_name == "exit_plan_mode"
@@ -817,13 +901,47 @@ def _normalize_question_preview(preview: Any) -> dict[str, Any] | None:
     return normalized
 
 
+_PERMANENT_REMEMBER_LABELS = frozenset({
+    "永久记住",
+    "Always Allow",
+    "always_allow",
+    "allow_always",
+})
+
+_PERMANENT_REMEMBER_HINT_RE = re.compile(
+    r"[；;]?\s*选择「永久记住」[^。\n]*[。.]?",
+)
+
+
 def _default_interrupt_options() -> list[dict[str, str]]:
-    return [
+    """权限审批默认选项。
+
+    企业版不提供「永久记住」：该能力依赖写回本地 config.yaml / session overlay，
+    与 Agent permissions 模板权威源不一致，且当前 supervisor Task 下 session_id
+    常丢失导致落盘失败。长期策略请改 Manager permissions 模板。
+    """
+    options = [
         {"label": "本次允许", "description": "仅本次授权执行"},
         {"label": "会话内记住", "description": "本次会话内自动放行同类操作"},
-        {"label": "永久记住", "description": "写回磁盘，所有会话均自动放行"},
         {"label": "拒绝", "description": "拒绝执行此工具"},
     ]
+    if not is_enterprise():
+        options.insert(
+            2,
+            {"label": "永久记住", "description": "写回磁盘，所有会话均自动放行"},
+        )
+    return options
+
+
+def _is_permanent_remember_option(option: dict[str, Any]) -> bool:
+    label = str(option.get("label") or "").strip()
+    value = str(option.get("value") or "").strip()
+    return label in _PERMANENT_REMEMBER_LABELS or value in _PERMANENT_REMEMBER_LABELS
+
+
+def _strip_permanent_remember_hint(message: str) -> str:
+    cleaned = _PERMANENT_REMEMBER_HINT_RE.sub("", message or "")
+    return cleaned.strip()
 
 
 def _plan_approval_interrupt_options(
@@ -852,6 +970,12 @@ def _question_options_from_ui_options(
         if normalized["label"]:
             options.append(normalized)
     if options:
+        # 仅过滤权限审批弹窗；技能演进等仍可保留「总是允许」。
+        if is_enterprise() and source == "permission_interrupt":
+            options = [
+                option for option in options
+                if not _is_permanent_remember_option(option)
+            ]
         return options
     return _plan_approval_interrupt_options(source, tool_name, message) or _default_interrupt_options()
 
@@ -930,6 +1054,8 @@ def extract_question_from_interaction(payload: Any) -> dict | None:
     else:
         header = f"权限审批: {tool_name}" if tool_name else "权限审批"
         question = message
+        if is_enterprise() and source == "permission_interrupt":
+            question = _strip_permanent_remember_hint(question)
 
     return {
         "question": question,

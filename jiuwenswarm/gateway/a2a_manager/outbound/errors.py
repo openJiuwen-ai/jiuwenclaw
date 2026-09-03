@@ -10,6 +10,9 @@ class A2AOutboundErrorCode(str, Enum):
     DISCOVERY_BLOCKED = "A2A_DISCOVERY_BLOCKED"
     CARD_FETCH_FAILED = "A2A_CARD_FETCH_FAILED"
     CARD_INVALID = "A2A_CARD_INVALID"
+    DISCOVERY_NOT_FOUND = "A2A_DISCOVERY_NOT_FOUND"
+    DISCOVERY_EXPIRED = "A2A_DISCOVERY_EXPIRED"
+    AGENT_ALREADY_REGISTERED = "A2A_AGENT_ALREADY_REGISTERED"
     AGENT_NOT_REGISTERED = "A2A_AGENT_NOT_REGISTERED"
     AGENT_DISABLED = "A2A_AGENT_DISABLED"
     AGENT_UNAVAILABLE = "A2A_AGENT_UNAVAILABLE"
@@ -21,6 +24,9 @@ class A2AOutboundErrorCode(str, Enum):
     DISPATCH_CONFLICT = "A2A_DISPATCH_CONFLICT"
     REMOTE_STATUS_UNKNOWN = "A2A_REMOTE_STATUS_UNKNOWN"
     OUTBOUND_BUSY = "A2A_OUTBOUND_BUSY"
+    TASK_INVALID = "A2A_OUTBOUND_TASK_INVALID"
+    MODE_INVALID = "A2A_OUTBOUND_MODE_INVALID"
+    MANAGER_UNAVAILABLE = "A2A_OUTBOUND_MANAGER_UNAVAILABLE"
     STORE_INVALID = "A2A_OUTBOUND_STORE_INVALID"
 
 
@@ -29,6 +35,9 @@ _SAFE_SUMMARIES: dict[A2AOutboundErrorCode, str] = {
     A2AOutboundErrorCode.DISCOVERY_BLOCKED: "发现地址被安全策略拦截。",
     A2AOutboundErrorCode.CARD_FETCH_FAILED: "无法获取第三方 Agent Card。",
     A2AOutboundErrorCode.CARD_INVALID: "第三方 Agent Card 无效或不兼容。",
+    A2AOutboundErrorCode.DISCOVERY_NOT_FOUND: "未找到指定的发现候选。",
+    A2AOutboundErrorCode.DISCOVERY_EXPIRED: "发现候选已过期，请重新发现。",
+    A2AOutboundErrorCode.AGENT_ALREADY_REGISTERED: "该第三方 Agent 已注册。",
     A2AOutboundErrorCode.AGENT_NOT_REGISTERED: "指定的第三方 Agent 尚未注册。",
     A2AOutboundErrorCode.AGENT_DISABLED: "指定的第三方 Agent 已停用。",
     A2AOutboundErrorCode.AGENT_UNAVAILABLE: "指定的第三方 Agent 当前不可用。",
@@ -40,6 +49,9 @@ _SAFE_SUMMARIES: dict[A2AOutboundErrorCode, str] = {
     A2AOutboundErrorCode.DISPATCH_CONFLICT: "出站请求状态已发生变化。",
     A2AOutboundErrorCode.REMOTE_STATUS_UNKNOWN: "暂时无法确认第三方请求状态。",
     A2AOutboundErrorCode.OUTBOUND_BUSY: "A2A 出站服务当前繁忙。",
+    A2AOutboundErrorCode.TASK_INVALID: "A2A 出站任务文本无效。",
+    A2AOutboundErrorCode.MODE_INVALID: "A2A 出站派发模式无效。",
+    A2AOutboundErrorCode.MANAGER_UNAVAILABLE: "A2A 出站管理服务当前不可用。",
     A2AOutboundErrorCode.STORE_INVALID: "A2A 出站数据无效。",
 }
 

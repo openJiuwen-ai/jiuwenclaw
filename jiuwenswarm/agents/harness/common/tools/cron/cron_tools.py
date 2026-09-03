@@ -38,15 +38,10 @@ def resolve_cron_jobs_path(
     agent_id: str,
     workspace_key: str | None = None,
 ) -> Path:
-    """Per-tenant cron_jobs.json under ``service_{sid}/agent_{aid}/agent/home/``."""
-    del workspace_key  # legacy kw; disk isolation is service_id + agent_id
-    sid = normalize_tenant_scope_id(service_id)
-    aid = normalize_tenant_scope_id(agent_id)
-    base = get_multi_tenant_user_workspace_dir(sid, aid)
-    if base is None:
-        raise TypeError(
-            f"invalid tenant for cron jobs path: service_id={sid!r}, agent_id={aid!r}"
-        )
+    """Per-tenant cron_jobs.json under ``workspace_{key}/agent/home/``."""
+    del service_id, agent_id  # routing ids; disk isolation is workspace_key
+    wk = normalize_tenant_scope_id(workspace_key)
+    base = get_multi_tenant_user_workspace_dir(wk)
     return base / "agent" / "home" / "cron_jobs.json"
 
 # 按 asyncio Task 隔离：多 session 并发时不能用单例字段存路由，否则后到的请求会覆盖先到的 session_id。
@@ -87,14 +82,20 @@ class CronTools:
         *,
         service_id: str = "default",
         agent_id: str = "default",
+        workspace_key: str = "default",
         agent_client: Any | None = None,
         message_handler: Any | None = None,
     ) -> None:
         self._service_id = str(service_id or "default").strip() or "default"
         self._agent_id = str(agent_id or "default").strip() or "default"
+        self._workspace_key = str(workspace_key or "default").strip() or "default"
         self._gateway_push: GatewayPushTransport = gateway_push or WebSocketGatewayPushTransport()
         self._local_store = CronJobStore(
-            path=resolve_cron_jobs_path(self._service_id, self._agent_id)
+            path=resolve_cron_jobs_path(
+                self._service_id,
+                self._agent_id,
+                workspace_key=self._workspace_key,
+            )
         )
         # 内置调度器，用于在 Agent-side 执行定时任务
         self._scheduler: CronSchedulerService | None = None

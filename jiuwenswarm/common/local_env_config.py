@@ -671,6 +671,7 @@ def build_effective_env_overlay(
 
 
 def bind_agent_env_ns(service_id: str, agent_id: str) -> Token:
+    """Bind tip env ns ``(service_id, agent_id)`` for this task."""
     key = resolve_env_ns(service_id, agent_id)
     return _agent_env_ns.set(key)
 

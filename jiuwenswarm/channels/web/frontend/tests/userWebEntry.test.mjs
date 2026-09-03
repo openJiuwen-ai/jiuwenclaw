@@ -16,7 +16,7 @@ globalThis.localStorage = {
   },
 };
 globalThis.window = {
-  __JIUWEN_USER_WEB_MODE__: 'personal',
+  __JIUWENSWARM_EDITION__: 'personal',
   history: { replaceState() {} },
   location: { pathname: '/', search: '', replace() {} },
 };
@@ -28,21 +28,25 @@ const {
   isDebugContext,
   orderedContextCandidates,
 } = await import('../node_modules/.cache/user-web-entry/EnterpriseEntry.mjs');
-const { parseLoginAuthSimulate } = await import('../node_modules/.cache/user-web-entry/auth/config.js');
+const {
+  isAuthEntryPath,
+  parseLoginAuthSimulate,
+} = await import('../node_modules/.cache/user-web-entry/auth/config.js');
 const { buildSimulatedEnterpriseContext } = await import('../node_modules/.cache/user-web-entry/auth/simulate/SimulatedAuthProvider.js');
 
-function renderEntry(mode, simulate = false) {
-  window.__JIUWEN_USER_WEB_MODE__ = mode;
+function renderEntry(edition, simulate = false) {
+  window.__JIUWENSWARM_EDITION__ = edition;
   window.__JIUWEN_LOGIN_AUTH_SIMULATE__ = simulate;
   return renderToStaticMarkup(React.createElement(EnterpriseEntry, null, React.createElement('div', { id: 'user-web-content' }, 'user web content')));
 }
 
 function resetBrowserState() {
   values.clear();
+  window.location.pathname = '/';
   window.location.search = '';
 }
 
-test('personal mode renders the standalone User Web without enterprise authentication', () => {
+test('personal edition renders the standalone User Web without enterprise authentication', () => {
   resetBrowserState();
   const html = renderEntry('personal');
 
@@ -50,7 +54,7 @@ test('personal mode renders the standalone User Web without enterprise authentic
   assert.doesNotMatch(html, /ENTERPRISE WORKSPACE/);
 });
 
-test('enterprise mode redirects unauthenticated users instead of rendering User Web', () => {
+test('enterprise edition redirects unauthenticated users instead of rendering User Web', () => {
   resetBrowserState();
   const html = renderEntry('enterprise');
 
@@ -59,7 +63,7 @@ test('enterprise mode redirects unauthenticated users instead of rendering User 
   assert.doesNotMatch(html, /user web content/);
 });
 
-test('enterprise mode loads and validates an authorized context before rendering User Web', () => {
+test('enterprise edition loads and validates an authorized context before rendering User Web', () => {
   resetBrowserState();
   localStorage.setItem('openjiuwen_access_token', 'manager-token');
   window.location.search = '?user_id=user-1&group_id=group-1&bot_id=bot-1&gateway_id=gateway-1';
@@ -74,10 +78,10 @@ test('simulated enterprise login uses local defaults without an access token', (
   resetBrowserState();
   const context = buildSimulatedEnterpriseContext('');
 
-  assert.equal(context.user.user_id, 'debug-user');
-  assert.equal(context.org.group_id, 'debug-group');
+  assert.equal(context.user.user_id, 'default');
+  assert.equal(context.org.group_id, 'default');
   assert.equal(context.gateway.jiuwenclaw_id, 'debug-gateway');
-  assert.equal(context.selectedBot, 'debug-agent');
+  assert.equal(context.selectedBot, 'default');
   assert.doesNotMatch(renderEntry('enterprise', true), /正在前往登录页/);
 });
 
@@ -95,6 +99,12 @@ test('LOGIN_AUTH_SIMULATE accepts only booleans and defaults to true', () => {
   assert.equal(parseLoginAuthSimulate('true'), true);
   assert.equal(parseLoginAuthSimulate(' FALSE '), false);
   assert.throws(() => parseLoginAuthSimulate('yes'), /期望 true 或 false/);
+});
+
+test('auth entry path guard stops User Web from redirecting /auth to itself', () => {
+  assert.equal(isAuthEntryPath('/auth'), true);
+  assert.equal(isAuthEntryPath('/auth/'), true);
+  assert.equal(isAuthEntryPath('/chat/'), false);
 });
 
 test('context candidates prefer URL values but retain every authorized combination', () => {

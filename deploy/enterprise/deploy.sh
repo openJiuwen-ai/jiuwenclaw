@@ -18,11 +18,13 @@ source "rabbitmq_handler.sh"
 source "redis_handler.sh"
 source "log_handler.sh"
 source "jina_handler.sh"
+source "proxy_handler.sh"
 source "configmap_secret_handler.sh"
 source "gateway_handler.sh"
 source "manager_handler.sh"
 source "web_handler.sh"
 source "runtime_handler.sh"
+source "patch_handler.sh"
 
 process_up() {
     # MODULES是ALL_MODULES的子集，启动顺序正着来
@@ -92,48 +94,6 @@ process_restart() {
 # ==================== Main function ====================
 main() {
     read_env_from_file "${CUSTOM_ENV_FILE}" "DEPLOY_VARS"
-
-    # USER_WEB_MODE 是用户面产品形态的唯一开关；旧布尔变量仅作兼容输入。
-    if [[ -z "${DEPLOY_VARS["USER_WEB_MODE"]:-}" ]]; then
-        if [[ "${DEPLOY_VARS["ENABLE_USER_WEB_EMBEDDING"]:-false}" == "true" ]]; then
-            DEPLOY_VARS["USER_WEB_MODE"]="enterprise"
-            warning "ENABLE_USER_WEB_EMBEDDING is deprecated; use USER_WEB_MODE=enterprise"
-        else
-            DEPLOY_VARS["USER_WEB_MODE"]="personal"
-        fi
-    fi
-    DEPLOY_VARS["ENABLE_USER_WEB_EMBEDDING"]=$(
-        [[ "${DEPLOY_VARS["USER_WEB_MODE"]}" == "enterprise" ]] && printf true || printf false
-    )
-    if [[ -z "${DEPLOY_VARS["LOGIN_AUTH_SIMULATE"]:-}" ]]; then
-        DEPLOY_VARS["LOGIN_AUTH_SIMULATE"]="true"
-    fi
-    local user_web_idp_defaulted="false"
-    local user_web_manager_defaulted="false"
-    if [[ -z "${DEPLOY_VARS["USER_WEB_IDP_TARGET"]:-}" ]]; then
-        DEPLOY_VARS["USER_WEB_IDP_TARGET"]="http://${DEPLOY_VARS["IDENTITY_NAME"]}:${DEPLOY_VARS["IDENTITY_REST_PORT"]}"
-        user_web_idp_defaulted="true"
-    fi
-    if [[ -z "${DEPLOY_VARS["USER_WEB_MANAGER_TARGET"]:-}" ]]; then
-        DEPLOY_VARS["USER_WEB_MANAGER_TARGET"]="http://${DEPLOY_VARS["MANAGER_SERVER_NAME"]}:${DEPLOY_VARS["MANAGER_REST_PORT"]}"
-        user_web_manager_defaulted="true"
-    fi
-    if [[ "${DEPLOY_VARS["USER_WEB_MODE"]}" == "enterprise" ]]; then
-        if [[ "${DEPLOY_VARS["LOGIN_AUTH_SIMULATE"]}" == "true" ]]; then
-            info "【登录认证模拟调试模式已开启】"
-        elif [[ "${DEPLOY_VARS["LOGIN_AUTH_SIMULATE"]}" == "false" ]]; then
-            info "【正式身份认证模式，依赖manager ID认证服务】"
-            if [[ "${user_web_idp_defaulted}" == "true" ]]; then
-                info "USER_WEB_IDP_TARGET 未配置，暂使用当前集群 Identity：${DEPLOY_VARS["USER_WEB_IDP_TARGET"]}"
-            fi
-            if [[ "${user_web_manager_defaulted}" == "true" ]]; then
-                info "USER_WEB_MANAGER_TARGET 未配置，暂使用当前集群 Manager：${DEPLOY_VARS["USER_WEB_MANAGER_TARGET"]}"
-            fi
-        fi
-    elif [[ "${DEPLOY_VARS["LOGIN_AUTH_SIMULATE"]}" == "false" ]]; then
-        warning "配置冲突：personal 模式仍将跳过企业登录认证"
-    fi
-
     parse_args "$@"
     detect_os
     check_dependency

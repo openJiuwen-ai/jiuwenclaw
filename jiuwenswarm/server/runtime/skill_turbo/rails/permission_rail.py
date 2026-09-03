@@ -10,8 +10,8 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
-from openjiuwen.harness.rails.security.tool_security_rail import (
-    PermissionInterruptRail,
+from jiuwenswarm.agents.harness.common.rails.permissions.skill_authorization_permission_rail import (
+    SkillAuthorizationPermissionRail,
 )
 
 # skill_turbo 外层统一审批：通用兜底描述 + 工具清单
@@ -33,11 +33,12 @@ SKILL_TURBO_APPROVAL_TOOLS: list[tuple[str, str]] = [
 ]
 
 
-class SkillTurboPermissionRail(PermissionInterruptRail):
-    """PermissionInterruptRail 子类，定制 skill_acceleration_exec 审批消息。
+class SkillTurboPermissionRail(SkillAuthorizationPermissionRail):
+    """SkillAuthorizationPermissionRail 子类，定制 skill_acceleration_exec 审批消息。
 
     仅覆盖 _build_message：当 tool_name == "skill_acceleration_exec" 时，
     展示统一审批消息（含内部工具清单），其余工具走父类默认逻辑。
+    基类同时携带 Skill 动态授权门禁短路（gate-handled 命中即跳过）。
     """
 
     def _build_message(

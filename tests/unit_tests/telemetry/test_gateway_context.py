@@ -188,11 +188,12 @@ async def test_real_non_stream_request_has_one_gateway_root_and_remote_child(
         env.channel_context.items()
         >= {
             "source": "business",
-            "user_id": "user-1",
             "domain_id": "domain-1",
             "app_id": "app-1",
         }.items()
     )
+    assert env.channel_context["user_id"] == "user-1"
+    assert "user_id" not in env.channel_context.get("routing", {})
     telemetry_metrics.add.assert_called_once_with(
         "jiuwenclaw.request.count",
         1,
@@ -325,11 +326,11 @@ async def test_real_stream_records_success_error_and_cancel_once(
         ),
         (
             {
-                "user_id": "",
+                "user_id": "list-user",
                 "domain_id": None,
                 "app_id": "",
                 "query": {
-                    "user_id": ["list-user", "ignored-user"],
+                    "user_id": ["ignored-user"],
                     "domain_id": ("tuple-domain", "ignored-domain"),
                     "app_id": "scalar-app",
                 },
@@ -365,6 +366,7 @@ def test_gateway_promotes_normalized_carrier_identity(
     try:
         handle = open_gateway_request(env)
         assert env.channel_context["user_id"] == expected_identity.user_id
+        assert "user_id" not in env.channel_context.get("routing", {})
         assert env.channel_context["domain_id"] == expected_identity.domain_id
         assert env.channel_context["app_id"] == expected_identity.app_id
         assert IdentityStore.get_identity() == expected_identity
@@ -470,7 +472,7 @@ def test_gateway_partial_open_failure_restores_parent_identity(
     env = _envelope(
         "partial-open",
         stream=False,
-        channel_context={"query": {"user_id": ["request-user"]}},
+        channel_context={"user_id": "request-user"},
     )
     handle = None
     try:

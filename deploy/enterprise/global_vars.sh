@@ -37,13 +37,20 @@ declare -A CONFIG=(
 
     ["JINA_TEMPLATE_FILE"]="${TEMPLATE_DIR}/jina.template.yaml"
     ["JINA_FILE"]="${CONFIG_DIR}/jina.yaml"
+    ["PROXY_TEMPLATE_FILE"]="${TEMPLATE_DIR}/proxy.template.yaml"
+    ["PROXY_FILE"]="${CONFIG_DIR}/proxy.yaml"
 
     ["SECRET_CM_TEMPLATE_FILE"]="${TEMPLATE_DIR}/configmap-secret.template.yaml"
     ["SECRET_CM_FILE"]="${CONFIG_DIR}/configmap-secret.yaml"
 
+    ["GATEWAY_CONFIG_TEMPLATE_FILE"]="${TEMPLATE_DIR}/gateway-config.template.yaml"
     ["GATEWAY_CONFIG_FILE"]="${CONFIG_DIR}/gateway-config.yaml"
+    ["GATEWAY_CONFIG_YAML_FILE"]="${CONFIG_DIR}/gateway-config.configmap.yaml"
+
     ["GATEWAY_ENV_TEMPLATE_FILE"]="${TEMPLATE_DIR}/gateway.template.env"
     ["GATEWAY_ENV_FILE"]="${CONFIG_DIR}/gateway.env"
+    ["GATEWAY_ENV_YAML_FILE"]="${CONFIG_DIR}/gateway-env.configmap.yaml"
+
     ["GATEWAY_TEMPLATE_FILE"]="${TEMPLATE_DIR}/gateway.template.yaml"
     ["GATEWAY_FILE"]="${CONFIG_DIR}/gateway.yaml"
 
@@ -61,6 +68,12 @@ declare -A CONFIG=(
 
     ["IDENTITY_TEMPLATE_FILE"]="${TEMPLATE_DIR}/identity.template.yaml"
     ["IDENTITY_FILE"]="${CONFIG_DIR}/identity.yaml"
+
+    ["AS_JSON_TEMPLATE_FILE"]="${TEMPLATE_DIR}/agentserver.template.json"
+    ["AS_JSON_FILE"]="${CONFIG_DIR}/agentserver.json"
+    ["AS_ENV_TEMPLATE_FILE"]="${TEMPLATE_DIR}/agentserver.template.env"
+    ["AS_ENV_FILE"]="${CONFIG_DIR}/agentserver.env"
+    ["AS_ENV_YAML_FILE"]="${CONFIG_DIR}/agentserver-env.configmap.yaml"
 
     ["START_PORT"]="30000"
     ["END_PORT"]="32767"
@@ -82,7 +95,7 @@ declare -A ARGS=(
 
 
 # ==== All available modules ====
-declare -ga ALL_MODULES=("NFS" "NFS-SC" "RABBITMQ" "MYSQL" "POSTGRESQL" "MINIO" "LOG" "JINA" "GATEWAY" "WEB" "MANAGER" "RUNTIME")
+declare -ga ALL_MODULES=("NFS" "NFS-SC" "RABBITMQ" "MYSQL" "POSTGRESQL" "MINIO" "LOG" "JINA" "PROXY" "GATEWAY" "WEB" "MANAGER" "RUNTIME")
 
 declare -ga MODULES=()
 
@@ -97,12 +110,6 @@ declare -A DEPLOY_VARS=(
     ["CORE_POD_PKG_PATH"]="/usr/local/lib/python3.11/site-packages/openjiuwen"
     ["JIUWENBOX_POD_PKG_PATH"]="/usr/local/lib/python3.11/site-packages/jiuwenbox"
     ["AGENT_BOT_ID_GROUP_NUM"]="0"
-    ["AGENT_SERVER_HOME"]="/home/app"
-    ["AGENT_SERVER_POD_NAME"]="jiuwenclaw-agentserver"
-    ["AGENT_SERVER_SERVICE_CONCURRENCY"]="10"
-    ["AGENT_SERVER_SESSION_CONCURRENCY"]="10"
-    ["AGENT_SERVER_SESSION_TTL"]="60"
-    ["AGENT_SERVER_REACT_MAX_ITER"]="10"
     ["CLAW_MOUNT_TYPE"]="pvc"
     ["CLAW_STORAGE_SIZE"]="1Gi"
     ["COLLECT_LOG_MASK_ENABLED"]="false"
@@ -119,12 +126,9 @@ declare -A DEPLOY_VARS=(
     ["ENABLE_EXTERNAL_PVC"]="false"
     ["ENABLE_EXTERNAL_RABBITMQ"]="false"
     ["ENABLE_EXTERNAL_REDIS"]="false"
-    ["USER_WEB_MODE"]=""
-    ["LOGIN_AUTH_SIMULATE"]="true"
-    ["LOGIN_AUTH_SIMULATE_AVAILABLE"]="true"
+    ["JIUWENSWARM_EDITION"]="enterprise"
     ["USER_WEB_IDP_TARGET"]=""
     ["USER_WEB_MANAGER_TARGET"]=""
-    ["ENABLE_USER_WEB_EMBEDDING"]="false"
     ["FLUENT_BIT_NAME"]="fluent-bit"
     ["FLUENT_BIT_IMAGE"]="fluent/fluent-bit:3.0.0"
     ["FUNC_SVC_NAME"]="0@jiuwen@clawtest"
@@ -142,7 +146,6 @@ declare -A DEPLOY_VARS=(
     ["LOG_TO_FILE_ENABLED"]="true"
     ["GATEWAY_NAME"]="jiuwenclaw-gateway"
     ["GATEWAY_REPLICAS"]="1"
-    ["GATEWAY_SQLITE_PATH"]="gateway.db"
     ["IS_UP_MANAGER_WEB"]="true"
     ["IDENTITY_NAME"]="jiuwenclaw-identity"
     ["IDENTITY_REST_PORT"]="8770"
@@ -158,6 +161,10 @@ declare -A DEPLOY_VARS=(
     ["JINA_READER_IMAGE"]="ghcr.1ms.run/jina-ai/reader:latest"
     ["JINA_READER_ENDPOINT"]="https://r.jinaai.cn"
     ["JINA_READER_NUM"]="2"
+    ["PROXY_NAME"]="proxy"
+    ["PROXY_IMAGE"]="nginx:alpine"
+    ["PROXY_PORT"]="18080"
+    ["PROXY_UPSTREAM"]=""
     ["FLUENT_BIT_IMAGE"]="fluent/fluent-bit:3.0.0"
     ["MANAGER_REST_PORT"]="8765"
     ["MANAGER_SERVER_NAME"]="jiuwenclaw-manager-server"
@@ -213,6 +220,7 @@ declare -A DEPLOY_VARS=(
     ["REDIS_MODE"]="standalone"
     ["RENDER_ONLY"]="false"
     ["SECRET_CM_NAME"]="jiuwenclaw-secret-configmap"
+    ["SKILL_AUTHORIZATION_ENABLED"]="false"
     ["TIMEZONE"]="Asia/Shanghai"
     ["VECTOR_NAME"]="vector-receiver"
     ["VECTOR_IMAGE"]="timberio/vector:0.40.0-alpine"
@@ -232,6 +240,20 @@ declare -A DEPLOY_VARS=(
     ["AGENT_RUNTIME_LOG_LEVEL"]="INFO"
     ["WS_ALLOWED_ORIGINS"]=""
     ["WS_ORIGIN_CHECK_ENABLED"]="false"
+
+    ["AGENT_SERVER_HOME"]="/home/app"
+    ["AGENT_SERVER_NAME"]="jiuwenclaw-agentserver"
+    ["AGENT_SERVER_PORT"]="8766"
+    ["AGENT_SERVER_SERVICE_CONCURRENCY"]="10"
+    ["AGENT_SERVER_SESSION_CONCURRENCY"]="10"
+    ["AGENT_SERVER_SESSION_TTL"]="60"
+    ["GATEWAY_WEB_SESSION_STORAGE"]="remote"
+    ["AGENT_SERVER_REACT_MAX_ITER"]="10"
+    ["AGENT_SERVER_ENV_CM_NAME"]="jiuwenclaw-agentserver-env"
+    ["JIUWENBOX_NAME"]="jiuwenbox"
+    ["JIUWENBOX_PORT"]="8321"
+    ["JIUWENBOX_HOME"]="/home/app"
+    ["APPLY_PATCH"]="false"
 )
 
 declare -A OYR_COMPONENTS=(

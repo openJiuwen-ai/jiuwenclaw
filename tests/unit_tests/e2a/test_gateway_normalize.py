@@ -82,12 +82,32 @@ def test_envelope_from_dict_preserves_officeclaw_tenant_ids():
     assert req.service_id == "default"
 
 
-def test_envelope_from_dict_derives_agent_id_from_agent_ref():
+def test_envelope_from_dict_does_not_derive_agent_id_from_agent_ref():
+    """agent_ref.id 是路由维，不能提升为租户 agent_id。"""
     env = E2AEnvelope.from_dict(
         {
             "request_id": "r-agent-ref",
             "channel_id": "officeclaw",
             "agent_ref": {"mode": "code", "id": "office"},
+            "params": {"query": "hi"},
+            "is_stream": True,
+            "method": "chat.send",
+        }
+    )
+    assert env.agent_ref == {"mode": "code", "id": "office"}
+    assert env.agent_id is None
+    req = e2a_to_agent_request(env)
+    assert req.agent_id is None
+    assert req.agent_ref == {"mode": "code", "id": "office"}
+
+
+def test_envelope_from_dict_keeps_explicit_top_level_agent_id():
+    env = E2AEnvelope.from_dict(
+        {
+            "request_id": "r-agent-top",
+            "channel_id": "officeclaw",
+            "agent_id": "office",
+            "agent_ref": {"mode": "code", "id": "default"},
             "params": {"query": "hi"},
             "is_stream": True,
             "method": "chat.send",
@@ -138,6 +158,7 @@ def test_e2a_to_agent_request_roundtrip():
 
 
 def test_web_transport_scope_is_bound_to_agent_params():
+    """Web：业务 params 不承载 routing；user_id 顶层，group/bot 在 metadata.routing。"""
     env = E2AEnvelope.from_dict(
         {
             "request_id": "web-scope",
@@ -151,21 +172,32 @@ def test_web_transport_scope_is_bound_to_agent_params():
                 "group_id": "payload-group",
             },
             "metadata": {
+                "user_id": "resolved-user",
+                "routing": {
+                    "group_id": "group-1",
+                    "bot_id": "bot-1",
+                },
                 "query": {
                     "user_id": ["query-user"],
                     "group_id": ["group-1"],
                     "bot_id": ["bot-1"],
-                }
+                },
             },
         }
     )
 
     req = e2a_to_agent_request(env)
 
-    assert req.params["user_id"] == "resolved-user"
-    assert req.params["group_id"] == "group-1"
-    assert req.params["bot_id"] == "bot-1"
+    # 业务 params 原样保留，不把 handshake routing 写入 params。
+    assert req.params["user_id"] == "payload-user"
+    assert req.params["group_id"] == "payload-group"
     assert req.params["content"] == "hello"
+    assert req.metadata is not None
+    assert req.metadata["user_id"] == "resolved-user"
+    assert req.metadata["routing"] == {
+        "group_id": "group-1",
+        "bot_id": "bot-1",
+    }
 
 
 def test_message_to_e2a_or_fallback_preserves_user_id():

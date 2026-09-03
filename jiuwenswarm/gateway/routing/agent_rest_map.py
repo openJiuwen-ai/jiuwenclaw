@@ -118,8 +118,16 @@ _ROUTE_ROWS: tuple[tuple[str, str, str], ...] = (
     ("skills.teamskillshub.pack", "POST", "/skills/teamskillshub/actions/pack"),
     ("skills.teamskillshub.publish", "POST", "/skills/teamskillshub/actions/publish"),
     ("skills.teamskillshub.delete", "POST", "/skills/teamskillshub/actions/delete"),
+    ("skills.source.providers", "GET", "/skills/sources"),
+    ("skills.source.search", "GET", "/skills/sources/search"),
+    ("skills.source.install", "POST", "/skills/sources/install"),
+    ("skills.updates.check", "GET", "/skills/updates"),
+    ("skills.update", "POST", "/skills/actions/update"),
+    ("skills.enterprise.list", "GET", "/skills/enterprise"),
     ("skills.enterprise.install", "POST", "/skills/enterprise/install"),
     ("skills.enterprise.uninstall", "POST", "/skills/enterprise/actions/uninstall"),
+    ("skills.enterprise.source.providers", "GET", "/skills/enterprise/sources"),
+    ("skills.enterprise.source.search", "GET", "/skills/enterprise/sources/search"),
     ("skills.get", "GET", "/skills/{name}"),
     ("skills.uninstall", "DELETE", "/skills/{name}"),
     ("skills.toggle", "POST", "/skills/{name}/actions/toggle"),
@@ -236,6 +244,20 @@ def normalize_agent_http_base(uri: str) -> str:
 
 
 def identity_headers(envelope: E2AEnvelope, *, accept: str) -> dict[str, str]:
+    """组装 REST 身份头。
+
+    REST body 只含业务 ``params``，不含整封 E2A；因此顶层 ``user_id`` 与
+    ``channel_context.routing``（``group_id`` / ``bot_id`` / ``gateway_id``）
+    必须经 ``X-*`` 头传到 Agent，由 Agent HTTP 入口重建。
+
+    企业租户顶层字段同理：``service_id`` / ``agent_id`` / ``workspace_key``
+    （Gateway ``apply_invoke_ids_to_envelope`` 写入）经
+    ``X-Service-Id`` / ``X-Agent-Id`` / ``X-Workspace-Key`` 透传。
+
+    ``gateway_id`` 仅透传保留；Agent 业务（如企业配置 ``RoutingContext``）当前不消费。
+    """
+    from jiuwenswarm.common.request_identity import web_routing_identity
+
     headers = {
         "X-Request-Id": str(envelope.request_id or ""),
         "X-Channel-Id": str(envelope.channel or "web"),
@@ -244,8 +266,29 @@ def identity_headers(envelope: E2AEnvelope, *, accept: str) -> dict[str, str]:
     session_id = envelope.session_id or (envelope.params or {}).get("session_id")
     if session_id:
         headers["X-Session-Id"] = str(session_id)
-    if envelope.user_id:
-        headers["X-User-Id"] = str(envelope.user_id)
+    identity = web_routing_identity(
+        envelope.channel_context if isinstance(envelope.channel_context, dict) else None
+    )
+    user_id = envelope.user_id or identity.get("user_id")
+    if user_id:
+        headers["X-User-Id"] = str(user_id)
+    for field, header_name in (
+        ("group_id", "X-Group-Id"),
+        ("bot_id", "X-Bot-Id"),
+        ("gateway_id", "X-Gateway-Id"),
+    ):
+        value = identity.get(field)
+        if value:
+            headers[header_name] = value
+    for attr, header_name in (
+        ("service_id", "X-Service-Id"),
+        ("agent_id", "X-Agent-Id"),
+        ("workspace_key", "X-Workspace-Key"),
+    ):
+        value = getattr(envelope, attr, None)
+        text = str(value).strip() if value is not None else ""
+        if text:
+            headers[header_name] = text
     return headers
 
 

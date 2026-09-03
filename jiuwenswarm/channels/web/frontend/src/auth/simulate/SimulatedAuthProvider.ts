@@ -3,13 +3,13 @@ import { parseRuntimeScope } from '../../services/runtimeScope';
 import type { EnterpriseAuthProvider } from '../types';
 
 const DEFAULTS = {
-  userId: 'debug-user',
+  userId: 'default',
   displayName: 'Debug User',
-  groupId: 'debug-group',
+  groupId: 'default',
   groupName: 'Debug Organization',
   gatewayId: 'debug-gateway',
   gatewayName: 'Debug Gateway',
-  botId: 'debug-agent',
+  botId: 'default',
   botName: 'Debug Agent',
 } as const;
 
@@ -38,7 +38,10 @@ export const simulatedAuthProvider: EnterpriseAuthProvider = {
   id: 'simulate',
   startupMessage: '【登录认证模拟调试模式已开启】使用默认用户、组织、组网和 Agent 候选值',
   isAuthenticated: () => true,
-  redirectToLogin: () => window.location.replace(entryPath()),
+  redirectToLogin: () => {
+    window.location.replace(entryPath());
+    return true;
+  },
   getCurrentUser: async () => buildSimulatedEnterpriseContext(window.location.search).user,
   listOrganizations: async () => buildSimulatedEnterpriseContext(window.location.search).orgs,
   listGateways: async () => buildSimulatedEnterpriseContext(window.location.search).gateways,

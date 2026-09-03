@@ -6,6 +6,14 @@ from openjiuwen.core.single_agent.rail.base import ToolCallInputs
 from openjiuwen.harness.rails.interrupt.ask_user_rail import AskUserRequest
 from jiuwenswarm.agents.harness.common.rails.stream_event_rail import (
     JiuSwarmStreamEventRail,
+    _bind_skill_turbo_outer_todo_token,
+    _reset_skill_turbo_outer_todo_token,
+)
+from jiuwenswarm.agents.harness.common.rails.task_execution_rail import (
+    SKILL_TURBO_OUTER_TODO_ACTIVE_EXTRA_KEY,
+)
+from jiuwenswarm.server.runtime.skill_turbo.skill_turbo_tools import (
+    get_skill_turbo_outer_todo_active,
 )
 
 
@@ -48,6 +56,23 @@ class _TestRail(JiuSwarmStreamEventRail):
 
     async def emit_context_usage(self, ctx):
         await self._emit_context_usage(ctx)
+
+
+@pytest.mark.parametrize("active", [True, False])
+def test_outer_todo_display_ownership_rebinds_into_tool_context(
+    active: bool,
+) -> None:
+    ctx = SimpleNamespace(
+        extra={SKILL_TURBO_OUTER_TODO_ACTIVE_EXTRA_KEY: active}
+    )
+
+    _bind_skill_turbo_outer_todo_token(ctx)
+    try:
+        assert get_skill_turbo_outer_todo_active() is active
+    finally:
+        _reset_skill_turbo_outer_todo_token(ctx)
+
+    assert get_skill_turbo_outer_todo_active() is None
 
 
 @pytest.mark.asyncio
@@ -196,8 +221,10 @@ async def test_ask_user_interrupt_emits_question_event_from_tool_args():
 
 
 @pytest.mark.asyncio
-async def test_skill_turbo_hitl_emits_ask_user_with_outer_request_id():
-    """Nested ask_user questions, but resume key is outer skill_acceleration_exec id."""
+async def test_skill_turbo_hitl_emits_ask_user_with_inner_request_id():
+    """Nested ask_user questions use the inner ask_user tool_call.id as
+    request_id, so sequential ask_user cards are not conflated by the
+    frontend (which keys cards on requestId)."""
     class ToolInterruptException(Exception):
         def __init__(self):
             super().__init__()
@@ -240,19 +267,19 @@ async def test_skill_turbo_hitl_emits_ask_user_with_outer_request_id():
     assert len(session.outputs) == 1
     output = session.outputs[0]
     assert output.type == "chat.ask_user_question"
-    assert output.payload["request_id"] == "call_c2967f3aec5c412583a203b9"
+    assert output.payload["request_id"] == "skill_turbo-tc-ask_user-54ee111d-0"
     assert output.payload["source"] == "ask_user_interrupt"
     assert output.payload["questions"][0]["question"] == "需要多少页？"
 
 
 @pytest.mark.asyncio
-async def test_skill_turbo_hitl_skips_emit_when_outer_tool_call_missing(monkeypatch):
-    """Without outer harness id, do not emit a nested ask_user request_id."""
+async def test_skill_turbo_hitl_skips_emit_when_inner_request_id_missing(monkeypatch):
+    """Without inner ask_user request_id, do not emit a question card."""
     class ToolInterruptException(Exception):
         def __init__(self):
             super().__init__()
             self.request = SimpleNamespace(
-                tool_call_id="skill_turbo-tc-ask_user-54ee111d-0",
+                tool_call_id="",
                 tool_name="ask_user",
                 tool_args={
                     "questions": [
@@ -264,30 +291,9 @@ async def test_skill_turbo_hitl_skips_emit_when_outer_tool_call_missing(monkeypa
                     ]
                 },
             )
-            self.tool_call = SimpleNamespace(
-                id="skill_turbo-tc-ask_user-54ee111d-0",
-                name="ask_user",
-                arguments={
-                    "questions": [
-                        {
-                            "question": "需要多少页？",
-                            "header": "页数",
-                            "options": [{"label": "10页", "description": ""}],
-                        }
-                    ]
-                },
-            )
+            self.tool_call = None
 
     session = _FakeSession()
-    warnings: list[str] = []
-
-    def _capture_warning(msg, *args, **kwargs):
-        warnings.append(msg % args if args else str(msg))
-
-    monkeypatch.setattr(
-        "jiuwenswarm.agents.harness.common.rails.stream_event_rail.logger.warning",
-        _capture_warning,
-    )
 
     await JiuSwarmStreamEventRail._emit_skill_turbo_ask_user_question(
         session,
@@ -296,10 +302,6 @@ async def test_skill_turbo_hitl_skips_emit_when_outer_tool_call_missing(monkeypa
     )
 
     assert session.outputs == []
-    assert any(
-        "outer skill_acceleration_exec tool_call.id unavailable" in message
-        for message in warnings
-    )
 
 
 @pytest.mark.asyncio

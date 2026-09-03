@@ -148,7 +148,7 @@ class FileCronJobStore:
         async with self._lock:
             return await asyncio.to_thread(self._call_under_file_lock, fn)
 
-    async def list_jobs(self) -> list[CronJob]:
+    async def list_jobs(self, *, filters: dict[str, Any] | None = None) -> list[CronJob]:
         # 惰性迁移:在同一个锁内 read + 推断缺 work_mode 的老 job + writeback,
         # 替代启动迁移 ``migrate_legacy_jobs_at_startup``。
         # 已迁移过的系统 jobs 全部 work_mode 合法,``needs_migration=False``
@@ -207,7 +207,22 @@ class FileCronJobStore:
                     continue
             return jobs
 
-        return sort_cron_jobs(await self._run_locked(_body))
+        jobs = sort_cron_jobs(await self._run_locked(_body))
+        # 与 CronJobRepository / GatewayDbCronJobStore 对齐：企业路径会传
+        # filters={group_id, bot_id, user_id}，文件 store 无 DB 列过滤，内存过滤。
+        raw_filters = filters or {}
+        route_filters: dict[str, str] = {}
+        for key in ("group_id", "bot_id", "user_id"):
+            val = raw_filters.get(key)
+            if isinstance(val, str) and val.strip():
+                route_filters[key] = val.strip()
+        if not route_filters:
+            return jobs
+        matched: list[CronJob] = []
+        for job in jobs:
+            if all(getattr(job, key, None) == value for key, value in route_filters.items()):
+                matched.append(job)
+        return matched
 
     async def get_job(self, job_id: str) -> CronJob | None:
         job_id = str(job_id or "").strip()
@@ -240,6 +255,9 @@ class FileCronJobStore:
         work_mode: str = DEFAULT_WEB_WORK_MODE,
         service_id: str | None = None,
         agent_id: str | None = None,
+        group_id: str | None = None,
+        bot_id: str | None = None,
+        user_id: str | None = None,
     ) -> CronJob:
         job = build_new_cron_job(
             job_id=job_id,
@@ -259,6 +277,9 @@ class FileCronJobStore:
             model_name=model_name,
             app_id=app_id,
             work_mode=work_mode,
+            group_id=group_id,
+            bot_id=bot_id,
+            user_id=user_id,
         )
         tenant_sid = str(service_id or "default").strip() or "default"
         tenant_aid = str(agent_id or "default").strip() or "default"

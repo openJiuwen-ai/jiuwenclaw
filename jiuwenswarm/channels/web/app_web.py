@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import errno
 import http.client
+import io
 import json
 import logging
 import mimetypes
@@ -35,6 +36,7 @@ parse_dotenv_early("jiuwenswarm-web")
 from jiuwenswarm.agents.harness.common.tools.ssl_config import get_insecure_ssl_context, get_ssl_verify
 from jiuwenswarm.common.debug_dump import install_async_dump_handler
 from jiuwenswarm.common.ws_diagnostics import describe_ws_exception, format_ws_diagnostics
+from jiuwenswarm.common.local_env_config import is_enterprise
 from jiuwenswarm.common.utils import (
     get_logs_dir,
     get_root_dir,
@@ -70,25 +72,18 @@ def _default_dist_dir() -> Path:
 
 def _inject_user_web_runtime_config(
     document: str,
-    mode: str,
     login_auth_simulate: bool = True,
-    login_auth_simulate_available: bool = True,
+    web_transport: str = "websocket",
 ) -> str:
-    """Inject runtime mode values without modifying JavaScript property names."""
+    """Inject runtime edition and login-auth flags into index.html."""
+    edition = "enterprise" if is_enterprise() else "personal"
     return (
-        document.replace("__JIUWEN_USER_WEB_MODE_VALUE__", mode)
-        .replace(
-            "__JIUWEN_USER_WEB_EMBEDDING_VALUE__",
-            "true" if mode == "enterprise" else "false",
-        )
+        document.replace("__JIUWENSWARM_EDITION_VALUE__", edition)
         .replace(
             "__JIUWEN_LOGIN_AUTH_SIMULATE_VALUE__",
             "true" if login_auth_simulate else "false",
         )
-        .replace(
-            "__JIUWEN_LOGIN_AUTH_SIMULATE_AVAILABLE_VALUE__",
-            "true" if login_auth_simulate_available else "false",
-        )
+        .replace("__JIUWEN_WEB_TRANSPORT_VALUE__", web_transport)
     )
 
 
@@ -101,6 +96,13 @@ def _parse_login_auth_simulate(raw: str | None) -> bool:
     raise ValueError(
         f"LOGIN_AUTH_SIMULATE 配置非法：期望 true 或 false，实际为 {raw!r}"
     )
+
+
+def _parse_web_transport(raw: str | None) -> str:
+    value = (raw or "").strip().lower()
+    if value in ("http", "a2"):
+        return "http"
+    return "websocket"
 
 
 def _probe_http_service(
@@ -157,10 +159,8 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
     idp_target = ""
     manager_api_target = ""
     ws_disable_compress = False
-    embedding_enabled = False
-    user_web_mode = "personal"
     login_auth_simulate = True
-    login_auth_simulate_available = True
+    web_transport = "websocket"
     logger = logging.getLogger(__name__)
 
     _HOP_BY_HOP_HEADERS = {
@@ -175,6 +175,7 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
     }
     _WS_LOG_MAX_CHARS = 2000
     _HTTP_PROXY_TIMEOUT = 30
+    _PROXY_STREAM_CHUNK = 65536
     _WS_CONNECT_TIMEOUT = 10
     _WS_SELECT_TIMEOUT = 60
     _WS_RECV_BUFFER = 65536
@@ -383,7 +384,6 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
 
             conn.request(self.command, self.path, body=body, headers=forward_headers)
             resp = conn.getresponse()
-            resp_body = resp.read()
 
             self.send_response(resp.status, resp.reason)
             for key, value in resp.getheaders():
@@ -391,11 +391,29 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
                     continue
                 self.send_header(key, value)
             self.end_headers()
-            if self.command != "HEAD":
-                self.wfile.write(resp_body)
+            if self.command == "HEAD":
+                return
+            # 流式泵送（read1 + 逐块 flush）：SSE（chat.delta / history.message）的
+            # 实时性依赖 body 增量到达。此前 resp.read() 整段读完才回包——响应头
+            # 和全部帧推迟到上游流结束，浏览器把 8s 的流式回复在流结束时一次性
+            # 收到，既丢失流式渲染，又让响应头超过前端 15s 请求超时（触发
+            # REQUEST_TIMEOUT → 前端自动 interrupt）。
+            # 注意必须用 read1：read(65536) 会跨 chunk 凑满 64KB 才返回，SSE 小帧
+            # 永远凑不满，等于仍然整段缓冲。HTTP/1.0 下无 Content-Length 的响应
+            # 由连接关闭定界（SSE 场景）。
+            while True:
+                chunk = resp.read1(self._PROXY_STREAM_CHUNK)
+                if not chunk:
+                    break
+                self.wfile.write(chunk)
+                self.wfile.flush()
         except Exception as exc:  # noqa: BLE001
             self.log_error("proxy http error: %s", exc)
-            self.send_error(502, "proxy http error")
+            try:
+                self.send_error(502, "proxy http error")
+            except Exception:  # noqa: BLE001
+                # 响应头已发出（流中断）：无法再回 502，断开连接由关闭定界
+                self.close_connection = True
         finally:
             conn.close()
 
@@ -692,12 +710,14 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
             index = Path(self.directory or os.getcwd()) / "index.html"
             body = _inject_user_web_runtime_config(
                 index.read_text(encoding="utf-8"),
-                self.user_web_mode,
                 self.login_auth_simulate,
-                self.login_auth_simulate_available,
+                self.web_transport,
             ).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
+            # 运行时配置已逐请求注入 index.html，必须禁止缓存，
+            # 否则浏览器会复用含过期/跨用户配置的旧响应。
+            self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
@@ -750,8 +770,23 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
         self.logger.error("%s - %s", self.address_string(), format % args)
 
     def _is_document_request(self) -> bool:
+        # 与上游一致：仅 Accept 含 text/html 的请求视为文档请求，磁盘上不存在的
+        # SPA 子路由也按文档处理（由 do_GET 注入 index.html）。
+        # Accept 缺失（如 IAB 首次导航）的 root 请求不走这里，改由 send_head
+        # 对 index.html 逐请求注入运行时配置兜底，行为不回退。
         path = urlparse(self.path).path
-        return path in ("/", "/index.html") and "text/html" in self.headers.get("Accept", "")
+        if "text/html" not in self.headers.get("Accept", ""):
+            return False
+        if path in ("/", "/index.html"):
+            return True
+        rel_path = unquote(path).lstrip("/")
+        if not rel_path:
+            return True
+        base_dir = Path(self.directory or os.getcwd()).resolve()
+        target = (base_dir / rel_path).resolve()
+        if os.path.commonpath([str(base_dir), str(target)]) != str(base_dir):
+            return False
+        return not target.exists()
 
     def send_head(self):
         parsed = urlparse(self.path)
@@ -763,7 +798,64 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
         in_base = os.path.commonpath([str(base_dir), str(target)]) == str(base_dir)
 
         if in_base and target.exists():
+            if target.name == "index.html":
+                # Accept 缺失（如 IAB 首次导航）时 _is_document_request 为 False
+                # 走到这里：index.html 必须逐请求注入运行时配置，禁止裸发。
+                body = _inject_user_web_runtime_config(
+                    target.read_text(encoding="utf-8"),
+                    self.login_auth_simulate,
+                    self.web_transport,
+                ).encode("utf-8")
+                f = io.BytesIO(body)
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header(
+                    "Cache-Control", "no-cache, no-store, must-revalidate"
+                )
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                return f
             return super().send_head()
+
+        # Vite base:'./' produces relative asset URLs (./assets/...). When the
+        # SPA route is a sub-path (e.g. /chat/new), the browser resolves these
+        # to /chat/assets/... which don't exist under dist/. Strip leading path
+        # segments and retry from the dist root before falling back to index.html.
+        static_exts = (".js", ".css", ".svg", ".png", ".jpg", ".jpeg", ".ico",
+                       ".webp", ".gif", ".woff", ".woff2", ".ttf", ".eot",
+                       ".map", ".json", ".webmanifest")
+        if req_path.endswith(static_exts) and "/" in rel_path:
+            basename = rel_path.rsplit("/", 1)[-1]
+            # Try progressively shorter prefixes (e.g. chat/assets/x.js ->
+            # assets/x.js -> x.js).
+            parts = rel_path.split("/")
+            for i in range(1, len(parts)):
+                candidate_rel = "/".join(parts[i:])
+                candidate = (base_dir / candidate_rel).resolve()
+                cand_in_base = os.path.commonpath(
+                    [str(base_dir), str(candidate)]
+                ) == str(base_dir)
+                if cand_in_base and candidate.exists():
+                    self.path = "/" + candidate_rel
+                    return super().send_head()
+
+        # SPA fallback: serve index.html with runtime config injected.
+        index_path = base_dir / "index.html"
+        if index_path.exists():
+            body = _inject_user_web_runtime_config(
+                index_path.read_text(encoding="utf-8"),
+                self.login_auth_simulate,
+                self.web_transport,
+            ).encode("utf-8")
+            f = io.BytesIO(body)
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            # 运行时配置已逐请求注入 index.html，必须禁止缓存，
+            # 否则浏览器会复用含过期/跨用户配置的旧响应。
+            self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            return f
 
         self.path = "/index.html"
         return super().send_head()
@@ -925,30 +1017,17 @@ def main() -> None:
     _ConfiguredHandler.ws_target = ws_target
     _ConfiguredHandler.idp_target = os.getenv("USER_WEB_IDP_TARGET", "").strip()
     _ConfiguredHandler.manager_api_target = os.getenv("USER_WEB_MANAGER_TARGET", "").strip()
-    configured_mode = os.getenv("USER_WEB_MODE", "").strip().lower()
-    if configured_mode not in {"personal", "enterprise"}:
-        legacy_embedding = os.getenv("ENABLE_USER_WEB_EMBEDDING", "")
-        configured_mode = "enterprise" if legacy_embedding.strip().lower() == "true" else "personal"
-    _ConfiguredHandler.user_web_mode = configured_mode
+    enterprise = is_enterprise()
     login_auth_simulate_raw = os.getenv("LOGIN_AUTH_SIMULATE")
-    login_auth_simulate_available_raw = os.getenv("LOGIN_AUTH_SIMULATE_AVAILABLE")
     try:
         login_auth_simulate = _parse_login_auth_simulate(
             login_auth_simulate_raw
         )
-        login_auth_simulate_available = _parse_login_auth_simulate(
-            login_auth_simulate_available_raw
-        )
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
     _ConfiguredHandler.login_auth_simulate = login_auth_simulate
-    _ConfiguredHandler.login_auth_simulate_available = login_auth_simulate_available
-    if configured_mode == "enterprise" and login_auth_simulate and not login_auth_simulate_available:
-        raise SystemExit(
-            "配置冲突：LOGIN_AUTH_SIMULATE=true，但当前客户交付制品未包含登录认证模拟插件；"
-            "请设置 LOGIN_AUTH_SIMULATE=false 并接入 manager ID认证服务"
-        )
-    _ConfiguredHandler.embedding_enabled = configured_mode == "enterprise"
+    web_transport = _parse_web_transport(os.getenv("WEB_TRANSPORT"))
+    _ConfiguredHandler.web_transport = web_transport
     _ConfiguredHandler.web_http_target = web_http_target
     _ConfiguredHandler.ws_disable_compress = args.ws_disable_compress
     _ConfiguredHandler.logger = logger
@@ -960,12 +1039,12 @@ def main() -> None:
         logger.info(
             "[jiuwenswarm-web] LOGIN_AUTH_SIMULATE 未配置，按默认值 true 启用登录认证模拟调试"
         )
-    if configured_mode == "personal":
+    if not enterprise:
         logger.info("[jiuwenswarm-web] personal 模式：跳过企业登录认证")
         if not login_auth_simulate:
             logger.warning(
-                "[jiuwenswarm-web] 配置冲突：USER_WEB_MODE=personal 时 "
-                "LOGIN_AUTH_SIMULATE 不参与登录流程，personal 模式仍跳过企业认证"
+                "[jiuwenswarm-web] 配置冲突：personal 模式仍将跳过企业登录认证；"
+                "LOGIN_AUTH_SIMULATE=false 不会启用正式身份认证"
             )
     elif login_auth_simulate:
         logger.info("[jiuwenswarm-web] 【登录认证模拟调试模式已开启】")

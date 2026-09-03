@@ -11,6 +11,7 @@ import { SkillPanel } from './components/SkillPanel';
 import { AgentPanel } from './components/AgentPanel/index';
 import { TeamPanel } from './components/TeamPanel';
 import { SessionsPanel } from './components/SessionsPanel';
+import { HistoryPanel } from './components/HistoryPanel';
 import CronPanel from './components/CronPanel';
 import { ToolPanel } from './components/ToolPanel';
 import { ConfigPanel } from './components/ConfigPanel';
@@ -27,7 +28,7 @@ import {
 import type { CodeReviewTarget } from './features/code-mode/types';
 
 import { FEATURE_APP_UPDATER_UI } from './featureFlags';
-import { ENTERPRISE_HIDDEN_NAV_ITEMS, isEnterpriseMode } from './edition';
+import { ENTERPRISE_HIDDEN_NAV_ITEMS, isEnterprise } from './edition';
 import {
   beginHistoryRestore,
   fetchHistoryPage,
@@ -102,7 +103,7 @@ function shouldPreviewModelSetupGuide(): boolean {
   return PREVIEW_MODEL_SETUP_GUIDE;
 }
 
-type MainNavKey = 'chat' | 'skills' | 'agents' | 'teams' | 'sessions' | 'cron' | 'channels' | 'extensions' | 'configpanel' | 'browserpanel' | 'updatepanel' | 'a2aingress';
+type MainNavKey = 'chat' | 'skills' | 'agents' | 'teams' | 'sessions' | 'history' | 'cron' | 'channels' | 'extensions' | 'configpanel' | 'browserpanel' | 'updatepanel' | 'a2aingress';
 
 type LoadedHistoryPage = {
   pageIdx: number;
@@ -271,7 +272,7 @@ function AppContent() {
     return 'new';
   });
 
-  const enterpriseMode = isEnterpriseMode();
+  const enterpriseMode = isEnterprise();
   const enterpriseBlockedNav = new Set<MainNavKey>(ENTERPRISE_HIDDEN_NAV_ITEMS);
   const [activeNav, setActiveNav] = useState<MainNavKey>('chat');
   const [serverConfig, setServerConfig] = useState<Record<string, unknown> | null>(null);
@@ -2209,7 +2210,7 @@ function AppContent() {
         isConnected={isConnected}
         onNewSession={handleNewSession}
         showNewSession={false}
-        hiddenNavItems={enterpriseMode ? ['sessions', ...ENTERPRISE_HIDDEN_NAV_ITEMS] : ['sessions']}
+        hiddenNavItems={enterpriseMode ? ['sessions', ...ENTERPRISE_HIDDEN_NAV_ITEMS] : ['sessions', 'history']}
         onMorePanelOpenChange={setSidebarMorePanelOpen}
       />
 
@@ -2346,7 +2347,21 @@ function AppContent() {
               isConnected={isConnected}
               isProcessing={isProcessing}
               onRestoreSession={handleRestoreSession}
+              isRemoteSessionStorage={
+                typeof serverConfig?.gateway_web_session_storage === 'string' &&
+                serverConfig.gateway_web_session_storage.trim().toLowerCase() === 'remote'
+              }
             />
+          </div>
+        )}
+        {enterpriseMode && (
+          <div
+            className={`app-section ${activeNav === 'history' ? '' : 'hidden'}`}
+            aria-hidden={activeNav !== 'history'}
+          >
+            {/* 企业版历史页保持挂载，切换导航时不丢失已加载的会话列表和详情。
+                个人版不挂载该旁路历史组件，维持原有个人版行为。 */}
+            <HistoryPanel />
           </div>
         )}
         {activeNav === 'cron' && (

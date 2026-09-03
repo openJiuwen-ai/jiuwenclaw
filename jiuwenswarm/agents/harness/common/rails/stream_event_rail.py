@@ -49,6 +49,9 @@ from jiuwenswarm.agents.harness.common.rails.read_file_validation import (
     is_read_file_tool,
     normalize_read_file_tool_outcome,
 )
+from jiuwenswarm.agents.harness.common.rails.task_execution_rail import (
+    SKILL_TURBO_OUTER_TODO_ACTIVE_EXTRA_KEY,
+)
 from jiuwenswarm.common.tool_display import (
     build_tool_display_name,
     extract_call_goal,
@@ -288,6 +291,7 @@ _SKILL_TURBO_METADATA_TOKEN_EXTRA_KEY = "_jiuwenswarm_skill_turbo_metadata_token
 _SKILL_TURBO_WORKSPACE_TOKEN_EXTRA_KEY = "_jiuwenswarm_skill_turbo_workspace_token"
 _SKILL_TURBO_INTERACTIVE_ASK_TOKEN_EXTRA_KEY = "_jiuwenswarm_skill_turbo_interactive_ask_token"
 _SKILL_TURBO_RESUME_ANSWERS_TOKEN_EXTRA_KEY = "_jiuwenswarm_skill_turbo_resume_answers_token"
+_SKILL_TURBO_OUTER_TODO_TOKEN_EXTRA_KEY = "_jiuwenswarm_skill_turbo_outer_todo_token"
 _SUBAGENT_PARENT_SESSION_TOKEN_EXTRA_KEY = "_jiuwenswarm_subagent_parent_session_token"
 
 
@@ -341,6 +345,29 @@ def _reset_skill_turbo_resume_answers_token(ctx: AgentCallbackContext) -> None:
             reset_skill_turbo_resume_answers,
         )
         reset_skill_turbo_resume_answers(token)
+
+
+def _reset_skill_turbo_outer_todo_token(ctx: AgentCallbackContext) -> None:
+    """Restore the display-ownership binding for this tool call."""
+    token = ctx.extra.pop(_SKILL_TURBO_OUTER_TODO_TOKEN_EXTRA_KEY, None)
+    if token is not None:
+        from jiuwenswarm.server.runtime.skill_turbo.skill_turbo_tools import (
+            reset_skill_turbo_outer_todo_active,
+        )
+        reset_skill_turbo_outer_todo_active(token)
+
+
+def _bind_skill_turbo_outer_todo_token(ctx: AgentCallbackContext) -> None:
+    """Rebind outer-todo display ownership into the tool context."""
+    active = ctx.extra.get(SKILL_TURBO_OUTER_TODO_ACTIVE_EXTRA_KEY)
+    if not isinstance(active, bool):
+        return
+    from jiuwenswarm.server.runtime.skill_turbo.skill_turbo_tools import (
+        set_skill_turbo_outer_todo_active,
+    )
+    ctx.extra[_SKILL_TURBO_OUTER_TODO_TOKEN_EXTRA_KEY] = (
+        set_skill_turbo_outer_todo_active(active)
+    )
 
 
 def _reset_subagent_parent_session_token(ctx: AgentCallbackContext) -> None:
@@ -948,6 +975,7 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
         _reset_skill_turbo_workspace_token(ctx)
         _reset_skill_turbo_interactive_ask_token(ctx)
         _reset_skill_turbo_resume_answers_token(ctx)
+        _reset_skill_turbo_outer_todo_token(ctx)
         _reset_subagent_parent_session_token(ctx)
 
     # ------------------------------------------------------------------
@@ -1210,6 +1238,8 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
                     exc_info=True,
                 )
 
+        _bind_skill_turbo_outer_todo_token(ctx)
+
         # SkillTurbo request metadata ContextVar 转绑：
         # 请求任务里 set_current_request_metadata 的绑定无法传播到本工具执行上下文，
         # 这里用 rail 上保存的副本重新绑定，供 skill_turbo 工具读取 session_id 等。
@@ -1276,6 +1306,7 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
     async def after_tool_call(self, ctx: AgentCallbackContext) -> None:
         _reset_subagent_parent_session_token(ctx)
         _reset_skill_turbo_resume_answers_token(ctx)
+        _reset_skill_turbo_outer_todo_token(ctx)
 
         session = ctx.session
         if session is None or not isinstance(ctx.inputs, ToolCallInputs):
@@ -1394,6 +1425,7 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
         _reset_skill_turbo_workspace_token(ctx)
         _reset_skill_turbo_interactive_ask_token(ctx)
         _reset_skill_turbo_resume_answers_token(ctx)
+        _reset_skill_turbo_outer_todo_token(ctx)
         _reset_subagent_parent_session_token(ctx)
         if ctx.context is not None:
             logger.info("[StreamEventRail] Attempting context repair after model exception")
@@ -1481,9 +1513,14 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
     ) -> None:
         """Emit chat.ask_user_question for SkillTurbo nested ask_user HITL.
 
-        Questions come from the inner ask_user tool_call; request_id is the
-        outer skill_acceleration_exec tool_call.id so OfficeClaw resume keeps
-        matching harness interrupt keys (e.g. call_c2967...).
+        request_id is the inner ask_user tool_call.id (unique per ask_user),
+        NOT the outer skill_acceleration_exec id. This ensures sequential
+        ask_user cards within the same skill_acceleration_exec have distinct
+        request_ids, so the frontend shows each as a separate card.
+
+        SkillTurbo resume (_resume_user_input_from_raw) extracts the user's
+        answer via ``next(iter(user_inputs.values()))`` — it ignores the key,
+        so using the inner ask_user id does not break resume.
         """
         inner_tc = getattr(skill_turbo_tic, "tool_call", None)
         payload = _ask_user_question_payload_from_interrupt(
@@ -1495,19 +1532,14 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
                 "[StreamEventRail] SkillTurbo HITL ask_user payload unavailable"
             )
             return
-        # OfficeClaw resume matches harness interrupt keys on the outer
-        # skill_acceleration_exec id. Emitting with the nested ask_user id is
-        # worse than skipping: the UI would show a question that cannot resume.
-        harness_id = str(getattr(outer_tool_call, "id", "") or "").strip()
-        if not harness_id:
+        inner_request_id = str(payload.get("request_id") or "").strip()
+        if not inner_request_id:
             logger.warning(
                 "[StreamEventRail] SkillTurbo HITL ask_user skipped: "
-                "outer skill_acceleration_exec tool_call.id unavailable "
-                "(would mismatch harness interrupt key); inner_request_id=%s",
-                payload.get("request_id"),
+                "inner ask_user request_id unavailable; harness_id=%s",
+                getattr(outer_tool_call, "id", ""),
             )
             return
-        payload["request_id"] = harness_id
         try:
             await session.write_stream(
                 OutputSchema(
@@ -1518,8 +1550,9 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
             )
             logger.info(
                 "[StreamEventRail] SkillTurbo HITL emitted chat.ask_user_question "
-                "request_id=%s",
-                payload.get("request_id"),
+                "request_id=%s harness_id=%s",
+                inner_request_id,
+                getattr(outer_tool_call, "id", ""),
             )
         except Exception:
             logger.debug(

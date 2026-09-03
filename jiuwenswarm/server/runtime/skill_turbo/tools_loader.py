@@ -132,7 +132,6 @@ async def load_all(ctx: ToolLoaderContext) -> list[Any]:
     # ─── openjiuwen 工具 ─────────────────────────────────────
     _register_group(tools, ctx, _load_oj_filesystem, "filesystem")
     _register_group(tools, ctx, _load_oj_bash, "bash")
-    _register_group(tools, ctx, _load_oj_code, "code")
 
     logger.info("[ToolsLoader] load_all done total=%d", len(tools))
     return tools
@@ -318,21 +317,6 @@ def _load_oj_bash(ctx: ToolLoaderContext) -> list[Any]:
 
     return [
         BashTool(
-            operation=ctx.sys_operation,
-            language=ctx.language,
-            agent_id=ctx.agent_id,
-        )
-    ]
-
-
-def _load_oj_code(ctx: ToolLoaderContext) -> list[Any]:
-    """Code 工具：构造前提是 sys_operation 存在。"""
-    if ctx.sys_operation is None:
-        return []
-    from openjiuwen.harness.tools.code import CodeTool
-
-    return [
-        CodeTool(
             operation=ctx.sys_operation,
             language=ctx.language,
             agent_id=ctx.agent_id,

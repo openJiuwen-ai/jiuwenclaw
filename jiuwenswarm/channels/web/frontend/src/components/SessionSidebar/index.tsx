@@ -22,10 +22,11 @@ import AgentDesignIcon from '../../assets/智能体.svg?react';
 import MoreDesignIcon from '../../assets/更多.svg?react';
 import { webRequest } from '../../services/webClient';
 import { useEnterpriseContext } from '../../services/enterpriseContext';
+import { isClickOutside } from './clickOutside';
 import { EditableCombobox } from './EditableCombobox';
 
 type MainNavKey =
-  'chat' | 'skills' | 'agents' | 'teams' | 'sessions' | 'cron' | 'channels' | 'extensions' | 'configpanel' | 'browserpanel' | 'updatepanel' | 'a2aingress';
+  'chat' | 'skills' | 'agents' | 'teams' | 'sessions' | 'history' | 'cron' | 'channels' | 'extensions' | 'configpanel' | 'browserpanel' | 'updatepanel' | 'a2aingress';
 
 interface SessionSidebarProps {
   activeNav: MainNavKey;
@@ -54,12 +55,23 @@ const teamNavIcon = (
   </svg>
 );
 
+const historyNavIcon = (
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.5}>
+    <path
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      d="M3 3v5h5M3.05 13A9 9 0 1 0 6 5.3L3 8"
+    />
+  </svg>
+);
+
 const mainNavItems: NavItem[] = [
   { key: 'chat', labelKey: 'nav.work', icon: <WorkIcon aria-hidden /> },
   { key: 'skills', labelKey: 'nav.skills', icon: <SkillDesignIcon aria-hidden /> },
   { key: 'channels', labelKey: 'nav.channels', icon: <ChannelIcon aria-hidden /> },
   { key: 'agents', labelKey: 'nav.agent', icon: <AgentDesignIcon aria-hidden /> },
   { key: 'teams', labelKey: 'nav.teams', icon: teamNavIcon },
+  { key: 'history', labelKey: 'nav.history', icon: historyNavIcon },
 ];
 
 const moreNavItems: NavItem[] = [
@@ -157,6 +169,8 @@ export function SessionSidebar({
   const settingsRef = useRef<HTMLButtonElement>(null);
   const enterprise = useEnterpriseContext();
   const [contextOpen, setContextOpen] = useState(false);
+  const contextButtonRef = useRef<HTMLButtonElement>(null);
+  const contextPanelRef = useRef<HTMLDivElement>(null);
 
   const handleNewSession = useCallback(() => {
     onNavigate('chat');
@@ -198,6 +212,19 @@ export function SessionSidebar({
     onMorePanelOpenChange?.(isMoreActive);
     return () => onMorePanelOpenChange?.(false);
   }, [isMoreActive, onMorePanelOpenChange]);
+
+  useEffect(() => {
+    if (!contextOpen) return;
+
+    const handleClickOutside = (event: MouseEvent) => {
+      if (isClickOutside(event.target as Node | null, [contextPanelRef.current, contextButtonRef.current])) {
+        setContextOpen(false);
+      }
+    };
+
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, [contextOpen]);
 
   return (
     <aside className="sidebar sidebar--icon-rail">
@@ -262,6 +289,7 @@ export function SessionSidebar({
 
       {enterprise && (
         <button
+          ref={contextButtonRef}
           type="button"
           className={`icon-rail-nav-item${contextOpen ? ' icon-rail-nav-item--active' : ''}`}
           onClick={() => setContextOpen(open => !open)}
@@ -273,7 +301,7 @@ export function SessionSidebar({
         </button>
       )}
       {enterprise && contextOpen && (
-        <div className="enterprise-context-popover">
+        <div ref={contextPanelRef} className="enterprise-context-popover">
           <div className="enterprise-context-popover__user">
             {enterprise.user.display_name || enterprise.user.user_id}
             <small>{enterprise.user.user_id}</small>

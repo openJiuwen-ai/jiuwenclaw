@@ -2,7 +2,7 @@ import { type ReactNode, useCallback, useEffect, useMemo, useState } from 'react
 import { isLoginAuthSimulateEnabled } from './auth/config';
 import { resolveEnterpriseAuthProvider } from './auth/providerRegistry';
 import { EnterpriseAuthError, type EnterpriseAuthProvider } from './auth/types';
-import { isEnterpriseMode } from './edition';
+import { isEnterprise } from './edition';
 import {
   EnterpriseContext,
   type EnterpriseAgent,
@@ -13,7 +13,7 @@ import {
 } from './services/enterpriseContext';
 import { parseRuntimeScope, setRuntimeScope } from './services/runtimeScope';
 
-type EntryPhase = 'loading' | 'ready' | 'empty' | 'error' | 'redirecting';
+type EntryPhase = 'loading' | 'ready' | 'empty' | 'error' | 'redirecting' | 'login-required';
 
 interface ContextCandidate {
   gateway: EnterpriseGateway;
@@ -76,7 +76,12 @@ async function resolveFirstContext(
 }
 
 function entryPath(): string {
-  return window.location.pathname.startsWith('/chat') ? '/chat/' : '/';
+  const pathname = window.location.pathname;
+  // 刷新落在具体会话路由上时必须保留原路径：引导完成后 activateContext 会
+  // replaceState 回本函数拼出的地址，若把 /chat/<sessionId> 折叠成 /chat/，
+  // App 挂载时就解析不到会话 id，刷新后历史不恢复（点侧栏才回来）。
+  if (/^\/chat\/[^/]+/.test(pathname)) return pathname;
+  return pathname.startsWith('/chat') ? '/chat/' : '/';
 }
 
 function contextUrl(userId: string, resolved: ResolvedContext, debugContext = false): string {
@@ -149,6 +154,7 @@ function errorText(error: unknown): string {
 function EntryStatus({ phase, error, onLogout }: { phase: EntryPhase; error: string; onLogout: () => void }) {
   const empty = phase === 'empty';
   const failed = phase === 'error';
+  const loginRequired = phase === 'login-required';
   return (
     <div className="enterprise-entry">
       <div className="enterprise-entry__glow" />
@@ -157,8 +163,26 @@ function EntryStatus({ phase, error, onLogout }: { phase: EntryPhase; error: str
           JIUWEN<span>CLAW</span>
         </div>
         <div className="enterprise-entry__eyebrow">ENTERPRISE WORKSPACE</div>
-        <h1>{empty ? '暂无可用 Agent' : failed ? '加载失败' : phase === 'redirecting' ? '正在前往登录页' : '正在加载工作空间'}</h1>
-        <p>{empty ? '当前账号没有可用的组织、组网和 Agent 组合，请联系管理员完成授权。' : failed ? error : '正在校验账号权限并选择一个可用 Agent。'}</p>
+        <h1>
+          {empty
+            ? '暂无可用 Agent'
+            : failed
+              ? '加载失败'
+              : loginRequired
+                ? '请从统一登录入口访问'
+                : phase === 'redirecting'
+                  ? '正在前往登录页'
+                  : '正在加载工作空间'}
+        </h1>
+        <p>
+          {empty
+            ? '当前账号没有可用的组织、组网和 Agent 组合，请联系管理员完成授权。'
+            : failed
+              ? error
+              : loginRequired
+                ? '当前 User Web 地址不提供登录页面，请访问正确的登录入口。'
+                : '正在校验账号权限并选择一个可用 Agent。'}
+        </p>
         {(empty || failed) && (
           <button type="button" className="enterprise-entry__button" onClick={onLogout}>
             返回登录页
@@ -170,7 +194,7 @@ function EntryStatus({ phase, error, onLogout }: { phase: EntryPhase; error: str
 }
 
 export function EnterpriseEntry({ children }: { children: ReactNode }) {
-  const enterprise = isEnterpriseMode();
+  const enterprise = isEnterprise();
   const simulateLogin = enterprise && isLoginAuthSimulateEnabled();
   const provider = useMemo(
     () => (enterprise ? resolveEnterpriseAuthProvider(simulateLogin) : null),
@@ -190,7 +214,7 @@ export function EnterpriseEntry({ children }: { children: ReactNode }) {
     if (!enterprise || !provider) return;
     console.info(provider.startupMessage);
     if (!provider.isAuthenticated()) {
-      provider.redirectToLogin();
+      if (!provider.redirectToLogin()) setPhase('login-required');
       return;
     }
 
@@ -229,7 +253,7 @@ export function EnterpriseEntry({ children }: { children: ReactNode }) {
       } catch (bootstrapError) {
         if (cancelled) return;
         if (bootstrapError instanceof EnterpriseAuthError && bootstrapError.status === 401) {
-          provider.redirectToLogin();
+          if (!provider.redirectToLogin()) setPhase('login-required');
           return;
         }
         setError(errorText(bootstrapError));
@@ -256,7 +280,7 @@ export function EnterpriseEntry({ children }: { children: ReactNode }) {
         activateContext(context.user.user_id, resolved, true);
       } catch (switchError) {
         if (switchError instanceof EnterpriseAuthError && switchError.status === 401) {
-          provider.redirectToLogin();
+          if (!provider.redirectToLogin()) setPhase('login-required');
           return;
         }
         setContextError(errorText(switchError));

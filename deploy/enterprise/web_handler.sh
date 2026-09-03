@@ -51,6 +51,20 @@ gen_web_file() {
         ]' -i "${file}"
     fi
 
+    if [[ "${DEPLOY_VARS["APPLY_PATCH"]}" == "false" ]]; then
+        yq eval '
+        select(.kind == "Deployment").spec.template.spec.containers[0].env += [
+            {
+                "name": "USER_WEB_IDP_TARGET",
+                "value": "'"${DEPLOY_VARS["USER_WEB_IDP_TARGET"]}"'"
+            },
+            {
+                "name": "USER_WEB_MANAGER_TARGET",
+                "value": "'"${DEPLOY_VARS["USER_WEB_MANAGER_TARGET"]}"'"
+            }
+        ]' -i "${file}"
+    fi
+
     add_resource_if_set "WEB" "${file}"
 
     # yq 追加资源配置时可能重复 env；Deployment strategic merge patch 不接受重复键，

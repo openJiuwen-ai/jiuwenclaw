@@ -136,7 +136,7 @@ async def test_generate_evolution_merge_version_fingerprint_gate(tmp_path, monke
     adapter._model = object()  # pylint: disable=protected-access
     adapter._config_cache = {"evolution": {"auto_save": True}}  # pylint: disable=protected-access
     monkeypatch.setattr(adapter, "_resolve_skill_dirs", lambda: [str(skills_dir)])
-    monkeypatch.setattr(adapter, "_bind_request_env_overlay", lambda: (None, None))
+    monkeypatch.setattr(adapter, "_bind_request_env_overlay", lambda: (None, None, None))
     monkeypatch.setattr(adapter, "_reset_request_env_bindings", lambda *_a, **_k: None)
     monkeypatch.setattr(adapter, "_resolve_runtime_language", lambda: "cn")
     monkeypatch.setattr(adapter, "_resolve_model_name", lambda: "test-model")
@@ -184,7 +184,7 @@ async def test_generate_evolution_merge_version_seeds_skill_path_trusted_dirs(
     adapter._model = object()  # pylint: disable=protected-access
     adapter._permission_rail = _Rail()  # pylint: disable=protected-access
     monkeypatch.setattr(adapter, "_resolve_skill_dirs", lambda: [str(skills_dir)])
-    monkeypatch.setattr(adapter, "_bind_request_env_overlay", lambda: (None, None))
+    monkeypatch.setattr(adapter, "_bind_request_env_overlay", lambda: (None, None, None))
     monkeypatch.setattr(adapter, "_reset_request_env_bindings", lambda *_a, **_k: None)
     monkeypatch.setattr(adapter, "_resolve_runtime_language", lambda: "cn")
     monkeypatch.setattr(adapter, "_resolve_model_name", lambda: "test-model")
@@ -425,7 +425,7 @@ async def test_generate_evolution_merge_version_accepts_office_claw_skill_path(
     adapter._instance = object()  # pylint: disable=protected-access
     adapter._model = object()  # pylint: disable=protected-access
     monkeypatch.setattr(adapter, "_resolve_skill_dirs", lambda: [str(workspace_skills)])
-    monkeypatch.setattr(adapter, "_bind_request_env_overlay", lambda: (None, None))
+    monkeypatch.setattr(adapter, "_bind_request_env_overlay", lambda: (None, None, None))
     monkeypatch.setattr(adapter, "_reset_request_env_bindings", lambda *_a, **_k: None)
     monkeypatch.setattr(adapter, "_resolve_runtime_language", lambda: "cn")
     monkeypatch.setattr(adapter, "_resolve_model_name", lambda: "test-model")

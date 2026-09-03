@@ -8,15 +8,19 @@ import inspect
 import logging
 from typing import Any
 
-from jiuwenswarm.common.request_identity import bind_web_routing_identity
+from jiuwenswarm.common.request_identity import (
+    merge_routing_into_params,
+    web_routing_identity,
+)
 from jiuwenswarm.common.schema.message import Message
 
 logger = logging.getLogger(__name__)
 
 # These methods are handled inside Gateway and therefore do not pass through
-# AgentServer's E2A normalization. Bind the same routing identity that HTTP
-# mapped routes already expose so WebSocket and HTTP have identical behavior.
+# AgentServer's E2A normalization. Local handlers only receive ``params``, so
+# merge ``metadata.routing`` into the handler params copy (not Message.params).
 _LOCAL_ROUTING_IDENTITY_PREFIXES = ("cron.", "skills.enterprise.")
+_LOCAL_ROUTING_IDENTITY_METHODS = frozenset({"models.list"})
 
 _ENTERPRISE_BLOCKED_EXACT = frozenset({
     "config.set", "config.save_all", "models.replace_all", "models.save",
@@ -24,7 +28,21 @@ _ENTERPRISE_BLOCKED_EXACT = frozenset({
     "updater.upgrade", "updater.reset_source", "updater.set_conf",
 })
 _ENTERPRISE_BLOCKED_PREFIXES = ("agents.", "teams.", "extensions.", "plugins.")
-_ENTERPRISE_SKILL_ALLOWED = frozenset({"skills.list", "skills.get", "skills.enterprise.list"})
+_ENTERPRISE_SKILL_ALLOWED = frozenset({
+    "skills.list",
+    "skills.get",
+    "skills.toggle",
+    "skills.source.providers",
+    "skills.source.search",
+    "skills.source.install",
+    "skills.updates.check",
+    "skills.update",
+    "skills.enterprise.list",
+    "skills.enterprise.install",
+    "skills.enterprise.uninstall",
+    "skills.enterprise.source.providers",
+    "skills.enterprise.source.search",
+})
 
 
 def is_enterprise_write_forbidden(method: str) -> bool:
@@ -71,9 +89,24 @@ async def dispatch_web_request(
         return
 
     handler = channel.rpc.method_handlers.get(method)
+    # 路由身份已由 WS/HTTP 入口写入 metadata.routing；此处只读、不再二次归一化。
+    routing = web_routing_identity(
+        user_message.metadata if isinstance(user_message.metadata, dict) else None
+    )
+    if not routing.get("bot_id"):
+        logger.warning(
+            "[WebChannel] missing bot_id in metadata.routing method=%s request_id=%s routing=%s",
+            method,
+            request_id,
+            routing,
+        )
     handler_params = params
-    if method.startswith(_LOCAL_ROUTING_IDENTITY_PREFIXES):
-        handler_params = bind_web_routing_identity(
+    if (
+        method in _LOCAL_ROUTING_IDENTITY_METHODS
+        or method.startswith(_LOCAL_ROUTING_IDENTITY_PREFIXES)
+    ):
+        # Gateway 本地 handler 只有 params：把 routing 合并进调用副本。
+        handler_params = merge_routing_into_params(
             params,
             user_message.metadata,
             override=True,

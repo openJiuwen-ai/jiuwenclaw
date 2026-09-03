@@ -1326,9 +1326,7 @@ def prepare_workspace(
     service_root.mkdir(parents=True, exist_ok=True)
     (service_root / ".logs").mkdir(parents=True, exist_ok=True)
 
-    agent_workspace = get_multi_tenant_user_workspace_dir("default", "default")
-    if agent_workspace is None:
-        raise RuntimeError("failed to resolve default multi-tenant workspace")
+    agent_workspace = get_multi_tenant_user_workspace_dir("default")
     agent_workspace.mkdir(parents=True, exist_ok=True)
     (agent_workspace / ".checkpoint").mkdir(parents=True, exist_ok=True)
     agent_root = agent_workspace / "agent"
@@ -1609,12 +1607,9 @@ def _resolve_paths(force=False) -> None:
     # 优先使用已初始化的用户工作区 (~/.jiuwenswarm)，
     # 保证源码运行与安装包运行后的读写路径完全一致。
     user_config_dir = workspace_dir / "config"
-    # 多租户路径：service_default/agent_default/agent/workspace
-    multi_tenant_workspace = get_multi_tenant_user_workspace_dir("default", "default")
-    if multi_tenant_workspace is not None:
-        user_workspace_dir = multi_tenant_workspace / "agent" / "workspace"
-    else:
-        user_workspace_dir = workspace_dir / "agent" / "workspace"
+    # 多租户路径：workspace_default/agent/workspace
+    multi_tenant_workspace = get_multi_tenant_user_workspace_dir("default")
+    user_workspace_dir = multi_tenant_workspace / "agent" / "workspace"
     if user_config_dir.exists():
         _root_dir = workspace_dir
         _config_dir = user_config_dir
@@ -1743,7 +1738,7 @@ def get_service_root_dir(service_id: str = "default") -> Path:
 def get_agent_root_dir() -> Path:
     """Get the agent root directory path (multi-tenant default).
 
-    Path: ``~/.jiuwenswarm/service_default/agent_default/agent/``
+    Path: ``~/.jiuwenswarm/workspace_default/agent/``
     (or the request-bound agent root when ContextVar is set).
     """
     try:
@@ -1754,7 +1749,7 @@ def get_agent_root_dir() -> Path:
             return bound
     except ImportError:
         logger.debug("tenant_context unavailable for agent root bind", exc_info=True)
-    return get_multi_tenant_user_workspace_dir("default", "default") / "agent"
+    return get_multi_tenant_user_workspace_dir("default") / "agent"
 
 
 def get_agent_root_relative_dir() -> Path:
@@ -1798,8 +1793,18 @@ def _normalize_tenant_id(value: str | None) -> str:
     return str(value or "").strip()
 
 
+def _require_workspace_key(workspace_key: str | None) -> str:
+    """Normalize and require non-empty ``workspace_key`` for ``workspace_{key}/`` paths."""
+    from jiuwenswarm.common.local_env_config import normalize_env_ns_id
+
+    wk = _normalize_tenant_id(workspace_key)
+    if not wk:
+        raise ValueError(f"workspace_key required: workspace_key={workspace_key!r}")
+    return normalize_env_ns_id(wk, default=wk)
+
+
 def _require_tenant_ids(service_id: str | None, agent_id: str | None) -> tuple[str, str]:
-    """Require non-empty ``service_id`` and ``agent_id`` for path construction."""
+    """Require non-empty ``service_id`` and ``agent_id`` (env/routing，非磁盘根)."""
     sid = _normalize_tenant_id(service_id)
     aid = _normalize_tenant_id(agent_id)
     if not sid or not aid:
@@ -1809,97 +1814,55 @@ def _require_tenant_ids(service_id: str | None, agent_id: str | None) -> tuple[s
     return sid, aid
 
 
-def get_multi_tenant_user_workspace_dir(
-    service_id: str | None,
-    agent_id: str | None = None,
-) -> Path | None:
+def _effective_workspace_key(workspace_key: str | None = None) -> str:
+    """Explicit ``workspace_key`` > bound key > ``default``."""
+    if workspace_key is not None:
+        return _require_workspace_key(workspace_key)
+    try:
+        from jiuwenswarm.server.runtime.tenant_context import get_bound_workspace_key
+    except ImportError:
+        return "default"
+
+    bound = get_bound_workspace_key()
+    if bound is not None:
+        return _require_workspace_key(bound)
+    return "default"
+
+
+def get_multi_tenant_user_workspace_dir(workspace_key: str) -> Path:
     """Get multi-tenant user workspace directory path.
 
-    Path format: ``~/.jiuwenswarm/service_{service_id}/agent_{agent_id}``
+    仅按 ``workspace_key`` 生成目录（与旧版 agentserver 一致）::
 
-    Aligns with test/jiuwenclaw and OfficeClaw on-disk layout
-    (e.g. ``service_default/agent_office``).
+        ~/.jiuwenswarm/workspace_{workspace_key}
     """
-    if not service_id and not agent_id:
-        return None
-    workspace_dir = get_user_workspace_dir()
-    workspace_dir = (
-        workspace_dir / f"service_{service_id}" if service_id else workspace_dir / "service"
-    )
-    workspace_dir = (
-        workspace_dir / f"agent_{agent_id}" if agent_id else workspace_dir / "agents"
-    )
-    return workspace_dir
+    wk = _require_workspace_key(workspace_key)
+    return get_user_workspace_dir() / f"workspace_{wk}"
 
 
-def resolve_tenant_env_ns(
-    service_id: str | None = None,
-    agent_id: str | None = None,
-) -> tuple[str, str]:
-    """Resolve ``(service_id, agent_id)``: explicit pair > bound env_ns > TypeError."""
-    from jiuwenswarm.common.local_env_config import (
-        get_bound_agent_env_ns,
-        normalize_env_ns_id,
-    )
-
-    if service_id is not None or agent_id is not None:
-        if service_id is None or agent_id is None:
-            raise TypeError(
-                "tenant scope requires both service_id and agent_id when either is passed"
-            )
-        sid = str(service_id).strip()
-        aid = str(agent_id).strip()
-        if not sid or not aid:
-            raise TypeError("tenant service_id/agent_id must be non-empty strings")
-        return normalize_env_ns_id(sid), normalize_env_ns_id(aid)
-    bound = get_bound_agent_env_ns()
-    if bound is not None:
-        return normalize_env_ns_id(bound[0]), normalize_env_ns_id(bound[1])
-    raise TypeError(
-        "tenant scope is required: pass service_id=... and agent_id=..., "
-        "or bind_agent_env_ns before resolving tenant paths"
-    )
-
-
-def get_tenant_agent_workspace_dir(
-    service_id: str | None = None,
-    agent_id: str | None = None,
-) -> Path:
-    """多租户 DeepAgent 工作区：``service_{sid}/agent_{aid}/agent/workspace``."""
-    sid, aid = resolve_tenant_env_ns(service_id, agent_id)
-    workspace = get_multi_tenant_user_workspace_dir(sid, aid)
-    if workspace is None:
-        raise TypeError(
-            f"invalid tenant for workspace path: service_id={sid!r}, agent_id={aid!r}"
-        )
-    return workspace / get_agent_workspace_relative_dir()
+def get_tenant_agent_workspace_dir(workspace_key: str | None = None) -> Path:
+    """多租户 DeepAgent 工作区：``workspace_{key}/agent/workspace``."""
+    wk = _effective_workspace_key(workspace_key)
+    return get_multi_tenant_user_workspace_dir(wk) / get_agent_workspace_relative_dir()
 
 
 # 兼容旧命名（上游 jiuwenclaw_workspace）
 get_tenant_agent_jiuwenclaw_workspace_dir = get_tenant_agent_workspace_dir
 
 
-def get_tenant_agent_skills_dirs(
-    service_id: str | None = None,
-    agent_id: str | None = None,
-) -> list[Path]:
+def get_tenant_agent_skills_dirs(workspace_key: str | None = None) -> list[Path]:
     """多租户 skills 目录（与 ``JiuWenSwarm`` / ``SkillManager`` 落盘路径一致）."""
-    workspace = get_tenant_agent_workspace_dir(service_id, agent_id)
-    return [workspace / "skills"]
+    return [get_tenant_agent_workspace_dir(workspace_key) / "skills"]
 
 
-def get_multi_tenant_skill_dirs(
-    service_id: str | None = None,
-    agent_id: str | None = None,
-) -> list[Path]:
+def get_multi_tenant_skill_dirs(workspace_key: str | None = None) -> list[Path]:
     """Resolve the skills directory list for multi-tenant / single-tenant mode.
 
-    - Multi-tenant（提供 ``service_id`` / ``agent_id``）: returns
-      ``[service_{sid}/agent_{aid}/agent/workspace/skills]``.
-    - Single-tenant（均未提供）: returns ``[get_agent_skills_dir()]``.
+    - Multi-tenant（提供 ``workspace_key``）: ``[workspace_{key}/agent/workspace/skills]``.
+    - Single-tenant（未提供）: ``[get_agent_skills_dir()]``（不读 bound key，避免误进多租户树）.
     """
-    if service_id or agent_id:
-        return get_tenant_agent_skills_dirs(service_id, agent_id)
+    if workspace_key is not None:
+        return get_tenant_agent_skills_dirs(workspace_key)
     return [get_agent_skills_dir()]
 
 
@@ -2067,34 +2030,32 @@ def resolve_gateway_cron_jobs_path(
     )
 
 
-def resolve_tenant_agent_root_dir(
-    service_id: str | None = None,
-    agent_id: str | None = None,
-) -> Path:
-    """Resolve ``service_{sid}/agent_{aid}/agent``."""
-    sid, aid = resolve_tenant_env_ns(service_id, agent_id)
-    workspace = get_multi_tenant_user_workspace_dir(sid, aid)
-    if workspace is None:
-        raise TypeError(
-            f"invalid tenant for agent root: service_id={sid!r}, agent_id={aid!r}"
-        )
-    return workspace / "agent"
+def resolve_tenant_agent_root_dir(workspace_key: str | None = None) -> Path:
+    """Resolve ``workspace_{key}/agent``.
+
+    When ``workspace_key`` is omitted: bound agent root (request context) >
+    bound ``workspace_key`` > ``default``.
+    """
+    try:
+        from jiuwenswarm.server.runtime.tenant_context import get_bound_agent_root
+
+        bound = get_bound_agent_root()
+        if bound is not None and workspace_key is None:
+            return bound
+    except ImportError:
+        pass
+    wk = _effective_workspace_key(workspace_key)
+    return get_multi_tenant_user_workspace_dir(wk) / "agent"
 
 
-def resolve_tenant_agent_workspace_dir(
-    service_id: str | None = None,
-    agent_id: str | None = None,
-) -> Path:
-    """Resolve ``service_{sid}/agent_{aid}/agent/workspace``."""
-    return resolve_tenant_agent_root_dir(service_id, agent_id) / "workspace"
+def resolve_tenant_agent_workspace_dir(workspace_key: str | None = None) -> Path:
+    """Resolve ``workspace_{key}/agent/workspace``."""
+    return resolve_tenant_agent_root_dir(workspace_key) / "workspace"
 
 
-def resolve_tenant_sessions_dir(
-    service_id: str | None = None,
-    agent_id: str | None = None,
-) -> Path:
-    """Resolve ``service_{sid}/agent_{aid}/agent/sessions`` for a tenant pair."""
-    return resolve_tenant_agent_root_dir(service_id, agent_id) / "sessions"
+def resolve_tenant_sessions_dir(workspace_key: str | None = None) -> Path:
+    """Resolve ``workspace_{key}/agent/sessions`` for a tenant workspace key."""
+    return resolve_tenant_agent_root_dir(workspace_key) / "sessions"
 
 
 def resolve_cron_tenant_scope(
@@ -2220,16 +2181,13 @@ def get_agent_sessions_dir() -> Path:
     return get_agent_root_dir() / "sessions"
 
 
-def get_agent_evolution_trajectories_dir(
-    service_id: str | None = None,
-    agent_id: str | None = None,
-) -> Path:
+def get_agent_evolution_trajectories_dir(workspace_key: str | None = None) -> Path:
     """Get the evolution execution trajectories directory.
 
-    Path: ``service_{sid}/agent_{aid}/agent/evolution_trajectories``
+    Path: ``workspace_{key}/agent/evolution_trajectories``
     """
-    if service_id is not None or agent_id is not None:
-        return resolve_tenant_agent_root_dir(service_id, agent_id) / "evolution_trajectories"
+    if workspace_key is not None:
+        return resolve_tenant_agent_root_dir(workspace_key) / "evolution_trajectories"
     return get_agent_root_dir() / "evolution_trajectories"
 
 
@@ -2273,16 +2231,13 @@ def resolve_git_branch(project_dir: str | None) -> str:
 
 
 def get_checkpoint_dir() -> Path:
-    """Get the default checkpoint directory (agent_default).
+    """Get the default checkpoint directory.
 
-    Path: ``~/.jiuwenswarm/service_default/agent_default/.checkpoint``
+    Path: ``~/.jiuwenswarm/workspace_default/.checkpoint``
 
     Per-agent isolation uses ``set_checkpoint`` / ``get_multi_tenant_user_workspace_dir``.
     """
-    workspace = get_multi_tenant_user_workspace_dir("default", "default")
-    if workspace:
-        return workspace / ".checkpoint"
-    return get_agent_root_dir().parent / ".checkpoint"
+    return get_multi_tenant_user_workspace_dir("default") / ".checkpoint"
 
 
 def _resolve_logs_service_id(service_id: str | None = None) -> str:
@@ -2418,6 +2373,8 @@ _ALREADY_MASKED_PATTERN = re.compile(rf"^{re.escape(_SENSITIVE_MASK)}(\(fp:[0-9a
 
 # LogMaskingEngine 回退失败计数（避免在日志 Filter 热路径上静默吞异常）。
 _sanitize_engine_fallback_failures = 0
+# identity 前缀脱敏失败计数（Filter 热路径不能再打 logging，避免递归）。
+_identity_sanitize_failures = 0
 
 
 def _is_already_masked(value: Any) -> bool:
@@ -2507,7 +2464,7 @@ def mask_sensitive(text: Any) -> str:
 
 
 class SensitiveDataFilter(logging.Filter):
-    """Mask sensitive data in all log messages and tracebacks."""
+    """Mask sensitive data in log messages, identity prefix, and tracebacks."""
 
     def filter(self, record: logging.LogRecord) -> bool:
         try:
@@ -2517,6 +2474,27 @@ class SensitiveDataFilter(logging.Filter):
         except Exception:
             # Never block logging because of desensitization failure.
             pass
+
+        # identity 由 IdentityFieldFilter 预先拼好；企业版已加载 DB 规则时与 msg
+        # 同引擎脱敏。非企业版不走本地 KV 回退，避免把前缀 user_id= 误伤成指纹掩码。
+        try:
+            identity = getattr(record, "identity", None)
+            if isinstance(identity, str) and identity and is_enterprise():
+                from jiuwenswarm.infrastructure.log_masking.engine import LogMaskingEngine
+
+                engine = LogMaskingEngine.get_instance()
+                if engine.uses_external_rules:
+                    record.identity = engine.sanitize(identity)
+        except Exception as exc:
+            # 不阻断日志输出；不能走 logging（本 Filter 在日志热路径上）。
+            global _identity_sanitize_failures
+            _identity_sanitize_failures += 1
+            if _identity_sanitize_failures == 1:
+                print(
+                    "[jiuwenswarm] identity sanitize failed, "
+                    f"falling back to raw identity: {exc!r}",
+                    file=sys.stderr,
+                )
 
         # Traceback 由 Formatter.formatException() 在 record.exc_text 中单独渲染，
         # 不经过 record.getMessage()，因此 message 脱敏覆盖不到。这里提前把
@@ -2542,6 +2520,15 @@ class SensitiveDataFilter(logging.Filter):
             # 同样不因脱敏失败而阻断日志输出。
             pass
         return True
+
+
+def build_log_identity(record: logging.LogRecord) -> str:
+    """从 record.user_id/domain_id/app_id 拼文本 identity 片段（null 输出 ``null``）。"""
+    parts = []
+    for field in ("user_id", "domain_id", "app_id"):
+        v = getattr(record, field, None)
+        parts.append(f"{field}={v if v is not None else 'null'}")
+    return " " + " ".join(parts) + " "
 
 
 class JsonOnlyFormatter(logging.Formatter):
@@ -2879,7 +2866,10 @@ class UserVisibleTagFilter(logging.Filter):
 
 
 class IdentityFieldFilter(logging.Filter):
-    """从 IdentityStore（contextvar）读身份，塞 record.user_id/domain_id/app_id。始终放行。
+    """从 IdentityStore 读身份，写入字段并预先拼好 ``record.identity``。始终放行。
+
+    须挂在 ``SensitiveDataFilter`` **之前**：先拼 identity，再由脱敏 Filter
+    同时处理 msg 与 identity，避免 Formatter 阶段才拼前缀导致规则打不中。
 
     import 链失败时身份降级为 null——日志 filter 绝不因自身 import 失败而中断日志
     （Python logging 不兜 filter 异常，filter 抛会透传到 logger.* 调用方）。
@@ -2899,18 +2889,20 @@ class IdentityFieldFilter(logging.Filter):
             record.user_id = None
             record.domain_id = None
             record.app_id = None
+        record.identity = build_log_identity(record)
         return True
 
 
 class IdentityTextFormatter(logging.Formatter):
-    """文本 Formatter：构建 record.identity = " user_id=.. domain_id=.. app_id=.. "（null 输出 "null"）。"""
+    """文本 Formatter：使用 Filter 阶段已写好的 ``record.identity`` 排版。
+
+    若上游未挂 IdentityFieldFilter（单测直调 Formatter），则按字段现场拼一份
+    兜底 identity，不再在此处做脱敏。
+    """
 
     def format(self, record: logging.LogRecord) -> str:
-        parts = []
-        for field in ("user_id", "domain_id", "app_id"):
-            v = getattr(record, field, None)
-            parts.append(f"{field}={v if v is not None else 'null'}")
-        record.identity = " " + " ".join(parts) + " "
+        if not isinstance(getattr(record, "identity", None), str):
+            record.identity = build_log_identity(record)
         return super().format(record)
 
 
@@ -2965,9 +2957,10 @@ def setup_logger(log_level: Optional[str] = None) -> logging.Logger:
     - format（text/json/dual）：env JIUWENSWARM_LOG_FORMAT 或 config.yaml logging.format
     - console_enabled/file_enabled：输出开关
     - JSON：JsonUserVisibleFormatter（.json 文件）
-    - 身份字段：IdentityFieldFilter（每 handler）
+    - 身份字段：IdentityFieldFilter（每 handler，且挂在 SensitiveDataFilter 之前）
     - user_visible Tag：UserVisibleTagFilter（text/dual）
     保留 dev-stable 既有的 SensitiveDataFilter + install_source_record_masking 双层脱敏。
+    Filter 顺序：IdentityFieldFilter → SensitiveDataFilter（msg + identity 同路径脱敏）。
 
     File/console handlers are served by a ``QueueListener`` thread so emit/flush
     I/O does not block the asyncio event loop. Source-record masking still runs
@@ -3046,8 +3039,8 @@ def setup_logger(log_level: Optional[str] = None) -> logging.Logger:
             h.setFormatter(json_formatter)
         else:
             h.setFormatter(text_formatter)
-        h.addFilter(privacy_filter)
         h.addFilter(identity_filter)
+        h.addFilter(privacy_filter)
         if tag_config:
             h.addFilter(UserVisibleTagFilter(tag_config))
         if name_filter is not None:
@@ -3084,6 +3077,7 @@ def setup_logger(log_level: Optional[str] = None) -> logging.Logger:
             stream_handler.setFormatter(text_formatter)
         if tag_config:
             stream_handler.addFilter(UserVisibleTagFilter(tag_config))
+        # identity 先于脱敏：先拼前缀，再统一 sanitize msg + identity
         stream_handler.addFilter(identity_filter)
         stream_handler.addFilter(privacy_filter)
         listener_targets.append(stream_handler)

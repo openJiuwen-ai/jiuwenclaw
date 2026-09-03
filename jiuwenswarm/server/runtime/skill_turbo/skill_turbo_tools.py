@@ -81,10 +81,37 @@ _SKILL_TURBO_TASK_EVENT_TYPES: frozenset[str] = frozenset({
     "task.update",
 })
 
+
+def _without_inner_task_routing(payload: dict[str, Any]) -> dict[str, Any]:
+    """Copy a parent-bound event without its SkillTurbo-only task id."""
+    task_id = payload.get("task_id")
+    if not isinstance(task_id, str) or not task_id.startswith("task_"):
+        return payload
+    cleaned = dict(payload)
+    cleaned.pop("task_id", None)
+    return cleaned
+
+
 # ── ContextVar：在 before_tool_call 中注入，供工具函数读取 ──
 _current_skill_turbo_adapter: ContextVar[Any] = ContextVar(
     "current_skill_turbo_adapter", default=None
 )
+_skill_turbo_outer_todo_active: ContextVar[bool | None] = ContextVar(
+    "skill_turbo_outer_todo_active", default=None
+)
+
+
+def set_skill_turbo_outer_todo_active(active: bool) -> Token:
+    """Bind whether the parent task list owns this tool call's display."""
+    return _skill_turbo_outer_todo_active.set(active)
+
+
+def get_skill_turbo_outer_todo_active() -> bool | None:
+    return _skill_turbo_outer_todo_active.get()
+
+
+def reset_skill_turbo_outer_todo_active(token: Token) -> None:
+    _skill_turbo_outer_todo_active.reset(token)
 
 # ── ContextVar：SkillTurbo HITL 中断信号 ──
 # skill_turbo_tools catch AbortError 后提取 ToolInterruptException 存入此 ContextVar，
@@ -376,11 +403,18 @@ async def skill_turbo(query: str) -> dict[str, Any] | str:
     # chat.* 事件自然归到外层 todo 步骤的 segment 下渲染。
     # 无活跃 todo 时：PPT 的 task 事件正常转发，独立展示步骤列表。
     outer_task_id = get_current_task_id()
-    has_outer_todo = outer_task_id is not None
+    rebound_outer_todo = get_skill_turbo_outer_todo_active()
+    has_outer_todo = (
+        rebound_outer_todo
+        if rebound_outer_todo is not None
+        else outer_task_id is not None
+    )
     logger.info(
-        "[SkillTurboTool] outer todo active=%s outer_task_id=%s parent_session=%s, "
+        "[SkillTurboTool] outer todo active=%s rebound=%s outer_task_id=%s "
+        "parent_session=%s, "
         "task events will be %s",
         has_outer_todo,
+        rebound_outer_todo,
         outer_task_id,
         type(parent_session).__name__ if parent_session is not None else None,
         "skipped" if has_outer_todo else "forwarded as-is",
@@ -407,16 +441,16 @@ async def skill_turbo(query: str) -> dict[str, Any] | str:
     if channel_id:
         inputs["channel_id"] = channel_id
 
-    # user_id / chat_id：从 request_metadata 提取放到 inputs 顶层，
-    # 供 pipeline_init 的 fallback 重建 files/{user_id}/{chat_id}/output 路径。
-    # chat_id 兼容 group_id（agent_compat.py 确认两者等价）。
+    # user_id 顶层；chat_id ← routing.group_id，供 pipeline 重建路径。
     if isinstance(request_metadata, dict):
-        _uid = request_metadata.get("user_id")
-        if _uid:
-            inputs["user_id"] = str(_uid)
-        _cid = request_metadata.get("chat_id") or request_metadata.get("group_id")
-        if _cid:
-            inputs["chat_id"] = str(_cid)
+        from jiuwenswarm.common.request_identity import web_routing_identity
+
+        user_id = str(request_metadata.get("user_id") or "").strip()
+        if user_id:
+            inputs["user_id"] = user_id
+        identity = web_routing_identity(request_metadata)
+        if identity.get("group_id"):
+            inputs["chat_id"] = identity["group_id"]
 
     # effective_project_dir：adapter 在 _update_runtime_config 中已写入 ContextVar
     effective_project_dir = get_effective_request_workspace_dir()
@@ -551,6 +585,13 @@ async def skill_turbo(query: str) -> dict[str, Any] | str:
             if has_outer_todo and event_type in _SKILL_TURBO_TASK_EVENT_TYPES:
                 continue
 
+            payload = chunk.payload
+            if has_outer_todo and isinstance(payload, dict):
+                # Internal task ids are meaningful to SkillTurbo itself, but
+                # become untitled task rows in the parent UI.  The original
+                # chunk remains untouched for execution/resume diagnostics.
+                payload = _without_inner_task_routing(payload)
+
             # 转发 chunk 到父会话 stream（前端实时可见）
             if parent_session is not None:
                 # SkillTurbo executor 产出的 event_type 带 "chat." 前缀（如 "chat.tool_call"），
@@ -560,7 +601,7 @@ async def skill_turbo(query: str) -> dict[str, Any] | str:
                 output = OutputSchema(
                     type=output_type,
                     index=0,
-                    payload=chunk.payload,
+                    payload=payload,
                 )
                 try:
                     await parent_session.write_stream(output)

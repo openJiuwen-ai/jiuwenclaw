@@ -21,30 +21,16 @@ from .schemas import (
 
 
 def routing_context_from_request(request: AgentRequest | Any) -> RoutingContext:
-    """从 ``request.params`` 解析路由上下文（调用方保证字段格式正确）。"""
-    p = getattr(request, "params", None) or {}
-    if not isinstance(p, dict):
-        p = {}
+    """从顶层 ``user_id`` + ``metadata.routing`` 解析路由上下文。"""
+    from jiuwenswarm.common.request_identity import web_routing_identity
+
+    meta = getattr(request, "metadata", None)
+    identity = web_routing_identity(meta if isinstance(meta, dict) else None)
     return RoutingContext(
-        group_id=str(p.get("group_id") or "").strip(),
-        bot_id=str(p.get("bot_id") or "").strip(),
-        user_id=str(p.get("user_id") or "").strip(),
+        group_id=str(identity.get("group_id") or "").strip(),
+        bot_id=str(identity.get("bot_id") or "").strip(),
+        user_id=str(identity.get("user_id") or "").strip(),
     )
-
-
-def _normalize_service_config_row(row: dict[str, Any]) -> dict[str, Any]:
-    out = dict(row)
-    if "autoscale_interval" in out and out["autoscale_interval"] is not None:
-        try:
-            out["autoscale_interval"] = float(out["autoscale_interval"])
-        except (TypeError, ValueError):
-            pass
-    if "container_port" in out and out["container_port"] is not None:
-        try:
-            out["container_port"] = int(out["container_port"])
-        except (TypeError, ValueError):
-            pass
-    return out
 
 
 def _apply_slot_entities(
@@ -60,8 +46,8 @@ def _apply_slot_entities(
         result.skill_whitelist = entities
     elif slot == TemplateRefSlot.EXTENSION_CONFIG:
         result.extension_config = entities
-    elif slot == TemplateRefSlot.SERVICE_CONFIG:
-        result.service_config = entities
+    elif slot == TemplateRefSlot.PERMISSIONS:
+        result.permissions = entities
 
 
 def _any_requested_slot_loaded(
@@ -77,7 +63,7 @@ def _any_requested_slot_loaded(
             return True
         if slot == TemplateRefSlot.EXTENSION_CONFIG and result.extension_config:
             return True
-        if slot == TemplateRefSlot.SERVICE_CONFIG and result.service_config:
+        if slot == TemplateRefSlot.PERMISSIONS and result.permissions:
             return True
     return False
 
@@ -96,8 +82,6 @@ async def _fetch_slot_entities(
                 template_id,
             )
             continue
-        if slot == TemplateRefSlot.SERVICE_CONFIG:
-            entity = _normalize_service_config_row(entity)
         entities.append(entity)
     return entities
 

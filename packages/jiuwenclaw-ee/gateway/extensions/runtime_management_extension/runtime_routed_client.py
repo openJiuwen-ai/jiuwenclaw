@@ -20,6 +20,7 @@ from jiuwenswarm.common.schema.agent import AgentResponse, AgentResponseChunk
 from jiuwenswarm.gateway.routing.agent_client import AgentServerClient
 from jiuwenswarm.gateway.routing.http_agent_client import HttpSseAgentServerClient
 
+from .invoke_ids import apply_invoke_ids_to_envelope
 from .session_route_client import (
     FatalRouteError,
     RetryableRouteError,
@@ -216,6 +217,8 @@ class RuntimeRoutedAgentClient(AgentServerClient):
         self._ensure_connected()
         if _is_heartbeat_envelope(envelope):
             return self._heartbeat_response(envelope)
+        # 对齐旧 RuntimeManagement：发 Agent 前补齐并 MD5 service/agent/workspace。
+        apply_invoke_ids_to_envelope(envelope)
         if _is_routeless_envelope(envelope):
             result = await self._http.send_request(envelope, base_url=_default_http_base())
             return result
@@ -260,6 +263,8 @@ class RuntimeRoutedAgentClient(AgentServerClient):
                 is_complete=True,
             )
             return
+        # 对齐旧 RuntimeManagement：发 Agent 前补齐并 MD5 service/agent/workspace。
+        apply_invoke_ids_to_envelope(envelope)
         if _is_routeless_envelope(envelope):
             async for chunk in self._http.send_request_stream(
                 envelope, base_url=_default_http_base()

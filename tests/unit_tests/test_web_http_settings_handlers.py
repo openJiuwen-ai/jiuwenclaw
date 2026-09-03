@@ -4,9 +4,12 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 from fastapi.testclient import TestClient
 
 from jiuwenswarm.gateway.channel_manager.base import RobotMessageRouter
+from jiuwenswarm.gateway.channel_manager.web import app_web_handlers
 from jiuwenswarm.gateway.channel_manager.web.web_http_app import create_web_http_app
 from jiuwenswarm.gateway.channel_manager.web.app_web_handlers import (
     WebHandlersBindParams,
@@ -116,6 +119,106 @@ def test_settings_config_models_locale_roundtrip():
     assert r.status_code == 400
     assert r.json()["ok"] is False
     assert r.json()["error"]["code"] == "BAD_REQUEST"
+
+
+def test_enterprise_models_list_uses_bot_header_and_hides_api_key(monkeypatch):
+    captured: dict[str, object] = {}
+
+    async def fake_load(request, slots):
+        captured["metadata"] = request.metadata
+        captured["slots"] = slots
+        return SimpleNamespace(
+            models={
+                "default_model": [
+                    {
+                        "template_id": "model-template-1",
+                        "template_name": "main model",
+                        "model_id": "GLM-5.2",
+                        "model_provider": "OpenAI",
+                        "api_base": "http://model.example/v1",
+                        "api_key": "server-only-secret",
+                        "parameters": {
+                            "temperature": 0.6,
+                            "reasoning_level": "high",
+                        },
+                        "timeout": 90,
+                    },
+                ],
+            },
+        )
+
+    monkeypatch.setattr(app_web_handlers, "is_enterprise", lambda: True)
+    monkeypatch.setattr(
+        app_web_handlers,
+        "load_effective_enterprise_config",
+        fake_load,
+    )
+
+    client = _client_with_cron(_FakeCron())
+    response = client.get(
+        "/api/v1/models",
+        headers={
+            "X-User-Id": "user-1",
+            "X-Group-Id": "group-1",
+            "X-Bot-Id": "bot-1",
+        },
+    )
+
+    assert response.status_code == 200
+    assert captured["metadata"] == {
+        "user_id": "user-1",
+        "routing": {"group_id": "group-1", "bot_id": "bot-1"},
+    }
+    assert captured["slots"] == {app_web_handlers.TemplateRefSlot.DEFAULT_MODEL}
+    data = response.json()["data"]
+    assert len(data["models"]) == 1
+    model = data["models"][0]
+    assert isinstance(model.pop("context_window_tokens"), int)
+    assert model == {
+        "model_name": "GLM-5.2",
+        "api_base": "http://model.example/v1",
+        "api_key": "",
+        "model_provider": "OpenAI",
+        "timeout": 90,
+        "temperature": 0.6,
+        "reasoning_level": "high",
+        "is_default": True,
+        "alias": "",
+    }
+    assert data == {
+        "models": [model],
+        "active_model": "GLM-5.2",
+        "model_source": "enterprise",
+    }
+
+
+def test_enterprise_models_list_does_not_fallback_to_local_config(monkeypatch):
+    async def fake_load(_request, _slots):
+        return None
+
+    def fail_local_config_read():
+        raise AssertionError("enterprise models.list must not read local config")
+
+    monkeypatch.setattr(app_web_handlers, "is_enterprise", lambda: True)
+    monkeypatch.setattr(
+        app_web_handlers,
+        "load_effective_enterprise_config",
+        fake_load,
+    )
+    monkeypatch.setattr(app_web_handlers, "get_config", fail_local_config_read)
+
+    client = _client_with_cron(_FakeCron())
+    response = client.get(
+        "/api/v1/models",
+        headers={"X-Bot-Id": "missing-bot"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["data"] == {
+        "models": [],
+        "active_model": "",
+        "model_source": "enterprise",
+    }
 
 
 def test_cron_job_full_path():

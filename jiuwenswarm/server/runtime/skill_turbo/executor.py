@@ -56,6 +56,10 @@ from jiuwenswarm.server.runtime.skill_turbo.permission_bridge import (
 )
 from jiuwenswarm.server.utils.stream_utils import parse_stream_chunk
 from jiuwenswarm.server.runtime.skill_turbo.json_utils import extract_llm_json
+from jiuwenswarm.server.runtime.skill_turbo.markdown_stream import (
+    markdown_stream_incoming,
+    terminate_dangling_markdown_fence,
+)
 from jiuwenswarm.server.runtime.skill_turbo.fallback_handler import FallbackContractError
 from jiuwenswarm.server.runtime.skill_turbo.interactive_ask import (
     resolve_interactive_ask_from_inputs,
@@ -368,6 +372,9 @@ class _StreamBufferState:
     """
 
     buckets: dict[tuple[str | None, str], _StreamBufferBucket] = field(default_factory=dict)
+    # Survives bucket pop/flush so the next chat.delta can be separated from a
+    # fence that already went out (frontend concatenates adjacent streamText).
+    last_emitted: dict[tuple[str | None, str], str] = field(default_factory=dict)
 
     def get_bucket(
         self, source_id: str | None, event_type: str
@@ -791,20 +798,30 @@ class SkillTurboExecutor:
                         yield flushed
 
                 bucket = buffer_state.get_bucket(source_id, event_type)
+                bucket_key = (source_id, event_type)
+                piece = markdown_stream_incoming(
+                    buffer_state.last_emitted.get(bucket_key, ""),
+                    str(content),
+                )
+                buffer_state.last_emitted[bucket_key] = piece
 
                 # 首个 chunk 立即发送，保证低首字延迟（与 subagent_executor 一致）
                 if not bucket.first_chunk_sent:
                     bucket.first_chunk_sent = True
+                    if piece != str(content) and isinstance(chunk.payload, dict):
+                        chunk.payload = {**chunk.payload, "content": piece}
+                    if bucket.plan_name is None:
+                        bucket.plan_name = payload.get("plan_name")
                     yield chunk
                     continue
 
                 # 累加到缓冲桶
-                bucket.parts.append(str(content))
+                bucket.parts.append(piece)
                 bucket.since = bucket.since or time.monotonic()
                 if bucket.plan_name is None:
                     bucket.plan_name = payload.get("plan_name")
 
-                # 60s 到期 flush
+                # 到期 flush
                 if time.monotonic() - bucket.since >= _SKILL_TURBO_STREAM_FLUSH_INTERVAL_SECONDS:
                     async for flushed in self._flush_bucket_chunks(
                         buffer_state, (source_id, event_type), request_id, channel_id
@@ -1482,19 +1499,34 @@ class SkillTurboExecutor:
         return None, current_tool_call_id
 
     def _next_tool_call_id(self, tool_name: str, kwargs: dict[str, Any]) -> str:
-        """生成确定性 tool_call_id：基于 (tool_name, canonical_args, call_index) 哈希。
+        """生成确定性 tool_call_id：基于 (tool_name, request_id, canonical_args, call_index) 哈希。
 
+        - request_id：``self._execution_inputs["request_id"]``，外层 ReAct 调用的
+          UUID（skill_turbo_tools 注入 inputs），全局唯一。它随 ``save_resume_ctx``
+          整体落盘、resume 时 ``apply_interactive_ask_to_inputs`` 原样复原
+          （不改动 request_id），因此同请求内重放稳定、跨请求不同。
+          混入它可避免「相同 ask_user args」时 tool_call_id 在不同会话/请求间撞车
+          导致 relay-claw 的 AskUserQuestionBridge 把后续卡片当同 HITL 重放吞掉
+          （前端不弹卡）。
         - canonical_args：``json.dumps(sort_keys, default=str)`` 后取 sha1[:8]
-        - call_index：本次执行内同 (name, args) 的第几次调用（从 0 起算）
+        - call_index：本次执行内同 (name, args, request_id) 的第几次调用（从 0 起算）
 
-        重放时只要 plan_code+inputs 一致，相同顺序的同名同参调用必然得到同样的 id；
-        与 ``PermissionInterruptRail`` 的 ``user_inputs[tool_call_id]`` 对应即可命中。
+        重放时只要 plan_code+inputs 一致且同一请求，相同顺序的同名同参调用必然得到
+        同样的 id；与 ``PermissionInterruptRail`` 的 ``user_inputs[tool_call_id]``
+        对应即可命中。
+
+        request_id 缺失（无外层请求上下文的单测/降级）时退化为原行为，仅保留同执行内
+        确定性，不影响重放匹配（回退命中走 tool_name + idx 路径）。
         """
         try:
             args_canonical = json.dumps(kwargs, sort_keys=True, default=str)
         except (TypeError, ValueError):
             args_canonical = repr(sorted(kwargs.items()))
-        args_hash = hashlib.sha1(args_canonical.encode("utf-8")).hexdigest()[:8]
+        # 混入 request_id：跨请求隔离，同请求内重放稳定（resume_ctx 整体穿越中断）。
+        # request_id 缺失时退化为原行为（args_canonical 单独哈希），不引入新失败模式。
+        rid = str(self._execution_inputs.get("request_id") or "")
+        args_source = f"{rid}\n{args_canonical}" if rid else args_canonical
+        args_hash = hashlib.sha1(args_source.encode("utf-8")).hexdigest()[:8]
         key = f"{tool_name}|{args_hash}"
         idx = self._tool_call_counter.get(key, 0)
         self._tool_call_counter[key] = idx + 1
@@ -2341,9 +2373,10 @@ class SkillTurboExecutor:
         if bucket is None or not bucket.parts:
             return
 
-        merged_content = "".join(bucket.parts)
+        merged_content = terminate_dangling_markdown_fence("".join(bucket.parts))
         if not merged_content:
             return
+        buffer_state.last_emitted[bucket_key] = merged_content
 
         payload: dict[str, Any] = {
             "event_type": event_type,

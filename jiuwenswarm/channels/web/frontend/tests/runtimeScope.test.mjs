@@ -33,7 +33,7 @@ test('runtime scope takes precedence in HTTP identity headers', () => {
       'X-User-Id': 'u1',
       'X-Group-Id': 'g1',
       'X-Bot-Id': 'b1',
-      'X-Jiuwenclaw-Id': 'gw1',
+      'X-Gateway-Id': 'gw1',
       'X-Session-Id': 'session-1',
     }
   );

@@ -43,6 +43,7 @@ from jiuwenswarm.server.runtime.session.permission_response_ledger import (
     PermissionResponseLedger,
 )
 from jiuwenswarm.server.runtime.skill.skill_manager import SkillManager
+from jiuwenswarm.server.runtime.skill.workspace_provider import SkillWorkspaceProvider
 from jiuwenswarm.server.utils.utils import is_team_params
 from jiuwenswarm.common.config import get_config, get_permissions_file_guard_workspace_access
 from jiuwenswarm.extensions.registry import ExtensionRegistry
@@ -592,6 +593,11 @@ _SKILL_ROUTES: dict[ReqMethod, str] = {
     ReqMethod.SKILLS_TEAMSKILLS_HUB_INSTALL: "handle_skills_team_skills_hub_install",
     ReqMethod.SKILLS_TEAMSKILLS_HUB_PUBLISH: "handle_skills_team_skills_hub_publish",
     ReqMethod.SKILLS_TEAMSKILLS_HUB_DELETE: "handle_skills_team_skills_hub_delete",
+    ReqMethod.SKILLS_SOURCE_PROVIDERS: "handle_skills_source_providers",
+    ReqMethod.SKILLS_SOURCE_SEARCH: "handle_skills_source_search",
+    ReqMethod.SKILLS_SOURCE_INSTALL: "handle_skills_source_install",
+    ReqMethod.SKILLS_UPDATES_CHECK: "handle_skills_updates_check",
+    ReqMethod.SKILLS_UPDATE: "handle_skills_update",
     ReqMethod.SKILLS_RETRIEVAL_STATUS: "handle_skills_retrieval_status",
     ReqMethod.SKILLS_RETRIEVAL_INDEX_BUILD: "handle_skills_retrieval_index_build",
     ReqMethod.SKILLS_RETRIEVAL_INDEX_CANCEL: "handle_skills_retrieval_index_cancel",
@@ -600,8 +606,11 @@ _SKILL_ROUTES: dict[ReqMethod, str] = {
     ReqMethod.SKILLS_EVOLUTION_STATUS: "handle_skills_evolution_status",
     ReqMethod.SKILLS_EVOLUTION_GET: "handle_skills_evolution_get",
     ReqMethod.SKILLS_EVOLUTION_SAVE: "handle_skills_evolution_save",
+    ReqMethod.SKILLS_ENTERPRISE_LIST: "handle_skills_enterprise_list",
     ReqMethod.SKILLS_ENTERPRISE_INSTALL: "handle_skills_web_install",
     ReqMethod.SKILLS_ENTERPRISE_UNINSTALL: "handle_skills_web_uninstall",
+    ReqMethod.SKILLS_ENTERPRISE_SOURCE_PROVIDERS: "handle_skills_source_providers",
+    ReqMethod.SKILLS_ENTERPRISE_SOURCE_SEARCH: "handle_skills_source_search",
 }
 
 # Evolution version RPCs (archives/rollback/rebuild) are handled by DeepAdapter.
@@ -618,6 +627,18 @@ _SKILLS_WEB_HANDLERS: frozenset[str] = frozenset(
     {
         "handle_skills_web_install",
         "handle_skills_web_uninstall",
+    }
+)
+
+_SKILL_SOURCE_POLICY_ROUTES: frozenset[ReqMethod] = frozenset(
+    {
+        ReqMethod.SKILLS_SOURCE_PROVIDERS,
+        ReqMethod.SKILLS_SOURCE_SEARCH,
+        ReqMethod.SKILLS_SOURCE_INSTALL,
+        ReqMethod.SKILLS_UPDATES_CHECK,
+        ReqMethod.SKILLS_UPDATE,
+        ReqMethod.SKILLS_ENTERPRISE_SOURCE_PROVIDERS,
+        ReqMethod.SKILLS_ENTERPRISE_SOURCE_SEARCH,
     }
 )
 
@@ -1018,14 +1039,23 @@ class JiuWenSwarm:
         user_workspace_dir: str | None = None,
         agent_id: str | None = None,
         service_id: str | None = None,
+        skill_manager: SkillManager | None = None,
     ) -> None:
         self._adapter: AgentAdapter | None = None
         self._sdk_name: str | None = None
-        # 多租户：user_workspace_dir 为租户根（service_{sid}/agent_{aid}），再拼相对 workspace/sessions
+        # 多租户：user_workspace_dir 为 workspace_key 对应的用户根，再拼相对 workspace/sessions。
         enterprise = is_enterprise()
         self._agent_id = agent_id if enterprise else None
         self._service_id = service_id if enterprise else None
         tenant_root = user_workspace_dir or (workspace_dir if enterprise else None)
+        if enterprise and not tenant_root:
+            from jiuwenswarm.server.runtime.skill.workspace_provider import (
+                SkillWorkspaceUnavailable,
+            )
+
+            raise SkillWorkspaceUnavailable(
+                "enterprise tenant workspace could not be resolved"
+            )
         if tenant_root:
             user_ws = Path(tenant_root)
             self._workspace_dir = str(
@@ -1039,7 +1069,24 @@ class JiuWenSwarm:
                 collapse_nested_agent_workspace_dir(get_agent_workspace_dir())
             )
             self._sessions_dir = None
-        self._skill_manager = SkillManager(workspace_dir=self._workspace_dir)
+        workspace_provider = SkillWorkspaceProvider()
+        ready_workspace = workspace_provider.ensure(
+            self._workspace_dir,
+            require_valid_state=enterprise,
+        )
+        self._workspace_dir = str(ready_workspace.workspace_dir)
+        if skill_manager is not None:
+            self._skill_manager = skill_manager
+        else:
+            self._skill_manager, _created = workspace_provider.get_or_create_manager(
+                self._workspace_dir,
+                require_valid_state=enterprise,
+                factory=lambda ready: SkillManager(
+                    workspace_dir=str(ready.workspace_dir),
+                    service_id=self._service_id,
+                    agent_id=self._agent_id,
+                ),
+            )
         self._session_manager = SessionManager()
         self._permission_response_ledger = PermissionResponseLedger()
         # SkillDev 模式：懒初始化，首次 skilldev.* 请求时构造
@@ -1132,6 +1179,7 @@ class JiuWenSwarm:
             bind_memory_workspace_dir,
         )
         from jiuwenswarm.common.local_env_config import bind_agent_env_ns
+        from jiuwenswarm.server.runtime.tenant_context import bind_workspace_key
 
         ws = Path(self._resolve_workspace_dir())
         agent_root = ws.parent
@@ -1152,13 +1200,18 @@ class JiuWenSwarm:
             or getattr(self, "_service_id", None)
             or "default"
         )
+        mem_wk = getattr(self, "_workspace_key", None) or "default"
         mem_aid_token = bind_memory_agent_id(str(mem_aid))
         env_ns_token = bind_agent_env_ns(str(mem_sid), str(mem_aid))
-        return tenant_tokens, (mem_ws_token, mem_aid_token, env_ns_token)
+        wk_token = bind_workspace_key(str(mem_wk))
+        return tenant_tokens, (mem_ws_token, mem_aid_token, env_ns_token, wk_token)
 
     @staticmethod
     def _reset_tenant_request_context(tenant_tokens: Any, mem_token: Any) -> None:
-        from jiuwenswarm.server.runtime.tenant_context import reset_tenant_workspace_dirs
+        from jiuwenswarm.server.runtime.tenant_context import (
+            reset_tenant_workspace_dirs,
+            reset_workspace_key,
+        )
         from jiuwenswarm.agents.harness.common.tools.memory_tools import (
             reset_memory_agent_id,
             reset_memory_workspace_dir,
@@ -1166,7 +1219,11 @@ class JiuWenSwarm:
         from jiuwenswarm.common.local_env_config import reset_agent_env_ns
 
         if isinstance(mem_token, tuple):
-            if len(mem_token) == 3:
+            if len(mem_token) == 4:
+                mem_ws_token, mem_aid_token, env_ns_token, wk_token = mem_token
+                reset_workspace_key(wk_token)
+                reset_agent_env_ns(env_ns_token)
+            elif len(mem_token) == 3:
                 mem_ws_token, mem_aid_token, env_ns_token = mem_token
                 reset_agent_env_ns(env_ns_token)
             else:
@@ -1207,6 +1264,7 @@ class JiuWenSwarm:
         adapter = self._ensure_adapter(mode=mode)
         setattr(adapter, "_env_service_id", getattr(self, "_env_service_id", "default"))
         setattr(adapter, "_env_agent_id", getattr(self, "_env_agent_id", "default"))
+        setattr(adapter, "_workspace_key", getattr(self, "_workspace_key", "default"))
         create_kwargs: dict[str, Any] = {"mode": mode, "sub_mode": sub_mode}
         if config_base is not None:
             create_kwargs["config_base"] = config_base
@@ -1784,7 +1842,46 @@ class JiuWenSwarm:
 
         value = selected_options[0] if selected_options else ""
 
-        if value in ("approve", "本次允许", "Approve", "Proceed", "批准", "开始执行"):
+        # Skill 动态授权三动作协议（SkillApprovalCard）：显式 action 原样透传，
+        # 由 SkillAuthorizationRail._parse_answer_to_action 裁决（无法识别即拒绝）。
+        is_permission_interrupt = source == "permission_interrupt"
+        explicit_action = answer.get("action") if isinstance(answer, dict) else None
+        if is_permission_interrupt and explicit_action == "approve_session":
+            confirm_payload = {
+                "action": "approve_session",
+                "approved": True,
+                "auto_confirm": False,
+                "feedback": "",
+            }
+        elif is_permission_interrupt and explicit_action == "continue_without_overlay":
+            confirm_payload = {
+                "action": "continue_without_overlay",
+                "approved": False,
+                "auto_confirm": False,
+                "feedback": custom_input or "用户选择仅加载不授权",
+            }
+        elif is_permission_interrupt and explicit_action == "approve_once":
+            confirm_payload = {
+                "action": "approve_once",
+                "approved": True,
+                "auto_confirm": False,
+                "feedback": "",
+            }
+        elif is_permission_interrupt and "会话内允许" in selected_options:
+            confirm_payload = {
+                "action": "approve_session",
+                "approved": True,
+                "auto_confirm": False,
+                "feedback": "",
+            }
+        elif is_permission_interrupt and "仅加载不授权" in selected_options:
+            confirm_payload = {
+                "action": "continue_without_overlay",
+                "approved": False,
+                "auto_confirm": False,
+                "feedback": custom_input or "用户选择仅加载不授权",
+            }
+        elif value in ("approve", "本次允许", "Approve", "Proceed", "批准", "开始执行"):
             confirm_payload = {"approved": True, "auto_confirm": False, "feedback": ""}
         elif value in ("session_allow", "会话内记住", "Session Allow"):
             confirm_payload = {
@@ -1913,6 +2010,11 @@ class JiuWenSwarm:
         handler_name = _SKILL_ROUTES[request.req_method]
         handler = getattr(self._skill_manager, handler_name)
         try:
+            if is_enterprise() and request.req_method in _SKILL_SOURCE_POLICY_ROUTES:
+                adapter = self._ensure_adapter(mode=self._adapter_mode_for_request(request))
+                prepare_sources = getattr(adapter, "prepare_skill_source_config", None)
+                if callable(prepare_sources):
+                    await prepare_sources(request)
             params = dict(request.params) if isinstance(request.params, dict) else {}
             if handler_name in _SKILLS_WEB_HANDLERS and is_enterprise():
                 if self._service_id and not str(params.get("service_id") or "").strip():
@@ -1927,6 +2029,8 @@ class JiuWenSwarm:
                 "handle_skills_skillnet_install",
                 "handle_skills_clawhub_download",
                 "handle_skills_team_skills_hub_install",
+                "handle_skills_source_install",
+                "handle_skills_update",
             ]
             _enterprise_web_handler = handler_name in _SKILLS_WEB_HANDLERS
             if handler_name == "handle_skills_skillnet_install" and payload.get("pending"):
@@ -2306,7 +2410,9 @@ class JiuWenSwarm:
                     request.request_id, action, session_id,
                 )
                 # Pass protocol fields straight to the Goal capability adapter.
-                goal_result = await adapter.handle_goal_command_structured(params, session_id)
+                goal_result = await adapter.handle_goal_command_structured(
+                    request, session_id=session_id
+                )
                 if goal_result is not None:
                     result_type = goal_result.get("result_type")
                     ok = result_type not in {"goal_error", "goal_confirm_required"}
@@ -2430,6 +2536,20 @@ class JiuWenSwarm:
 
         tenant_tokens, mem_token = self._bind_tenant_request_context()
         try:
+            # 兜底：注入上一轮 SkillTurbo 中断时保存的节点产物摘要，让 LLM 知道
+            # 「已完成的工作」而非盲目从头重跑。失败不阻断主流程。
+            # dev-stable 无 plan_pause / interrupt_resume prepare 链，此处只做最小子集。
+            prepare_interrupt_artifacts = getattr(
+                adapter, "prepare_interrupt_artifacts_for_request", None
+            )
+            if callable(prepare_interrupt_artifacts):
+                try:
+                    await prepare_interrupt_artifacts(request)
+                except Exception as exc:
+                    logger.warning(
+                        "[JiuWenSwarm] prepare_interrupt_artifacts failed "
+                        "session_id=%s: %s", session_id, exc, exc_info=True,
+                    )
             try:
                 inputs, memory_mode, raw_query = self._build_inputs(request)
             except _TeamPlanApprovalPayloadError as exc:
@@ -2564,7 +2684,9 @@ class JiuWenSwarm:
                 try:
                     adapter = self._ensure_adapter(mode=self._adapter_mode_for_request(request))
                     session_id = self._session_manager.get_session_id(request.session_id)
-                    goal_result = await adapter.handle_goal_command_structured(params, session_id)
+                    goal_result = await adapter.handle_goal_command_structured(
+                        request, session_id=session_id
+                    )
                     if goal_result is None:
                         yield AgentResponseChunk(
                             request_id=request.request_id,
@@ -2710,6 +2832,20 @@ class JiuWenSwarm:
         rid = request.request_id
         cid = request.channel_id
         try:
+            # 兜底：注入上一轮 SkillTurbo 中断时保存的节点产物摘要，让 LLM 知道
+            # 「已完成的工作」而非盲目从头重跑。失败不阻断主流程。
+            # dev-stable 无 plan_pause / interrupt_resume prepare 链，此处只做最小子集。
+            prepare_interrupt_artifacts = getattr(
+                adapter, "prepare_interrupt_artifacts_for_request", None
+            )
+            if callable(prepare_interrupt_artifacts):
+                try:
+                    await prepare_interrupt_artifacts(request)
+                except Exception as exc:
+                    logger.warning(
+                        "[JiuWenSwarm] prepare_interrupt_artifacts failed "
+                        "session_id=%s: %s", session_id, exc, exc_info=True,
+                    )
             inputs, memory_mode, raw_query = self._build_inputs(request)
         except _TeamPlanApprovalPayloadError as exc:
             yield AgentResponseChunk(

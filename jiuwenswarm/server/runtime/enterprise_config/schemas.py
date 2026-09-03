@@ -6,9 +6,6 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any
 
-SERVICE_CONFIG_SLOT = "service_config"
-SERVICE_CONFIG_TABLE = "service_config_template"
-
 
 class TemplateRefSlot(StrEnum):
     """``template_ref`` JSON 键名（与 agent_template.template_ref 槽位一致）。"""
@@ -20,7 +17,7 @@ class TemplateRefSlot(StrEnum):
     EMBEDDING_MODEL = "embedding_model"
     SKILL_WHITELIST = "skill_whitelist"
     EXTENSION_CONFIG = "extension_config"
-    SERVICE_CONFIG = "service_config"
+    PERMISSIONS = "permissions"
 
 
 SLOT_ENTITY_TABLE: dict[TemplateRefSlot, str] = {
@@ -31,7 +28,7 @@ SLOT_ENTITY_TABLE: dict[TemplateRefSlot, str] = {
     TemplateRefSlot.EMBEDDING_MODEL: "embedding_template",
     TemplateRefSlot.SKILL_WHITELIST: "skill_whitelist_template",
     TemplateRefSlot.EXTENSION_CONFIG: "extension_config_template",
-    TemplateRefSlot.SERVICE_CONFIG: "service_config_template",
+    TemplateRefSlot.PERMISSIONS: "permissions_template",
 }
 
 MODEL_SLOT_KEYS = frozenset({
@@ -46,6 +43,7 @@ DEFAULT_AGENT_LOAD_SLOTS = frozenset({
     TemplateRefSlot.EMBEDDING_MODEL,
     TemplateRefSlot.SKILL_WHITELIST,
     TemplateRefSlot.EXTENSION_CONFIG,
+    TemplateRefSlot.PERMISSIONS,
 })
 
 
@@ -74,6 +72,8 @@ def normalize_template_ref(value: Any) -> dict[str, list[str]]:
 
 @dataclass(frozen=True)
 class RoutingContext:
+    """企业配置路由三元组；不含 ``gateway_id``（Agent 业务不消费）。"""
+
     group_id: str
     bot_id: str
     user_id: str
@@ -96,7 +96,7 @@ class EffectiveEnterpriseConfig:
     embedding: list[dict[str, Any]] | None = None
     skill_whitelist: list[dict[str, Any]] | None = None
     extension_config: list[dict[str, Any]] | None = None
-    service_config: list[dict[str, Any]] | None = None
+    permissions: list[dict[str, Any]] | None = None
     service_id: str | None = None
     agent_id: str | None = None
     workspace_dir: str | None = None
@@ -115,7 +115,7 @@ class EffectiveEnterpriseConfig:
             "embedding": self.embedding,
             "skill_whitelist": self.skill_whitelist,
             "extension_config": self.extension_config,
-            "service_config": self.service_config,
+            "permissions": self.permissions,
             "service_id": self.service_id,
             "agent_id": self.agent_id,
             "workspace_dir": self.workspace_dir,
@@ -129,8 +129,6 @@ class EffectiveEnterpriseConfig:
 
 
 __all__ = (
-    "SERVICE_CONFIG_SLOT",
-    "SERVICE_CONFIG_TABLE",
     "DEFAULT_AGENT_LOAD_SLOTS",
     "EffectiveEnterpriseConfig",
     "MODEL_SLOT_KEYS",

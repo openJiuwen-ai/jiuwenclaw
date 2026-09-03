@@ -1,4 +1,4 @@
-import { isEnterpriseMode } from '../../edition';
+import { isEnterprise } from '../../edition';
 import { getRuntimeScope } from '../../services/runtimeScope';
 
 export type ChatRoute =
@@ -16,7 +16,7 @@ export function parseChatRoute(pathname: string): ChatRoute | null {
 }
 
 function appendEnterpriseScope(path: string): string {
-  if (!isEnterpriseMode()) return path;
+  if (!isEnterprise()) return path;
   const scope = getRuntimeScope();
   const query = new URLSearchParams(window.location.search);
   if (scope.userId) query.set('user_id', scope.userId);
