@@ -743,16 +743,17 @@ def test_sync_team_identity_metadata_updates_only_for_create_kinds(monkeypatch):
     TeamHelpersHarness.sync_team_identity_metadata_for_test(
         channel_id="web",
         session_id="team_sess_001",
-        mode="team",
         ready_team_name="demo-team",
         activation_kind=RunActionKind.CREATE.value,
     )
 
+    # 只写 team_name，不碰 metadata.mode（sync_team_identity_metadata 曾写死
+    # mode="team" 会盖掉 chat 轮次落盘的 team.work.plan，制造 session.plan_status
+    # 误报 false 的空窗）。
     assert updates == [
         {
             "session_id": "team_sess_001",
             "channel_id": "web",
-            "mode": "team",
             "team_name": "demo-team",
         }
     ]
@@ -775,7 +776,6 @@ def test_sync_team_identity_metadata_skips_recover_kinds(monkeypatch):
     TeamHelpersHarness.sync_team_identity_metadata_for_test(
         channel_id="web",
         session_id="team_sess_001",
-        mode="team",
         ready_team_name="new-team",
         activation_kind=RunActionKind.NEW_TEAM_IN_SESSION.value,
     )
@@ -800,7 +800,6 @@ def test_sync_team_identity_metadata_keeps_existing_name_on_mismatch(monkeypatch
     TeamHelpersHarness.sync_team_identity_metadata_for_test(
         channel_id="web",
         session_id="team_sess_001",
-        mode="team",
         ready_team_name="new-team",
         activation_kind=RunActionKind.CREATE.value,
     )
