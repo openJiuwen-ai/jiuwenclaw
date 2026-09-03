@@ -104,7 +104,7 @@ class A2AAuthenticationMiddleware:
                     credential = b""
         try:
             digest = hash_credential(credential.decode("ascii"))
-        except (UnicodeDecodeError, ValueError):
+        except ValueError:
             digest = ""
         if credential and hmac.compare_digest(digest, config.credential_hash):
             await self.app(scope, receive, send)

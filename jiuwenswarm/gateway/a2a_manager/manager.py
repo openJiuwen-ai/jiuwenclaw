@@ -241,6 +241,18 @@ class A2AManager:
         effective_base_url = (
             f"http://{effective.host}:{effective.port}" if effective else None
         )
+        security_fields = (
+            "auth_type",
+            "api_key_header",
+            "card_auth_required",
+            "credential_hash",
+        )
+        security_pending_apply = False
+        if effective is not None:
+            for name in security_fields:
+                if getattr(config, name) != getattr(effective, name):
+                    security_pending_apply = True
+                    break
         return A2AIngressSnapshot(
             enabled=config.enabled,
             state=self._state,
@@ -293,18 +305,7 @@ class A2AManager:
             effective_card_auth_required=effective.card_auth_required
             if effective
             else None,
-            security_pending_apply=bool(
-                effective
-                and any(
-                    getattr(config, name) != getattr(effective, name)
-                    for name in (
-                        "auth_type",
-                        "api_key_header",
-                        "card_auth_required",
-                        "credential_hash",
-                    )
-                )
-            ),
+            security_pending_apply=security_pending_apply,
         )
 
     def history(self, limit: int = 100) -> dict[str, Any]:

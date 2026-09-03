@@ -1707,12 +1707,20 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
 
     async def _a2a_ingress_edit(ws, req_id, params, session_id):
         if a2a_manager is None:
-            await channel.send_response(ws, req_id, ok=False, error="A2A ingress manager is unavailable", code="A2A_BIND_FAILED")
+            await channel.send_response(
+                ws, req_id, ok=False, error="A2A ingress manager is unavailable", code="A2A_BIND_FAILED"
+            )
             return
         try:
             payload = await a2a_manager.edit_config()
         except Exception:
-            await channel.send_response(ws, req_id, ok=False, error="Unable to read A2A ingress configuration", code="A2A_CONFIG_INVALID")
+            await channel.send_response(
+                ws,
+                req_id,
+                ok=False,
+                error="Unable to read A2A ingress configuration",
+                code="A2A_CONFIG_INVALID",
+            )
             return
         await channel.send_response(ws, req_id, ok=True, payload=payload)
 
