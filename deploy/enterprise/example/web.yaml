@@ -56,17 +56,17 @@ spec:
               value: "<<WEB_DB_USER>>"
             - name: WEB_DB_NAME
               value: "web"
-            - name: JIUWENCLAW_MINIO_ENDPOINT
+            - name: OBS_URL
               value: <<OBS_URL>>
-            - name: JIUWENCLAW_MINIO_ACCESS_KEY
+            - name: OBS_ACCESS_KEY
               value: <<OBS_ACCESS_KEY>>
-            - name: JIUWENCLAW_MINIO_BUCKET
+            - name: OBS_BUCKET
               value: <<OBS_BUCKET>>
-            - name: JIUWENCLAW_MINIO_SECURE
+            - name: OBS_SECURE
               value: <<OBS_SECURE>>
-            - name: JIUWENCLAW_MINIO_PUBLIC_BASE_URL
+            - name: OBS_PUBLIC_BASE_URL
               value: ""
-            - name: JIUWENCLAW_MINIO_REGION
+            - name: OBS_REGION
               value: <<OBS_REGION>>
 ---
 # 集群内部访问： 提供稳定 DNS 域名

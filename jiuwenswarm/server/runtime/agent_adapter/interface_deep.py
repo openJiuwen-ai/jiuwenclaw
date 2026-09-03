@@ -17479,6 +17479,18 @@ class JiuWenSwarmDeepAdapter:
                         }
                     return None
 
+                # send_file OBS path: OutputSchema(type="chat.file", payload={files:[url...]})
+                # must not fall through to _stream_text_payload — files-only payload has
+                # no content/output, so the frame would be dropped and Gateway never
+                # materializes a download token.
+                if chunk_type == "chat.file":
+                    if isinstance(payload, dict):
+                        return {
+                            "event_type": "chat.file",
+                            **payload,
+                        }
+                    return None
+
                 if chunk_type == "thinking":
                     return {
                         "event_type": "chat.processing_status",
