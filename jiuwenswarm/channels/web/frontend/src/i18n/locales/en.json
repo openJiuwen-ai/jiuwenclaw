@@ -34,7 +34,6 @@
     "chat": "Chat",
     "work": "Tasks",
     "agent": "Experts",
-    "teams": "Teams",
     "sessions": "Sessions",
     "cron": "Scheduled Tasks",
     "skills": "Skills",
@@ -575,30 +574,6 @@
   "references": {
     "tab": "References",
     "empty": "No references currently"
-  },
-  "teams": {
-    "title": "Team Management",
-    "subtitle": "Inspect team directories or delete teams",
-    "teamList": "Teams",
-    "count": "{{count}} team(s)",
-    "sessionCount": "{{count}} session(s)",
-    "directory": "Team Directory",
-    "noneSelected": "No team selected",
-    "empty": "No teams",
-    "selectFirst": "Select a team first",
-    "loadingDirectory": "Loading team directory...",
-    "emptyDirectory": "No files in this team directory",
-    "deleteTeam": "Delete team",
-    "deleting": "Deleting...",
-    "deleteConfirm": "Delete team {{team}}?\nThis will delete the team runtime, linked sessions, and directory.",
-    "folder": "Folder",
-    "notPreviewable": "Not previewable",
-    "selectFile": "Select a file to view",
-    "errors": {
-      "loadTeams": "Failed to load teams",
-      "loadDirectory": "Failed to load team directory",
-      "deleteTeam": "Failed to delete team: {{team}}"
-    }
   },
   "statusBar": {
     "evolving": "Checking whether skill evolution is needed...",

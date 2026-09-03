@@ -34,7 +34,6 @@
     "chat": "对话",
     "work": "任务",
     "agent": "专家",
-    "teams": "团队",
     "sessions": "会话",
     "cron": "定时任务",
     "skills": "技能",
@@ -563,30 +562,6 @@
   "references": {
     "tab": "参考信息",
     "empty": "当前暂无参考信息"
-  },
-  "teams": {
-    "title": "团队管理",
-    "subtitle": "查看团队目录或删除团队",
-    "teamList": "团队列表",
-    "count": "当前 {{count}} 个团队",
-    "sessionCount": "{{count}} 个会话",
-    "directory": "团队目录",
-    "noneSelected": "未选择团队",
-    "empty": "暂无团队",
-    "selectFirst": "请先选择团队",
-    "loadingDirectory": "加载团队目录中...",
-    "emptyDirectory": "暂无团队目录文件",
-    "deleteTeam": "删除团队",
-    "deleting": "删除中...",
-    "deleteConfirm": "确认删除团队 {{team}} ?\n将删除团队运行时、关联会话及目录。",
-    "folder": "文件夹",
-    "notPreviewable": "不可预览",
-    "selectFile": "请选择一个文件查看",
-    "errors": {
-      "loadTeams": "团队列表加载失败",
-      "loadDirectory": "团队目录加载失败",
-      "deleteTeam": "删除团队失败：{{team}}"
-    }
   },
   "statusBar": {
     "evolving": "正在检测是否需要技能演进...",
