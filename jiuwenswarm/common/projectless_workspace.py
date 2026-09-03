@@ -200,14 +200,15 @@ def _get_session_task_date(session_id: str | None) -> str | None:
     """
     raw_session = str(session_id or "").strip()
     session_path = Path(raw_session)
-    if (
-        not raw_session
-        or raw_session in {".", ".."}
-        or "/" in raw_session
-        or "\\" in raw_session
-        or session_path.is_absolute()
-        or session_path.name != raw_session
-    ):
+    if not raw_session:
+        return None
+    if raw_session in {".", ".."}:
+        return None
+    if any(separator in raw_session for separator in ("/", "\\")):
+        return None
+    if session_path.is_absolute():
+        return None
+    if session_path.name != raw_session:
         return None
 
     try:
