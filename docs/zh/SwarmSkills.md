@@ -389,8 +389,9 @@ tools:
 
 Swarm Skills 需要在 Agent Team 集群模式下运行。在使用前，请确保已切换到集群模式：
 
-- 在对话页面的模式切换中选择「集群模式」
-- 或使用命令：`/mode team`
+- **Web 界面**：在主界面顶部或左侧模式选择器中切换为「集群模式（Agent Team）」
+- **TUI 终端交互**：在 TUI 输入框中执行命令 `/mode team` 切换到集群模式
+- **命令行启动**：启动应用时指定模式参数，例如 `python -m jiuwenswarm.app --mode team` 或 `jiuwenswarm-tui --mode team`
 
 用户通常通过以下步骤开始使用 Swarm Skills：
 
@@ -769,11 +770,11 @@ graph TD
 
 **步骤七：验证**
 
-运行自动化验证器，确保 TeamSkill 符合规范：
+运行自动化验证器，确保 Swarm Skill 符合规范：
 
 ```bash
 # 方式一：使用 TUI 内置命令（推荐）
-# 将 <skill_path> 替换为 TeamSkill 的完整绝对路径
+# 将 <skill_path> 替换为 Swarm Skill 的完整绝对路径
 # 注意：TUI 中 ~ 不会被展开，必须使用完整路径如 /root/.jiuwenswarm/agent/workspace/skills/my-team-skill
 # 通用命令模板：/teamskills validate <你的技能绝对路径> --type teamskills
 
@@ -786,7 +787,7 @@ python3 /root/.jiuwenswarm/agent/workspace/skills/swarmskill-creator/scripts/val
 
 > **实用提示**：
 > 1. 请将命令中的【你的技能绝对路径】替换为实际路径，不要直接用占位符
-> 2. 你创建的技能默认保存在：~/.jiuwenswarm/agent/workspace/skills/你的技能目录名
+> 2. 你创建的 Swarm Skill 默认保存在：`~/.jiuwenswarm/agent/workspace/skills/<你的技能目录名>`
 > 3. TUI中执行路径类命令时，必须用完整绝对路径（如/root/xxx），~不会被自动识别
 > 4. 当前系统内置可用技能：swarmskill-creator、skill-creator
 
@@ -836,7 +837,7 @@ python3 /root/.jiuwenswarm/agent/workspace/skills/swarmskill-creator/scripts/val
 
 ```bash
 # 方式一：使用 TUI 内置命令（推荐）
-/teamskills validate path/to/<swarmskill-name>/ --type swarmskills
+/teamskills validate path/to/<swarmskill-name>/ --type teamskills
 
 # 方式二：使用独立验证脚本（脚本随 swarmskill-creator 技能提供）
 python3 scripts/validate_swarmskill.py path/to/<swarmskill-name>/
@@ -898,8 +899,8 @@ python3 scripts/validate_swarmskill.py path/to/<swarmskill-name>/
 | 安装 Swarm Skill | `/teamskills install <asset_id> --version <x.y.z>` |
 | 查看已安装技能 | `/teamskills list` |
 | 卸载 Swarm Skill | `/teamskills uninstall <name>` |
-| 创建 Swarm Skill 脚手架 | `/teamskills init <name> --type swarmskills` |
-| 验证 Swarm Skill | `/teamskills validate <path> --type swarmskills` |
+| 创建 Swarm Skill 脚手架 | `/teamskills init <name> --type teamskills` |
+| 验证 Swarm Skill | `/teamskills validate <path> --type teamskills` |
 | 打包 Swarm Skill | `/teamskills pack <path> --output <dir>` |
 | 配置 Hub URL 和 Token | `/teamskills config --market-url <url> --token <TOKEN>` |
 | 发布到 Swarm Skills Hub | `/teamskills publish <path> --version <x.y.z> --token <TOKEN>` |
