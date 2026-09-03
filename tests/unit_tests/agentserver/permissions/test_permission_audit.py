@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from pathlib import Path
 
@@ -94,6 +95,30 @@ def test_audit_keeps_allowed_route_metadata(
     )
     assert '"decision_source":"host_route"' in caplog.text
     assert '"host_route_source":"manual_only"' in caplog.text
+
+
+def test_audit_keeps_safe_reviewer_prose_in_memory_and_persistent_sinks(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _capture(caplog, monkeypatch)
+    summary = "The cat food costs $100"
+    writer = PersistentAuditWriter(data_root=tmp_path / "data")
+
+    result = emit_permission_audit(
+        _facts(tmp_path),
+        decision="ask",
+        reason="semantic_review_required",
+        degraded=False,
+        extra={"reviewer_reason_summary": summary},
+        persistent_writer=writer,
+    )
+
+    assert f'"reviewer_reason_summary":"{summary}"' in caplog.text
+    assert result is not None and result.persisted is True
+    record = json.loads(result.path.read_text(encoding="utf-8"))
+    assert record["reviewer_reason_summary"] == summary
 
 
 def test_audit_redacts_sensitive_fields_and_filters_unknown_extra(

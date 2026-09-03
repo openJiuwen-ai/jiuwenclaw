@@ -5,9 +5,13 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from jiuwenswarm.agents.harness.common.rails.permissions.persistent_audit import (
+    AUDIT_TEXT_REDACTED,
     PersistentAuditWriter,
     resolve_persistent_audit_root,
+    sanitize_audit_field,
 )
 from jiuwenswarm.agents.harness.common.rails.permissions.tool_decision_facts import build_tool_decision_facts
 
@@ -140,3 +144,62 @@ def test_persistent_audit_redacts_sensitive_mapping_keys(tmp_path: Path) -> None
     record = json.loads(content)
     assert sensitive_path not in content
     assert record["reviewer_reason_summary"] == {"[redacted]": "safe_value"}
+
+
+@pytest.mark.parametrize(
+    "summary",
+    [
+        "The cat food costs $100",
+        "Please find me another option",
+    ],
+)
+def test_reviewer_summary_preserves_unambiguous_natural_language(summary: str) -> None:
+    assert sanitize_audit_field("reviewer_reason_summary", summary) == summary
+
+
+@pytest.mark.parametrize(
+    "summary",
+    [
+        "$100",
+        "$HOME",
+        "${HOME}",
+        "$(whoami)",
+        "$?",
+        "$$",
+        "$!",
+        "$#",
+        "$@",
+        "$*",
+        "$-",
+        "$0",
+        "$1",
+        "$'secret'",
+        '$"text"',
+        "$((1+2))",
+        "cat secret.txt",
+        "cat ./secret",
+        "find /tmp",
+        "git status",
+        "curl --header value",
+        "wget https://example.invalid/file",
+        "cat file > output",
+        "cat file && echo done",
+        "The cat food costs $100 and $HOME is set",
+        "The cat food costs $100 but use cat secret.txt",
+        "The command is cat secret.txt",
+        "The operation is find credentials",
+        "The reviewer approves cat private-key.pem",
+    ],
+)
+def test_reviewer_summary_redacts_ambiguous_or_command_like_text(summary: str) -> None:
+    assert sanitize_audit_field("reviewer_reason_summary", summary) == AUDIT_TEXT_REDACTED
+
+
+def test_natural_language_exception_does_not_relax_other_or_nested_fields() -> None:
+    summary = "The cat food costs $100"
+
+    assert sanitize_audit_field("reason", summary) == AUDIT_TEXT_REDACTED
+    assert sanitize_audit_field("unknown", summary) == AUDIT_TEXT_REDACTED
+    assert sanitize_audit_field("reviewer_reason_summary", {"note": summary}) == {
+        "note": AUDIT_TEXT_REDACTED
+    }

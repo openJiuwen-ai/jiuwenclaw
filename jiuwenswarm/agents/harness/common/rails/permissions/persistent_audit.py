@@ -42,6 +42,9 @@ EXTRA_ALLOWLIST = frozenset(
     }
 )
 _SAFE_AUDIT_TEXT_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.: -]{0,159}$")
+_SAFE_NATURAL_LANGUAGE_AUDIT_TEXT_PATTERN = re.compile(
+    r"^[A-Za-z0-9][A-Za-z0-9$_.: -]{0,159}$"
+)
 _POSIX_ABSOLUTE_PATH_PATTERN = re.compile(r"(?<!\w)/(?:[^\s'\"\\]+/?)+")
 _WINDOWS_ABSOLUTE_PATH_PATTERN = re.compile(r"\b[A-Za-z]:\\[^\s'\"]+")
 _SECRET_LIKE_PATTERN = re.compile(
@@ -53,6 +56,14 @@ _SHELL_CONTROL_PATTERN = re.compile(r"(&&|\|\||[;<>`$])")
 _COMMAND_LIKE_PATTERN = re.compile(
     r"(?i)\b(?:bash|cat|cmd|cp|curl|find|git|grep|mv|powershell|python3?|rm|sh|"
     r"sudo|wget)\s+\S+"
+)
+_NATURAL_LANGUAGE_AUDIT_FIELDS = frozenset({"reviewer_reason_summary"})
+_CLEAR_NATURAL_LANGUAGE_PATTERN = re.compile(
+    r"(?i)\b(?:a|some|the)\s+cat food\b|\bplease\s+find me\b"
+)
+_CONTEXTUAL_PRICE_PATTERN = re.compile(
+    r"(?i)\b(?:amount(?:s)?(?:\s+of)?|budget(?:ed)?|costs?|for|price(?:d)?"
+    r"(?:\s+at)?|totals?|worth)\s+\$(?:0|[1-9]\d*)(?:\.\d{1,2})?\b"
 )
 
 
@@ -243,6 +254,8 @@ def sanitize_audit_value(value: object) -> object:
 
 def sanitize_audit_field(key: str, value: object) -> object:
     """Sanitize one allowlisted field with its narrow structured contract."""
+    if key in _NATURAL_LANGUAGE_AUDIT_FIELDS and isinstance(value, str):
+        return _sanitize_natural_language_audit_text(value)
     return sanitize_audit_value(value)
 
 
@@ -253,6 +266,22 @@ def _sanitize_audit_text(value: object) -> str:
     if _audit_text_contains_sensitive_content(text):
         return AUDIT_TEXT_REDACTED
     if _SAFE_AUDIT_TEXT_PATTERN.fullmatch(text):
+        return text[:MAX_AUDIT_TEXT_LENGTH]
+    return AUDIT_TEXT_REDACTED
+
+
+def _sanitize_natural_language_audit_text(value: object) -> str:
+    """Preserve safe reviewer prose without weakening strict audit fields."""
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    # Mask only unambiguous prose and contextual prices before reusing the full
+    # strict detector. Any unmasked command or dollar form remains protected.
+    strict_view = _CLEAR_NATURAL_LANGUAGE_PATTERN.sub("natural phrase", text)
+    strict_view = _CONTEXTUAL_PRICE_PATTERN.sub("price", strict_view)
+    if "$" in strict_view or _audit_text_contains_sensitive_content(strict_view):
+        return AUDIT_TEXT_REDACTED
+    if _SAFE_NATURAL_LANGUAGE_AUDIT_TEXT_PATTERN.fullmatch(text):
         return text[:MAX_AUDIT_TEXT_LENGTH]
     return AUDIT_TEXT_REDACTED
 
