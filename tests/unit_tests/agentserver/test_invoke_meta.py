@@ -1264,3 +1264,62 @@ def test_skills_goal_override_uses_real_skill_slugs():
         assert "再调用 `invoke`" not in text
         assert "Deliver the video file" in text or "交付视频文件" in text
 
+
+def test_skills_goal_override_uses_available_skills_catalog_for_english():
+    from jiuwenswarm.agents.harness.common.prompt.skills_goal_override import (
+        _STATIC_BLOCK_EN,
+    )
+
+    assert "<available_skills>" in _STATIC_BLOCK_EN
+    assert "</available_skills>" in _STATIC_BLOCK_EN
+    assert _STATIC_BLOCK_EN.count("<skill>") == 15
+    assert "<name>xiaoyi-web-search</name>" in _STATIC_BLOCK_EN
+    assert "<name>execution-validator-skill</name>" in _STATIC_BLOCK_EN
+    assert "<name>skill-scope</name>" in _STATIC_BLOCK_EN
+    assert "Use `skill_tool` to load a skill's full `SKILL.md`" in _STATIC_BLOCK_EN
+
+
+def test_skills_goal_override_uses_available_skills_catalog_for_chinese():
+    from jiuwenswarm.agents.harness.common.prompt.skills_goal_override import (
+        _STATIC_BLOCK_CN,
+    )
+
+    assert "<available_skills>" in _STATIC_BLOCK_CN
+    assert "</available_skills>" in _STATIC_BLOCK_CN
+    assert _STATIC_BLOCK_CN.count("<skill>") == 15
+    assert "<name>xiaoyi-web-search</name>" in _STATIC_BLOCK_CN
+    assert "<name>skill-scope</name>" in _STATIC_BLOCK_CN
+    assert "使用 `skill_tool` 加载其完整 `SKILL.md`" in _STATIC_BLOCK_CN
+
+
+def test_skills_goal_override_caps_dynamic_catalog_with_configurable_budget(monkeypatch):
+    from jiuwenswarm.agents.harness.common.prompt.skills_goal_override import (
+        _SKILLS_PROMPT_MAX_CHARS_ENV,
+        _STATIC_BLOCK_EN,
+        _build_all_mode_skill_prompt,
+        _dynamic_skill_entries_xml,
+    )
+
+    dynamic = "1. `custom-one`: first dynamic skill\n2. `custom-two`: second dynamic skill"
+    first = _dynamic_skill_entries_xml("16. `custom-one`: first dynamic skill")[0]
+    budget = len(_STATIC_BLOCK_EN) + len(first) + 1
+    monkeypatch.setenv(_SKILLS_PROMPT_MAX_CHARS_ENV, str(budget))
+
+    text = _build_all_mode_skill_prompt(dynamic)
+    assert "<name>custom-one</name>" in text
+    assert "custom-two" not in text
+    assert text.count("<available_skills>") == 1
+    assert text.count("</available_skills>") == 1
+    assert len(text) <= budget
+
+
+def test_skills_goal_override_escapes_dynamic_skill_xml():
+    from jiuwenswarm.agents.harness.common.prompt.skills_goal_override import (
+        _dynamic_skill_entries_xml,
+    )
+
+    text = _dynamic_skill_entries_xml("1. `custom<&`: uses <input> & \"quoted\" values")[0]
+
+    assert "<name>custom&lt;&amp;</name>" in text
+    assert "uses &lt;input&gt; &amp; &quot;quoted&quot; values" in text
+
