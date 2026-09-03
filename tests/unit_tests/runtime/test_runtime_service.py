@@ -14,6 +14,7 @@ from jiuwenswarm.common.schema.agent import AgentResponse, AgentResponseChunk
 from jiuwenswarm.common.schema.message import ReqMethod
 from jiuwenswarm.runtime import AgentRuntime, RuntimeStateError
 from jiuwenswarm.runtime import service as runtime_service_module
+from jiuwenswarm.runtime.events import RuntimeEvent
 from jiuwenswarm.runtime.plan import PlanStateResult
 
 
@@ -359,6 +360,146 @@ async def test_cleanup_session_does_not_require_runtime_start() -> None:
 
 
 @pytest.mark.asyncio
+async def test_answer_interaction_preserves_contract_and_lifecycle_order() -> None:
+    order: list[str] = []
+
+    class InteractionAgent(FakeAgent):
+        async def process_message(self, request: AgentRequest) -> AgentResponse:
+            order.append("process")
+            return AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=True,
+                payload={
+                    "event_type": "chat.interaction_answered",
+                    "interaction_id": "interaction-1",
+                },
+                metadata={"source": "interaction"},
+                agent_ref={"mode": "agent", "id": "interaction-agent"},
+            )
+
+    class InteractionManager(FakeAgentManager):
+        async def begin_foreground_chat(self) -> None:
+            order.append("foreground.begin")
+            await super().begin_foreground_chat()
+
+        async def end_foreground_chat(self) -> None:
+            order.append("cleanup.foreground")
+            await super().end_foreground_chat()
+
+    class InteractionPlanController(FakePlanController):
+        async def ensure_state(
+            self,
+            *args: object,
+        ) -> PlanStateResult:
+            order.append("plan.ensure")
+            return PlanStateResult()
+
+        async def check_post_process_exit(
+            self,
+            *args: object,
+        ) -> list[dict[str, object]]:
+            order.append("cleanup.plan")
+            return []
+
+    async def initialize() -> None:
+        order.append("start")
+
+    manager = InteractionManager()
+    manager.agent = InteractionAgent()
+
+    class InteractionRuntime(AgentRuntime):
+        async def prepare_chat_turn(
+            self,
+            request: AgentRequest,
+            channel_id: str,
+            *,
+            sync_metadata: bool = True,
+        ) -> tuple[str, str | None, object]:
+            order.append("prepare")
+            assert channel_id == "web"
+            assert sync_metadata is True
+            return "agent", "normal", manager.agent
+
+    runtime = InteractionRuntime(
+        agent_manager=manager,
+        initializer=initialize,
+        plan_controller=InteractionPlanController(),
+    )
+
+    async def trigger_hook(_request: AgentRequest) -> None:
+        order.append("hook")
+
+    runtime._trigger_before_chat_request_hook = trigger_hook
+    request = AgentRequest(
+        request_id="answer-request",
+        channel_id="web",
+        session_id="answer-session",
+        req_method=ReqMethod.CHAT_ANSWER,
+        params={
+            "interaction_id": "interaction-1",
+            "answer": "approve",
+            "mode": "agent",
+            "work_mode": "work",
+        },
+        metadata={"client": "web"},
+    )
+
+    events = await runtime.answer_interaction(request)
+
+    assert order == [
+        "start",
+        "hook",
+        "foreground.begin",
+        "prepare",
+        "plan.ensure",
+        "process",
+        "cleanup.plan",
+        "cleanup.foreground",
+    ]
+    assert manager.foreground_calls == ["begin", "end"]
+    assert len(events) == 1
+    assert events[0].to_dict() == {
+        "request_id": "answer-request",
+        "channel_id": "web",
+        "session_id": "answer-session",
+        "payload": {
+            "event_type": "chat.interaction_answered",
+            "interaction_id": "interaction-1",
+        },
+        "agent_ref": {"mode": "agent", "id": "interaction-agent"},
+        "metadata": {"source": "interaction"},
+        "is_complete": True,
+        "ok": True,
+    }
+
+
+@pytest.mark.asyncio
+async def test_answer_interaction_rejects_non_answer_before_runtime_start() -> None:
+    manager = FakeAgentManager()
+    manager.agent = SimpleNamespace(process_message=AsyncMock())
+    initializer = AsyncMock()
+    runtime = AgentRuntime(agent_manager=manager, initializer=initializer)
+    request = AgentRequest(
+        request_id="not-an-answer",
+        channel_id="web",
+        session_id="answer-session",
+        req_method=ReqMethod.CHAT_SEND,
+        params={"query": "hello", "mode": "agent", "work_mode": "work"},
+    )
+
+    with pytest.raises(ValueError) as exc_info:
+        await runtime.answer_interaction(request)
+
+    assert str(exc_info.value) == ("interaction answer must use ReqMethod.CHAT_ANSWER")
+    assert runtime.started is False
+    initializer.assert_not_awaited()
+    assert manager.foreground_calls == []
+    assert manager.agent_calls == []
+    manager.agent.process_message.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_stream_uses_selected_existing_agent_and_runtime_events() -> None:
     manager = FakeAgentManager()
     plan = FakePlanController()
@@ -673,6 +814,28 @@ async def test_agent_server_session_fork_waits_for_runtime_with_explicit_target(
     ws.send.assert_awaited_once()
 
 
+def test_runtime_error_event_metadata_is_optional_and_copied() -> None:
+    metadata = {"trace_id": "runtime-error"}
+
+    event = RuntimeEvent.error(
+        request_id="error-with-metadata",
+        channel_id="process_cli",
+        session_id="session-1",
+        error=ValueError("boom"),
+        metadata=metadata,
+    )
+    event_without_metadata = RuntimeEvent.error(
+        request_id="error-without-metadata",
+        channel_id="process_cli",
+        session_id=None,
+        error=ValueError("boom"),
+    )
+    metadata["trace_id"] = "mutated"
+
+    assert event.metadata == {"trace_id": "runtime-error"}
+    assert event_without_metadata.metadata is None
+
+
 @pytest.mark.asyncio
 async def test_runtime_events_preserve_unary_and_stream_metadata() -> None:
     manager = FakeAgentManager()
@@ -883,18 +1046,25 @@ async def test_plan_post_error_does_not_replace_agent_error() -> None:
     )
     runtime._trigger_before_chat_request_hook = no_hook
 
-    unary = await runtime.invoke(_chat_request("primary-unary-error"))
+    unary_request = _chat_request("primary-unary-error")
+    unary_request.metadata = {"trace_id": "unary-error"}
+    stream_request = _chat_request("primary-stream-error")
+    stream_request.metadata = {"trace_id": "stream-error"}
+
+    unary = await runtime.invoke(unary_request)
     streamed = [
-        event async for event in runtime.stream(_chat_request("primary-stream-error"))
+        event async for event in runtime.stream(stream_request)
     ]
 
     assert unary[-1].event_type == "runtime.error"
     assert unary[-1].ok is False
     assert unary[-1].payload["error"] == "agent execution failed"
+    assert unary[-1].metadata == {"trace_id": "unary-error"}
     assert streamed[-1].event_type == "runtime.error"
     assert streamed[-1].ok is False
     assert streamed[-1].is_complete is True
     assert streamed[-1].payload["error"] == "agent stream failed"
+    assert streamed[-1].metadata == {"trace_id": "stream-error"}
     assert manager.foreground_calls == ["begin", "end", "begin", "end"]
 
 
