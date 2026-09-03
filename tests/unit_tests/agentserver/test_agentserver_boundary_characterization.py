@@ -297,9 +297,7 @@ class PortableRuntime:
         await cancel_all_team_stream_tasks_across_managers(
             reason=reason,
             exclude_session_ids=(
-                None
-                if exclude_session_ids is None
-                else set(exclude_session_ids)
+                None if exclude_session_ids is None else set(exclude_session_ids)
             ),
         )
 
