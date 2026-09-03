@@ -28,13 +28,13 @@ from jiuwenswarm.agents.harness.common.prompt import skills_goal_override  # noq
 class DesignPromptPriority(IntEnum):
     INTRO = 10
     CONTENT_POLICY = 11
-    ROLE = 12
-    PRODUCT_FUNDAMENTALS = 13
-    BOUNDARIES = 14
-    INTERACTION_PRINCIPLES = 15
-    CORE_CAPABILITIES = 16
-    REGIONAL_CONVENTIONS = 17
-    SYSTEM = 20
+    SYSTEM = 13
+    ROLE = 14
+    PRODUCT_FUNDAMENTALS = 15
+    BOUNDARIES = 16
+    INTERACTION_PRINCIPLES = 17
+    CORE_CAPABILITIES = 18
+    REGIONAL_CONVENTIONS = 19
     TOOL_AND_SKILL_PRINCIPLES = 33
     ERROR_HANDLING = 38
     TONE_AND_STYLE = 45

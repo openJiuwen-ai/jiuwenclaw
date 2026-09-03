@@ -18,7 +18,7 @@ class PromptPriority(IntEnum):
     """Named prompt section priorities for general agent builder."""
 
     IDENTITY = 10
-    CONTENT_POLICY = 12
+    CONTENT_POLICY = 11
     REGIONAL_CONVENTIONS = 16
     TASK_EXECUTION = 21
     SKILLS = 40

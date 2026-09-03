@@ -24,7 +24,7 @@ from jiuwenswarm.agents.harness.common.prompt import skills_goal_override  # noq
 
 class CodePromptPriority(IntEnum):
     INTRO = 10
-    CONTENT_POLICY = 12
+    CONTENT_POLICY = 11
     SYSTEM = 15
     REGIONAL_CONVENTIONS = 16
     DOING_TASKS = 25
