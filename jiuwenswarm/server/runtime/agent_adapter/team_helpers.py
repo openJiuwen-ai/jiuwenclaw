@@ -675,7 +675,6 @@ def sync_team_identity_metadata(
     *,
     channel_id: str | None,
     session_id: str,
-    mode: str,
     ready_team_name: str,
     activation_kind: str | None,
 ) -> None:
@@ -695,10 +694,14 @@ def sync_team_identity_metadata(
         )
         return
 
+    # 只持久化 team 身份（team_name），不碰 metadata.mode：这里历史上写死
+    # mode="team" 传给 update_session_metadata，会把 chat 轮次刚落盘的
+    # team.work.plan / team.work.normal 盖回光杆 "team"，制造 session.plan_status
+    # 等按 metadata.mode 判定 plan 的读取方读到误报 false 的空窗。会话的真实
+    # mode 由 sync_session_request_metadata / append_history_record 按每轮请求维护。
     update_session_metadata(
         session_id=session_id,
         channel_id=_resolve_channel_id(channel_id),
-        mode=mode,
         team_name=ready_team_name,
     )
 
@@ -2998,7 +3001,6 @@ async def _consume_stream_with_query(
                     sync_team_identity_metadata(
                         channel_id=channel_id,
                         session_id=session_id,
-                        mode="team",
                         ready_team_name=ready_team_name,
                         activation_kind=activation_kind,
                     )
