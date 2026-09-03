@@ -1167,7 +1167,6 @@ body.workspace-resize-active iframe {
   }
 
   .team-member-message__plain {
-    max-width: min(100%, 720px);
     min-width: 0;
     overflow-x: auto;
     color: var(--color-text-primary);
