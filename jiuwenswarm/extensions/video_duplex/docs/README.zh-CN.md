@@ -16,12 +16,17 @@ flowchart LR
 
 ## 启用与配置
 
+优先在 Jiuwen 侧栏打开 **扩展 → 应用插件 → Full-duplex → 设置**。配置表单、字段显示、
+密钥占位和保存逻辑均由 `video-duplex` 插件提供；核心前端只负责发现并挂载该组件。
+禁用插件后，全双工功能入口会隐藏，但 **扩展 → 应用插件** 中的设置入口仍保留，可用于重新启用。
+
 实例配置文件：
 
 - Windows：`%USERPROFILE%\.jiuwenswarm\config\.env`
 - macOS/Linux：`~/.jiuwenswarm/config/.env`
 
-修改后重启 Gateway。`VIDEO_DUPLEX_ENABLED=false` 会禁用插件并隐藏侧栏入口。
+在设置页保存后，新请求会直接使用最新配置。手动修改 `.env` 时需要重启 Gateway。
+`VIDEO_DUPLEX_ENABLED=false` 会禁用插件并隐藏全双工侧栏入口。
 
 ### JoyAI + OpenAI 兼容 ASR/TTS
 
@@ -101,7 +106,7 @@ sequenceDiagram
 2. 选择摄像头、共享屏幕或本地视频并授予权限。
 3. 用语音或文字提问，确认文字、语音和打断正常。
 4. 对需要外部信息的问题，确认搜索进度和最终回答均返回。
-5. 将 `VIDEO_DUPLEX_ENABLED=false` 后重启，确认入口与插件路由均不可用。
+5. 在 **扩展 → 应用插件** 中禁用，确认全双工入口隐藏，但管理页仍可重新启用。
 
 日志位于 `~/.jiuwenswarm/logs/`：
 
@@ -117,6 +122,8 @@ sequenceDiagram
 | 职责 | 文件 |
 |---|---|
 | 插件注册与贡献 | `extension.py`、`extension.yaml` |
+| 插件设置页面 | `frontend/VideoDuplexSettings.tsx` |
+| 插件设置持久化 | `backend/settings.py` |
 | 页面 | `frontend/VideoLivePanel/index.tsx` |
 | JoyAI 调度 | `frontend/VideoLivePanel/joyaiProvider.ts` |
 | Qwen 会话 | `frontend/VideoLivePanel/qwenOmniSession.ts` |

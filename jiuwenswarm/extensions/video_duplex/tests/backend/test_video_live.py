@@ -18,6 +18,7 @@ from websockets.frames import Close
 
 from jiuwenswarm.extensions.video_duplex.backend import (
     joyai_provider,
+    settings,
     video_live,
     video_search,
     video_voice,
@@ -47,8 +48,49 @@ def _isolate_video_mode_environment(monkeypatch) -> None:
         "QWEN_OMNI_API_KEY",
         "QWEN_OMNI_MODEL_NAME",
         "QWEN_OMNI_VOICE",
+        "JOYAI_API_BASE",
+        "JOYAI_API_KEY",
+        "JOYAI_MODEL_NAME",
     ):
         monkeypatch.delenv(name, raising=False)
+
+
+def test_plugin_settings_mask_secrets_and_report_original_length(monkeypatch) -> None:
+    monkeypatch.setenv("VIDEO_DUPLEX_ENABLED", "true")
+    monkeypatch.setenv("JOYAI_API_KEY", "secret-value")
+    monkeypatch.setenv("JOYAI_API_BASE", "http://127.0.0.1:8070/v1")
+
+    payload = settings.settings_payload(enabled=True)
+
+    assert payload["values"]["joyai_api_key"] == ""
+    assert payload["configured_secret_lengths"]["joyai_api_key"] == 12
+    assert payload["values"]["joyai_api_base"] == "http://127.0.0.1:8070/v1"
+
+
+def test_plugin_settings_persist_provider_and_preserve_blank_secret(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        'JOYAI_API_KEY="existing-secret"\nVIDEO_LIVE_MODE="realtime"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(settings, "_active_env_file", lambda: env_file)
+    monkeypatch.setenv("JOYAI_API_KEY", "existing-secret")
+
+    settings.update_settings({
+        "video_live_provider": "joyai",
+        "joyai_api_key": "",
+        "joyai_api_base": "http://127.0.0.1:8070/v1",
+        "voice_protocol": "native_ws",
+    })
+
+    persisted = env_file.read_text(encoding="utf-8")
+    assert 'JOYAI_API_KEY="existing-secret"' in persisted
+    assert 'VIDEO_LIVE_MODE="joyai"' in persisted
+    assert 'JOYAI_API_BASE="http://127.0.0.1:8070/v1"' in persisted
+    assert settings.settings_payload(enabled=True)["values"]["voice_protocol"] == "native_ws"
 
 
 class FakeChannel:

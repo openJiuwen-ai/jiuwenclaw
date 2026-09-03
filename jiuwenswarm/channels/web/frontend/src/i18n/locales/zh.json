@@ -44,6 +44,16 @@
     "logs": "日志",
     "update": "更新"
   },
+  "applicationPlugins": {
+    "title": "应用插件",
+    "description": "管理提供独立页面和运行时能力的应用插件。",
+    "backToExtensions": "返回扩展",
+    "refresh": "刷新",
+    "enabled": "已启用",
+    "disabled": "已禁用",
+    "empty": "尚未发现应用插件",
+    "noSettings": "此插件未提供设置页面。"
+  },
   "settingsPanel": {
     "title": "设置",
     "categories": {
@@ -2805,7 +2815,8 @@
     "tabs": {
       "plugin": "插件",
       "mcp": "MCP",
-      "my": "我的扩展"
+      "my": "我的扩展",
+      "applicationPlugins": "应用插件"
     },
     "categories": {
       "all": "全部",

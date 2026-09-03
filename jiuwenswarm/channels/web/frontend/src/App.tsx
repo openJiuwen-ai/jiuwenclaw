@@ -124,9 +124,7 @@ import { generateUuidV4 } from './utils/uuid';
 import { ApplicationPluginOutlet } from './applicationPlugins/ApplicationPluginOutlet';
 import { enabledApplicationPlugins } from './applicationPlugins/manifest';
 import { useApplicationPlugins } from './applicationPlugins/useApplicationPlugins';
-import type {
-  ApplicationPluginNavKey,
-} from './applicationPlugins/types';
+import type { ApplicationPluginNavKey } from './applicationPlugins/types';
 import {
   ModelSetupGuide,
   type ModelSetupGuideStep,
@@ -865,7 +863,8 @@ function AppContent({
       }
     },
   });
-  const applicationPlugins = useApplicationPlugins(isConnected);
+  const applicationPluginState = useApplicationPlugins(isConnected);
+  const applicationPlugins = applicationPluginState.plugins;
   const visibleApplicationPlugins = enabledApplicationPlugins(applicationPlugins);
   const settingsRequest = useMemo(() => resolveSettingsRequest(request), [request, resolveSettingsRequest]);
 
@@ -3118,6 +3117,10 @@ function AppContent({
         {activeNav === 'connectorMarket' && (
           <div className="app-section">
             <ConnectorMarketPanel
+              applicationPlugins={applicationPlugins}
+              applicationPluginsLoading={applicationPluginState.loading}
+              applicationPluginsError={applicationPluginState.error}
+              onRefreshApplicationPlugins={applicationPluginState.refresh}
               onCreateViaChat={() => window.dispatchEvent(new CustomEvent('jiuwen:new-conversation', {
                 detail: {
                   skillName: 'plugin-creator',

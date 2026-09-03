@@ -108,8 +108,29 @@ async def register_extensions(registry):
 ```
 
 纯后端插件可不覆盖 `frontend_contributions()`，纯前端插件也无需覆盖
-`bind_web_channel()`。插件可覆盖 `is_enabled()`，禁用时宿主会隐藏入口并拒绝新的 RPC 和
-WebSocket 连接。配置由插件自己从环境变量或其私有存储读取，宿主不提供业务配置页面。
+`bind_web_channel()`。插件可覆盖 `is_enabled()`，禁用时宿主会隐藏功能入口并拒绝新的运行时
+RPC 和 WebSocket 连接。
+
+内置 bundled 插件可以在自己的 `frontend/index.tsx` 中导出设置组件：
+
+```tsx
+export const applicationPluginId = 'my-plugin';
+export const applicationPluginSettings = MyPluginSettings;
+```
+
+核心前端会在 **扩展 → 应用插件** 中发现并挂载该组件，但不解释任何业务配置字段。设置组件应
+通过插件自己的 RPC 读写环境变量或私有存储。用于重新启用插件的管理 RPC 可在注册时声明：
+
+```python
+channel.register_method(
+    "plugin.my_plugin.settings",
+    settings_handler,
+    local_only=True,
+    available_when_disabled=True,
+)
+```
+
+`available_when_disabled` 只应用于配置和启用状态等管理接口，不应赋给业务运行时接口。
 
 需要 Core Agent 或媒体附件处理时，使用宿主注入服务：
 

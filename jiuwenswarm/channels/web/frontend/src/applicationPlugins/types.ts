@@ -20,3 +20,8 @@ export interface ApplicationPluginManifest {
   api_version: number;
   plugins: ApplicationPluginContribution[];
 }
+
+export interface ApplicationPluginSettingsProps {
+  contribution: ApplicationPluginContribution;
+  onManifestChanged: () => void;
+}

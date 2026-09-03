@@ -71,7 +71,16 @@ class _TestPlugin(ApplicationPluginExtension):
         async def ping(ws, req_id, params, session_id):  # noqa: ANN001
             await channel.send_response(ws, req_id, ok=True, payload={"pong": True})
 
+        async def settings(ws, req_id, params, session_id):  # noqa: ANN001
+            await channel.send_response(ws, req_id, ok=True, payload={"settings": True})
+
         channel.register_method("example.ping", ping, local_only=True)
+        channel.register_method(
+            "example.settings",
+            settings,
+            local_only=True,
+            available_when_disabled=True,
+        )
 
     def frontend_contributions(self) -> tuple[FrontendContribution, ...]:
         return (
@@ -136,10 +145,12 @@ async def test_registry_binds_local_methods_and_blocks_disabled_plugins() -> Non
     responses: list[dict[str, Any]] = []
 
     await channel.methods["example.ping"](responses, "req-1", {}, "session-1")
+    await channel.methods["example.settings"](responses, "req-2", {}, "session-1")
 
-    assert channel.local_only == {"example.ping"}
+    assert channel.local_only == {"example.ping", "example.settings"}
     assert channel.application_plugin_registry is registry
     assert responses[0]["code"] == "APPLICATION_PLUGIN_DISABLED"
+    assert responses[1]["payload"] == {"settings": True}
 
 
 def test_websocket_routes_use_the_registered_runtime_plugin_id() -> None:

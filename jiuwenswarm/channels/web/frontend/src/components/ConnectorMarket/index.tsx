@@ -9,6 +9,8 @@ import { CreatePluginPage } from './CreatePluginPage';
 import { RegisterMcpPage } from './RegisterMcpPage';
 import { UploadFileCreateModal } from './UploadFileCreateModal';
 import { Toast } from './Toast';
+import { ApplicationPluginsPanel } from '../../applicationPlugins/ApplicationPluginsPanel';
+import type { ApplicationPluginContribution } from '../../applicationPlugins/types';
 
 // 列表轮询间隔：和 CronPanel/index.tsx 的定时任务列表用同一套静默刷新节奏（见该文件
 // "定时任务列表除了...没有别的刷新入口"一段注释）——插件/MCP 也可能被其他渠道（Agent工具、
@@ -29,6 +31,7 @@ export function requestManageView(myKind: MarketKind) {
 
 type View =
   | { name: 'market' }
+  | { name: 'application-plugins' }
   | { name: 'plugin-detail'; id: string; fromMy: boolean }
   | { name: 'mcp-detail'; connectorName: string }
   | { name: 'create-manual' }
@@ -73,9 +76,22 @@ interface ConnectorMarketPanelProps {
    * 不传这个 prop 就退化成原来的"尚未接入"提示（同款可选 prop 处理）。
    */
   onCreateViaChat?: () => void;
+  applicationPlugins?: ApplicationPluginContribution[];
+  applicationPluginsLoading?: boolean;
+  applicationPluginsError?: string;
+  onRefreshApplicationPlugins?: () => Promise<void>;
 }
 
-export function ConnectorMarketPanel({ onUseExample, onUsePluginExample, onUseExtension, onCreateViaChat }: ConnectorMarketPanelProps = {}) {
+export function ConnectorMarketPanel({
+  onUseExample,
+  onUsePluginExample,
+  onUseExtension,
+  onCreateViaChat,
+  applicationPlugins = [],
+  applicationPluginsLoading = false,
+  applicationPluginsError = '',
+  onRefreshApplicationPlugins = async () => {},
+}: ConnectorMarketPanelProps = {}) {
   const { t } = useTranslation();
   const [view, setView] = useState<View>({ name: 'market' });
   const [topTab, setTopTab] = useState<TopTab>(() => (pendingManageView ? 'my' : 'plugin'));
@@ -213,6 +229,17 @@ export function ConnectorMarketPanel({ onUseExample, onUsePluginExample, onUseEx
           onCreateWithSkill={onCreateViaChat ?? (() => window.alert(t('connectorMarket.create.withSkillNotWired')))}
           onCreateWithUpload={() => setUploadModalOpen(true)}
           onRegisterCustomMcp={() => setView({ name: 'register-mcp' })}
+          onOpenApplicationPlugins={() => setView({ name: 'application-plugins' })}
+        />
+      )}
+
+      {view.name === 'application-plugins' && (
+        <ApplicationPluginsPanel
+          plugins={applicationPlugins}
+          loading={applicationPluginsLoading}
+          error={applicationPluginsError}
+          onRefresh={onRefreshApplicationPlugins}
+          onBack={() => setView({ name: 'market' })}
         />
       )}
 

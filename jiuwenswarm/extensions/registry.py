@@ -24,9 +24,16 @@ class _ApplicationPluginChannel:
     def __getattr__(self, name: str) -> Any:
         return getattr(self._channel, name)
 
-    def register_method(self, method: str, handler: Callable, *, local_only: bool = False) -> None:
+    def register_method(
+        self,
+        method: str,
+        handler: Callable,
+        *,
+        local_only: bool = False,
+        available_when_disabled: bool = False,
+    ) -> None:
         async def enabled_handler(ws, req_id, params, session_id):  # noqa: ANN001
-            if not self._plugin.is_enabled():
+            if not available_when_disabled and not self._plugin.is_enabled():
                 await self._channel.send_response(
                     ws,
                     req_id,

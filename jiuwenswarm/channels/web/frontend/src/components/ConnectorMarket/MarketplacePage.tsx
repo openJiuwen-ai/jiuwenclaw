@@ -37,6 +37,7 @@ interface MarketplacePageProps {
   onCreateWithSkill: () => void;
   onCreateWithUpload: () => void;
   onRegisterCustomMcp: () => void;
+  onOpenApplicationPlugins: () => void;
 }
 
 // 2026-08-07：backend-requests.md 需求8 已解决——plugin_packages.list/show 现在真的下发单值
@@ -166,6 +167,7 @@ export function MarketplacePage({
   onCreateWithSkill,
   onCreateWithUpload,
   onRegisterCustomMcp,
+  onOpenApplicationPlugins,
 }: MarketplacePageProps) {
   const { t, i18n } = useTranslation();
   const [category, setCategory] = useState<string>('all');
@@ -434,6 +436,13 @@ export function MarketplacePage({
               </button>
             );
           })}
+          <button
+            type="button"
+            onClick={onOpenApplicationPlugins}
+            className="relative pb-2 text-[14px] font-normal leading-[22px] text-text"
+          >
+            {t('connectorMarket.tabs.applicationPlugins')}
+          </button>
         </div>
 
         <div className="flex shrink-0 items-center gap-2">

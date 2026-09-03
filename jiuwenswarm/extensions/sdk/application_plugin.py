@@ -81,6 +81,8 @@ class ApplicationPluginExtension(BaseExtension):
         """Register local RPC methods and connection hooks on ``channel``.
 
         Frontend-only plugins do not need to override this method.
+        Settings handlers may pass ``available_when_disabled=True`` so users
+        can re-enable the plugin from its own management component.
         """
 
         del channel, services
