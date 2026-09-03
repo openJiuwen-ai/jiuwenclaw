@@ -28,6 +28,7 @@ import sys
 import threading
 import time
 import argparse
+from dataclasses import dataclass
 from pathlib import Path
 from ctypes import wintypes
 
@@ -519,7 +520,19 @@ def _save_sandbox_user_password(password: str) -> None:
         )
         _reg_set_str(const.REG_VALUE_SANDBOX_USER_PW, enc.hex())
     except ImportError:  # pragma: no cover
-        logger.warning("pywin32 缺失, 沙箱用户密码未加密存储 (仅开发环境)")
+        # 旧日志"未加密存储"误导排查: 实际是根本未存储 (后续读注册表取不到密码,
+        # 沙箱启动失败且日志指向错). 非开发环境 pywin32 缺失属关键依赖缺失,
+        # fail-fast 而非静默跳过 (避免后续启动失败排查困难).
+        if sys.flags.dev_mode:
+            logger.warning(
+                "pywin32 缺失, 沙箱用户密码未存储 (仅开发环境容忍, "
+                "生产环境 pywin32 为必需依赖)",
+            )
+        else:
+            raise RuntimeError(
+                "pywin32 缺失, 无法存储沙箱用户密码 (DPAPI 加密依赖 pywin32, "
+                "pywin32 为 jbx-sandbox 必需依赖)",
+            ) from None
 
 
 def _create_sandbox_user(password: str, *, retries: int = 1) -> bool:
@@ -1050,14 +1063,21 @@ def _uac_shell_execute_target(payload_exe: str, payload_args: list[str]) -> tupl
     return uac_py, _quote_arg(launcher)
 
 
-def _elevate_and_run_install(
-    force: bool = False,
-    preinstall_paths: list[str] | None = None,
-    proxy_port_start: int = const.DEFAULT_PROXY_PORT_RANGE_START,
-    proxy_port_end: int = const.DEFAULT_PROXY_PORT_RANGE_END,
-    policy_path: str | None = None,
-    recreate_user: bool = False,
-) -> int:
+@dataclass
+class InstallOptions:
+    """安装参数具名封装 (G.FNM.03: 6 参数→dataclass).
+
+    install / _elevate_and_run_install 共用, 各字段含义见 install() docstring.
+    """
+    force: bool = False
+    preinstall_paths: list[str] | None = None
+    proxy_port_start: int = const.DEFAULT_PROXY_PORT_RANGE_START
+    proxy_port_end: int = const.DEFAULT_PROXY_PORT_RANGE_END
+    policy_path: str | None = None
+    recreate_user: bool = False
+
+
+def _elevate_and_run_install(opts: InstallOptions) -> int:
     """通过 UAC 拉起提权子进程执行 install, 并同步阻塞等待其完成.
 
     转发 force / recreate_user / preinstall_paths / proxy_port_* / policy_path
@@ -1096,14 +1116,14 @@ def _elevate_and_run_install(
             f"创建 install 同步 Event 失败 (CreateEventW WinError {err})"
         )
 
-    if force:
+    if opts.force:
         parts.append("--force")
-    if recreate_user:
+    if opts.recreate_user:
         parts.append("--recreate-user")
     parts.append("--proxy-port-start")
-    parts.append(str(proxy_port_start))
+    parts.append(str(opts.proxy_port_start))
     parts.append("--proxy-port-end")
-    parts.append(str(proxy_port_end))
+    parts.append(str(opts.proxy_port_end))
     # 把完成 Event 名传给子进程, 子进程 install 跑完后 SetEvent 通知本进程.
     parts.append("--install-done-event")
     parts.append(event_name)
@@ -1111,18 +1131,18 @@ def _elevate_and_run_install(
     # 子进程需显式接收路径, 否则会 fallback 回包目录写日志.
     parts.append("--install-log-path")
     parts.append(_install_log_path())
-    if preinstall_paths:
+    if opts.preinstall_paths:
         # 用 base64(JSON) 编码列表传参: json.dumps 含内层双引号, Windows 命令行解析会把内层 " 当闭合, 含空格路径被拆成多 argv →
         # 子进程 argparse 报错退出, 到不了 install/SetEvent. base64 后是纯字母, 彻底避开命令行转义.
         import base64
         encoded = base64.b64encode(
-            json.dumps(preinstall_paths).encode("utf-8")
+            json.dumps(opts.preinstall_paths).encode("utf-8")
         ).decode("ascii")
         parts.append("--preinstall-paths")
         parts.append(encoded)
-    if policy_path:
+    if opts.policy_path:
         parts.append("--policy-path")
-        parts.append(policy_path)
+        parts.append(opts.policy_path)
     if getattr(sys, "frozen", False) and py == sys.executable:
         uac_file, params = py, " ".join(_quote_arg(p) for p in parts)
     else:
@@ -1159,7 +1179,7 @@ def _elevate_and_run_install(
     wait_timeout = 0x00000102  # noqa: N806 - Win32 常量
     wait_failed = 0xFFFFFFFF  # noqa: N806 - Win32 常量
     install_wait_timeout = 120_000  # noqa: N806 - Win32 常量
-    logger.info("已通过 UAC 提权运行 install 子进程 (force=%s), 阻塞等待完成 (超时 %ds)...", force, install_wait_timeout // 1000)
+    logger.info("已通过 UAC 提权运行 install 子进程 (force=%s), 阻塞等待完成 (超时 %ds)...", opts.force, install_wait_timeout // 1000)
     try:
         wait_result = kernel32.WaitForSingleObject(
             wintypes.HANDLE(h_event), install_wait_timeout,
@@ -1281,18 +1301,12 @@ PREINSTALL_JOIN_TIMEOUT_SECONDS = 120.0  # noqa: N816 - Win32 常量
 # ---------------------------------------------------------------------------
 # 公开 API.
 # ---------------------------------------------------------------------------
-def install(
-    force: bool = False,
-    preinstall_paths: list[str] | None = None,
-    proxy_port_start: int = const.DEFAULT_PROXY_PORT_RANGE_START,
-    proxy_port_end: int = const.DEFAULT_PROXY_PORT_RANGE_END,
-    policy_path: str | None = None,
-    recreate_user: bool = False,
-) -> None:
+def install(opts: InstallOptions) -> None:
     """执行一次性安装 (需管理员权限).
 
     Args:
-        force: 忽略幂等标记强制重装.
+        opts: 安装参数 (见 InstallOptions). 各字段:
+            force: 忽略幂等标记强制重装.
         preinstall_paths: 读 ACL 预装路径 (来自根 policy 的
             ``windows.filesystem.read_acl_preinstall``). 为 None 时用
             默认 4 个系统目录.
@@ -1307,6 +1321,15 @@ def install(
             --force 补预装不传, 以免误删正在使用的账户.
     """
     _require_windows()
+    # 解包 opts 到局部变量: install 主体可能改 force/preinstall_paths
+    # (recreate_user 隐含 force; policy_path 合并预装路径), 用局部变量操作
+    # 更清晰, 提权转发时再构造新 InstallOptions.
+    force = opts.force
+    preinstall_paths = opts.preinstall_paths
+    proxy_port_start = opts.proxy_port_start
+    proxy_port_end = opts.proxy_port_end
+    policy_path = opts.policy_path
+    recreate_user = opts.recreate_user
     # 若给了 policy_path, 读其 read_acl_preinstall + tool_paths 合并进预装路径.
     # 用户改 tool_paths 后 --force --policy-path <yaml> 重装即可预装新工具目录
     # (运行时普通用户无权改这些目录 DACL, 必须管理员预装).
@@ -1318,14 +1341,14 @@ def install(
         except Exception as exc:  # noqa: BLE001
             logger.warning("install 读 policy 预装路径失败: %s", exc)
     if not _is_admin():
-        _elevate_and_run_install(
+        _elevate_and_run_install(InstallOptions(
             force=force,
             preinstall_paths=preinstall_paths,
             proxy_port_start=proxy_port_start,
             proxy_port_end=proxy_port_end,
             policy_path=policy_path,
             recreate_user=recreate_user,
-        )
+        ))
         return
 
     # exe 重装必须跳过幂等: 已 installed=1 也要删用户重建.
@@ -1731,7 +1754,12 @@ def ensure_acl_policy_paths_authorized(
     need_elevate: set[str] = set()
     skipped: list[str] = []
     for p in new_acl_paths:
-        if "{{" in p or (p.startswith("%") and "%" in p[1:] and not os.path.exists(p)):
+        # 拆分布尔条件避免单 if 4 表达式 (G.CTL.03): 占位符或未展开环境变量.
+        is_placeholder = "{{" in p
+        is_unexpanded_env = (
+            p.startswith("%") and "%" in p[1:] and not os.path.exists(p)
+        )
+        if is_placeholder or is_unexpanded_env:
             skipped.append(p)
             continue
         if _path_owned_by_current_user(p):
@@ -1871,13 +1899,13 @@ def ensure_windows_setup(
                         "当前进程已是管理员, 本进程补预装 (不弹 UAC).",
                         sorted(new_paths), sorted(new_acl_paths),
                     )
-                    install(
+                    install(InstallOptions(
                         force=True,
                         preinstall_paths=sorted(new_paths),
                         proxy_port_start=proxy_port_start,
                         proxy_port_end=proxy_port_end,
                         policy_path=policy_path,
-                    )
+                    ))
                 else:
                     logger.warning(
                         "Windows 沙箱已安装, 但检测到新增路径需管理员预装: "
@@ -1891,13 +1919,13 @@ def ensure_windows_setup(
             return
         # installed != "1" 或 force=True. 非管理员走 install() 内的一次 UAC
         # (仅首次/损坏态; 已安装且用户存在不会到这里, 不会每次建沙箱弹框).
-        install(
+        install(InstallOptions(
             force=force,
             preinstall_paths=preinstall_paths,
             proxy_port_start=proxy_port_start,
             proxy_port_end=proxy_port_end,
             policy_path=policy_path,
-        )
+        ))
     except Exception:  # noqa: BLE001
         logger.error("ensure_windows_setup 失败", exc_info=True)
         raise
@@ -1917,7 +1945,7 @@ def _verify_or_reset_sandbox_user_password() -> None:
                     "jbx-sandbox 用户不存在 (注册表可能仍为 installed=1), 尝试重建",
                 )
                 try:
-                    install(force=True, recreate_user=True)
+                    install(InstallOptions(force=True, recreate_user=True))
                 except Exception as exc:  # noqa: BLE001
                     logger.error("重建 jbx-sandbox 失败. %s: %s", _SANDBOX_USER_REPAIR, exc)
                     raise RuntimeError(
@@ -2433,14 +2461,14 @@ def _main(argv: list[str]) -> int:
         _notify = _make_install_done_notifier(args.install_done_event)
         try:
             # --policy-path: install 内部会读 policy 合并预装路径, 这里只透传路径.
-            install(
+            install(InstallOptions(
                 force=args.force,
                 preinstall_paths=preinstall_paths,
                 proxy_port_start=args.proxy_port_start,
                 proxy_port_end=args.proxy_port_end,
                 policy_path=args.policy_path,
                 recreate_user=args.recreate_user,
-            )
+            ))
         except BaseException:
             _notify()
             raise

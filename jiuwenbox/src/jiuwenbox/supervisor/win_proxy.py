@@ -35,6 +35,8 @@ _TUNNEL_BUF = 65536
 _HANDSHAKE_TIMEOUT = 15.0
 # 目标连接超时 (秒).
 _CONNECT_TIMEOUT = 15.0
+# HTTP 头最大累计字节数, 超限返回 431 防 DoS (恶意客户端发超大头耗尽内存).
+_MAX_HEADER_BYTES = 65536
 
 
 class EgressFilter:
@@ -102,8 +104,13 @@ class EgressFilter:
             return False
         return any(ip in net for net in nets)
 
-    def allow(self, host: str, port: int) -> tuple[bool, str]:
-        """判定是否放行 (host, port). 返回 (allowed, reason).
+    def allow(self, host: str, port: int) -> tuple[bool, str, str | None]:
+        """判定是否放行 (host, port). 返回 (allowed, reason, resolved_ip).
+
+        resolved_ip 为域名解析得到的 IP (host 本身是 IP 时即 host), 供调用方
+        直接用 IP 发起连接, 避免 _connect_target 二次解析 DNS 导致 DNS 重绑定
+        (rebinding) 绕过 IP 过滤的 TOCTOU 窗口. host 不可解析或命中 deny 时
+        resolved_ip 为 None.
 
         语义对齐 Linux supervisor/network.py 的 iptables 规则:
           0. disable_all 总开关置位 → 直接拒绝 (officeAce sandbox.network.set;
@@ -117,20 +124,20 @@ class EgressFilter:
           3. 无任何 allow 规则: 按 default.
         """
         if self.disable_all:
-            return False, "network disabled (disable_all)"
+            return False, "network disabled (disable_all)", None
         if not host:
-            return False, "empty host"
+            return False, "empty host", None
 
         # 1. 域名 deny 优先.
         for pat in self._blocked_domains:
             if self._domain_matches(pat, host):
-                return False, f"domain blocked by {pat}"
+                return False, f"domain blocked by {pat}", None
 
         # 2. 端口 deny.
         if port in self._blocked_ports:
-            return False, f"port {port} blocked"
+            return False, f"port {port} blocked", None
 
-        # 3. IP deny (域名先解析).
+        # 3. IP deny (域名先解析). resolved_ip 带回供连接用, 消除二次 DNS 解析.
         resolved_ips: list[str] = []
         ip_host: str | None = None
         try:
@@ -145,15 +152,19 @@ class EgressFilter:
                     resolved_ips.append(info[4][0])
             except socket.gaierror:
                 if self._has_allow_rules():
-                    return False, f"unresolvable domain {host} with allow-rules present"
-                return self.egress.default != "deny", "unresolvable domain, default"
+                    return False, f"unresolvable domain {host} with allow-rules present", None
+                return self.egress.default != "deny", "unresolvable domain, default", None
 
         ips_to_check: list[str] = [ip_host] if ip_host else resolved_ips
+        # 供连接使用的 IP: host 是 IP 取 host, 否则取首个解析结果 (多 IP 取首
+        # 个与单次连接语义一致; 真正的多 IP 容错需改 _connect_target 逐个尝试,
+        # 本 PR 范围仅消除二次解析).
+        resolved_ip = ip_host or (resolved_ips[0] if resolved_ips else None)
 
         # 3a. blocked_ips 命中 -> 拒绝.
         for ip in ips_to_check:
             if self._ip_in_networks(ip, self._blocked_ips):
-                return False, f"ip {ip} blocked"
+                return False, f"ip {ip} blocked", None
 
         # 4. allow 判定.
         has_ip_rules = bool(self._allowed_ips or self._allowed_domains)
@@ -181,15 +192,15 @@ class EgressFilter:
             if port_in_allow:
                 reasons.append("port")
             if reasons:
-                return True, f"explicitly allowed ({'+'.join(reasons)})"
+                return True, f"explicitly allowed ({'+'.join(reasons)})", resolved_ip
             if self.egress.default != "deny":
-                return True, "default allow (no allow rule matched)"
-            return False, f"{host}:{port} not in any allow rule"
+                return True, "default allow (no allow rule matched)", resolved_ip
+            return False, f"{host}:{port} not in any allow rule", None
 
         # 5. 无任何 allow 规则: 按 default.
         if self.egress.default == "deny":
-            return False, "default deny (no allow rules)"
-        return True, "default allow"
+            return False, "default deny (no allow rules)", None
+        return True, "default allow", resolved_ip
 
     def _has_allow_rules(self) -> bool:
         return bool(
@@ -246,10 +257,16 @@ async def _relay(
                 pass
 
 
-async def _connect_target(host: str, port: int) -> tuple:
-    """连接目标, 返回 (reader, writer)."""
+async def _connect_target(host: str, port: int, *, connect_ip: str | None = None) -> tuple:
+    """连接目标, 返回 (reader, writer).
+
+    connect_ip 非空时用 IP 而非 host 发起连接 (allow() 已解析得到的 IP),
+    消除二次 DNS 解析导致的 DNS 重绑定 (rebinding) TOCTOU 窗口 — 第一次
+    解析过 IP 过滤后, 若用域名再次解析, 攻击者可返回被阻止的 IP 完成连接.
+    SNI/TLS 仍用原 host (connect_ip 仅用于 TCP 握手地址).
+    """
     return await asyncio.wait_for(
-        asyncio.open_connection(host, port),
+        asyncio.open_connection(connect_ip or host, port, server_hostname=host if connect_ip else None),
         timeout=_CONNECT_TIMEOUT,
     )
 
@@ -284,7 +301,7 @@ async def handle_http_connect(
             await client_writer.drain()
             return
 
-        allowed, reason = egress_filter.allow(host, port)
+        allowed, reason, resolved_ip = egress_filter.allow(host, port)
         if not allowed:
             logger.info("HTTP CONNECT 拒绝 %s:%d (%s)", host, port, reason)
             client_writer.write(
@@ -304,7 +321,7 @@ async def handle_http_connect(
                 break
 
         try:
-            target_reader, target_writer = await _connect_target(host, port)
+            target_reader, target_writer = await _connect_target(host, port, connect_ip=resolved_ip)
         except OSError as exc:  # asyncio.TimeoutError 为 OSError 子类, 简化
             logger.info("CONNECT 目标连接失败 %s:%d (%s)", host, port, exc)
             client_writer.write(
@@ -371,7 +388,7 @@ async def handle_socks5(
         port_bytes = await client_reader.readexactly(2)
         port = int.from_bytes(port_bytes, "big")
 
-        allowed, reason = egress_filter.allow(host, port)
+        allowed, reason, resolved_ip = egress_filter.allow(host, port)
         if not allowed:
             logger.info("SOCKS5 拒绝 %s:%d (%s)", host, port, reason)
             client_writer.write(b"\x05\x02\x00\x01\x00\x00\x00\x00\x00\x00")
@@ -379,7 +396,7 @@ async def handle_socks5(
             return
 
         try:
-            target_reader, target_writer = await _connect_target(host, port)
+            target_reader, target_writer = await _connect_target(host, port, connect_ip=resolved_ip)
         except OSError as exc:  # asyncio.TimeoutError 为 OSError 子类, 简化
             logger.info("SOCKS5 目标连接失败 %s:%d (%s)", host, port, exc)
             client_writer.write(b"\x05\x05\x00\x01\x00\x00\x00\x00\x00\x00")
@@ -435,7 +452,7 @@ async def handle_http_forward(
         host = parsed.hostname or ""
         port = parsed.port or (443 if parsed.scheme == "https" else 80)
 
-        allowed, reason = egress_filter.allow(host, port)
+        allowed, reason, resolved_ip = egress_filter.allow(host, port)
         if not allowed:
             logger.info("HTTP FORWARD 拒绝 %s:%d (%s)", host, port, reason)
             client_writer.write(
@@ -446,7 +463,8 @@ async def handle_http_forward(
             await client_writer.drain()
             return
 
-        # 读掉剩余 HTTP 头 (到空行).
+        # 读掉剩余 HTTP 头 (到空行). 累计字节数超 _MAX_HEADER_BYTES 视为 DoS,
+        # 返回 431 Request Header Fields Too Large 终止连接 (防内存耗尽).
         headers_data = b""
         while True:
             header = await asyncio.wait_for(
@@ -455,6 +473,15 @@ async def handle_http_forward(
             if header in (b"\r\n", b"\n", b""):
                 break
             headers_data += header
+            if len(headers_data) > _MAX_HEADER_BYTES:
+                client_writer.write(
+                    b"HTTP/1.1 431 Request Header Fields Too Large\r\n"
+                    b"Content-Length: 0\r\n"
+                    b"\r\n",
+                )
+                await client_writer.drain()
+                logger.info("HTTP FORWARD 头超限 %d 字节, 终止 %s:%d", len(headers_data), host, port)
+                return
 
         # 重组请求行: 将绝对 URL 替换为路径形式 (去掉 scheme+host).
         path = parsed.path or "/"
@@ -465,7 +492,7 @@ async def handle_http_forward(
         new_request_line = f"{method} {path} HTTP/1.1\r\n".encode("latin-1")
 
         try:
-            target_reader, target_writer = await _connect_target(host, port)
+            target_reader, target_writer = await _connect_target(host, port, connect_ip=resolved_ip)
         except OSError as exc:
             logger.info("HTTP FORWARD 目标连接失败 %s:%d (%s)", host, port, exc)
             client_writer.write(
