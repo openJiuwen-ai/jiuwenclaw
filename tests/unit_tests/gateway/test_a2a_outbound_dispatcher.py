@@ -245,7 +245,8 @@ async def test_find_agents_returns_only_callable_minimal_catalog() -> None:
     )
 
     assert [item["agent_id"] for item in result["items"]] == ["agent-1"]
-    assert result["total"] == 2
+    assert result["total"] == 1
+    assert result["total_matches"] == 2
     assert result["matched_total"] == 2
     assert "url" not in result["items"][0]
     assert "credential_ref" not in result["items"][0]
@@ -266,12 +267,14 @@ async def test_find_agents_natural_language_ranks_without_hiding_catalog() -> No
         "weather-agent",
     }
     assert generic["total"] == 2
+    assert generic["total_matches"] == 2
     assert generic["matched_total"] == 0
 
     weather = await dispatcher.find_agents(query="请帮我查询天气", limit=5)
 
     assert weather["items"][0]["agent_id"] == "weather-agent"
     assert weather["total"] == 2
+    assert weather["total_matches"] == 2
     assert weather["matched_total"] == 1
 
     strict = await dispatcher.find_agents(
@@ -728,6 +731,19 @@ def test_empty_security_requirement_allows_anonymous_access():
 
     assert A2AOutboundDispatcher._credential_required(card) is False
     assert A2AOutboundDispatcher._credential_transport_options(card, "") == ({}, {}, {})
+
+
+def test_card_without_security_contract_still_sends_configured_credential():
+    """Regression: a card without securityRequirements must not silently drop a
+    configured credential_ref (previously fell back to a bearer header)."""
+    card = {"securitySchemes": {}}
+
+    assert A2AOutboundDispatcher._credential_required(card) is False
+    assert A2AOutboundDispatcher._credential_transport_options(card, "secret") == (
+        {"Authorization": "Bearer secret"},
+        {},
+        {},
+    )
 
 
 @pytest.mark.asyncio

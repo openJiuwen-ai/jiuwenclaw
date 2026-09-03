@@ -480,7 +480,11 @@ class A2AChannel(BaseChannel):
         )
         self._uvicorn_server = uvicorn.Server(uv_cfg)
         self._stopping = False
-        listen_socket = self._bind_listen_socket(self.config.host, self.config.port)
+        # getaddrinfo() (DNS resolution) inside _bind_listen_socket is blocking;
+        # run it off the event loop so a slow lookup doesn't stall other coroutines.
+        listen_socket = await asyncio.to_thread(
+            self._bind_listen_socket, self.config.host, self.config.port
+        )
         self._listen_socket = listen_socket
         server_task = asyncio.create_task(
             self._uvicorn_server.serve(sockets=[listen_socket]),
@@ -523,14 +527,24 @@ class A2AChannel(BaseChannel):
         self._stopping = True
         self._running = False
         try:
-            for request_id in list(self._pending):
-                try:
-                    await self.cancel_pending_request(request_id)
-                except Exception:  # noqa: BLE001
-                    logger.exception(
-                        "[A2AChannel] failed to cancel downstream request during shutdown: %s",
-                        request_id,
-                    )
+            pending_ids = list(self._pending)
+            if pending_ids:
+                # Cancel concurrently: sequential awaits could each block up to the
+                # per-request ack timeout, making stop() take up to N x timeout.
+                results = await asyncio.gather(
+                    *(
+                        self.cancel_pending_request(request_id)
+                        for request_id in pending_ids
+                    ),
+                    return_exceptions=True,
+                )
+                for request_id, result in zip(pending_ids, results):
+                    if isinstance(result, Exception):
+                        logger.error(
+                            "[A2AChannel] failed to cancel downstream request during shutdown: %s",
+                            request_id,
+                            exc_info=result,
+                        )
             self._pending.clear()
             if self._uvicorn_server is not None:
                 self._uvicorn_server.should_exit = True

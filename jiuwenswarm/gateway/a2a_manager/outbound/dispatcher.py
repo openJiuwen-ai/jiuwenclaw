@@ -223,7 +223,12 @@ class A2AOutboundDispatcher:
         items = [item for _, item in matches[:normalized_limit]]
         return {
             "items": items,
-            "total": len(matches),
+            # Back-compat: "total" keeps its pre-existing meaning of "count of
+            # returned items". The full (unsliced) candidate count that used to
+            # live here is now reported separately as "total_matches" so
+            # existing consumers relying on total == len(items) don't break.
+            "total": len(items),
+            "total_matches": len(matches),
             "matched_total": sum(1 for score, _ in matches if score > 0),
         }
 
@@ -679,9 +684,25 @@ class A2AOutboundDispatcher:
         card: dict[str, Any], credential: str
     ) -> tuple[dict[str, str], dict[str, str], dict[str, str]]:
         """Build credential placement from the Agent Card security contract."""
-        requirements = card.get("securityRequirements") or []
-        if not requirements or not credential:
+        if not credential:
             return {}, {}, {}
+        requirements = card.get("securityRequirements") or []
+        if not requirements:
+            # Card doesn't declare a security contract (common for agents registered
+            # before A2A security schemes were adopted). Fall back to the previous
+            # unconditional bearer-header behavior instead of silently dropping a
+            # configured credential, which would turn into a remote 401.
+            return (
+                {
+                    "Authorization": (
+                        credential
+                        if credential.lower().startswith("bearer ")
+                        else f"Bearer {credential}"
+                    )
+                },
+                {},
+                {},
+            )
         schemes = card.get("securitySchemes") or {}
         for requirement in requirements:
             if not isinstance(requirement, dict):
@@ -976,6 +997,11 @@ class A2AOutboundDispatcher:
             A2AOutboundDispatchStatus.WORKING,
             A2AOutboundDispatchStatus.COMPLETED,
         }
+        # Breaking change vs. earlier batches: remote_task_id/remote_context_id are
+        # intentionally NOT exposed here (still retained on the internal dataclass and
+        # persisted record). Callers must use the local dispatch_id for all follow-up
+        # a2a_get_dispatch/a2a_cancel_dispatch calls, so leaking the remote agent's own
+        # task/context identifiers would only invite an LLM caller to misuse them.
         payload: dict[str, Any] = {
             "ok": ok,
             "dispatch_id": dispatch.dispatch_id,
