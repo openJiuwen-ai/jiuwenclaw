@@ -63,4 +63,6 @@ def e2a_to_agent_request(env: E2AEnvelope) -> AgentRequest:
         metadata=metadata,
         # V2: 透传 agent_ref 到 AgentServer，供响应侧 chunk/response 回带（设计 §6.3）。
         agent_ref=env.agent_ref,
+        # Preserve the Gateway-authenticated sender across the E2A boundary.
+        user_id=str(env.user_id or ""),
     )

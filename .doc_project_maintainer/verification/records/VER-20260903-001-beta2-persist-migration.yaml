@@ -1,0 +1,33 @@
+id: VER-20260903-001-beta2-persist-migration
+applies_to:
+  source_revision: "dd4a13d76ed606a018cb03e46e58bbb25078e1ed plus the beta2 persist migration commit containing this record"
+  modules: [agent-harness, agentserver-runtime, gateway-and-channels]
+  flows: [eternal-conversation-memory, gateway-agentserver-e2a-chat]
+  paths:
+    - jiuwenswarm/agents/harness/common/rails/eternal_conversation
+    - jiuwenswarm/common/e2a/agent_compat.py
+    - jiuwenswarm/server/runtime/session/session_metadata.py
+evidence:
+  level: unit
+  scenario: beta2 migration and existing metadata concurrency regression
+  environment: "Windows; Python 3.12.12; Core ce21a9b7cfcce28923fba6c47758d60c624b69be"
+  command: "pytest modules and environment documented in docs/zh/persist-session-beta2-migration.md"
+  repetitions: 1
+  successes: 399
+  warnings: 5
+result: failed
+status: active
+recorded_at: 2026-09-03T07:56:41Z
+supersedes: []
+evidence_paths:
+  - docs/zh/persist-session-beta2-migration.md
+  - .venv/beta2-persist-final.xml
+  - .venv/beta2-e2a-tests.xml
+notes: >-
+  Final backend regression: 334 passed and one existing Windows atomic metadata
+  replace PermissionError; E2A suite: 65 passed. All 48 Rail tests passed.
+  Web contracts: 12 passed; Web build and TUI build/full npm test passed.
+  Frozen installation is blocked by the base branch project-name/lock mismatch;
+  test dependencies were reused with the beta2 pinned Core loaded separately.
+  Only invalid-escape SyntaxWarnings were restored to warnings for diagnosis.
+  No full-repository UT claim and no new real-model 200-task acceptance.

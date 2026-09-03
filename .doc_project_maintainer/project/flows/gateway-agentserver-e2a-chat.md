@@ -3,7 +3,7 @@ id: gateway-agentserver-e2a-chat
 name: Gateway AgentServer E2A Chat
 status: partial
 confidence: confirmed
-last_updated: 2026-08-01
+last_updated: 2026-09-03
 user_visible_surface: "Channel, TUI, CLI, ACP, and web responses produced from AgentServer output."
 source_of_truth: []
 modules:
@@ -54,9 +54,13 @@ Normal chat replay is not handled by this flow; session/history reconstruction b
 
 `request_id` is the correlation key for Gateway queues. Writes are serialized by `send_lock`. Streaming uses a keepalive heartbeat while the agent is still running. JSON parse errors and handler exceptions are returned as error wire frames where possible.
 
+Beta2 Persist Session migration also preserves the Gateway-authenticated `E2AEnvelope.user_id` as `AgentRequest.user_id` (empty string when absent). In digital-avatar groups, the inbound pipeline separately injects the physical sender's display name/ID into the model-visible text after rewriting; this envelope is context, not an authorization source. `/persist <first task>` uses existing controlled-IM allocation before forwarding the stripped first task with its sender identity intact.
+
 ## Verification
 
 Evidence exists in `tests/unit_tests/agentserver/test_agentserver_modes.py`, `test_agentserver_acp.py`, `test_agentserver_cli_commands.py`, `test_agent_ws_connection_close.py`, and Gateway `test_agent_client.py`.
+
+Beta2 identity coverage: `tests/unit_tests/e2a/test_gateway_normalize.py`, `tests/unit_tests/gateway/test_im_inbound_identity.py`, and `test_message_handler_persist.py`. Migration results and limitations are recorded in `docs/zh/persist-session-beta2-migration.md`.
 
 ## Known Gaps
 

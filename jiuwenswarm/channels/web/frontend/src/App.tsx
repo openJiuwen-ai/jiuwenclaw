@@ -70,7 +70,10 @@ import {
 } from './multi-session/state/newConversationLifecycle';
 import { resolveNewConversationProjectDir } from './multi-session/state/newConversationProject';
 import { toDisplaySessionTitle } from './utils/documentMessage';
-import { createConversationSession } from './multi-session/state/createConversationSession';
+import {
+  createConversationSession,
+  parsePersistSessionCommand,
+} from './multi-session/state/createConversationSession';
 import { useTranslation } from 'react-i18next';
 import {
   normalizeA2UIEnabled,
@@ -1956,6 +1959,12 @@ function AppContent() {
     const currentSessionId = sessionIdRef.current;
     if (!currentSessionId) return;
     if (currentSessionId === NEW_CONVERSATION_ID) {
+      const persistCommand = parsePersistSessionCommand(content);
+      if (persistCommand.persistSession && !persistCommand.content) {
+        window.alert(t('persistSession.textRequired'));
+        return;
+      }
+      const messageContent = persistCommand.content;
       if (creatingSessionRef.current) return;
       creatingSessionRef.current = true;
       useChatStore.getState().setProcessing(NEW_CONVERSATION_ID, true);
@@ -1964,6 +1973,7 @@ function AppContent() {
         mode: newRuntime?.mode ?? mode,
         selectedModelName: useSessionStore.getState().getEffectiveModelName(NEW_CONVERSATION_ID),
         projectDir: newRuntime?.projectDirectory ?? null,
+        persistSession: persistCommand.persistSession,
       };
       const baseWorkContext = getWorkContextForSession(NEW_CONVERSATION_ID);
       const preservedProject = newConversationProjectRef.current;
@@ -1977,8 +1987,9 @@ function AppContent() {
           create_token: generateUuidV4(),
           mode: runtimeSettings.mode,
           is_swarm: runtimeSettings.mode === 'team',
-          title: createConversationTitle(content).slice(0, 100),
+          title: createConversationTitle(messageContent).slice(0, 100),
           work_mode: workContext.work_mode,
+          persist_session: runtimeSettings.persistSession,
         };
         const previousSession = newConversationPreviousSessionRef.current;
         if (previousSession) {
@@ -1998,13 +2009,14 @@ function AppContent() {
         const newSid = created.session_id;
         const createdSession = registerCreatedConversation(
           created.session_id,
-          runtimeSettings,
+          { ...runtimeSettings, persistSession: created.persist_session },
           Date.now(),
-          content,
+          messageContent,
           {
             project_id: created.project_id || workContext.project_id,
             project_dir: created.project_dir || workContext.project_dir,
             work_mode: created.work_mode || workContext.work_mode,
+            persist_session: created.persist_session,
           },
         );
         // 迁移 'new' 会话的已选技能到新会话
@@ -2037,12 +2049,12 @@ function AppContent() {
         if (goalArmedOnNew) {
           // 欢迎页 "+" 选了「目标」：这条内容不走普通 chat.send，
           // 本地落一条 user 消息（供徽章匹配）后改调 command.goal（见 InputArea.tsx 的同款分流逻辑）
-          queueOrAddGoalObjectiveMessage(newSid, content);
-          setGoalObjective(newSid, content);
+          queueOrAddGoalObjectiveMessage(newSid, messageContent);
+          setGoalObjective(newSid, messageContent);
         } else {
-          const sent = await sendMessage(content, newSid, mediaItems);
+          const sent = await sendMessage(messageContent, newSid, mediaItems);
           if (!sent) {
-            useChatStore.getState().setInputValue(newSid, content);
+            useChatStore.getState().setInputValue(newSid, messageContent);
           }
         }
         newConversationProjectRef.current = null;

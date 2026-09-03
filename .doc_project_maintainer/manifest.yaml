@@ -1,6 +1,6 @@
 version: 0.0.1
 artifact_root: .doc_project_maintainer
-last_updated: '2026-08-03'
+last_updated: '2026-08-16'
 sync:
   status: partial
   last_scanned_commit: 10afedf222bcd6db98b24347a28f75e4613b3c87
@@ -76,6 +76,7 @@ modules:
   - agentserver-schedule-auto-harness
   - agentserver-history-stream
   - session-prewarm-allocation
+  - eternal-conversation-memory
   coverage:
     status: partial
     last_scanned: '2026-07-13'
@@ -115,6 +116,7 @@ modules:
   - agentserver-plan-mode-exit
   - agentserver-schedule-auto-harness
   - session-prewarm-allocation
+  - eternal-conversation-memory
   coverage:
     status: planned
     last_scanned: '2026-07-07'
@@ -173,6 +175,11 @@ directories:
     status: partial
     last_scanned: '2026-07-07'
 flows:
+- id: eternal-conversation-memory
+  name: Eternal Conversation Memory
+  summary: Explicit Web/TUI request flag mounts a common Work/Code Rail; Session-owned Extractor and Builder publish audited Snapshot and Pending/Built UT state without losing foreground context.
+  confidence: confirmed
+  doc: project/flows/eternal-conversation-memory.md
 - id: gateway-agentserver-e2a-chat
   name: Gateway AgentServer E2A Chat
   summary: Gateway sends E2A envelopes over WebSocket; AgentServer dispatches to agents and returns unary or streaming E2A
