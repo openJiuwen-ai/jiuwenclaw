@@ -1,12 +1,26 @@
 from pathlib import Path
+from typing import NamedTuple
 
 from openjiuwen.core.foundation.tool import Tool, ToolCard
 
 from text_utils import (
     CJK_PDF_TO_WORD_NOTE,
+    _coerce_table,
     collect_structured_content_text,
     contains_cjk,
+    normalize_generator_content,
+    validate_generator_content,
 )
+
+
+class _TextBoxSpec(NamedTuple):
+    text: str
+    left: float
+    top: float
+    width: float
+    height: float
+    size_pt: int
+    bold: bool = False
 
 
 class DocumentGenerator(Tool):
@@ -36,8 +50,10 @@ class DocumentGenerator(Tool):
                         "content": {
                             "type": "object",
                             "description": (
-                                "结构化内容，可包含 title, subtitle, paragraphs[], "
-                                "tables[], sheets[], slides[]"
+                                "结构化内容。Word/PDF: title, paragraphs[], tables[]。"
+                                "PPT: slides[] 每页用 title, body, tables[]；"
+                                "bullets/paragraphs/subtitle 会自动并入 body，"
+                                "table/{headers,rows} 会自动并入 tables[]"
                             ),
                         },
                         "output_dir": {
@@ -64,6 +80,12 @@ class DocumentGenerator(Tool):
                 "success": False,
                 "error": "缺少必要参数: format, filename, content, output_dir",
             }
+
+        if isinstance(content, dict):
+            content = normalize_generator_content(content)
+            validation_error = validate_generator_content(content, fmt)
+            if validation_error:
+                return {"success": False, "error": validation_error}
 
         base_dir = Path(output_dir).expanduser()
         base_dir.mkdir(parents=True, exist_ok=True)
@@ -149,7 +171,7 @@ class DocumentGenerator(Tool):
 
         for table in content.get("tables", []):
             pdf.ln(5)
-            data = table if isinstance(table, list) else table.get("data", [])
+            data = _coerce_table(table)
             if data:
                 col_count = max(len(row) for row in data) if data else 1
                 col_width = 180 / col_count
@@ -187,7 +209,7 @@ class DocumentGenerator(Tool):
                 doc.add_paragraph(text)
 
         for table in content.get("tables", []):
-            data = table if isinstance(table, list) else table.get("data", [])
+            data = _coerce_table(table)
             if data:
                 rows = len(data)
                 cols = max(len(row) for row in data) if data else 1
@@ -210,12 +232,7 @@ class DocumentGenerator(Tool):
             ws.title = content.get("sheet_name", "Sheet1")
             table_data = content.get("tables", [])
             if table_data:
-                first_table = table_data[0]
-                data = (
-                    first_table
-                    if isinstance(first_table, list)
-                    else first_table.get("data", [])
-                )
+                data = _coerce_table(table_data[0])
                 for row in data:
                     ws.append(row)
             else:
@@ -233,49 +250,102 @@ class DocumentGenerator(Tool):
         wb.save(file_path)
 
     @staticmethod
-    def _generate_ppt(file_path: str, content: dict) -> None:
-        from pptx import Presentation
+    def _fill_text_frame(text_frame, text: str) -> None:
+        lines = [line.strip() for line in str(text).split("\n") if line.strip()]
+        if not lines:
+            return
+        text_frame.text = lines[0]
+        for line in lines[1:]:
+            paragraph = text_frame.add_paragraph()
+            paragraph.text = line
+            paragraph.level = 0
+
+    @staticmethod
+    def _apply_cjk_font(text_frame, size_pt: int, bold: bool = False) -> None:
+        from pptx.dml.color import RGBColor
+        from pptx.util import Pt
+
+        font_name = "Microsoft YaHei"
+        color = RGBColor(0x1F, 0x4E, 0x79) if bold else RGBColor(0x33, 0x33, 0x33)
+        for paragraph in text_frame.paragraphs:
+            for run in paragraph.runs:
+                run.font.name = font_name
+                run.font.size = Pt(size_pt)
+                run.font.bold = bold
+                run.font.color.rgb = color
+
+    @staticmethod
+    def _add_textbox(slide, spec: _TextBoxSpec):
         from pptx.util import Inches
 
+        box = slide.shapes.add_textbox(
+            Inches(spec.left), Inches(spec.top), Inches(spec.width), Inches(spec.height)
+        )
+        text_frame = box.text_frame
+        text_frame.word_wrap = True
+        DocumentGenerator._fill_text_frame(text_frame, spec.text)
+        DocumentGenerator._apply_cjk_font(text_frame, size_pt=spec.size_pt, bold=spec.bold)
+        return box
+
+    @staticmethod
+    def _add_slide_table(slide, data, top_inches: float = 1.6) -> None:
+        from pptx.util import Inches
+
+        rows = len(data)
+        cols = max(len(row) for row in data) if data else 1
+        table = slide.shapes.add_table(
+            rows, cols, Inches(0.5), Inches(top_inches), Inches(9.0), Inches(4.8)
+        ).table
+        for i, row in enumerate(data):
+            for j, cell in enumerate(row):
+                if j < cols:
+                    table.cell(i, j).text = str(cell)
+                    DocumentGenerator._apply_cjk_font(
+                        table.cell(i, j).text_frame,
+                        size_pt=12,
+                        bold=(i == 0),
+                    )
+
+    @staticmethod
+    def _generate_ppt(file_path: str, content: dict) -> None:
+        from pptx import Presentation
+
         prs = Presentation()
+        blank_layout = prs.slide_layouts[6]
+        slides = content.get("slides") or []
+        if not slides and content.get("title"):
+            slides = [
+                {
+                    "title": content.get("title", ""),
+                    "body": content.get("subtitle", ""),
+                }
+            ]
 
-        title = content.get("title", "")
-        if title:
-            slide_layout = prs.slide_layouts[0]
-            slide = prs.slides.add_slide(slide_layout)
-            if slide.shapes.title:
-                slide.shapes.title.text = title
-            if len(slide.placeholders) > 1:
-                slide.placeholders[1].text = content.get("subtitle", "")
-
-        for slide_data in content.get("slides", []):
-            slide_layout = prs.slide_layouts[1]
-            slide = prs.slides.add_slide(slide_layout)
-            shapes = slide.shapes
-
+        for slide_data in slides:
+            if not isinstance(slide_data, dict):
+                continue
+            body = slide_data.get("body") or ""
+            if not isinstance(body, str):
+                body = "\n".join(str(item) for item in body if item)
+            tables = [_coerce_table(item) for item in slide_data.get("tables", [])]
+            tables = [item for item in tables if item]
+            slide = prs.slides.add_slide(blank_layout)
             slide_title = slide_data.get("title", "")
-            if slide_title and shapes.title:
-                shapes.title.text = slide_title
-
-            body = slide_data.get("body", "")
-            if body and len(shapes.placeholders) > 1:
-                shapes.placeholders[1].text_frame.text = body
-
-            for table_data in slide_data.get("tables", []):
-                data = (
-                    table_data
-                    if isinstance(table_data, list)
-                    else table_data.get("data", [])
+            if slide_title:
+                DocumentGenerator._add_textbox(
+                    slide,
+                    _TextBoxSpec(
+                        str(slide_title), 0.5, 0.25, 9.0, 0.8, 28, bold=True
+                    ),
                 )
-                if data:
-                    rows = len(data)
-                    cols = max(len(row) for row in data) if data else 1
-                    table = shapes.add_table(
-                        rows, cols, Inches(1), Inches(2), Inches(8), Inches(3)
-                    ).table
-                    for i, row in enumerate(data):
-                        for j, cell in enumerate(row):
-                            if j < cols:
-                                table.cell(i, j).text = str(cell)
+            if body:
+                DocumentGenerator._add_textbox(
+                    slide,
+                    _TextBoxSpec(body, 0.5, 1.15, 9.0, 2.0 if tables else 5.8, 18),
+                )
+            for data in tables:
+                DocumentGenerator._add_slide_table(
+                    slide, data, top_inches=3.3 if body else 1.2
+                )
 
         prs.save(file_path)
