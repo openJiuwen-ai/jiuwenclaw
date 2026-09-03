@@ -99,10 +99,13 @@ def _parse_login_auth_simulate(raw: str | None) -> bool:
 
 
 def _parse_web_transport(raw: str | None) -> str:
+    """Parse WEB_TRANSPORT; unset follows edition (enterprise→http, personal→websocket)."""
     value = (raw or "").strip().lower()
     if value in ("http", "a2"):
         return "http"
-    return "websocket"
+    if value in ("websocket", "ws"):
+        return "websocket"
+    return "http" if is_enterprise() else "websocket"
 
 
 def _probe_http_service(

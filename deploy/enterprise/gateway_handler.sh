@@ -77,6 +77,11 @@ gen_gateway_file() {
     local file="${CONFIG["GATEWAY_FILE"]}"
     local enable_gw_lable="${DEPLOY_VARS["GATEWAY_SCHED_LABEL_ENABLED"]}"
 
+    # 内置 MinIO 时 .env 的 OBS_URL 可能为空；模板占位符需要可达 endpoint
+    if [ -z "${DEPLOY_VARS["OBS_URL"]:-}" ] || [ "${DEPLOY_VARS["ENABLE_EXTERNAL_OBS"]}" != "true" ]; then
+        DEPLOY_VARS["OBS_URL"]="${DEPLOY_VARS["MINIO_NAME"]}-headless.default:9000"
+    fi
+
     render_config_template "${template_file}" "${file}" "DEPLOY_VARS"
     enable_dev_mode_if_needed "${file}" gateway
 

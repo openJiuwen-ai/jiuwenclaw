@@ -124,6 +124,31 @@ def test_parse_content_chunk_forwards_task_id() -> None:
     assert parsed["task_id"] == "task_plan"
 
 
+def test_parse_chat_file_obs_url_is_not_dropped() -> None:
+    """Enterprise send_file writes OutputSchema(type=chat.file, files=[url]).
+
+    Fallback treats unknown typed chunks as chat.delta via content/output; a
+    files-only payload would return None and Gateway would never materialize.
+    """
+    chunk = SimpleNamespace(
+        type="chat.file",
+        payload={
+            "files": [
+                {
+                    "url": "http://minio-headless.default:9000/b/downloads/out.docx",
+                    "name": "out.docx",
+                    "size": 10,
+                }
+            ]
+        },
+    )
+    parsed = JiuWenSwarmDeepAdapter._parse_stream_chunk(chunk)
+    assert parsed is not None
+    assert parsed["event_type"] == "chat.file"
+    assert parsed["files"][0]["url"].startswith("http://")
+    assert parsed["files"][0]["name"] == "out.docx"
+
+
 def test_parse_unknown_chat_delta_payload_forwards_task_id() -> None:
     chunk = SimpleNamespace(
         type="node.progress",

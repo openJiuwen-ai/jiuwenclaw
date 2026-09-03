@@ -8,6 +8,11 @@ render_agentserver_env_configmap() {
     local envfile_name="${DEPLOY_VARS["AGENT_SERVER_ENV_CM_NAME"]}"
     local yaml_file="${CONFIG["AS_ENV_YAML_FILE"]}"
 
+    # 内置 MinIO 时 .env 的 OBS_URL 为空；Agent 下载 put 需要可达 endpoint
+    if [ -z "${DEPLOY_VARS["OBS_URL"]:-}" ] || [ "${DEPLOY_VARS["ENABLE_EXTERNAL_OBS"]}" != "true" ]; then
+        DEPLOY_VARS["OBS_URL"]="${DEPLOY_VARS["MINIO_NAME"]}-headless.default:9000"
+    fi
+
     render_config_template "${env_template}" "${env_file}" "DEPLOY_VARS"
 
     # 移除所有注释行、过滤空值行 KEY=、按变量名排序
