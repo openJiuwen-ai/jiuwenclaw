@@ -139,7 +139,7 @@ export function ContextUsageIndicator() {
     };
   }, [closeDetail, detailOpen]);
 
-  if (mode !== 'agent' || !activeSessionId || !snapshot) return null;
+  if ((mode !== 'agent' && mode !== 'team') || !activeSessionId || !snapshot) return null;
 
   const notReported = t('chat.contextUsage.notReported');
   const { occupancy_rate: rate, input_tokens: used, limit_tokens: limit } = snapshot.context_window;
