@@ -10,3 +10,6 @@ export { HelpTips } from './HelpTips/HelpTips';
 export { Loading } from './Loading/Loading';
 export { Dialog } from './Dialog/Dialog';
 export { Tag, type TagProps, type TagVariant } from './Tag/Tag';
+export { PageHeader, type PageHeaderProps } from './PageHeader/PageHeader';
+export { CategoryTabs, type CategoryTabsOption, type CategoryTabsProps } from './CategoryTabs/CategoryTabs';
+export { PageToolbarSearch, type PageToolbarSearchProps } from './PageToolbarSearch/PageToolbarSearch';

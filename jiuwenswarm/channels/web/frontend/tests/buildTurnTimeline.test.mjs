@@ -21,6 +21,22 @@ function userMessage(ms, id = 'u1') {
   };
 }
 
+function goalObjectiveUserMessage(ms, id = 'goal1') {
+  return {
+    type: 'message',
+    key: id,
+    timestampMs: ms,
+    sourceIndex: 0,
+    message: {
+      id,
+      role: 'user',
+      content: '帮我盯着这个目标',
+      timestamp: iso(ms),
+      isGoalObjectiveMessage: true,
+    },
+  };
+}
+
 function reasoningItem(segment, sourceIndex = 0) {
   return {
     type: 'reasoning',
@@ -230,4 +246,42 @@ test('slash 命令结果自成时间线块，不把上一轮任务用时排到�
     1,
     '命令卡片自身不应新增任务用时',
   );
+});
+
+test('空窗透传：无关新提问不继承上一条空窗提问的起点（哪怕只隔 5 分钟）', () => {
+  const secondAt = U + 5 * 60_000; // 两条无关提问相隔 5 分钟
+  const items = [
+    userMessage(U, 'u1'), // 上一条提问未获回复，形成空窗轮
+    userMessage(secondAt, 'u2'), // 无关新提问
+    reasoningItem({
+      id: 'rsn1',
+      text: 'thinking…',
+      startedAt: secondAt + 5_000,
+      closed: true,
+      updatedAt: secondAt + 40_000,
+    }, 1),
+  ];
+  const summary = turnSummaryOf(buildRenderItems(items, false, false));
+  assert.ok(summary, '第二个提问轮应生成任务用时行');
+  assert.equal(summary.startMs, secondAt, '起点是本轮提问时刻，不得并吞上一条空窗提问');
+  assert.equal(summary.workEndMs, secondAt + 40_000, '耗时终点不包含无关等待');
+});
+
+test('空窗透传：同流程「设目标」隔 11 分钟仍继承原始起点', () => {
+  const goalAt = U + 11 * 60_000; // goal 插队与上一提问相隔 11 分钟
+  const items = [
+    userMessage(U, 'u1'), // 上一条提问未获回复，形成空窗轮
+    goalObjectiveUserMessage(goalAt, 'goal1'), // 设目标：与上一提问同属一次交互流程
+    reasoningItem({
+      id: 'rsn1',
+      text: 'thinking…',
+      startedAt: goalAt + 5_000,
+      closed: true,
+      updatedAt: goalAt + 40_000,
+    }, 1),
+  ];
+  const summary = turnSummaryOf(buildRenderItems(items, false, false));
+  assert.ok(summary, '设目标轮应生成任务用时行');
+  assert.equal(summary.startMs, U, '同流程轮耗时从上一条提问算起，不因超过时间阈值被丢弃');
+  assert.equal(summary.workEndMs, goalAt + 40_000, '耗时终点仍取真实工作末帧');
 });

@@ -3,17 +3,7 @@
   min-width: 360px;
 }
 
-[data-testid="skill-content"] .chat-picker-panel__tabs {
-  height: 34px;
-  min-height: 34px;
-  margin-bottom: 0;
-  font-size: 16px;
-}
 
-[data-testid="skill-content"] {
-  margin-left: max(48px, calc((100% - 1400px) / 2));
-  margin-right: max(48px, calc((100% - 1400px) / 2));
-}
 
 @media (min-width: 1600px) {
   .skill-card {
