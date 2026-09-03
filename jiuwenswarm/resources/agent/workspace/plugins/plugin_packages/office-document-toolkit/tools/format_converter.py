@@ -3,7 +3,12 @@ from pathlib import Path
 
 from openjiuwen.core.foundation.tool import Tool, ToolCard
 
-from pdf_font_utils import select_pdf_font
+from text_utils import (
+    CJK_PDF_BLOCKED_MESSAGE,
+    collect_docx_text,
+    collect_presentation_text,
+    contains_cjk,
+)
 
 
 class FormatConverter(Tool):
@@ -159,7 +164,7 @@ class FormatConverter(Tool):
     @staticmethod
     def _pdf_to_word(output_path: str, source_path: str) -> None:
         from docx import Document
-        from pypdf import PdfReader
+        from PyPDF2 import PdfReader
 
         reader = PdfReader(source_path)
         doc = Document()
@@ -176,13 +181,14 @@ class FormatConverter(Tool):
         from fpdf import FPDF
 
         doc = Document(source_path)
+        if contains_cjk(collect_docx_text(doc)):
+            raise ValueError(CJK_PDF_BLOCKED_MESSAGE)
+
         pdf = FPDF()
         pdf.add_page()
         pdf.set_auto_page_break(auto=True, margin=15)
 
-        font_name = select_pdf_font(pdf)
-
-        pdf.set_font(font_name, "", 11)
+        pdf.set_font("Helvetica", "", 11)
         for para in doc.paragraphs:
             if para.text.strip():
                 pdf.multi_cell(0, 7, para.text)
@@ -225,14 +231,15 @@ class FormatConverter(Tool):
         from pptx import Presentation
 
         prs = Presentation(source_path)
+        if contains_cjk(collect_presentation_text(prs)):
+            raise ValueError(CJK_PDF_BLOCKED_MESSAGE)
+
         pdf = FPDF()
         pdf.set_auto_page_break(auto=True, margin=15)
 
-        font_name = select_pdf_font(pdf)
-
         for slide in prs.slides:
             pdf.add_page()
-            pdf.set_font(font_name, "B", 14)
+            pdf.set_font("Helvetica", "B", 14)
             for shape in slide.shapes:
                 if shape.has_text_frame:
                     text = shape.text_frame.text

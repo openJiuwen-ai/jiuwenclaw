@@ -1,4 +1,5 @@
 import asyncio
+from datetime import datetime, timedelta
 import json
 from types import SimpleNamespace
 from pathlib import Path
@@ -81,6 +82,50 @@ def test_projectless_task_workspace_has_stable_task_layout(tmp_path, monkeypatch
     assert metadata["query"] == "生成月度报告"
     assert metadata["title"] == "生成月度报告"
     assert not (tmp_path / "Documents" / ".jiuwenswarm").exists()
+
+
+def test_projectless_task_workspace_uses_session_creation_date_on_first_use(
+    tmp_path, monkeypatch
+):
+    tasks_dir = tmp_path / "Documents"
+    registry_dir = tmp_path / "registry"
+    sessions_dir = tmp_path / "agent" / "sessions"
+    session_id = "session-created-yesterday"
+    session_start = datetime.now().astimezone() - timedelta(days=1)
+    session_dir = sessions_dir / session_id
+    session_dir.mkdir(parents=True)
+    (session_dir / "metadata.json").write_text(
+        json.dumps(
+            {
+                "session_id": session_id,
+                "created_at": session_start.timestamp(),
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setenv("JIUWENSWARM_TASKS_DIR", str(tasks_dir))
+    monkeypatch.setenv("JIUWENSWARM_TASK_REGISTRY_DIR", str(registry_dir))
+    monkeypatch.setattr(
+        "jiuwenswarm.common.utils.get_agent_sessions_dir",
+        lambda: sessions_dir,
+    )
+
+    workspace = get_projectless_task_workspace(session_id, "跨天首次使用")
+    resumed = resolve_runtime_workspace_paths(
+        internal_workspace_dir=tmp_path / "internal",
+        project_dir=None,
+        workspace_dir=None,
+        cwd=None,
+        session_id=session_id,
+        task_name="第二天继续对话",
+        bind_request=True,
+    )
+
+    expected_date = session_start.strftime("%Y-%m-%d")
+    assert workspace.root_dir.parent.name == expected_date
+    assert resumed.runtime_workspace_root == workspace.root_dir
+    assert resumed.cwd == workspace.root_dir / "work"
 
 
 def test_projectless_task_workspace_preserves_full_request_in_metadata(
@@ -571,6 +616,17 @@ def test_projectless_task_workspace_detection_includes_agent_and_code_not_team()
         {"mode": "agent", "work_mode": "code"}, "tui"
     )
     assert _uses_projectless_task_workspace({"mode": "code"}, "tui")
+    assert not _uses_projectless_task_workspace(
+        {"mode": "code.normal", "cwd": "C:/workspace/project"}, "tui"
+    )
+    assert not _uses_projectless_task_workspace(
+        {
+            "mode": "code.normal",
+            "project_dir": "C:/workspace/project",
+            "cwd": "C:/workspace/project",
+        },
+        "tui",
+    )
     assert not _uses_projectless_task_workspace({"mode": "team"}, "tui")
     assert JiuWenSwarmDeepAdapter._is_projectless_agent_mode("agent")
     assert not JiuWenSwarmDeepAdapter._is_projectless_agent_mode("code")

@@ -1,32 +1,33 @@
 import { useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Button } from '../../../../components/ui';
+import { settingsActionIcons } from '../../../../assets/settings';
+import { Button, Switch } from '../../../../components/ui';
 import { Form, FormDialog, useForm } from '../../../../components/form';
 import { SettingRow, SettingsConfirmDialog } from '../../components';
 import type { SettingsCustomItemProps } from '../../registry/types';
+import { parseConfigBoolean, toConfigBoolean } from '../../services/settingsContract';
 import { useSettingsFormDialogClose } from '../../services/useSettingsFormDialogClose';
 import { useSettingsServices } from '../../services/SettingsServicesProvider';
 import { useSettingsSource } from '../../services/SettingsSourceProvider';
+import {
+  isMediaCapabilityConfigured,
+  mediaCapabilityEnabledField,
+  mediaCapabilityPersistenceFields,
+  wasConfigAppliedWithoutRestart,
+  type MediaCapabilityModality,
+} from './mediaCapabilities';
+import { MediaModelConfigDialog } from './MediaModelConfigDialog';
+import './AgentSettings.css';
 
 const keyFields = ['jina_api_key', 'bocha_api_key', 'perplexity_api_key', 'serper_api_key'] as const;
 const modalities = ['vision', 'audio', 'video'] as const;
-const modalityConfigSuffixes = ['api_base', 'api_key', 'model', 'provider'] as const;
-const modalityConfigFields: ReadonlySet<string> = new Set(
-  modalities.flatMap((modality) => modalityConfigSuffixes.map((suffix) => `${modality}_${suffix}`)),
-);
-const modalityProviderFields: ReadonlySet<string> = new Set(modalities.map((modality) => `${modality}_provider`));
 
 function isSearchKeyField(name: string): name is (typeof keyFields)[number] {
   return keyFields.some((field) => field === name);
 }
 
 function isRequiredAgentConfigField(name: string): boolean {
-  return isSearchKeyField(name) || modalityConfigFields.has(name);
-}
-
-function getInitialAgentConfigValue(name: string, config: Record<string, unknown>): string {
-  const value = String(config[name] ?? '');
-  return modalityProviderFields.has(name) && !value.trim() ? 'OpenAI' : value;
+  return isSearchKeyField(name);
 }
 
 type SaveConfig = (updates: Record<string, string>, operation: string) => Promise<unknown>;
@@ -47,7 +48,7 @@ function AgentConfigDialog({
   const { t } = useTranslation();
   const { isConnected } = useSettingsServices();
   const form = useForm({
-    initialValues: Object.fromEntries(fields.map((name) => [name, getInitialAgentConfigValue(name, config)])),
+    initialValues: Object.fromEntries(fields.map((name) => [name, String(config[name] ?? '')])),
   });
   const [submitting, setSubmitting] = useState(false);
   const [saveError, setSaveError] = useState('');
@@ -61,29 +62,19 @@ function AgentConfigDialog({
   const items = useMemo(
     () =>
       fields.map((name) => {
-        const provider = name.endsWith('_provider');
         const key = name.includes('key');
         const required = isRequiredAgentConfigField(name);
-        return provider
-          ? {
-              name,
-              label: t(`settingsPanel.fields.${name}.title`),
-              helpTips: t('config.keyHelp.modelProvider'),
-              component: 'select' as const,
-              options: [{ value: 'OpenAI', label: 'OpenAI' }],
-              required,
-            }
-          : {
-              name,
-              label: t(`settingsPanel.fields.${name}.title`),
-              component: 'input' as const,
-              type: key ? ('password' as const) : ('text' as const),
-              passwordVisibilityLabels: key
-                ? { show: t('settingsPanel.common.showValue'), hide: t('settingsPanel.common.hideValue') }
-                : undefined,
-              placeholder: t('config.enterValue'),
-              required,
-            };
+        return {
+          name,
+          label: t(`settingsPanel.fields.${name}.title`),
+          component: 'input' as const,
+          type: key ? ('password' as const) : ('text' as const),
+          passwordVisibilityLabels: key
+            ? { show: t('settingsPanel.common.showValue'), hide: t('settingsPanel.common.hideValue') }
+            : undefined,
+          placeholder: t('config.enterValue'),
+          required,
+        };
       }),
     [fields, t],
   );
@@ -181,34 +172,92 @@ export function AgentSearchSettings({ disabled }: SettingsCustomItemProps) {
 export function AgentMediaSettings({ disabled }: SettingsCustomItemProps) {
   const { t } = useTranslation();
   const { isConnected } = useSettingsServices();
-  const { values, save } = useSettingsSource();
-  const [dialog, setDialog] = useState<{ titleKey: string; fields: readonly string[] } | null>(null);
+  const { values, savingKeys, save } = useSettingsSource();
+  const [dialog, setDialog] = useState<{
+    modality: MediaCapabilityModality;
+    enableOnSave: boolean;
+  } | null>(null);
+  const [restartRequired, setRestartRequired] = useState(false);
   const saveConfig: SaveConfig = (updates, operation) => save(updates, operation);
+  const handleSaveResult = (result: unknown) => {
+    setRestartRequired(!wasConfigAppliedWithoutRestart(result));
+  };
+
+  const toggleCapability = async (modality: MediaCapabilityModality, nextEnabled: boolean) => {
+    if (nextEnabled && !isMediaCapabilityConfigured(values, modality)) {
+      setDialog({ modality, enableOnSave: true });
+      return;
+    }
+
+    setRestartRequired(false);
+    try {
+      const result = await saveConfig(
+        { [mediaCapabilityEnabledField(modality)]: toConfigBoolean(nextEnabled) },
+        `settingsPanel.agent.${modality}`,
+      );
+      handleSaveResult(result);
+    } catch {
+      setRestartRequired(false);
+    }
+  };
+
   return (
     <>
-      {modalities.map((modality) => (
-        <SettingRow
-          key={modality}
-          title={t(`settingsPanel.agent.${modality}`)}
-          description={
-            values[`${modality}_model`] ? String(values[`${modality}_model`]) : t('settingsPanel.common.notConfigured')
-          }
-        >
-          <Button
-            disabled={disabled || !isConnected}
-            onClick={() =>
-              setDialog({
-                titleKey: `settingsPanel.agent.${modality}`,
-                fields: [`${modality}_api_base`, `${modality}_api_key`, `${modality}_model`, `${modality}_provider`],
-              })
+      {restartRequired ? (
+        <div className="settings-agent-media__restart-notice" role="status">
+          {t('settingsPanel.agent.savedRestartRequired')}
+        </div>
+      ) : null}
+      {modalities.map((modality) => {
+        const configured = isMediaCapabilityConfigured(values, modality);
+        const enabledField = mediaCapabilityEnabledField(modality);
+        const enabled = configured && parseConfigBoolean(values[enabledField]);
+        const capabilityFields = [...mediaCapabilityPersistenceFields(modality), enabledField];
+        const busy = capabilityFields.some((field) => savingKeys.has(field));
+        const name = t(`settingsPanel.agent.${modality}`);
+        return (
+          <SettingRow
+            key={modality}
+            className="settings-agent-media__row"
+            title={name}
+            description={t(`settingsPanel.agent.${modality}Description`)}
+            subSettings={
+              configured ? (
+                <div className="settings-agent-media__model-card">
+                  <strong className="settings-agent-media__model-name">{String(values[`${modality}_model`])}</strong>
+                  <div className="settings-agent-media__actions">
+                    <Button
+                      variant="quiet"
+                      size="sm"
+                      icon={<settingsActionIcons.edit aria-hidden />}
+                      title={t('common.modify')}
+                      aria-label={`${t('common.modify')} ${name}`}
+                      disabled={disabled || !isConnected || busy}
+                      onClick={() => setDialog({ modality, enableOnSave: false })}
+                    />
+                  </div>
+                </div>
+              ) : null
             }
           >
-            {t('settingsPanel.common.configure')}
-          </Button>
-        </SettingRow>
-      ))}
+            <Switch
+              checked={enabled}
+              disabled={disabled || !isConnected || busy}
+              aria-label={t('settingsPanel.agent.toggleCapability', { name })}
+              onChange={(nextEnabled) => void toggleCapability(modality, nextEnabled)}
+            />
+          </SettingRow>
+        );
+      })}
       {dialog ? (
-        <AgentConfigDialog {...dialog} config={values} save={saveConfig} onClose={() => setDialog(null)} />
+        <MediaModelConfigDialog
+          modality={dialog.modality}
+          config={values}
+          save={saveConfig}
+          enableOnSave={dialog.enableOnSave}
+          onSaved={handleSaveResult}
+          onClose={() => setDialog(null)}
+        />
       ) : null}
     </>
   );

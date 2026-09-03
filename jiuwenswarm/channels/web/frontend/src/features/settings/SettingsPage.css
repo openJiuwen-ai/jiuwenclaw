@@ -1,3 +1,5 @@
+/* Copyright (c) Huawei Technologies Co., Ltd. 2025-2026. All rights reserved. */
+
 .settings-page {
   display: grid;
   grid-template-columns: clamp(208px, 15.4167vw, 296px) minmax(0, 1fr);
@@ -208,6 +210,19 @@
   gap: 8px;
 }
 
+.settings-experimental-cli__scope {
+  display: inline-flex;
+  align-items: center;
+  justify-self: start;
+  min-height: 24px;
+  padding: 2px 8px;
+  color: var(--color-settings-text-secondary);
+  font-size: 12px;
+  line-height: 20px;
+  border-radius: var(--radius-full);
+  background: var(--color-surface-muted);
+}
+
 .settings-inline-input {
   display: flex;
   align-items: center;
@@ -237,9 +252,11 @@
   }
 }
 
-.settings-experimental-cli__status {
-  display: grid;
-  gap: 5px;
+.settings-experimental-cli__install-running {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
   padding: 12px;
   color: var(--color-feedback-warning);
   font-size: 14px;
@@ -249,27 +266,8 @@
   background: var(--color-feedback-warning-subtle);
 }
 
-.settings-experimental-cli__status--failed {
-  color: var(--color-feedback-danger);
-  border-color: var(--color-border-danger);
-  background: var(--color-feedback-danger-subtle);
-}
-
-.settings-experimental-cli__status--succeeded {
-  color: var(--color-feedback-success);
-  border-color: var(--color-border-success);
-  background: var(--color-feedback-success-subtle);
-}
-
-.settings-experimental-cli__status pre {
-  max-height: 112px;
-  padding: 8px;
-  margin: 0;
-  overflow: auto;
-  color: inherit;
-  font: 12px/18px var(--font-mono);
-  border-radius: 8px;
-  background: var(--color-surface-muted);
+.settings-experimental-cli__install-running .ui-button {
+  flex: 0 0 auto;
 }
 
 .settings-model-dialog {
@@ -1010,7 +1008,6 @@
 }
 
 @container settings-models-list (max-width: 36rem) {
-
   .settings-model-card {
     grid-template-columns: 40px minmax(0, 1fr);
   }

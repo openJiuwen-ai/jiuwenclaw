@@ -20,6 +20,8 @@ logger = logging.getLogger(__name__)
 class _SessionAdmissionState:
     active_users: int = 0
     user_waiters: int = 0
+    team_user_submissions: int = 0
+    team_user_active: bool = False
     heartbeat_run_id: str | None = None
     heartbeat_blocked: bool = False
 
@@ -42,7 +44,13 @@ class SessionRunAdmission:
 
     def is_user_active(self, session_id: str) -> bool:
         state = self._states.get(session_id)
-        return bool(state and (state.active_users or state.user_waiters))
+        if state is None:
+            return False
+        direct_user_work = bool(state.active_users or state.user_waiters)
+        team_user_work = bool(
+            state.team_user_submissions or state.team_user_active
+        )
+        return direct_user_work or team_user_work
 
     def active_heartbeat_sessions(self) -> set[str]:
         return {
@@ -88,11 +96,12 @@ class SessionRunAdmission:
                 state.user_waiters -= 1
 
     async def begin_team_user(self, session_id: str) -> None:
-        """Exclusively admit one Team round and keep Heartbeat behind it.
+        """Mark an interactive Team iteration without serializing its steers.
 
-        A Team runner stream can outlive many interaction rounds.  The caller
-        must pair this method with ``end_user`` only after the submitted round
-        reaches a terminal event, not when the transport coroutine returns.
+        Team decides whether an input is an immediate steer or a follow-up.
+        Admission only keeps Heartbeat outside the active user iteration.
+        Multiple inputs therefore register concurrent pending submissions and
+        never wait for one another.
         """
         async with self._condition:
             state = self._state(session_id)
@@ -104,9 +113,61 @@ class SessionRunAdmission:
                         and self._state(session_id).active_users == 0
                     )
                 )
+                state.team_user_submissions += 1
+            finally:
+                state.user_waiters -= 1
+
+    async def complete_team_user_submission(
+        self,
+        session_id: str,
+        *,
+        accepted: bool,
+    ) -> None:
+        """Resolve one steer submission and retain activity only if accepted."""
+        async with self._condition:
+            state = self._states.get(session_id)
+            if state is None:
+                return
+            state.team_user_submissions = max(0, state.team_user_submissions - 1)
+            if accepted:
+                state.team_user_active = True
+            self._drop_idle_state(session_id, state)
+            self._condition.notify_all()
+
+    async def begin_bounded_team_user(self, session_id: str) -> None:
+        """Exclusively admit bounded Cron automation around Team activity."""
+        async with self._condition:
+            state = self._state(session_id)
+            state.user_waiters += 1
+            try:
+                await self._condition.wait_for(
+                    lambda: self._bounded_team_user_can_begin(session_id)
+                )
                 state.active_users += 1
             finally:
                 state.user_waiters -= 1
+
+    def _bounded_team_user_can_begin(self, session_id: str) -> bool:
+        state = self._state(session_id)
+        direct_user_active = state.active_users > 0
+        team_user_active = bool(
+            state.team_user_submissions or state.team_user_active
+        )
+        return (
+            state.heartbeat_run_id is None
+            and not direct_user_active
+            and not team_user_active
+        )
+
+    async def end_team_user(self, session_id: str) -> None:
+        """Release the interactive Team marker at its runtime terminal event."""
+        async with self._condition:
+            state = self._states.get(session_id)
+            if state is None:
+                return
+            state.team_user_active = False
+            self._drop_idle_state(session_id, state)
+            self._condition.notify_all()
 
     async def end_user(self, session_id: str) -> None:
         async with self._condition:
@@ -120,9 +181,12 @@ class SessionRunAdmission:
     async def try_begin_heartbeat(self, session_id: str, run_id: str) -> bool:
         async with self._condition:
             state = self._state(session_id)
-            session_has_work = bool(
-                state.active_users or state.user_waiters or state.heartbeat_run_id
+            direct_user_work = bool(state.active_users or state.user_waiters)
+            team_user_work = bool(
+                state.team_user_submissions or state.team_user_active
             )
+            user_has_work = direct_user_work or team_user_work
+            session_has_work = user_has_work or state.heartbeat_run_id is not None
             if state.heartbeat_blocked or session_has_work:
                 return False
             state.heartbeat_run_id = run_id
@@ -140,9 +204,12 @@ class SessionRunAdmission:
     def _drop_idle_state(
         self, session_id: str, state: _SessionAdmissionState
     ) -> None:
-        session_has_work = bool(
-            state.active_users or state.user_waiters or state.heartbeat_run_id
+        direct_user_work = bool(state.active_users or state.user_waiters)
+        team_user_work = bool(
+            state.team_user_submissions or state.team_user_active
         )
+        user_has_work = direct_user_work or team_user_work
+        session_has_work = user_has_work or state.heartbeat_run_id is not None
         if not session_has_work and not state.heartbeat_blocked:
             self._states.pop(session_id, None)
 

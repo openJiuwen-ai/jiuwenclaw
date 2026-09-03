@@ -53,8 +53,13 @@ class ExtensionLoader:
                     roots.append(subdir)
         return roots
 
-    async def load_extension(self, root: Path) -> Any:
-        manifest = _load_manifest_dict(root)
+    @staticmethod
+    def load_manifest(root: Path) -> dict:
+        """Read extension metadata without importing its entry module."""
+        return _load_manifest_dict(root)
+
+    async def load_extension(self, root: Path, *, manifest: dict | None = None) -> Any:
+        manifest = manifest if manifest is not None else _load_manifest_dict(root)
 
         await self._install_dependencies(manifest, root)
 

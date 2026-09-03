@@ -1,9 +1,11 @@
-import { ChevronDown, Search } from 'lucide-react';
+import { ChevronDown } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import SearchIcon from '../../assets/agent-management/agent-search.svg?react';
 import { CatalogPage, PAGE_SIZE } from './CatalogPage';
 import { AgentEditor } from './AgentEditor';
 import { DefinitionDetailPage } from './DefinitionDetailPage';
+import { AgentUploadDialog } from './AgentUploadDialog';
 import { PendingConnectorModals, usePendingConnectorFlow } from '../ConnectorMarket/usePendingConnectorFlow';
 import { useConnectorStore } from '../../stores/connectorStore';
 import {
@@ -129,6 +131,8 @@ export function AgentManagementPanel({ onUseAgent, onUsePrompt, onCreateViaChat 
   const [saving, setSaving] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
   const [createMenuOpen, setCreateMenuOpen] = useState(false);
+  const [uploadDialogOpen, setUploadDialogOpen] = useState(false);
+  const [uploadError, setUploadError] = useState<string | null>(null);
   const [mcpOptions, setMcpOptions] = useState<McpOption[]>([]);
   const [mcpStatus, setMcpStatus] = useState<RequestStatus>('idle');
   const catalogRef = useRef<AgentCatalogItem[]>([]);
@@ -136,6 +140,7 @@ export function AgentManagementPanel({ onUseAgent, onUsePrompt, onCreateViaChat 
   const detailRevisionRef = useRef(0);
   const filesRevisionRef = useRef(0);
   const fileRevisionRef = useRef(0);
+  const actionNoticeTimerRef = useRef<number | null>(null);
   const installFlowTargetRef = useRef<string | null>(null);
   const reconnectFlowTargetRef = useRef<string | null>(null);
   const connectorError = useConnectorStore(state => state.error);
@@ -192,6 +197,14 @@ export function AgentManagementPanel({ onUseAgent, onUsePrompt, onCreateViaChat 
   useEffect(() => {
     void loadCatalog();
   }, [loadCatalog]);
+
+  useEffect(() => {
+    return () => {
+      if (actionNoticeTimerRef.current !== null) {
+        window.clearTimeout(actionNoticeTimerRef.current);
+      }
+    };
+  }, []);
 
   const openDetail = useCallback(
     async (id: string) => {
@@ -366,8 +379,14 @@ export function AgentManagementPanel({ onUseAgent, onUsePrompt, onCreateViaChat 
     setActionError(null);
     setActionNotice(null);
     try {
+      const fromDetail = view === 'detail' && selectedId === id;
       const result = await client.uninstallDefinition(id);
-      await refreshAfterAction(id);
+      if (fromDetail) {
+        await loadCatalog();
+        goBackToCatalog();
+      } else {
+        await refreshAfterAction(id);
+      }
       if (result.notice) setActionNotice(result.notice);
     } catch (error) {
       setActionError(formatActionError(error, t('agentManagement.states.actionError')));
@@ -432,6 +451,41 @@ export function AgentManagementPanel({ onUseAgent, onUsePrompt, onCreateViaChat 
     }
   };
 
+  const openUpload = () => {
+    setCreateMenuOpen(false);
+    setActionError(null);
+    setActionNotice(null);
+    setUploadError(null);
+    setUploadDialogOpen(true);
+  };
+
+  const handleUpload = async (path: string) => {
+    if (actionNoticeTimerRef.current !== null) {
+      window.clearTimeout(actionNoticeTimerRef.current);
+      actionNoticeTimerRef.current = null;
+    }
+    setActionError(null);
+    setActionNotice(null);
+    setUploadError(null);
+    try {
+      const result = await client.importAgentTemplate(path);
+      await loadCatalog();
+      setUploadDialogOpen(false);
+      setUploadError(null);
+      setMineQuery('');
+      setMinePage(1);
+      setView('mine');
+      const notice = t('agentManagement.states.uploadSuccess', { id: result.id });
+      setActionNotice(notice);
+      actionNoticeTimerRef.current = window.setTimeout(() => {
+        setActionNotice(current => (current === notice ? null : current));
+        actionNoticeTimerRef.current = null;
+      }, 3000);
+    } catch (error) {
+      setUploadError(formatActionError(error, t('agentManagement.states.uploadError')));
+    }
+  };
+
   const goBackToCatalog = () => {
     setActionError(null);
     setActionNotice(null);
@@ -445,10 +499,21 @@ export function AgentManagementPanel({ onUseAgent, onUsePrompt, onCreateViaChat 
     </>
   );
 
+  const uploadDialog = uploadDialogOpen ? (
+    <AgentUploadDialog
+      error={uploadError}
+      onCancel={() => {
+        setUploadDialogOpen(false);
+        setUploadError(null);
+      }}
+      onConfirm={handleUpload}
+    />
+  ) : null;
+
   if (view === 'detail') {
     return (
       <>
-        <main className="agent-management-panel agent-management-panel--detail" data-source={client.source}>
+        <main className="agent-management-panel agent-management-panel--detail" data-source={client.source} data-testid="agent-management-panel" data-variant="detail">
           <DefinitionDetailPage
             detail={state.detail}
             detailStatus={state.detailStatus}
@@ -484,6 +549,7 @@ export function AgentManagementPanel({ onUseAgent, onUsePrompt, onCreateViaChat 
           />
         </main>
         {pendingConnectorModals}
+        {uploadDialog}
       </>
     );
   }
@@ -491,7 +557,7 @@ export function AgentManagementPanel({ onUseAgent, onUsePrompt, onCreateViaChat 
   if (view === 'create') {
     return (
       <>
-        <main className="agent-management-panel agent-management-panel--create" data-source={client.source}>
+        <main className="agent-management-panel agent-management-panel--create" data-source={client.source} data-testid="agent-management-panel" data-variant="create">
           <AgentEditor
             draft={draft}
             skillOptions={state.skillOptions}
@@ -512,25 +578,28 @@ export function AgentManagementPanel({ onUseAgent, onUsePrompt, onCreateViaChat 
           />
         </main>
         {pendingConnectorModals}
+        {uploadDialog}
       </>
     );
   }
 
   const isMine = view === 'mine';
   return (
-    <main className={`agent-management-panel agent-management-panel--${isMine ? 'mine' : 'catalog'}`} data-source={client.source}>
-      <header className="agent-management-header">
+    <main className={`agent-management-panel agent-management-panel--${isMine ? 'mine' : 'catalog'}`} data-source={client.source} data-testid="agent-management-panel" data-variant={isMine ? 'mine' : 'catalog'}>
+      <header className="agent-management-header" data-testid="agent-management-header">
         <div>
-          <h1>{t('agentManagement.title')}</h1>
-          <p>{t('agentManagement.subtitle')}</p>
+          <h1 data-testid="agent-management-title">{t('agentManagement.title')}</h1>
+          <p data-testid="agent-management-subtitle">{t('agentManagement.subtitle')}</p>
         </div>
       </header>
-      <div className="agent-management-primary-row">
-        <nav className="agent-management-primary-tabs" role="tablist" aria-label={t('agentManagement.tabsLabel')}>
+      <div className="agent-management-primary-row" data-testid="agent-management-primary-row">
+        <nav className="agent-management-primary-tabs" role="tablist" aria-label={t('agentManagement.tabsLabel')} data-testid="agent-management-primary-tabs">
           <button
             type="button"
             role="tab"
             aria-selected={!isMine}
+            data-testid="agent-management-primary-tab"
+            data-variant="catalog"
             className={!isMine ? 'is-active' : ''}
             onClick={() => {
               setCreateMenuOpen(false);
@@ -545,6 +614,8 @@ export function AgentManagementPanel({ onUseAgent, onUsePrompt, onCreateViaChat 
             type="button"
             role="tab"
             aria-selected={isMine}
+            data-testid="agent-management-primary-tab"
+            data-variant="mine"
             className={isMine ? 'is-active' : ''}
             onClick={() => {
               setCreateMenuOpen(false);
@@ -556,39 +627,44 @@ export function AgentManagementPanel({ onUseAgent, onUsePrompt, onCreateViaChat 
             {t('agentManagement.tabs.mine')}
           </button>
         </nav>
-        <div className="agent-management-primary-actions">
-          <label className="agent-management-search">
-            <Search size={16} aria-hidden="true" />
-            <span className="sr-only">{t('agentManagement.searchLabel')}</span>
+        <div className="agent-management-primary-actions" data-testid="agent-management-primary-actions">
+          <label className="agent-management-search" data-testid="agent-management-search">
+            <SearchIcon aria-hidden="true" />
             <input
               type="search"
               name="agent-management-search"
+              aria-label={t('agentManagement.searchLabel')}
               autoComplete="off"
               disabled={connectorFlowId !== null}
               value={isMine ? mineQuery : query}
               onChange={event => (isMine ? (setMineQuery(event.target.value), setMinePage(1)) : (setQuery(event.target.value), setCatalogPage(1)))}
               placeholder={t(isMine ? 'agentManagement.searchMine' : 'agentManagement.searchCatalog')}
+              data-testid="agent-management-search-input"
             />
           </label>
           {isMine ? (
-            <div className="agent-management-create-menu">
+            <div className="agent-management-create-menu" data-testid="agent-management-create-menu">
               <button
                 type="button"
                 className="agent-management-button agent-management-button--primary agent-management-create"
                 aria-haspopup="menu"
                 aria-expanded={createMenuOpen}
+                data-testid="agent-management-create-button"
                 onClick={() => setCreateMenuOpen(open => !open)}
               >
                 {t('agentManagement.actions.create')}
                 <ChevronDown size={15} aria-hidden="true" />
               </button>
               {createMenuOpen ? (
-                <div className="agent-management-create-menu__popover" role="menu">
-                  <button type="button" role="menuitem" onClick={openCreate}>
+                <div className="agent-management-create-menu__popover" role="menu" data-testid="agent-management-create-menu-popover">
+                  <button type="button" role="menuitem" data-testid="agent-management-create-menu-item" data-variant="create-first" onClick={openCreate}>
                     {t('agentManagement.actions.createFirst')}
                   </button>
-                  <button type="button" role="menuitem" onClick={() => { setCreateMenuOpen(false); onCreateViaChat?.(); }}>
+                  <button type="button" role="menuitem" data-testid="agent-management-create-menu-item" data-variant="create-by-chat" onClick={() => { setCreateMenuOpen(false); onCreateViaChat?.(); }}>
                     {t('agentManagement.actions.createByChat')}
+                  </button>
+                  <button type="button" role="menuitem" onClick={openUpload}>
+                    {t('agentManagement.actions.createByUpload')}
                   </button>
                 </div>
               ) : null}
@@ -597,12 +673,12 @@ export function AgentManagementPanel({ onUseAgent, onUsePrompt, onCreateViaChat 
         </div>
       </div>
       {actionError ? (
-        <div className="agent-management-inline-error" role="alert">
+        <div className="agent-management-inline-error" role="alert" data-testid="agent-management-inline-error">
           {actionError}
         </div>
       ) : null}
       {actionNotice ? (
-        <div className="agent-management-inline-notice" role="status">
+        <div className="agent-management-inline-notice" role="status" data-testid="agent-management-inline-notice">
           {actionNotice}
         </div>
       ) : null}
@@ -631,6 +707,7 @@ export function AgentManagementPanel({ onUseAgent, onUsePrompt, onCreateViaChat 
         onCreate={openCreate}
       />
       {pendingConnectorModals}
+      {uploadDialog}
     </main>
   );
 }

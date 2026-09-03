@@ -14,8 +14,8 @@ if not defined BUILD_DISPLAY_NAME exit /b 1
 echo Build identity: %BUILD_DISPLAY_NAME% %BUILD_VERSION%
 echo.
 
-echo [1/3] Installing Python deps (uv sync --extra dev --extra claude --extra codex)...
-call uv sync --extra dev --extra claude --extra codex
+echo [1/3] Installing Python deps (uv sync --extra dev)...
+call uv sync --extra dev
 if errorlevel 1 exit /b 1
 
 echo.

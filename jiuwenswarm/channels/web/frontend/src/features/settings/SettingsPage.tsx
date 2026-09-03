@@ -1,10 +1,9 @@
+// Copyright (c) Huawei Technologies Co., Ltd. 2025-2026. All rights reserved.
+
 import type { WebConnectionState } from '../../types';
 import type { SettingsRequest } from './services/settingsContract';
-import type {
-  CodexDependencyInstallStatus,
-  ExternalCliAgentKind,
-  ExternalCliDetectResult,
-} from '../../components/ExternalCliAgentsSection';
+import type { ExternalCliAgentKind, ExternalCliDetectResult } from '../../components/ExternalCliAgentsSection';
+import type { ExternalCliInstallStatuses } from '../../components/ExternalCliInstallDialog';
 import { SettingsPageLayout } from './SettingsPageLayout';
 import { SettingsServicesProvider } from './services/SettingsServicesProvider';
 import type { SettingsPageDefinition } from './registry/types';
@@ -16,9 +15,13 @@ export function SettingsPage({
   connectionState,
   request,
   onHasChangesChange,
+  onConfigSaved,
   onDetectExternalCli,
   onSelectExternalCliPath,
-  onGetCodexDependencyInstallStatus,
+  onTrackExternalCliDependencyInstalls,
+  externalCliInstallStatuses,
+  externalCliInstallBusy,
+  onOpenExternalCliInstallDialog,
   initialModuleId,
 }: {
   definition: SettingsPageDefinition;
@@ -26,9 +29,13 @@ export function SettingsPage({
   connectionState: WebConnectionState;
   request: SettingsRequest;
   onHasChangesChange?: (hasChanges: boolean) => void;
+  onConfigSaved?: (updatedKeys: readonly string[]) => Promise<void> | void;
   onDetectExternalCli?: (agent: ExternalCliAgentKind, path?: string) => Promise<ExternalCliDetectResult>;
   onSelectExternalCliPath?: (agent: ExternalCliAgentKind, initialPath?: string) => Promise<string | null>;
-  onGetCodexDependencyInstallStatus?: () => Promise<CodexDependencyInstallStatus>;
+  onTrackExternalCliDependencyInstalls?: (statuses: ExternalCliInstallStatuses) => void;
+  externalCliInstallStatuses?: ExternalCliInstallStatuses;
+  externalCliInstallBusy?: boolean;
+  onOpenExternalCliInstallDialog?: () => void;
   initialModuleId?: SettingsModuleTarget;
 }) {
   return (
@@ -37,9 +44,13 @@ export function SettingsPage({
       connectionState={connectionState}
       request={request}
       onHasChangesChange={onHasChangesChange}
+      onConfigSaved={onConfigSaved}
       onDetectExternalCli={onDetectExternalCli}
       onSelectExternalCliPath={onSelectExternalCliPath}
-      onGetCodexDependencyInstallStatus={onGetCodexDependencyInstallStatus}
+      onTrackExternalCliDependencyInstalls={onTrackExternalCliDependencyInstalls}
+      externalCliInstallStatuses={externalCliInstallStatuses}
+      externalCliInstallBusy={externalCliInstallBusy}
+      onOpenExternalCliInstallDialog={onOpenExternalCliInstallDialog}
     >
       <SettingsPageLayout definition={definition} initialModuleId={initialModuleId} />
     </SettingsServicesProvider>

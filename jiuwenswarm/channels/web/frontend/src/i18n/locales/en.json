@@ -125,7 +125,8 @@
       "searchModel": "Search and select a model",
       "noModelResults": "No matching models",
       "openModelList": "Open model list",
-      "modelIdPlaceholder": "Enter a model ID",
+      "modelIdPlaceholder": "Enter a model ID, e.g. glm-4.7",
+      "modelIdHint": "For example: glm-4.7. Model IDs vary by provider; refer to its model list or official documentation.",
       "fetchLatestModels": "Fetch latest",
       "presetModels": "Showing provider presets. Open the list to fetch the latest models",
       "noPresetModels": "No preset models. Open the list or refresh to fetch the latest models",
@@ -167,11 +168,7 @@
         "anthropicUnavailable": "This provider plan does not support the Anthropic protocol"
       },
       "reasoning": {
-        "auto": "Use default",
-        "off": "Off",
-        "low": "Low",
-        "medium": "Medium",
-        "high": "High"
+        "auto": "Use default"
       },
       "openaiAccount": "OpenAI account",
       "agentOsReadonly": "AgentOS read-only",
@@ -182,6 +179,8 @@
       "catalogResponseInvalid": "The model-provider catalog response is invalid. Please try again.",
       "catalogLoadingCustomAvailable": "Loading built-in model providers. You can still choose Custom to continue.",
       "catalogLoadFailedCustomAvailable": "Built-in model providers failed to load. You can still choose Custom to continue.",
+      "catalogLoading": "Loading model providers and reasoning options. Please wait.",
+      "catalogLoadFailed": "Model providers and reasoning options failed to load. Retry before saving.",
       "saveResponseInvalid": "The model-save response is invalid. Reload to verify the server state.",
       "savedApplied": "Saved and applied",
       "savedRestartRequired": "Saved; takes effect after restart",
@@ -200,7 +199,8 @@
         "vendorSelectionRequired": "Select a model provider. Re-select the provider plan for a historical configuration that has no plan data",
         "vendorSelectionInvalid": "This provider plan is not in the server catalog. Select it again",
         "anthropicUnavailable": "This provider plan does not support the Anthropic protocol. Use OpenAI or select another provider",
-        "reasoningUnsupported": "The current reasoning level “{{value}}” is unsupported. Select another value",
+        "reasoningUnsupported": "The reasoning option “{{value}}” is unsupported. Select another option or use the default",
+        "reasoningUnavailable": "Reasoning options have not loaded. Retry before saving",
         "aliasConflict": "Custom name must be globally unique and cannot match another model ID",
         "modelNameConflict": "Model ID cannot match another configuration's custom name"
       },
@@ -212,8 +212,17 @@
       "webSearch": "Web search",
       "mediaTools": "Tools",
       "vision": "Image processing",
+      "visionDescription": "Enable image processing; disabling it keeps the saved model configuration.",
+      "visionConfigTitle": "Configure image processing model",
       "audio": "Audio processing",
+      "audioDescription": "Enable audio processing; disabling it keeps the saved model configuration.",
+      "audioConfigTitle": "Configure audio processing model",
       "video": "Video understanding",
+      "videoDescription": "Enable video understanding; disabling it keeps the saved model configuration.",
+      "videoConfigTitle": "Configure video understanding model",
+      "toggleCapability": "Toggle {{name}} capability",
+      "saveAndEnable": "Save and enable",
+      "savedRestartRequired": "Saved; takes effect after restart.",
       "team": "Agent team"
     },
     "browser": {
@@ -232,7 +241,9 @@
     },
     "experimental": {
       "externalCliAgents": "Third-Party Agents",
+      "externalCliAgentsDescription": "For Team mode only.",
       "a2ui": "A2UI generation",
+      "trajectoryUi": "Trajectory UI",
       "proactive": "Proactive recommendations",
       "proactiveLimits": "Recommendation limits",
       "proactiveLimitsDescription": "Up to {{daily}} per day and {{rounds}} conversation rounds per check.",
@@ -261,7 +272,7 @@
       "api_base": { "title": "API URL", "placeholder": "e.g. https://api.openai.com/v1" },
       "api_key": { "title": "API key", "placeholder": "e.g. sk-..." },
       "model_provider": { "title": "Model provider" },
-      "reasoning_level": { "title": "Reasoning level" },
+      "reasoning_level": { "title": "Reasoning" },
       "embed_api_base": { "title": "API URL" },
       "embed_api_key": { "title": "API key" },
       "embed_model": { "title": "Model name" },
@@ -299,21 +310,18 @@
       "video_api_key": { "title": "API key" },
       "video_model": { "title": "Model name" },
       "video_provider": { "title": "Model provider" },
-      "swarmflow_enabled": {
-        "title": "Dynamic workflow",
-        "description": "Control whether the agent team enables dynamic workflow capabilities."
-      },
       "permissions_mode": {
         "title": "Global permission mode",
         "description": "Choose the shared guardrail mode for ordinary Agents and Teams."
       },
       "a2ui_enabled": { "title": "Enable A2UI", "description": "Render supported results as interactive interfaces." },
+      "trajectory_ui_enabled": { "title": "Enable trajectory UI", "description": "Show Chat and Trajectory switching in Agent and Team modes and enable the trajectory observability data path." },
       "external_cli_agent_claude_enabled": {
         "title": "Enable Claude",
         "description": "Allow a Team Leader to spawn a Claude Agent."
       },
       "external_cli_agent_claude_use_builtin": {
-        "title": "Use built-in Claude",
+        "title": "Use built-in Claude CLI",
         "description": "Do not specify a local CLI path; let the SDK use its default lookup."
       },
       "external_cli_agent_claude_cli_path": { "title": "Claude CLI path" },
@@ -322,7 +330,7 @@
         "description": "Allow a Team Leader to spawn a Codex Agent; first use may install dependencies."
       },
       "external_cli_agent_codex_use_builtin": {
-        "title": "Use built-in Codex",
+        "title": "Use built-in Codex CLI",
         "description": "Do not specify a local CLI path; let the SDK use its default lookup."
       },
       "external_cli_agent_codex_cli_path": { "title": "Codex CLI path" },
@@ -344,6 +352,24 @@
     "validation": {
       "required": "This field is required",
       "integerRange": "Enter an integer from {{min}} to {{max}}"
+
+    }
+  },
+  "trajectory": {
+    "loading": "Loading trajectory UI…",
+    "tabs": {
+      "aria": "Agent and Team content view",
+      "trajectory": "Trajectory"
+    },
+    "team": {
+      "memberLanes": "Member trajectory lanes",
+      "members": "Members"
+    },
+    "layout": {
+      "hideSessions": "Collapse sessions",
+      "showSessions": "Show sessions",
+      "hideTasks": "Collapse tasks",
+      "showTasks": "Show tasks"
     }
   },
   "team": {
@@ -369,6 +395,7 @@
     "elapsedTime": "Elapsed time: {{value}}",
     "duration": "Duration",
     "noTasks": "No tasks currently",
+    "moreTasks": "{{count}} more tasks",
     "noMemberData": "No member data",
     "selectMember": "Select a team member",
     "detailTabs": {
@@ -476,7 +503,9 @@
       "views": {
         "list": "List view",
         "structure": "Structure view",
-        "board": "Board view"
+        "board": "Board view",
+        "graph": "Graph view",
+        "workflow": "Workflow view"
       },
       "metrics": {
         "progress": "Progress"
@@ -574,11 +603,12 @@
     }
   },
   "chat": {
-    "placeholder": "Enter to send, Shift+Enter for new line",
+    "placeholder": "What can I do for you? Type \"/\" to quickly reference skills and commands",
     "placeholderCompacting": "Context compression in progress. Messages are temporarily disabled",
+    "placeholderAwaitingApproval": "Please respond to the pending confirmation above",
     "placeholderProcessing": "Processing, enter to interrupt...",
     "placeholderProcessingQueue": "Processing, new input will join the queue...",
-    "placeholderTeamMode": "Team mode, new input will run in parallel...",
+    "placeholderTeamMode": "What can I do for you? Type \"/\" to quickly reference skills and commands",
     "placeholderTeamModeProcessing": "Team mode processing, new input will run in parallel...",
     "placeholderVoice": "Listening...",
     "welcomeLogoAlt": "WorkSwarm logo",
@@ -624,7 +654,23 @@
       "configured": "Configured Models",
       "free": "Free Models",
       "addModel": "Add Custom Model",
+      "empty": "No models available. Add a model in Settings first.",
       "placeholder": "Select Model"
+    },
+    "contextUsage": {
+      "title": "Context usage",
+      "ariaLabel": "Context usage {{rate}}",
+      "hoverMetric": "{{rate}} ({{used}}/{{limit}})",
+      "detailMetric": "{{rate}} ({{used}}/{{limit}})",
+      "kvCacheHitRate": "KV hit rate",
+      "detailTitle": "Context usage",
+      "systemPrompt": "System prompt",
+      "messages": "Conversation messages",
+      "tools": "Tools & MCP",
+      "skills": "Skills",
+      "notReported": "Not reported",
+      "close": "Close context details",
+      "noBreakdown": "No category details returned by the backend"
     },
     "configLockedHistory": "Session has messages — create a new session to change config",
     "modeSwitchDisabledProcessing": "This conversation is running. Start a new conversation to choose another mode",
@@ -636,7 +682,7 @@
     "noInstalledSwarmSkills": "No installed swarm skills",
     "noInstalledSkills": "No installed skills",
     "skillsSearchPlaceholder": "Search skill name or description",
-    "skillsManage": "Skill Management",
+    "skillsManage": "More skills",
     "skillsAdd": "Add to composer",
     "skillsRemove": "Remove",
     "agent": "Agents",
@@ -653,6 +699,7 @@
     "extensionConnect": "Connect",
     "extensionManagePlugins": "Manage My Plugins",
     "extensionManageMcps": "Manage My MCPs",
+    "extensionMore": "More",
     "recentTasks": "Progress",
     "contextCompressionCommandRunning": "Compressing context",
     "teamPause": "Pause",
@@ -773,9 +820,6 @@
     "approvalInputPlaceholder": "Add revision notes then click Next; leave empty and click Skip"
   },
   "persistSession": {
-    "toolbarTag": "Persist Session",
-    "closeTag": "Turn off Persist Session",
-    "lockedHint": "Persist Session was locked when this session was created and cannot be changed",
     "textRequired": "Enter a task after /persist"
   },
   "goal": {
@@ -1040,11 +1084,11 @@
       },
       "1": {
         "title": "Configure your first model",
-        "description": "Model settings are under More, in Configuration."
+        "description": "Model configuration is on the Models page in Settings."
       },
       "2": {
         "title": "Complete model configuration",
-        "description": "Enter the model name, API URL, API key, and model provider in Default model, then select Save."
+        "description": "Select Add model, choose a model provider, complete the required fields, then select Save."
       }
     },
     "quickSetup": {
@@ -1120,9 +1164,9 @@
     "externalCli": {
       "claude": "Claude",
       "codex": "Codex",
-      "claudeHint": "Use Claude from PATH or specify an executable path.",
-      "codexHint": "Use Codex from PATH or specify an executable path.",
-      "useBuiltin": "Use built-in",
+      "claudeHint": "The SDK is installed automatically when needed; use the built-in CLI, a CLI from PATH, or a specified path.",
+      "codexHint": "The SDK is installed automatically when needed; use the built-in CLI, a CLI from PATH, or a specified path.",
+      "useBuiltin": "Use built-in CLI",
       "detect": "Detect",
       "selectFile": "Choose file",
       "selectFileTitle": "Choose {{agent}} command",
@@ -1135,16 +1179,37 @@
       "statusUnsupported": "Unsupported path",
       "statusUnavailable": "Unavailable",
       "version": "Version {{version}}",
-      "compatibilityWarning": "The detected version may be incompatible. You can change the executable path, upgrade the version, or select \"Use built-in\" to use the default startup mode.",
-      "compatibilityWarningWithVersion": "The detected version may be incompatible. You can change the executable path, upgrade to {{version}} or later, or select \"Use built-in\" to use the default startup mode.",
-      "windowsScriptPath": "The selected file is a Windows script. Choose a real executable, or select \"Use built-in\".",
-      "dependencyInstalling": "{{agents}} dependencies are being installed in the background. The agent is not enabled during installation; after installation finishes, enable it again and save the configuration.",
-      "dependencyInstalled": "Enable {{agent}} again and save the configuration.",
+      "compatibilityWarning": "The detected version may be incompatible. You can change the executable path, upgrade the version, or select \"Use built-in CLI\" to use the default startup mode.",
+      "compatibilityWarningWithVersion": "The detected version may be incompatible. You can change the executable path, upgrade to {{version}} or later, or select \"Use built-in CLI\" to use the default startup mode.",
+      "windowsScriptPath": "The selected file is a Windows script. Choose a real executable, or select \"Use built-in CLI\".",
+      "dependencyInstalling": "Installing optional components for {{agents}} in the background. They remain disabled during installation; enable them again and save the configuration when installation finishes.",
+      "dependencyInstalled": "The optional {{agent}} component is installed. Enable it again and save the configuration.",
       "dependencyInstallPhasePreparing": "Preparing {{agent}} dependency installation",
       "dependencyInstallPhaseInstalling": "Installing {{agent}} dependencies",
       "dependencyInstallPhaseVerifying": "Verifying {{agent}} dependencies",
-      "dependencyInstallPhaseSucceeded": "{{agent}} dependencies installed",
-      "dependencyInstallPhaseFailed": "{{agent}} dependency installation failed"
+      "dependencyInstallPhaseSucceeded": "{{agent}} dependencies installed. Enable {{agent}} again and save the configuration.",
+      "dependencyInstallPhaseFailed": "{{agent}} dependency installation failed",
+      "installDialogTitle": "Install optional components",
+      "installDialogDescription": "Closing this dialog does not interrupt installation. When it finishes, return to Third-Party Agent settings, enable the component again, and save the configuration.",
+      "installArtifact": "Downloading file {{current}} of {{total}}: {{package}} {{version}}",
+      "installProgress": "Download progress",
+      "installEta": "About {{eta}} remaining",
+      "installRetry": "Download interrupted. Retrying ({{current}}/{{total}})",
+      "installSwitchingSource": "Using a fallback download source",
+      "installRunInBackground": "Run in background",
+      "installInProgress": "{{agents}} installation is in progress. You can view its progress at any time.",
+      "installViewProgress": "View progress",
+      "claudeCodex": "Claude / Codex",
+      "installPhase": {
+        "idle": "Waiting",
+        "preparing": "Preparing",
+        "downloading": "Downloading",
+        "installing": "Installing",
+        "verifying": "Verifying",
+        "succeeded": "Installed. Enable again to use",
+        "failed": "Installation failed",
+        "running": "Installing"
+      }
     },
     "proactive": {
       "typeLabel": {
@@ -1328,10 +1393,6 @@
       "wakeOffset": "Wake early",
       "wakeOffsetUnit": "minutes",
       "wakeOffsetHelp": "Start the agent this many minutes before the scheduled push time; 0 means run at the scheduled time"
-    },
-    "modelPicker": {
-      "configured": "Configured",
-      "empty": "No models available yet, add one in the config panel first"
     },
     "timePicker": {
       "hour": "Hr",
@@ -1828,6 +1889,7 @@
         "readFailed": "Unable to read the skill graph. Refresh the graph first.",
         "refreshFailed": "Failed to refresh the skill graph",
         "cancelFailed": "Failed to cancel the skill graph build",
+        "primaryModelProbeFailed": "Primary model connection test failed: {{detail}}",
         "buildFailedWithDetail": "Symphony graph build failed: {{detail}}"
       },
       "serverDetails": {
@@ -1841,6 +1903,8 @@
       "buildStages": {
         "idle": "No build logs",
         "updateStart": "Starting skill graph build",
+        "modelProbeStart": "Testing primary model connection",
+        "modelProbeDone": "Primary model connection test passed",
         "updateCancelRequested": "Cancelling skill graph build",
         "updateCancelled": "Skill graph build cancelled",
         "scanStart": "Scanning skill directories",
@@ -2125,9 +2189,13 @@
       "connecting": "Connecting…",
       "uninstall": "Uninstall",
       "uninstalling": "Uninstalling…",
+      "delete": "Delete",
+      "deleting": "Deleting…",
       "create": "Create",
       "createFirst": "Create manually",
       "createByChat": "Create via chat",
+      "createByUpload": "Create from file",
+      "uploading": "Uploading…",
       "createViaChatPrompt": "Help me create an xxx Agent who is good at xxx",
       "back": "Back"
     },
@@ -2148,6 +2216,8 @@
       "authRequired": "This Agent requires authentication before it can be installed",
       "connectionUnavailable": "Required MCP connectors are not connected yet. Connect them before use.",
       "connectorUnavailableNamed": "This Agent requires the MCP connector “{{connector}}”, which is not connected. Connect it and try again.",
+      "uploadSuccess": "Agent package {{id}} was imported. Review it in My Agents.",
+      "uploadError": "Unable to upload and import the Agent package. Check the file and try again.",
       "newVersion": "This Agent has a new version available",
       "teamUnavailable": "Team Agent management is not available yet",
       "featureUnavailable": "This feature is outside this milestone",
@@ -2230,6 +2300,12 @@
       "personaLabel": "Persona",
       "personaPlaceholder": "Keep Markdown and line breaks in the persona",
       "personaPreview": "Persona Markdown preview",
+      "uploadHint": "Supports .zip and .tar files; once extracted, the folder must include manifest.json, persona files, and README.md, and the .json file must declare package_type.",
+      "uploadPlaceholder": "Click or drag a file here",
+      "uploadInvalidType": "Only .zip and .tar files are supported",
+      "uploadPickerUnsupported": "Local file selection is not supported in this environment",
+      "uploadPickerFailed": "Failed to open the local file picker. Try again.",
+      "removeUpload": "Remove selected file",
       "skillsLabel": "Skills (optional)",
       "skillsToggle": "Collapse or expand skill configuration",
       "addSkill": "Add skill",
@@ -2336,6 +2412,8 @@
       "toolName": "Tool name",
       "arguments": "Arguments",
       "result": "Result",
+      "flowchart": "Flowchart",
+      "flowchartHint": "click to expand/collapse",
       "truncated": "result truncated"
     },
     "toolGroup": {
@@ -2773,6 +2851,7 @@
     "prev": "Previous",
     "next": "Next",
     "cancel": "Cancel",
+    "replyLater": "Reply Later",
     "skip": "Skip",
     "nextStep": "Next",
     "confirm": "Confirm",
@@ -2832,7 +2911,8 @@
       "addMcp": "Add MCP",
       "pickSkillTitle": "Select skills",
       "pickMcpTitle": "Select MCP",
-      "submitError": "Creation failed - this still awaits backend support",
+      "submitError": "Creation failed. Please check your input and try again.",
+      "fieldRequired": "This field is required",
       "withSkillNotWired": "This entry point isn't wired to the chat panel yet"
     },
     "chatPrompts": {
@@ -3107,5 +3187,42 @@
       "skipped": "Last run skipped",
       "cancelled": "Last run cancelled"
     }
+  },
+  "swarmflow": {
+    "statusPlanned": "Planned",
+    "statusPending": "Pending",
+    "statusRunning": "Running",
+    "statusPaused": "Paused",
+    "statusCompleted": "Completed",
+    "statusFailed": "Failed",
+    "statusStopped": "Stopped",
+    "statusWaitingForHuman": "Waiting for input",
+    "subWorkflow": "Sub-workflow",
+    "clickToReply": "Click to reply",
+    "waitingForHuman": "Waiting for {{count}}",
+    "noWorkflow": "No workflow",
+    "layoutIndented": "Indented Tree",
+    "layoutOrgChart": "Org Chart",
+    "layoutGraph": "Flow Graph",
+    "pauseResumeHint": "Pause / Resume",
+    "stopHint": "Stop",
+    "sessionBudget": "Session budget (team-wide, never resets)",
+    "runBudget": "Run budget (META.workflow_token_limit)",
+    "sessionBudgetShort": "Session",
+    "runBudgetShort": "Run",
+    "budgetUnlimited": "unbounded",
+    "budgetExhaustedSession": "Session budget exhausted",
+    "budgetExhaustedWorkflow": "Run budget exhausted",
+    "toggleLabel": "SwarmFlow",
+    "tagHint": "SwarmFlow is active for this session",
+    "closeTag": "Close SwarmFlow",
+    "closeTagDisabled": "Cannot close while processing",
+    "configTitle": "SwarmFlow Configuration",
+    "configReadonlyHint": "Session is active, config is read-only",
+    "budgetPanelTitle": "SwarmFlow Budget",
+    "budgetPanelHint": "Set the Token limit for this session.",
+    "budgetPlaceholder": "Enter number",
+    "budgetActualHint": "Configured limit: {{count}} tokens",
+    "workflowList": "Workflow List"
   }
 }

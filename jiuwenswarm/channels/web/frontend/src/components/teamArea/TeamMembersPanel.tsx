@@ -350,7 +350,7 @@ function GroupChatDetail({
 
       <div
         ref={scrollContainerRef}
-        className="min-h-0 flex-1 overflow-y-auto px-7 py-6"
+        className="team-group-chat-message-list min-h-0 flex-1 overflow-y-auto px-7 py-6"
         onScroll={handleScroll}
         data-testid="team-area-group-chat-message-list"
       >
@@ -400,7 +400,7 @@ function GroupChatMessage({ event }: { event: ParsedTeamEvent }) {
     <div className={`flex items-start gap-3 ${isUser ? 'justify-end' : ''}`}>
       {!isUser && <TeamMemberAvatar member={event.fromMember} className="h-8 w-8" />}
       <div className={`min-w-0 ${isUser ? 'max-w-[72%] text-right' : 'flex-1'}`}>
-        <div className="mb-1 text-sm font-semibold text-text" data-testid="team-area-group-chat-message-sender">
+        <div className="mb-1 text-base font-semibold text-text" data-testid="team-area-group-chat-message-sender">
           {displayName}
         </div>
         <div className={`text-sm leading-6 text-text ${isUser ? 'inline-block rounded-lg bg-accent-subtle px-3 py-2 text-left' : ''}`}>
@@ -529,7 +529,7 @@ const MemberOverviewCard = memo(function MemberOverviewCard({
           {sequence}
         </span>
         <div className="relative shrink-0">
-          <TeamMemberAvatar member={member.member_id} alt={displayName} className="h-10 w-10 rounded-full" imageClassName="rounded-full" />
+          <TeamMemberAvatar member={member.member_id} alt={displayName} className="h-8 w-8 rounded-full" imageClassName="rounded-full" />
         </div>
         <div className="min-w-0 flex-1">
           <div className="truncate text-sm font-normal text-text" data-testid="team-area-member-overview-card-name">
@@ -735,17 +735,12 @@ function TeamMemberContextCompressionBar({ state, onClose }: { state?: TeamMembe
 }
 
 function FinalSummaryList({ events }: { events: TeamMemberExecutionEvent[] }) {
-  const { t } = useTranslation();
-
   if (events.length === 0) {
     return null;
   }
 
   return (
     <div className="mx-auto mt-5 max-w-[720px] border-t border-[var(--color-team-detail-divider)] pt-4" data-testid="team-area-final-summary">
-      <h3 className="text-sm font-semibold text-text" data-testid="team-area-final-summary-title">
-        {t('team.process.execution.final')}
-      </h3>
       <div className="mt-4 space-y-6">
         {events.map(event => (
           <section key={event.id} className="space-y-3" data-testid="team-area-final-summary-item" data-variant={event.id}>

@@ -1,3 +1,5 @@
+// Copyright (c) Huawei Technologies Co., Ltd. 2025-2026. All rights reserved.
+
 import { useCallback, useEffect, useState } from 'react';
 import { AlertCircle, CheckCircle2, FileSearch, Loader2, RefreshCw } from 'lucide-react';
 
@@ -13,15 +15,28 @@ export type ExternalCliDetectResult = {
   message?: string;
 };
 
-export type CodexDependencyInstallStatus = {
+export type ExternalCliDependencyInstallStatus = {
+  cli_agent?: ExternalCliAgentKind;
   status?: string;
   phase?: string;
   error?: string;
   log_tail?: string[];
+  downloaded_bytes?: number;
+  total_bytes?: number;
+  bytes_per_second?: number;
+  eta_seconds?: number;
+  artifact_index?: number;
+  artifact_count?: number;
+  current_package?: string;
+  current_version?: string;
+  download_attempt?: number;
+  download_max_attempts?: number;
+  switching_source?: boolean;
 };
 
 export type ExternalCliConfigSaveResult = {
-  codex_dependency_install?: CodexDependencyInstallStatus;
+  codex_dependency_install?: ExternalCliDependencyInstallStatus;
+  external_cli_dependency_installs?: Partial<Record<ExternalCliAgentKind, ExternalCliDependencyInstallStatus>>;
 };
 
 export const EXTERNAL_CLI_AGENT_KINDS: ExternalCliAgentKind[] = ['claude', 'codex'];
@@ -71,8 +86,14 @@ export function applyExternalCliAgentAtomicUpdates(
   updates[cliPathKey] = enabled && !useBuiltin ? cliPath : '';
 }
 
-export function isCodexDependencyInstalling(result: ExternalCliConfigSaveResult | void): boolean {
-  return result?.codex_dependency_install?.status === 'running';
+export function externalCliDependencyInstalls(
+  result: ExternalCliConfigSaveResult | void,
+): Partial<Record<ExternalCliAgentKind, ExternalCliDependencyInstallStatus>> {
+  const installs = { ...(result?.external_cli_dependency_installs ?? {}) };
+  if (result?.codex_dependency_install?.status === 'running' && !installs.codex) {
+    installs.codex = { ...result.codex_dependency_install, cli_agent: 'codex' };
+  }
+  return installs;
 }
 
 type ExternalCliAgentsSectionProps = {
@@ -177,7 +198,7 @@ export function ExternalCliAgentsSection({
 
   return (
     <div className="space-y-3" data-testid="settings-panel-external-cli-agents">
-      {EXTERNAL_CLI_AGENT_KINDS.map(cliAgent => {
+      {EXTERNAL_CLI_AGENT_KINDS.map((cliAgent) => {
         const enabledKey = externalCliKey(cliAgent, 'enabled');
         const useBuiltinKey = externalCliKey(cliAgent, 'use_builtin');
         const cliPathKey = externalCliKey(cliAgent, 'cli_path');
@@ -222,7 +243,7 @@ export function ExternalCliAgentsSection({
                   type="checkbox"
                   checked={useBuiltin}
                   disabled={disabled || !enabled}
-                  onChange={event => onChange(useBuiltinKey, event.target.checked ? 'true' : 'false')}
+                  onChange={(event) => onChange(useBuiltinKey, event.target.checked ? 'true' : 'false')}
                   className="h-3.5 w-3.5 rounded border-border"
                   data-testid="settings-panel-external-cli-agent-use-builtin-input"
                   data-variant={cliAgent}
@@ -237,7 +258,11 @@ export function ExternalCliAgentsSection({
                 data-testid="settings-panel-external-cli-agent-detect-btn"
                 data-variant={cliAgent}
               >
-                {detecting[cliAgent] ? <Loader2 className="w-3.5 h-3.5 settings-spinner" /> : <RefreshCw className="w-3.5 h-3.5" />}
+                {detecting[cliAgent] ? (
+                  <Loader2 className="w-3.5 h-3.5 settings-spinner" />
+                ) : (
+                  <RefreshCw className="w-3.5 h-3.5" />
+                )}
                 {t('config.externalCli.detect')}
               </button>
               {!useBuiltin ? (
@@ -246,12 +271,18 @@ export function ExternalCliAgentsSection({
                   data-testid="settings-panel-external-cli-agent-status"
                   data-variant={cliAgent}
                 >
-                  {displayResult?.status === 'ok' ? <CheckCircle2 className="inline w-3.5 h-3.5 mr-1" /> : <AlertCircle className="inline w-3.5 h-3.5 mr-1" />}
+                  {displayResult?.status === 'ok' ? (
+                    <CheckCircle2 className="inline w-3.5 h-3.5 mr-1" />
+                  ) : (
+                    <AlertCircle className="inline w-3.5 h-3.5 mr-1" />
+                  )}
                   {statusText(displayResult)}
                 </span>
               ) : null}
               {displayResult?.version ? (
-                <span className="text-xs text-text-muted">{t('config.externalCli.version', { version: displayResult.version })}</span>
+                <span className="text-xs text-text-muted">
+                  {t('config.externalCli.version', { version: displayResult.version })}
+                </span>
               ) : null}
             </div>
             <div className="flex items-center gap-2">
@@ -259,7 +290,7 @@ export function ExternalCliAgentsSection({
                 type="text"
                 value={draftValues[cliPathKey] ?? ''}
                 disabled={disabled || !enabled || useBuiltin}
-                onChange={event => onChange(cliPathKey, event.target.value)}
+                onChange={(event) => onChange(cliPathKey, event.target.value)}
                 placeholder={displayResult?.path || t('config.externalCli.cliPathPlaceholder', { agent: cliAgent })}
                 data-testid="settings-panel-external-cli-agent-cli-path-input"
                 data-variant={cliAgent}
@@ -275,7 +306,11 @@ export function ExternalCliAgentsSection({
                 data-testid="settings-panel-external-cli-agent-select-file-btn"
                 data-variant={cliAgent}
               >
-                {selecting[cliAgent] ? <Loader2 className="w-4 h-4 settings-spinner" /> : <FileSearch className="w-4 h-4" />}
+                {selecting[cliAgent] ? (
+                  <Loader2 className="w-4 h-4 settings-spinner" />
+                ) : (
+                  <FileSearch className="w-4 h-4" />
+                )}
               </button>
             </div>
             {message ? <div className="text-[11px] leading-4 text-text-muted">{message}</div> : null}

@@ -1,8 +1,10 @@
-import { ArrowLeft, Send, Trash2 } from 'lucide-react';
+import { ArrowLeft } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { useTranslation } from 'react-i18next';
 import { getAgentAvatarUrl, type AgentCapability, type AgentDetail, type DefinitionFileEntry, type RequestStatus } from '../../features/agentManagement';
+import UninstallIcon from '../../assets/agent-management/uninstall.svg?react';
+import PromptSendIcon from '../../assets/agent-management/prompt-send.svg?react';
 import { DefinitionFilePreview } from './DefinitionFilePreview';
 
 type DefinitionDetailPageProps = {
@@ -129,6 +131,7 @@ export function DefinitionDetailPage({
   const avatarUrl = getAgentAvatarUrl(detail);
   const canUse = detail.installed && detail.connectionState === 'connected' && detail.enabled !== false;
   const needsConnection = detail.installed && detail.connectionState !== 'connected';
+  const canDelete = detail.source === 'local' && !detail.installed;
   const canPreviewFiles = detail.source === 'local' || detail.installed;
   return (
     <div className="agent-management-detail" data-testid="agent-detail">
@@ -155,15 +158,6 @@ export function DefinitionDetailPage({
           </div>
         </div>
         <div className="agent-management-detail__actions">
-          <button
-            type="button"
-            className="agent-management-button agent-management-button--secondary agent-management-detail-action--use"
-            disabled={!canUse || busy}
-            aria-disabled={!canUse}
-            onClick={() => onUse(detail.id)}
-          >
-            {t('agentManagement.actions.use')}
-          </button>
           {detail.installed ? (
             <>
               {needsConnection ? (
@@ -184,20 +178,43 @@ export function DefinitionDetailPage({
                 aria-busy={busy}
                 onClick={() => onUninstall(detail.id)}
               >
-                <Trash2 size={15} aria-hidden="true" />
+                <UninstallIcon aria-hidden="true" />
                 {busy ? t('agentManagement.actions.uninstalling') : t('agentManagement.actions.uninstall')}
+              </button>
+              <button
+                type="button"
+                className="agent-management-button agent-management-button--secondary agent-management-detail-action--use"
+                disabled={!canUse || busy}
+                aria-disabled={!canUse}
+                onClick={() => onUse(detail.id)}
+              >
+                {t('agentManagement.actions.use')}
               </button>
             </>
           ) : (
-            <button
-              type="button"
-              className="agent-management-button agent-management-button--primary agent-management-detail-action--install"
-              disabled={busy}
-              aria-busy={busy}
-              onClick={() => onInstall(detail.id)}
-            >
-              {busy ? t('agentManagement.actions.installing') : t('agentManagement.actions.install')}
-            </button>
+            <>
+              {canDelete ? (
+                <button
+                  type="button"
+                  className="agent-management-detail-action agent-management-detail-action--uninstall"
+                  disabled={busy}
+                  aria-busy={busy}
+                  onClick={() => onUninstall(detail.id)}
+                >
+                  <UninstallIcon aria-hidden="true" />
+                  {busy ? t('agentManagement.actions.deleting') : t('agentManagement.actions.delete')}
+                </button>
+              ) : null}
+              <button
+                type="button"
+                className="agent-management-button agent-management-button--primary agent-management-detail-action--install"
+                disabled={busy}
+                aria-busy={busy}
+                onClick={() => onInstall(detail.id)}
+              >
+                {busy ? t('agentManagement.actions.installing') : t('agentManagement.actions.install')}
+              </button>
+            </>
           )}
         </div>
       </header>
@@ -247,7 +264,7 @@ export function DefinitionDetailPage({
                   disabled={!canUse || busy || !onUsePrompt}
                   onClick={() => onUsePrompt?.(detail.id, prompt)}
                 >
-                  <Send size={16} aria-hidden="true" />
+                  <PromptSendIcon width={16} height={16} aria-hidden="true" />
                 </button>
               </div>
             ))}

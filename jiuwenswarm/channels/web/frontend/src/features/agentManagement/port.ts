@@ -46,15 +46,20 @@ export class AgentInstallPendingError extends AgentManagementError {
   }
 }
 
+export interface AgentCatalogListOptions {
+  enrichTags?: boolean;
+}
+
 export interface AgentManagementClient {
   readonly source: AgentManagementSource;
-  listCatalog(): Promise<AgentCatalogItem[]>;
+  listCatalog(options?: AgentCatalogListOptions): Promise<AgentCatalogItem[]>;
   getDefinition(id: string): Promise<AgentDetail>;
   getDefinitionFiles(id: string): Promise<DefinitionFileEntry[]>;
   getDefinitionFile(id: string, relativePath: string): Promise<AgentFileContent>;
   listSkillOptions(): Promise<SkillOption[]>;
   listMcpOptions(): Promise<McpOption[]>;
   createAgent(draft: AgentDraft): Promise<void>;
+  importAgentTemplate(path: string): Promise<{ id: string }>;
   installDefinition(id: string): Promise<AgentInstallResult>;
   uninstallDefinition(id: string): Promise<{ notice?: string }>;
 }

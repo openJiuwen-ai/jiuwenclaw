@@ -342,11 +342,6 @@ export function SkillPanel({
   const [mySkillsSubTab, setMySkillsSubTab] = useState<"all" | "enabled" | "disabled">("enabled");
   const [mySkillsPublishFilter, setMySkillsPublishFilter] = useState<"all" | "published" | "unpublished">("all");
   const [marketplaceCategory, setMarketplaceCategory] = useState<"all" | "software-development" | "office-productivity" | "content-creation" | "multimodal-media" | "data-science-research" | "compliance-legal" | "lifestyle-health" | "finance-wealth">("all");
-  const [skillType] = useState<"skill" | "team" | "multimodal" | null>(() => {
-    const stored = localStorage.getItem('skillPanel.skillType');
-    if (stored === "skill" || stored === "team" || stored === "multimodal") return stored;
-    return null;
-  });
   const [skills, setSkills] = useState<SkillItem[]>([]);
   const [plugins, setPlugins] = useState<InstalledPluginItem[]>([]);
   const [, setMarketplaces] = useState<MarketplaceItem[]>([]);
@@ -354,6 +349,7 @@ export function SkillPanel({
   const [hubLoading, setHubLoading] = useState(false);
   const [search, setSearch] = useState("");
   const prevIsActiveRef = useRef(isActive);
+  const mountedRef = useRef(false);
   const [selectedSkill, setSelectedSkill] = useState<SkillDetail | null>(null);
   const [listState, setListState] = useState<LoadState>("idle");
   const [detailState, setDetailState] = useState<LoadState>("idle");
@@ -372,11 +368,6 @@ export function SkillPanel({
   const [graphActionError, setGraphActionError] = useState<string | null>(null);
   const [knowledgeTaskCount, setKnowledgeTaskCount] = useState(0);
   const [openMenuSkillName, setOpenMenuSkillName] = useState<string | null>(null);
-
-  // 持久化技能类型胶囊选中状态
-  useEffect(() => {
-    localStorage.setItem('skillPanel.skillType', skillType ?? '');
-  }, [skillType]);
 
   useEffect(() => {
     return () => {
@@ -571,13 +562,6 @@ export function SkillPanel({
       // （排除条件不依赖搜索关键字，跟下面的关键字过滤谁先谁后结果一样）。
       result = computeMySkills(result, installedSkillNames);
     }
-    if (skillType === "team") {
-      result = result.filter((skill) => skill.skill_type === "swarm_skill");
-    } else if (skillType === "multimodal") {
-      result = result.filter((skill) => skill.skill_type === "multimodal_skill");
-    } else if (skillType === "skill") {
-      result = result.filter((skill) => !skill.skill_type || skill.skill_type === "skill");
-    }
     const keyword = search.trim().toLowerCase();
     if (!keyword) return result;
     return result.filter((skill) => {
@@ -660,7 +644,6 @@ export function SkillPanel({
       const data = await webRequest<{
         success: boolean;
         partial?: boolean;
-        query?: string;
         items?: Array<{
           source: string;
           identifier: string;
@@ -688,7 +671,7 @@ export function SkillPanel({
         }>;
         detail?: string;
       }>("skills.online_search.search", withSession({
-        query,
+       query,
         limit: 50,
       }), { timeoutMs: 45000 });
 
@@ -1130,9 +1113,11 @@ export function SkillPanel({
   // 当左边栏切换到技能页面时，或切换到"我的技能"页签时，调用 list 接口
   useEffect(() => {
     const prevIsActive = prevIsActiveRef.current;
+    const isInitialMount = !mountedRef.current;
+    mountedRef.current = true;
 
-    // 场景1：从其他页面切换到技能页面（isActive 变为 true）
-    if (isActive && !prevIsActive) {
+    // 场景1：从其他页面切换到技能页面（isActive 变为 true），或首次挂载且已激活
+    if (isActive && (!prevIsActive || isInitialMount)) {
       fetchSkills();
     }
 
@@ -1143,7 +1128,7 @@ export function SkillPanel({
 
     // 更新 ref
     prevIsActiveRef.current = isActive;
-  }, [isActive, activeTab, fetchSkills]);
+  }, [isActive, activeTab, fetchSkills, mountedRef]);
 
   // OAuth 回调后恢复技能详情页 + 打开发布抽屉
   // 在 isActive 变为 true 后执行（确保 WebSocket 已连接、SkillPanel 已挂载）
@@ -1182,11 +1167,39 @@ export function SkillPanel({
   }, []);
 
   // 新建会话并将技能选中到输入框
-  const handleGoToChat = useCallback((skillName: string) => {
+  const handleGoToChat = useCallback((skillName: string, skillType?: string) => {
     window.dispatchEvent(new CustomEvent('jiuwen:new-conversation', {
-      detail: { skillName }
+      detail: { skillName, ...(skillType === 'swarm_skill' ? { mode: 'team' as const } : {}) }
     }));
   }, []);
+
+  const renderHubSkillActionButton = useCallback((skill: MarketplacePluginItem) => {
+    if (installedSkillMap.has(skill.name)) {
+      return (
+        <button
+          onClick={(e) => { e.stopPropagation(); handleGoToChat(skill.name, skill.plugin_type === 'swarmskill' ? 'swarm_skill' : undefined); }}
+          onMouseEnter={(e) => {
+            const rect = e.currentTarget.getBoundingClientRect();
+            setGoTryTooltip({ left: rect.left + rect.width / 2, top: rect.top });
+          }}
+          onMouseLeave={() => setGoTryTooltip(null)}
+          className="w-8 h-8 flex items-center justify-center rounded-[8px] hover:bg-[#F0F7FF] text-text-muted hover:text-[#1476FF] transition-colors"
+        >
+          <NewConversationIcon aria-hidden width="20" height="20" />
+        </button>
+      );
+    }
+    return (
+      <button
+        onClick={(e) => { e.stopPropagation(); handleInstallHubSkill(skill); }}
+        className="w-8 h-8 flex items-center justify-center rounded-[8px] hover:bg-[#F0F7FF] text-text-muted hover:text-[#1476FF] transition-colors"
+      >
+        <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
+          <path strokeLinecap="round" strokeLinejoin="round" d="M12 5v14M5 12h14" />
+        </svg>
+      </button>
+    );
+  }, [installedSkillMap, handleGoToChat, handleInstallHubSkill]);
 
   // 新建会话：skill-creator（所有 Skill Creator 统一入口）chip + "帮我修改这个技能" + 该技能 chip
   const handleEditSkill = useCallback((skillName: string, skillType?: string) => {
@@ -1195,6 +1208,7 @@ export function SkillPanel({
         skillName: 'skill-creator',
         suffixText: t('skills.chatPrompts.editSkill'),
         secondSkillName: skillName,
+        ...(skillType === 'swarm_skill' ? { mode: 'team' as const } : {}),
         metadata: {
           scene: 'edit_skill',
           target_skill: skillName,
@@ -2110,7 +2124,7 @@ export function SkillPanel({
                     if (isInstalled) {
                       return (
                         <button
-                          onClick={() => handleGoToChat(selectedHubSkill.name)}
+                          onClick={() => handleGoToChat(selectedHubSkill.name, selectedHubSkill.plugin_type === 'swarmskill' ? 'swarm_skill' : undefined)}
                           className="flex items-center justify-center rounded-[16px] text-sm text-[#191919] bg-white border border-[#191919] hover:bg-secondary/30 whitespace-nowrap"
                           style={{ height: '32px', padding: '0 24px' }}
                         >
@@ -2218,34 +2232,7 @@ export function SkillPanel({
                           )}
                         </div>
                         <div className="shrink-0">
-                          {(() => {
-                            const isInstalled = installedSkillMap.has(skill.name);
-                            if (isInstalled) {
-                              return (
-                                <button
-                                  onClick={(e) => { e.stopPropagation(); handleGoToChat(skill.name); }}
-                                  onMouseEnter={(e) => {
-                                    const rect = e.currentTarget.getBoundingClientRect();
-                                    setGoTryTooltip({ left: rect.left + rect.width / 2, top: rect.top });
-                                  }}
-                                  onMouseLeave={() => setGoTryTooltip(null)}
-                                  className="w-8 h-8 flex items-center justify-center rounded-[8px] hover:bg-[#F0F7FF] text-text-muted hover:text-[#1476FF] transition-colors"
-                                >
-                                  <NewConversationIcon aria-hidden width="20" height="20" />
-                                </button>
-                              );
-                            }
-                            return (
-                              <button
-                                onClick={(e) => { e.stopPropagation(); handleInstallHubSkill(skill); }}
-                                className="w-8 h-8 flex items-center justify-center rounded-[8px] hover:bg-[#F0F7FF] text-text-muted hover:text-[#1476FF] transition-colors"
-                              >
-                                <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
-                                  <path strokeLinecap="round" strokeLinejoin="round" d="M12 5v14M5 12h14" />
-                                </svg>
-                              </button>
-                            );
-                          })()}
+                          {renderHubSkillActionButton(skill)}
                         </div>
                       </div>
                       <div className="text-xs text-text-muted mt-4 line-clamp-2">
@@ -2314,6 +2301,36 @@ export function SkillPanel({
                               </span>
                             </div>
                           </div>
+                          <div className="shrink-0">
+                            {(() => {
+                              const isInstalled = installedSkillMap.has(skill.name);
+                              if (isInstalled) {
+                                return (
+                                  <button
+                                    onClick={(e) => { e.stopPropagation(); handleGoToChat(skill.name); }}
+                                    onMouseEnter={(e) => {
+                                      const rect = e.currentTarget.getBoundingClientRect();
+                                      setGoTryTooltip({ left: rect.left + rect.width / 2, top: rect.top });
+                                    }}
+                                    onMouseLeave={() => setGoTryTooltip(null)}
+                                    className="w-8 h-8 flex items-center justify-center rounded-[8px] hover:bg-[#F0F7FF] text-text-muted hover:text-[#1476FF] transition-colors"
+                                  >
+                                    <NewConversationIcon aria-hidden width="20" height="20" />
+                                  </button>
+                                );
+                              }
+                              return (
+                                <button
+                                  onClick={(e) => { e.stopPropagation(); handleInstallHubSkill(skill); }}
+                                  className="w-8 h-8 flex items-center justify-center rounded-[8px] hover:bg-[#F0F7FF] text-text-muted hover:text-[#1476FF] transition-colors"
+                                >
+                                  <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
+                                    <path strokeLinecap="round" strokeLinejoin="round" d="M12 5v14M5 12h14" />
+                                  </svg>
+                                </button>
+                              );
+                            })()}
+                            </div>
                         </div>
                         <div className="text-xs text-text-muted mt-4 line-clamp-2">
                           {skill.short_desc || skill.detail_desc || t('skills.noDescription')}
@@ -2372,34 +2389,7 @@ export function SkillPanel({
                                   )}
                                 </div>
                                 <div className="shrink-0">
-                                  {(() => {
-                                    const isInstalled = installedSkillMap.has(skill.name);
-                                    if (isInstalled) {
-                                      return (
-                                        <button
-                                          onClick={(e) => { e.stopPropagation(); handleGoToChat(skill.name); }}
-                                          onMouseEnter={(e) => {
-                                            const rect = e.currentTarget.getBoundingClientRect();
-                                            setGoTryTooltip({ left: rect.left + rect.width / 2, top: rect.top });
-                                          }}
-                                          onMouseLeave={() => setGoTryTooltip(null)}
-                                          className="w-8 h-8 flex items-center justify-center rounded-[8px] hover:bg-[#F0F7FF] text-text-muted hover:text-[#1476FF] transition-colors"
-                                        >
-                                          <NewConversationIcon aria-hidden width="20" height="20" />
-                                        </button>
-                                      );
-                                    }
-                                    return (
-                                      <button
-                                        onClick={(e) => { e.stopPropagation(); handleInstallHubSkill(skill); }}
-                                        className="w-8 h-8 flex items-center justify-center rounded-[8px] hover:bg-[#F0F7FF] text-text-muted hover:text-[#1476FF] transition-colors"
-                                      >
-                                        <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
-                                          <path strokeLinecap="round" strokeLinejoin="round" d="M12 5v14M5 12h14" />
-                                        </svg>
-                                      </button>
-                                    );
-                                  })()}
+                                  {renderHubSkillActionButton(skill)}
                                 </div>
                               </div>
                               <div className="text-xs text-text-muted mt-4 line-clamp-2">
@@ -2450,34 +2440,7 @@ export function SkillPanel({
                                   </div>
                                 </div>
                                 <div className="shrink-0">
-                                  {(() => {
-                                    const isInstalled = installedSkillMap.has(skill.name);
-                                    if (isInstalled) {
-                                      return (
-                                        <button
-                                          onClick={(e) => { e.stopPropagation(); handleGoToChat(skill.name); }}
-                                          onMouseEnter={(e) => {
-                                            const rect = e.currentTarget.getBoundingClientRect();
-                                            setGoTryTooltip({ left: rect.left + rect.width / 2, top: rect.top });
-                                          }}
-                                          onMouseLeave={() => setGoTryTooltip(null)}
-                                          className="w-8 h-8 flex items-center justify-center rounded-[8px] hover:bg-[#F0F7FF] text-text-muted hover:text-[#1476FF] transition-colors"
-                                        >
-                                          <NewConversationIcon aria-hidden width="20" height="20" />
-                                        </button>
-                                      );
-                                    }
-                                    return (
-                                      <button
-                                        onClick={(e) => { e.stopPropagation(); handleInstallHubSkill(skill); }}
-                                        className="w-8 h-8 flex items-center justify-center rounded-[8px] hover:bg-[#F0F7FF] text-text-muted hover:text-[#1476FF] transition-colors"
-                                      >
-                                        <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
-                                          <path strokeLinecap="round" strokeLinejoin="round" d="M12 5v14M5 12h14" />
-                                        </svg>
-                                      </button>
-                                    );
-                                  })()}
+                                  {renderHubSkillActionButton(skill)}
                                 </div>
                               </div>
                               <div className="text-xs text-text-muted mt-4 line-clamp-2">
@@ -2585,11 +2548,12 @@ export function SkillPanel({
                           <div className="fixed inset-0 z-40" onClick={() => setDetailMenuOpen(false)} />
                           <div className="absolute right-0 top-full mt-1 z-50 min-w-[160px] rounded-lg border border-border bg-panel shadow-lg py-1">
                             <button
-                              onClick={() => {
+                              onClick={selectedSkill.enabled !== false ? () => {
                                 setDetailMenuOpen(false);
                                 handleEditSkill(selectedSkill.name, selectedSkill.skill_type);
-                              }}
-                              className="flex items-center w-full px-3 py-2 text-sm text-left text-text hover:bg-secondary"
+                              } : undefined}
+                              disabled={selectedSkill.enabled === false}
+                              className="flex items-center w-full px-3 py-2 text-sm text-left text-text hover:bg-secondary disabled:opacity-40 disabled:cursor-not-allowed"
                             >
                               {t('skills.actions.edit')}
                             </button>
@@ -2620,8 +2584,9 @@ export function SkillPanel({
                     </div>
                     {/* 去试试 */}
                     <button
-                      onClick={() => handleGoToChat(selectedSkill.name)}
-                      className="flex items-center justify-center rounded-[16px] text-sm text-[#191919] bg-white border border-[#191919] hover:bg-secondary/30 whitespace-nowrap"
+                      onClick={selectedSkill.enabled !== false ? () => handleGoToChat(selectedSkill.name, selectedSkill.skill_type) : undefined}
+                      disabled={selectedSkill.enabled === false}
+                      className="flex items-center justify-center rounded-[16px] text-sm text-[#191919] bg-white border border-[#191919] hover:bg-secondary/30 whitespace-nowrap disabled:opacity-40 disabled:cursor-not-allowed"
                       style={{ height: '32px', padding: '0 24px' }}
                     >
                       {t('skills.actions.goTry')}
@@ -3035,12 +3000,13 @@ export function SkillPanel({
                                       <div className="absolute right-0 top-full mt-1 z-50 min-w-[160px] rounded-lg border border-border bg-panel shadow-lg py-1">
                                         {!isPackage ? (
                                           <button
-                                            onClick={(e) => {
+                                            onClick={isDisabled ? undefined : (e: React.MouseEvent) => {
                                               e.stopPropagation();
                                               setOpenMenuSkillName(null);
                                               handleEditSkill(skill.name, skill.skill_type);
                                             }}
-                                            className="flex items-center w-full px-3 py-2 text-sm text-left text-text hover:bg-secondary"
+                                            disabled={isDisabled}
+                                            className="flex items-center w-full px-3 py-2 text-sm text-left text-text hover:bg-secondary disabled:opacity-40 disabled:cursor-not-allowed"
                                           >
                                             {t('skills.actions.edit')}
                                           </button>
@@ -3062,16 +3028,18 @@ export function SkillPanel({
                                 </div>
                                 <button
                                   type="button"
-                                  onClick={(e) => {
+                                  onClick={isDisabled ? undefined : (e: React.MouseEvent) => {
                                     e.stopPropagation();
-                                    handleGoToChat(skill.name);
+                                    handleGoToChat(skill.name, skill.skill_type);
                                   }}
+                                  disabled={isDisabled}
                                   onMouseEnter={(e) => {
+                                    if (isDisabled) return;
                                     const rect = e.currentTarget.getBoundingClientRect();
                                     setGoTryTooltip({ left: rect.left + rect.width / 2, top: rect.top });
                                   }}
                                   onMouseLeave={() => setGoTryTooltip(null)}
-                                  className="w-7 h-7 flex items-center justify-center rounded-md hover:bg-secondary text-text-muted hover:text-text"
+                                  className="w-7 h-7 flex items-center justify-center rounded-md hover:bg-secondary text-text-muted hover:text-text disabled:opacity-40 disabled:cursor-not-allowed"
                                 >
                                   <NewConversationIcon aria-hidden width="16" height="16" />
                                 </button>
@@ -3717,6 +3685,7 @@ export function SkillPanel({
               <button
                 type="button"
                 onClick={() => setOauthLoginOpen(false)}
+                data-testid="skill-panel-oauth-login-close-btn"
                 className="w-7 h-7 flex items-center justify-center rounded-md hover:bg-secondary text-text-muted hover:text-text"
               >
                 <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
@@ -3735,6 +3704,8 @@ export function SkillPanel({
                 onClick={() => handleOAuthLogin('gitcode')}
                 disabled={oauthLoadingProvider === 'gitcode'}
                 className="flex items-center justify-center gap-2 rounded-[16px] text-sm whitespace-nowrap transition-colors w-full mb-3"
+                data-testid="skill-panel-oauth-login-btn"
+                data-variant="gitcode"
                 style={{
                   height: '40px',
                   backgroundColor: '#191919',
@@ -3758,6 +3729,8 @@ export function SkillPanel({
                 onClick={() => handleOAuthLogin('github')}
                 disabled={oauthLoadingProvider === 'github'}
                 className="flex items-center justify-center gap-2 rounded-[16px] text-sm whitespace-nowrap transition-colors w-full"
+                data-testid="skill-panel-oauth-login-btn"
+                data-variant="github"
                 style={{
                   height: '40px',
                   backgroundColor: '#fff',
@@ -3776,7 +3749,7 @@ export function SkillPanel({
                 )}
                 {oauthLoadingProvider === 'github' ? t('skills.oauthLogin.loading') : t('skills.oauthLogin.githubLogin')}
               </button>
-              <p className="mt-4 text-xs text-text-muted text-center">
+              <p className="mt-4 text-xs text-text-muted text-center" data-testid="skill-panel-oauth-login-callback-hint">
                 {t('skills.oauthLogin.callbackHint')}
               </p>
               {oauthError && (

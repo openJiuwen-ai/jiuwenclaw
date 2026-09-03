@@ -211,6 +211,14 @@ react:
     enable_kv_cache_release: false
     enable_kv_cache_affinity: false
   context_engine_config:
+    # 是否预下载/使用模型词表；关闭时使用字符串长度兜底，默认不联网。
+    enable_tiktoken_counter: false
+    tokenizer_cache_dir: tokenizers
+    tokenizer_offline: false
+    # 开发调试时打开：落盘 core 最终发送给模型的完整 messages/tools。
+    # 内容可能包含用户数据和系统提示词，默认关闭。
+    enable_context_debug: false
+    # context_debug_dir: context-debug
     enable_reload: true
     enabled: true
     message_summary_offloader_config:

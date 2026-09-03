@@ -12,13 +12,13 @@
   useImperativeHandle,
   FormEvent,
   Fragment,
+  type CSSProperties,
   type RefObject,
 } from 'react';
 import { createPortal } from 'react-dom';
 import { useTranslation } from 'react-i18next';
 import type { TFunction } from 'i18next';
-import { AtSign, ChevronRight, CircleX, ClipboardList, FileText, Infinity as InfinityIcon, Loader2, Plus, Search, Square, Target, X } from 'lucide-react';
-import { MoreHorizontal } from 'lucide-react';
+import { AtSign, ChevronRight, CircleX, Loader2, Plus, Settings, Square, Workflow, X } from 'lucide-react';
 import { useSpeechRecognition } from '../../hooks';
 
 // import { stopAllTts } from '../../utils';
@@ -28,19 +28,17 @@ import {
   usePlanStore,
   useSessionStore,
   useWorkspaceStore,
-  resolveChatModelSelection,
 } from '../../stores';
 import { supportsPlanMode } from '../../features/planMode/wireMode';
 import { queueOrAddGoalObjectiveMessage } from '../../features/goalPendingObjectiveBubble';
-import { requestSettingsModule } from '../../features/settings/settingsNavigation';
-import { AgentMode, MediaItem, ModelEntry, Permission, type ProjectInfo } from '../../types';
+import { AgentMode, MediaItem, Permission, type ProjectInfo } from '../../types';
 import { NEW_CONVERSATION_ID } from '../../multi-session/state/newConversationLifecycle';
 import { ProjectCreateMenu, type ProjectCreateMode } from '../../multi-session/sidebar/ProjectCreateMenu';
 import { projectCreateErrorKey } from '../../multi-session/sidebar/projectCreateErrors';
 import { AGENT_MODE_OPTIONS, PERMISSION_OPTIONS } from '../../config/chatConfig';
 import clsx from 'clsx';
 import { PermissionWarningDialog } from './PermissionWarningDialog';
-import { ModelProviderIcon } from '../ModelProviderIcon';
+import ChatModelSelector from './ChatModelSelector';
 import { FileIcon } from '../FileIcon';
 import { getEvolutionPillLabel } from './evolution-status';
 import { webRequest } from '../../services/webClient';
@@ -50,11 +48,18 @@ import {
   type SlashCommand,
   type SlashCommandContext,
 } from './slashCommands/registry';
-import { shouldExecuteRegisteredSlashCommand } from './slashCommands/semantics';
+import {
+  getWebSlashCommandsForMode,
+  shouldExecuteRegisteredSlashCommand,
+  supportsWebSlashCommands,
+} from './slashCommands/semantics';
 import { withUploadDocumentBlock } from '../../utils/documentMessage';
 import { ExtensionPickerPanel } from './ExtensionPickerPanel';
 import { SkillPickerPanel } from './SkillPickerPanel';
+import { PickerPanel } from './PickerPanel';
 import { Switch } from '../Switch';
+import { Input } from '../ui';
+import { Select } from '../ui/Select/Select';
 import { ExtensionIcon } from '../ConnectorMarket/icons';
 import {
   isLikelyAbsolutePath,
@@ -70,9 +75,16 @@ import {
 } from '../../features/workspace/localFilePicker';
 import { useDesktopLocalFilePickerReady } from '../../hooks';
 import { getInputProjectOptions, isDefaultInputProject } from './projectSelection';
-import AgentPickerIcon from '../../assets/智能体.svg?react';
+import AgentPickerIcon from '../../assets/agent-management/智能体选择.svg?react';
+import AttachmentIcon from '../../assets/agent-management/attachment.svg?react';
+import GoalIcon from '../../assets/agent-management/goal.svg?react';
+import PlanIcon from '../../assets/agent-management/planned-events.svg?react';
+import SearchIcon from '../../assets/agent-management/agent-search.svg?react';
+import SkillIcon from '../../assets/agent-management/agent-skill.svg?react';
 
 const MENU_GAP = 10;
+/** 智能体选择列表单行高度（与 ChatPanel.css 的 .chat-agent-picker__item min-height 一致） */
+const AGENT_PICKER_ROW_HEIGHT = 40;
 
 function resolveMenuDirection(anchorBottom: number, menuHeight: number) {
   const spaceBelow = window.innerHeight - anchorBottom - MENU_GAP;
@@ -85,6 +97,7 @@ import { TeamMemberAvatar } from '../TeamMemberAvatar';
 import { CodeBranchSelector } from '../../features/code-mode/CodeBranchSelector';
 import { generateUuidV4 } from '../../utils/uuid';
 import { createAgentManagementClient, getAgentAvatarUrl, type AgentCatalogItem } from '../../features/agentManagement';
+import { ContextUsageIndicator } from './ContextUsageIndicator';
 
 /** 输入栏下拉所需的最小技能数据结构（与 SkillPanel 中的 SkillItem 保持一致） */
 type InputAreaSkillItem = {
@@ -628,9 +641,9 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
   // 兜底逻辑，只在下方空间不够时才翻上，正常情况仍然默认下弹。
   const [attachMenuDirection, setAttachMenuDirection] = useState<'up' | 'down'>('down');
   const [extensionPanelOpen, setExtensionPanelOpen] = useState(false);
-  const [extensionAnchor, setExtensionAnchor] = useState<DOMRect | null>(null);
   const [skillPanelOpen, setSkillPanelOpen] = useState(false);
-  const [skillAnchor, setSkillAnchor] = useState<DOMRect | null>(null);
+  const [swarmflowConfigPanelOpen, setSwarmflowConfigPanelOpen] = useState(false);
+  const [swarmflowConfigAnchor, setSwarmflowConfigAnchor] = useState<DOMRect | null>(null);
   const inputRef = useRef<HTMLDivElement>(null);
   const insertSkillChipRef = useRef<(skillName: string) => void>(() => undefined);
   /** 保存技能插入前的光标位置，用于在光标处插入 chip */
@@ -640,13 +653,13 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
   const modeMenuPortalRef = useRef<HTMLDivElement>(null);
   const attachMenuRef = useRef<HTMLDivElement>(null);
   const attachMenuPortalRef = useRef<HTMLDivElement>(null);
-  const extensionMenuItemRef = useRef<HTMLButtonElement>(null);
   const extensionPanelRef = useRef<HTMLDivElement>(null);
   const composerFrameRef = useRef<HTMLDivElement>(null);
   const composerSuggestionMenuRef = useRef<HTMLDivElement>(null);
   const compactingSessionIdsRef = useRef<Set<string>>(new Set());
-  const skillMenuItemRef = useRef<HTMLButtonElement>(null);
   const skillPanelRef = useRef<HTMLDivElement>(null);
+  const swarmflowConfigBtnRef = useRef<HTMLButtonElement>(null);
+  const swarmflowConfigPanelRef = useRef<HTMLDivElement>(null);
   const autoSendTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const attachmentMenuTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const attachmentMenuOpenedByLongPressRef = useRef(false);
@@ -655,9 +668,13 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
   const isVoicePressingRef = useRef(false);
   const { t } = useTranslation();
   const activeSessionId = useChatStore((s) => s.activeSessionId);
+  const hasPendingQuestion = useChatStore(
+    (s) => Boolean(s.runtimes[activeSessionId ?? '']?.pendingQuestion),
+  );
   const isCompactRunning = Boolean(
     activeSessionId && compactingSessionIds.has(activeSessionId),
   );
+  const composerDisabled = isCompactRunning || hasPendingQuestion;
   const selectedAgentId = useSessionStore((s) => {
     const runtime = s.runtimes[activeSessionId ?? ''];
     if (runtime?.mode !== 'agent') return null;
@@ -713,9 +730,6 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
   const evolutionStatus = useChatStore((s) => s.runtimes[activeSessionId ?? '']?.evolutionStatus ?? null);
   const mode = useSessionStore((s) => s.runtimes[activeSessionId ?? '']?.mode ?? 'agent');
   const selectedSkills = useSessionStore((s) => s.runtimes[activeSessionId ?? '']?.selectedSkills ?? []);
-  const persistSessionDraft = useSessionStore(
-    (s) => s.runtimes[activeSessionId ?? '']?.persistSession ?? false,
-  );
   const teamMembers = useSessionStore((s) => s.runtimes[activeSessionId ?? '']?.teamMembers ?? []) as InputAreaTeamMember[];
   const currentSession = useSessionStore((s) => s.currentSession);
   const activeSession = useSessionStore((s) => {
@@ -755,12 +769,6 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
 
   const isWorkContextLocked = Boolean(activeSessionId && activeSessionId !== NEW_CONVERSATION_ID);
   const showWorkContextRow = activeSessionId === NEW_CONVERSATION_ID;
-  const persistSessionEnabled = activeSessionId === NEW_CONVERSATION_ID
-    ? persistSessionDraft
-    : activeSession?.persist_session === true;
-  const persistSessionLocked = Boolean(
-    activeSessionId && activeSessionId !== NEW_CONVERSATION_ID,
-  );
   /** Goal 入口是否适用于当前上下文（agent 模式 + 已接入 onSetGoal，如欢迎页新会话就不适用） */
   const canUseGoalMenu = isAgentMode && Boolean(onSetGoal);
   // 只跟 armed 挂钩：这个 tag 是"下一条消息将用于设置目标"的过渡态指示，发送后 armed 变 false
@@ -774,6 +782,17 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
   const planPendingExplicitEntry = usePlanStore(
     (s) => s.runtimes[activeSessionId ?? '']?.pendingExplicitEntry ?? false,
   );
+  // Reactive selectors for swarmflow state. Using getState() inside render IIFEs
+  // does not subscribe the component to store changes, leaving the Switch/UI stale
+  // when swarmflow is toggled off.
+  const swarmflowActive = useSessionStore(
+    (s) => s.runtimes[activeSessionId ?? '']?.enableSwarmflow ?? false,
+  );
+  const swarmflowBudget = useSessionStore(
+    (s) => s.runtimes[activeSessionId ?? '']?.swarmflowBudget ?? null,
+  );
+  // 进入真实会话后开关只读：仅新建对话页可修改，真实会话可查看不可改
+  const swarmflowToggleDisabled = isProcessing || (activeSessionId !== NEW_CONVERSATION_ID && hasHistory);
   // Plan 已经真正生效：开关打开且至少发出过一条 Plan 消息（pendingExplicitEntry 已被消费）。
   // 区别于"刚打开开关但还没发消息"的未提交态——后者和 Goal 的 armed 一样可以被对方随手顶替。
   const planCommitted = planActive && !planPendingExplicitEntry;
@@ -797,10 +816,10 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
     () => getComposerSuggestionItems(
       composerSuggestion,
       mentionableMembers,
-      slashCommands,
+      getWebSlashCommandsForMode(slashCommands, mode),
       slashSkills,
     ),
-    [composerSuggestion, mentionableMembers, slashCommands, slashSkills],
+    [composerSuggestion, mentionableMembers, mode, slashCommands, slashSkills],
   );
 
   useEffect(() => {
@@ -931,11 +950,11 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
     },
   });
 
-  const imageInputDisabled = isListening || isCompactRunning || (isInterruptible && !isTeamMode);
+  const imageInputDisabled = isListening || composerDisabled || (isInterruptible && !isTeamMode);
   const isDesktopBridgeReady = useDesktopLocalFilePickerReady();
   // "+" 触发按钮本身不跟图片/目标的可用性挂钩：菜单以后可能挂其他跟图片/目标无关的功能，
   // 触发按钮只要不在录音就该能点开；具体某一项能不能选，交给菜单里每一项各自的禁用态处理。
-  const attachTriggerDisabled = isListening || isCompactRunning;
+  const attachTriggerDisabled = isListening || composerDisabled;
   const readyAttachments = useMemo(
     () =>
       attachments.filter(
@@ -961,8 +980,10 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
           useChatStore.getState().setInputValue(sid, finalText);
         }
         setPendingVoiceText('');
+        if (composerDisabled) return;
 
         setTimeout(() => {
+          if (sid && useChatStore.getState().runtimes[sid]?.pendingQuestion) return;
           if (isTeamMode) {
             onSubmit(finalText);
           } else if (isInterruptible) {
@@ -976,7 +997,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
         }, 150);
       }
     }
-  }, [isListening, pendingVoiceText, inputValue, isInterruptible, isTeamMode, onSubmit, onInterrupt]);
+  }, [composerDisabled, isListening, pendingVoiceText, inputValue, isInterruptible, isTeamMode, onSubmit, onInterrupt]);
 
   useEffect(() => {
     return () => {
@@ -1425,11 +1446,14 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
         !attachMenuRef.current?.contains(event.target as Node) &&
         !attachMenuPortalRef.current?.contains(event.target as Node) &&
         !extensionPanelRef.current?.contains(event.target as Node) &&
-        !skillPanelRef.current?.contains(event.target as Node)
+        !skillPanelRef.current?.contains(event.target as Node) &&
+        !swarmflowConfigPanelRef.current?.contains(event.target as Node) &&
+        !swarmflowConfigBtnRef.current?.contains(event.target as Node)
       ) {
         setAttachMenuOpen(false);
         setExtensionPanelOpen(false);
         setSkillPanelOpen(false);
+        setSwarmflowConfigPanelOpen(false);
       }
     };
 
@@ -1611,19 +1635,20 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
   );
 
   const handleSubmit = useCallback(() => {
-    if (isCompactRunning) return;
+    if (composerDisabled) return;
 
     // 用富文本（含 chip 标记）作为发送内容，气泡可交织渲染技能
     const richContent = extractRichContent();
     const trimmedBase = (richContent + pendingVoiceText).trim();
 
-    // 斜杠命令拦截：控制命令不走 chat.send / 队列 / 中断逻辑（与 command.goal 同级——
-    // 控制操作不该被排进消息队列，/btw 还要能与主对话并行）。命中注册表即执行并 return；
+    // 单 Agent 下拦截斜杠命令：控制命令不走 chat.send / 队列 / 中断逻辑。
+    // Team 下不拦截，以普通文本发送，不会触发 command.btw / command.compact 等 RPC。
     if (trimmedBase.startsWith('/')) {
       const { name, args } = parseSlashLine(trimmedBase);
       const cmd = findSlashCommand(name);
-      if (cmd && shouldExecuteRegisteredSlashCommand(name, args)) {
-        const slashSid = useChatStore.getState().activeSessionId;
+      const slashSid = useChatStore.getState().activeSessionId;
+      const slashMode = useSessionStore.getState().getRuntime(slashSid)?.mode ?? mode;
+      if (cmd && shouldExecuteRegisteredSlashCommand(name, args, slashMode)) {
         if (isListening) stopListening();
         if (slashSid) useChatStore.getState().setInputValue(slashSid, '');
         setPendingVoiceText('');
@@ -1633,7 +1658,6 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
         setComposerSuggestion(null);
         // requiresSession=false 的命令（如 /plan 纯本地开关）无需真实会话，欢迎页也能用
         if (cmd.requiresSession === false || (slashSid && slashSid !== NEW_CONVERSATION_ID)) {
-          const slashMode = useSessionStore.getState().getRuntime(slashSid)?.mode ?? 'agent';
           void executeSlashCommand(
             cmd,
             {
@@ -1738,12 +1762,13 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
     readyMediaItems,
     hasUploadingAttachments,
     hasAttachmentErrors,
-    isCompactRunning,
+    composerDisabled,
     isInterruptible,
     isListening,
     onSubmit,
     onInterrupt,
     stopListening,
+    mode,
     isAgentMode,
     isTeamMode,
     queuePaused,
@@ -1756,15 +1781,15 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
 
   const trimmedDraft = (inputValue + pendingVoiceText).trim();
   const hasTextDraft = trimmedDraft.length > 0;
-  // Attachments / listening still count as "composer busy" so Stop stays hidden
-  // while the user is preparing a follow-up, but they do not enable Send.
+  // Attachments / listening count as "composer busy" so Stop stays hidden while
+  // preparing a follow-up. A pending approval keeps Stop available and blocks Send.
   const hasDraft = hasTextDraft || attachments.length > 0 || isListening;
   const isImageInterruptBlocked =
     isInterruptible && !isTeamMode && !isAgentMode && readyMediaItems.length > 0;
-  const showStop = isProcessing && !isPaused && !hasDraft;
+  const showStop = isProcessing && !isPaused && (!hasDraft || hasPendingQuestion);
   const hasReadyMedia = readyMediaItems.length > 0;
   const canSubmit = showStop || (
-    !isCompactRunning &&
+    !composerDisabled &&
     (hasTextDraft || hasReadyMedia) &&
     !isLoadingHistory &&
     !isImageInterruptBlocked &&
@@ -1870,6 +1895,12 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
         setComposerSuggestion(null);
         return;
       }
+      const slashSid = useChatStore.getState().activeSessionId;
+      const slashMode = useSessionStore.getState().getRuntime(slashSid)?.mode ?? mode;
+      if (!supportsWebSlashCommands(slashMode)) {
+        setComposerSuggestion(null);
+        return;
+      }
       const slashCmd = findSlashCommand(value);
       // 无参命令（/plan、/compact）：选中即执行，不插入文本、不再等回车。
       // `/plan hi` 这类手工输入不走此选中路径，提交时会被当作普通消息。
@@ -1884,13 +1915,11 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
           setRangeStartByTextOffset(range, el, Math.max(0, beforeTextLength - triggerLength));
           range.deleteContents();
         }
-        const slashSid = useChatStore.getState().activeSessionId;
         if (slashSid) useChatStore.getState().setInputValue(slashSid, extractPlainText());
         setComposerSuggestion(null);
         el.focus();
         // requiresSession=false 的命令（如 /plan 纯本地开关）无需真实会话，欢迎页也能用
         if (slashCmd.requiresSession === false || (slashSid && slashSid !== NEW_CONVERSATION_ID)) {
-          const slashMode = useSessionStore.getState().getRuntime(slashSid)?.mode ?? 'agent';
           void executeSlashCommand(
             slashCmd,
             {
@@ -2033,7 +2062,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
     if (sid) useChatStore.getState().setInputValue(sid, extractPlainText());
     setComposerSuggestion(null);
     el.focus();
-  }, [executeSlashCommand, extractPlainText, getCurrentComposerTrigger, onSubmit, setRangeStartByTextOffset]);
+  }, [executeSlashCommand, extractPlainText, getCurrentComposerTrigger, mode, onSubmit, setRangeStartByTextOffset]);
 
   const notifyKVCInputIntent = useCallback(() => {
     if (!activeSessionId || activeSessionId === NEW_CONVERSATION_ID) return;
@@ -2779,8 +2808,8 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
       )}
       <div
         ref={inputRef}
-        contentEditable={!isCompactRunning}
-        aria-disabled={isCompactRunning}
+        contentEditable={!composerDisabled}
+        aria-disabled={composerDisabled}
         suppressContentEditableWarning
         onBeforeInput={handleEditorBeforeInput}
         onInput={handleEditorInput}
@@ -2792,6 +2821,8 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
         data-placeholder={
           isCompactRunning
             ? t('chat.placeholderCompacting')
+            : hasPendingQuestion
+              ? t('chat.placeholderAwaitingApproval')
             : isListening
               ? t('chat.placeholderVoice')
             : isTeamMode
@@ -2806,7 +2837,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                     ? t('chat.placeholderProcessing')
                     : t('chat.placeholder')
         }
-        className={cx('chat-input-editor', isCompactRunning && 'chat-input-editor--disabled')}
+        className={cx('chat-input-editor', composerDisabled && 'chat-input-editor--disabled')}
         data-testid="chat-panel-input"
       />
 
@@ -2840,6 +2871,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
               className={cx(
                 'chat-input-btn chat-input-btn--add-file',
                 attachTriggerDisabled && 'chat-input-btn--disabled',
+                attachMenuOpen && 'chat-input-btn--menu-open',
               )}
               title={attachTriggerDisabled ? t('chat.addFileDisabled') : t('chat.addFile')}
               aria-label={attachTriggerDisabled ? t('chat.addFileDisabled') : t('chat.addFile')}
@@ -2871,23 +2903,31 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                   }}
                 >
                   <span className="chat-mode-select__option-main">
-                    <span className="chat-mode-select__icon" aria-hidden="true">
-                      <FileText className="w-4 h-4" />
+                    <span className="chat-mode-select__icon chat-mode-select__icon--asset" aria-hidden="true">
+                      <AttachmentIcon aria-hidden="true" />
                     </span>
                     <span className="chat-mode-select__label">{t('chat.addFile')}</span>
                   </span>
                 </button>
                 {!isTeamMode && <>
+                <div className="chat-attach-menu-item-anchor">
                 <button
                   type="button"
-                  className="chat-mode-select__option chat-agent-picker-trigger"
+                  className={clsx(
+                    'chat-mode-select__option chat-agent-picker-trigger',
+                    agentPickerOpen && 'chat-mode-select__option--panel-open',
+                  )}
                   role="menuitem"
                   aria-haspopup="menu"
                   aria-expanded={agentPickerOpen}
-                  onClick={() => setAgentPickerOpen((open) => !open)}
+                  onClick={() => {
+                    setAgentPickerOpen((open) => !open);
+                    setExtensionPanelOpen(false);
+                    setSkillPanelOpen(false);
+                  }}
                 >
                     <span className="chat-mode-select__option-main">
-                      <span className="chat-mode-select__icon" aria-hidden="true">
+                      <span className="chat-mode-select__icon chat-mode-select__icon--asset" aria-hidden="true">
                       <AgentPickerIcon aria-hidden="true" />
                       </span>
                     <span className="chat-mode-select__label">{t('chat.agent')}</span>
@@ -2895,25 +2935,39 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                   <ChevronRight className="chat-agent-picker-trigger__chevron" size={15} aria-hidden="true" />
                 </button>
                 {agentPickerOpen && (
-                  <div
-                    className={clsx('chat-agent-picker', attachMenuDirection === 'up' && 'chat-agent-picker--up')}
-                    role="menu"
-                    aria-label={t('chat.agent')}
+                  <PickerPanel
+                    className="chat-agent-picker"
+                    direction={attachMenuDirection}
+                    ariaLabel={t('chat.agent')}
                     onMouseEnter={() => setAgentPickerOpen(true)}
+                    rowHeight={AGENT_PICKER_ROW_HEIGHT}
+                    itemCount={filteredAgentOptions.length}
+                    tabs={
+                      <div className="chat-picker-panel__tabs" role="tablist" aria-label={t('agentManagement.detail.tabsLabel')}>
+                        <span className="is-active" role="tab" aria-selected="true">{t('chat.agent')}</span>
+                      </div>
+                    }
+                    search={
+                      <label className="chat-picker-panel__search">
+                        <div className="chat-picker-panel__search-inner">
+                          <SearchIcon aria-hidden="true" />
+                          <input
+                            type="search"
+                            value={agentPickerQuery}
+                            onChange={(event) => setAgentPickerQuery(event.target.value)}
+                            placeholder={t('chat.agentSearchPlaceholder')}
+                          />
+                        </div>
+                      </label>
+                    }
+                    footer={{
+                      label: t('chat.agentMore'),
+                      onClick: () => {
+                        setAttachMenuOpen(false);
+                        onNavigateToAgents?.();
+                      },
+                    }}
                   >
-                    <div className="chat-agent-picker__tabs" role="tablist" aria-label={t('agentManagement.detail.tabsLabel')}>
-                      <span className="is-active" role="tab" aria-selected="true">{t('chat.agent')}</span>
-                    </div>
-                    <label className="chat-agent-picker__search">
-                      <Search size={14} aria-hidden="true" />
-                      <span className="sr-only">{t('chat.agentSearchPlaceholder')}</span>
-                      <input
-                        type="search"
-                        value={agentPickerQuery}
-                        onChange={(event) => setAgentPickerQuery(event.target.value)}
-                        placeholder={t('chat.agentSearchPlaceholder')}
-                      />
-                    </label>
                     {agentOptionsStatus === 'loading' ? (
                       <div className="chat-agent-picker__state">{t('common.loading')}</div>
                     ) : agentOptionsStatus === 'error' ? (
@@ -2923,74 +2977,64 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                         {installedAgentOptions.length === 0 ? t('chat.agentNoInstalled') : t('chat.agentNoMatches')}
                       </div>
                     ) : (
-                      <div className="chat-agent-picker__list">
-                        {filteredAgentOptions.map((item) => {
-                          const avatarUrl = getAgentAvatarUrl(item);
-                          const isSelected = selectedAgentId === item.id;
-                          return (
-                            <button
-                              key={item.id}
-                              type="button"
-                              className={clsx('chat-agent-picker__item', isSelected && 'is-selected')}
-                              role="menuitemradio"
-                              aria-checked={isSelected}
-                              aria-describedby={agentTooltip?.id === item.id ? 'chat-agent-picker-tooltip' : undefined}
-                              onMouseEnter={(event) => {
-                                if (!item.description) return;
-                                const rect = event.currentTarget.getBoundingClientRect();
-                                const tooltipWidth = 240;
-                                const left = rect.right + 8 + tooltipWidth <= window.innerWidth
-                                  ? rect.right + 8
-                                  : Math.max(8, rect.left - tooltipWidth - 8);
-                                setAgentTooltip({
-                                  id: item.id,
-                                  description: item.description,
-                                  top: Math.min(rect.top, Math.max(8, window.innerHeight - 80)),
-                                  left,
-                                });
-                              }}
-                              onMouseLeave={() => setAgentTooltip(null)}
-                              onFocus={(event) => {
-                                if (!item.description) return;
-                                const rect = event.currentTarget.getBoundingClientRect();
-                                setAgentTooltip({
-                                  id: item.id,
-                                  description: item.description,
-                                  top: Math.min(rect.top, Math.max(8, window.innerHeight - 80)),
-                                  left: Math.max(8, rect.left - 248),
-                                });
-                              }}
-                              onBlur={() => setAgentTooltip(null)}
-                              onClick={() => {
-                                if (!activeSessionId) return;
-                                useSessionStore.getState().setMode(activeSessionId, 'agent');
-                                setAgentSelectionIntent(activeSessionId, { kind: 'select', id: item.id });
-                                setAttachMenuOpen(false);
-                              }}
-                            >
-                              <span className="chat-agent-picker__avatar" aria-hidden="true">
-                                {avatarUrl ? <img src={avatarUrl} alt="" /> : item.displayName.trim().slice(0, 1).toUpperCase() || '?'}
-                              </span>
-                              <span className="chat-agent-picker__item-name">{item.displayName}</span>
-                              {isSelected ? <span className="chat-agent-picker__check" aria-hidden="true">✓</span> : null}
-                            </button>
-                          );
-                        })}
-                      </div>
+                      filteredAgentOptions.map((item) => {
+                        const avatarUrl = getAgentAvatarUrl(item);
+                        const isSelected = selectedAgentId === item.id;
+                        return (
+                          <button
+                            key={item.id}
+                            type="button"
+                            className={clsx('chat-agent-picker__item', isSelected && 'is-selected')}
+                            role="menuitemradio"
+                            aria-checked={isSelected}
+                            aria-describedby={agentTooltip?.id === item.id ? 'chat-agent-picker-tooltip' : undefined}
+                            onMouseEnter={(event) => {
+                              if (!item.description) return;
+                              const rect = event.currentTarget.getBoundingClientRect();
+                              const tooltipWidth = 240;
+                              const left = rect.right + 8 + tooltipWidth <= window.innerWidth
+                                ? rect.right + 8
+                                : Math.max(8, rect.left - tooltipWidth - 8);
+                              setAgentTooltip({
+                                id: item.id,
+                                description: item.description,
+                                top: Math.min(rect.top, Math.max(8, window.innerHeight - 80)),
+                                left,
+                              });
+                            }}
+                            onMouseLeave={() => setAgentTooltip(null)}
+                            onFocus={(event) => {
+                              if (!item.description) return;
+                              const rect = event.currentTarget.getBoundingClientRect();
+                              setAgentTooltip({
+                                id: item.id,
+                                description: item.description,
+                                top: Math.min(rect.top, Math.max(8, window.innerHeight - 80)),
+                                left: Math.max(8, rect.left - 248),
+                              });
+                            }}
+                            onBlur={() => setAgentTooltip(null)}
+                            onClick={() => {
+                              if (!activeSessionId) return;
+                              useSessionStore.getState().setMode(activeSessionId, 'agent');
+                              setAgentSelectionIntent(activeSessionId, { kind: 'select', id: item.id });
+                              setAttachMenuOpen(false);
+                            }}
+                          >
+                            <span className="chat-agent-picker__avatar" aria-hidden="true">
+                              {avatarUrl ? <img src={avatarUrl} alt="" /> : item.displayName.trim().slice(0, 1).toUpperCase() || '?'}
+                            </span>
+                            <span className="chat-agent-picker__item-name">{item.displayName}</span>
+                            {isSelected && (
+                              <svg className="chat-mode-select__check" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth={2} aria-hidden="true">
+                                <path strokeLinecap="round" strokeLinejoin="round" d="M5 10.5l3 3L15 6.5" />
+                              </svg>
+                            )}
+                          </button>
+                        );
+                      })
                     )}
-                    <div className="chat-agent-picker__footer">
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setAttachMenuOpen(false);
-                          onNavigateToAgents?.();
-                        }}
-                      >
-                        <MoreHorizontal size={14} aria-hidden="true" />
-                        {t('chat.agentMore')}
-                      </button>
-                    </div>
-                  </div>
+                  </PickerPanel>
                 )}
                 {agentTooltip ? (
                   <div
@@ -3002,106 +3046,84 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                     {agentTooltip.description}
                   </div>
                 ) : null}
+                </div>
                 </>}
-                {canUseGoalMenu && (
-                  <button
-                    type="button"
-                    className={clsx(
-                      'chat-mode-select__option',
-                      persistSessionEnabled && 'chat-mode-select__option--active',
-                    )}
-                    role="menuitemcheckbox"
-                    aria-checked={persistSessionEnabled}
-                    disabled={persistSessionLocked}
-                    title={persistSessionLocked ? t('persistSession.lockedHint') : undefined}
-                    onClick={() => {
-                      if (persistSessionLocked || !activeSessionId) return;
-                      useSessionStore
-                        .getState()
-                        .setPersistSession(activeSessionId, !persistSessionEnabled);
-                      setAttachMenuOpen(false);
-                    }}
-                  >
-                    <span className="chat-mode-select__option-main">
-                      <span className="chat-mode-select__icon" aria-hidden="true">
-                        <InfinityIcon className="w-4 h-4" />
-                      </span>
-                      <span className="chat-mode-select__label">
-                        {t('persistSession.toolbarTag')}
-                      </span>
-                    </span>
-                    {persistSessionEnabled && (
-                      <svg className="chat-mode-select__check" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth={2} aria-hidden="true">
-                        <path strokeLinecap="round" strokeLinejoin="round" d="M5 10.5l3 3L15 6.5" />
-                      </svg>
-                    )}
-                  </button>
-                )}
                 {/* 插件/MCP 装备目前后端在集群模式下不生效（JiuWenSwarmDeepAdapter
                     ._ensure_chat_extensions 对 team 模式直接短路，见
                     interface_deep.py），继续展示这个入口只会让用户以为选了插件/MCP 会生效，
                     实际发出去也是白发。集群模式下直接不渲染这个入口，跟旁边 SkillSelector
                     （!isTeamMode 判断）保持同样的处理方式。 */}
-                {!isTeamMode && (
-                  <button
-                    ref={extensionMenuItemRef}
-                    type="button"
-                    className="chat-mode-select__option"
-                    role="menuitem"
-                    aria-haspopup="menu"
-                    aria-expanded={extensionPanelOpen}
-                    onClick={() => {
-                      if (!extensionPanelOpen && extensionMenuItemRef.current) {
-                        setExtensionAnchor(extensionMenuItemRef.current.getBoundingClientRect());
-                      }
-                      setExtensionPanelOpen((open) => !open);
-                      setSkillPanelOpen(false);
-                    }}
-                  >
-                    <span className="chat-mode-select__option-main">
-                      {/* 手绘拼图图标（ConnectorMarket/icons.tsx）在这个菜单里视觉上比旁边
-                          FileText/Target/ClipboardList 这些 lucide 图标显得更小（用户 2026-08-19
-                          反馈），单独放大到 18px。真正生效的是 CSS 里的 --lg 修饰 class（见
-                          ChatPanel.css `.chat-mode-select__icon svg { width/height: 14px }`
-                          这条共享基础规则的选择器特异度是 class+元素，Tailwind 任意值 class 在
-                          SVG 自身上加宽高属性/class 特异度更低会被它盖掉，实测确认过），不是这里
-                          ExtensionIcon 的 className。 */}
-                      <span className="chat-mode-select__icon chat-mode-select__icon--lg" aria-hidden="true">
-                        <ExtensionIcon />
-                      </span>
-                      <span className="chat-mode-select__label">{t('chat.extension')}</span>
-                    </span>
-                    <svg className="chat-mode-select__chevron" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth={1.8} aria-hidden="true">
-                      <path strokeLinecap="round" strokeLinejoin="round" d="M8 6l4 4-4 4" />
-                    </svg>
-                  </button>
-                )}
-                <div className="chat-mode-select__divider" role="separator" />
+                <div className="chat-attach-menu-item-anchor">
                 <button
-                  ref={skillMenuItemRef}
                   type="button"
-                  className="chat-mode-select__option"
+                  className={clsx(
+                    'chat-mode-select__option',
+                    skillPanelOpen && 'chat-mode-select__option--panel-open',
+                  )}
                   role="menuitem"
                   aria-haspopup="menu"
                   aria-expanded={skillPanelOpen}
                   onClick={() => {
-                    if (!skillPanelOpen && skillMenuItemRef.current) {
-                      setSkillAnchor(skillMenuItemRef.current.getBoundingClientRect());
-                    }
                     setSkillPanelOpen((open) => !open);
+                    setAgentPickerOpen(false);
                     setExtensionPanelOpen(false);
                   }}
                 >
                   <span className="chat-mode-select__option-main">
-                    <span className="chat-mode-select__icon" aria-hidden="true">
-                      <span className="chat-config-icon chat-config-icon--skill" />
+                    <span className="chat-mode-select__icon chat-mode-select__icon--asset" aria-hidden="true">
+                      <SkillIcon aria-hidden="true" />
                     </span>
                     <span className="chat-mode-select__label">{t(isTeamMode ? 'chat.swarmSkills' : 'chat.skills')}</span>
                   </span>
-                  <svg className="chat-mode-select__chevron" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth={1.8} aria-hidden="true">
-                    <path strokeLinecap="round" strokeLinejoin="round" d="M8 6l4 4-4 4" />
-                  </svg>
+                  <ChevronRight className="chat-mode-select__chevron" size={16} aria-hidden="true" />
                 </button>
+                {skillPanelOpen && (
+                  <SkillPickerPanel
+                    panelRef={skillPanelRef}
+                    direction={attachMenuDirection}
+                    isTeamMode={isTeamMode}
+                    onClose={() => setSkillPanelOpen(false)}
+                    onNavigateToSkills={onNavigateToSkills}
+                    onInsertSkill={insertSkillChip}
+                    onRemoveSkill={removeSkillChip}
+                  />
+                )}
+                </div>
+                {!isTeamMode && (
+                  <div className="chat-attach-menu-item-anchor">
+                  <button
+                    type="button"
+                    className={clsx(
+                      'chat-mode-select__option',
+                      extensionPanelOpen && 'chat-mode-select__option--panel-open',
+                    )}
+                    role="menuitem"
+                    aria-haspopup="menu"
+                    aria-expanded={extensionPanelOpen}
+                    onClick={() => {
+                      setExtensionPanelOpen((open) => !open);
+                      setAgentPickerOpen(false);
+                      setSkillPanelOpen(false);
+                    }}
+                  >
+                    <span className="chat-mode-select__option-main">
+                      <span className="chat-mode-select__icon chat-mode-select__icon--asset" aria-hidden="true">
+                        <ExtensionIcon />
+                      </span>
+                      <span className="chat-mode-select__label">{t('chat.extension')}</span>
+                    </span>
+                    <ChevronRight className="chat-mode-select__chevron" size={16} aria-hidden="true" />
+                  </button>
+                  {extensionPanelOpen && (
+                    <ExtensionPickerPanel
+                      panelRef={extensionPanelRef}
+                      direction={attachMenuDirection}
+                      onClose={() => setExtensionPanelOpen(false)}
+                    />
+                  )}
+                  </div>
+                )}
+                <div className="chat-mode-select__divider" role="separator" />
                 {canUsePlanMenu && (() => {
                   // 对称地：已有未完成目标时不能选计划；对话进行中（isProcessing）时也先禁掉，
                   // 避免在当前这轮还没结束时又叠加切一次模式。这条"打开"方向的限制沿用原逻辑；
@@ -3120,6 +3142,11 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                     if (!activeSessionId) return;
                     if (next) {
                       if (planDisabledOn) return;
+                      // Plan 与 Swarmflow 互斥：开启 Plan 前先关掉 Swarmflow。
+                      if (useSessionStore.getState().getRuntime(activeSessionId)?.enableSwarmflow) {
+                        useSessionStore.getState().setSwarmflowActive(activeSessionId, false);
+                        setSwarmflowConfigPanelOpen(false);
+                      }
                       // 走到这里 hasUnfinishedGoal 一定是 false，goalArmed 为 true 时只可能是
                       // "刚选了目标、还没发消息"的未提交态，顶掉换成 Plan。
                       useGoalStore.getState().setArmed(activeSessionId, false);
@@ -3144,12 +3171,65 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                       }}
                     >
                       <span className="chat-mode-select__option-main">
-                        <span className="chat-mode-select__icon" aria-hidden="true">
-                          <ClipboardList className="w-4 h-4" />
+                        <span className="chat-mode-select__icon chat-mode-select__icon--asset" aria-hidden="true">
+                          <PlanIcon aria-hidden="true" />
                         </span>
                         <span className="chat-mode-select__label">{t('plan.toggleLabel')}</span>
                       </span>
                       <Switch checked={planActive} disabled={planDisabled} onChange={togglePlan} />
+                    </div>
+                  );
+                })()}
+                {isTeamMode && (() => {
+                  const toggleSwarmflow = (next: boolean) => {
+                    if (!activeSessionId || swarmflowToggleDisabled) return;
+                    // Swarmflow 与 Plan 互斥：开启 Swarmflow 前先关掉 Plan。
+                    if (next && planActive) {
+                      usePlanStore.getState().setActive(activeSessionId, false);
+                    }
+                    useSessionStore.getState().setSwarmflowActive(activeSessionId, next);
+                  };
+                  return (
+                    <div
+                      className={cx('chat-mode-select__option', swarmflowToggleDisabled && 'chat-mode-select__option--disabled')}
+                      role="menuitem"
+                      data-testid="chat-panel-input-attach-menu-swarmflow"
+                    >
+                      <span
+                        className="chat-mode-select__option-main"
+                        onClick={() => {
+                          if (swarmflowToggleDisabled) return;
+                          toggleSwarmflow(!swarmflowActive);
+                        }}
+                      >
+                        <span className="chat-mode-select__icon" aria-hidden="true">
+                          <Workflow className="w-4 h-4" />
+                        </span>
+                        <span className="chat-mode-select__label">{t('swarmflow.toggleLabel')}</span>
+                      </span>
+                      <div className="chat-mode-select__option-actions">
+                        <button
+                          ref={swarmflowConfigBtnRef}
+                          type="button"
+                          className={cx('chat-mode-select__config-btn', !swarmflowActive && 'chat-mode-select__config-btn--disabled')}
+                          aria-haspopup="menu"
+                          aria-expanded={swarmflowConfigPanelOpen}
+                          data-testid="chat-panel-input-attach-menu-swarmflow-config"
+                          title={t('swarmflow.configTitle')}
+                          disabled={!swarmflowActive}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            if (!swarmflowActive) return;
+                            if (!swarmflowConfigPanelOpen && swarmflowConfigBtnRef.current) {
+                              setSwarmflowConfigAnchor(swarmflowConfigBtnRef.current.getBoundingClientRect());
+                            }
+                            setSwarmflowConfigPanelOpen((open) => !open);
+                          }}
+                        >
+                          <Settings className="w-3.5 h-3.5" aria-hidden="true" />
+                        </button>
+                        <Switch checked={swarmflowActive} disabled={swarmflowToggleDisabled} onChange={toggleSwarmflow} />
+                      </div>
                     </div>
                   );
                 })()}
@@ -3195,8 +3275,8 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                       }}
                     >
                       <span className="chat-mode-select__option-main">
-                        <span className="chat-mode-select__icon" aria-hidden="true">
-                          <Target className="w-4 h-4" />
+                        <span className="chat-mode-select__icon chat-mode-select__icon--asset" aria-hidden="true">
+                          <GoalIcon aria-hidden="true" />
                         </span>
                         <span className="chat-mode-select__label">{t('goal.toggleLabel')}</span>
                       </span>
@@ -3206,25 +3286,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                 })()}
               </div>,
               document.body
-            )}
-           {extensionPanelOpen && extensionAnchor && (
-             <ExtensionPickerPanel
-               anchorRect={extensionAnchor}
-               panelRef={extensionPanelRef}
-               onClose={() => setExtensionPanelOpen(false)}
-             />
-           )}
-            {skillPanelOpen && skillAnchor && (
-              <SkillPickerPanel
-                anchorRect={skillAnchor}
-                panelRef={skillPanelRef}
-                isTeamMode={isTeamMode}
-                onClose={() => setSkillPanelOpen(false)}
-                onNavigateToSkills={onNavigateToSkills}
-                onInsertSkill={insertSkillChip}
-                onRemoveSkill={removeSkillChip}
-              />
-            )}
+             )}
           </div>
           <div
             ref={modeMenuRef}
@@ -3268,7 +3330,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
             {isModeMenuOpen && modeMenuAnchor && createPortal(
               <div
                 ref={modeMenuPortalRef}
-                className="chat-mode-select__menu"
+                className="chat-mode-select__menu chat-mode-select__menu--agent-modes"
                 role="menu"
                 data-testid="chat-panel-mode-select-menu"
                 style={menuDirection === 'up'
@@ -3343,25 +3405,22 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                   if (activeSessionId) setAgentSelectionIntent(activeSessionId, { kind: 'clear' });
                 }}
               >
-                <X size={11} strokeWidth={2.5} aria-hidden="true" />
+                <X size={16} strokeWidth={2.5} aria-hidden="true" />
               </button>
             </div>
           )}
           {goalTagVisible && (
-            <div className="chat-goal-tag" data-testid="chat-panel-goal-tag">
-              <button type="button" className="chat-mode-select__trigger" data-testid="chat-panel-goal-tag-label">
-                <span className="chat-mode-select__value">
-                  <span className="chat-mode-select__icon" aria-hidden="true">
-                    <Target className="w-4 h-4" />
-                  </span>
-                  <span className="chat-mode-select__label">{t('goal.toolbarTag')}</span>
-                </span>
-              </button>
+            <div className="chat-agent-tag" data-testid="chat-panel-goal-tag">
+              <span className="chat-agent-tag__avatar chat-agent-tag__avatar--plain" aria-hidden="true">
+                <GoalIcon aria-hidden="true" />
+              </span>
+              <span className="chat-agent-tag__label" data-testid="chat-panel-goal-tag-label">{t('goal.toolbarTag')}</span>
               <button
                 type="button"
-                className="chat-goal-tag__close"
+                className="chat-agent-tag__close"
                 data-testid="chat-panel-goal-tag-close"
                 title={t('goal.closeTag')}
+                aria-label={t('goal.closeTag')}
                 onClick={() => {
                   if (!activeSessionId) return;
                   if (currentGoal) {
@@ -3370,31 +3429,61 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                   useGoalStore.getState().setArmed(activeSessionId, false);
                 }}
               >
-                <X size={11} strokeWidth={2.5} />
+                <X size={16} strokeWidth={2.5} aria-hidden="true" />
               </button>
             </div>
           )}
 
           {planTagVisible && (
-            <div className="chat-goal-tag" data-testid="chat-panel-plan-tag">
-              <button type="button" className="chat-mode-select__trigger" data-testid="chat-panel-plan-tag-label">
+            <div className="chat-agent-tag" data-testid="chat-panel-plan-tag">
+              <span className="chat-agent-tag__avatar chat-agent-tag__avatar--plain" aria-hidden="true">
+                <PlanIcon aria-hidden="true" />
+              </span>
+              <span className="chat-agent-tag__label" data-testid="chat-panel-plan-tag-label">{t('plan.toolbarTag')}</span>
+              <button
+                type="button"
+                className="chat-agent-tag__close"
+                data-testid="chat-panel-plan-tag-close"
+                disabled={isProcessing}
+                title={isProcessing ? t('plan.closeTagDisabled') : t('plan.closeTag')}
+                aria-label={isProcessing ? t('plan.closeTagDisabled') : t('plan.closeTag')}
+                onClick={() => {
+                  if (isProcessing) return;
+                  if (!activeSessionId) return;
+                  usePlanStore.getState().setActive(activeSessionId, false);
+                }}
+              >
+                <X size={16} strokeWidth={2.5} aria-hidden="true" />
+              </button>
+            </div>
+          )}
+
+          {swarmflowActive && (
+            <div className="chat-goal-tag" data-testid="chat-panel-swarmflow-tag">
+              <button
+                type="button"
+                className="chat-mode-select__trigger"
+                data-testid="chat-panel-swarmflow-tag-label"
+                title={t('swarmflow.tagHint')}
+              >
                 <span className="chat-mode-select__value">
                   <span className="chat-mode-select__icon" aria-hidden="true">
-                    <ClipboardList className="w-4 h-4" />
+                    <Workflow className="w-3.5 h-3.5" />
                   </span>
-                  <span className="chat-mode-select__label">{t('plan.toolbarTag')}</span>
+                  <span className="chat-mode-select__label">{t('swarmflow.toggleLabel')}</span>
                 </span>
               </button>
               <button
                 type="button"
                 className="chat-goal-tag__close"
-                data-testid="chat-panel-plan-tag-close"
-                disabled={isProcessing}
-                title={isProcessing ? t('plan.closeTagDisabled') : t('plan.closeTag')}
+                data-testid="chat-panel-swarmflow-tag-close"
+                disabled={swarmflowToggleDisabled}
+                title={swarmflowToggleDisabled ? t('swarmflow.closeTagDisabled') : t('swarmflow.closeTag')}
                 onClick={() => {
-                  if (isProcessing) return;
+                  if (swarmflowToggleDisabled) return;
                   if (!activeSessionId) return;
-                  usePlanStore.getState().setActive(activeSessionId, false);
+                  useSessionStore.getState().setSwarmflowActive(activeSessionId, false);
+                  setSwarmflowConfigPanelOpen(false);
                 }}
               >
                 <X size={11} strokeWidth={2.5} />
@@ -3435,8 +3524,10 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
             </button>
           )} */}
 
-          <ModelSelector
-            disabled={isProcessing || isCompactRunning || (!isAgentMode && activeSessionId !== NEW_CONVERSATION_ID)}
+          {isAgentMode && <ContextUsageIndicator />}
+
+          <ChatModelSelector
+            disabled={isProcessing || composerDisabled || (!isAgentMode && activeSessionId !== NEW_CONVERSATION_ID)}
           />
 
           <button
@@ -3467,24 +3558,24 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
       </div>
       </div>
 
-      {showSlashSuggestionBelow && composerSuggestion && (
-        <ComposerSuggestionMenu
-          suggestion={composerSuggestion}
-          items={composerSuggestionItems}
-          highlightedIndex={composerSuggestionIndex}
-          navigationMode={composerSuggestionNavigationMode}
-          containerRef={composerSuggestionMenuRef}
-          onPointerHighlight={(index) => {
-            setComposerSuggestionNavigationMode('pointer');
-            setComposerSuggestionIndex(index);
-          }}
-          onPick={insertComposerToken}
-          loading={slashCatalogLoading}
-          placement="below"
-        />
-      )}
-
       {showWorkContextRow ? (
+        <div className="chat-work-context-wrapper" data-testid="chat-panel-work-context-wrapper">
+          {showSlashSuggestionBelow && composerSuggestion && (
+            <ComposerSuggestionMenu
+              suggestion={composerSuggestion}
+              items={composerSuggestionItems}
+              highlightedIndex={composerSuggestionIndex}
+              navigationMode={composerSuggestionNavigationMode}
+              containerRef={composerSuggestionMenuRef}
+              onPointerHighlight={(index) => {
+                setComposerSuggestionNavigationMode('pointer');
+                setComposerSuggestionIndex(index);
+              }}
+              onPick={insertComposerToken}
+              loading={slashCatalogLoading}
+              placement="below"
+            />
+          )}
         <div ref={workMenuRef} className="chat-work-context-row" data-testid="chat-panel-work-context-row">
           <div className={clsx('chat-work-select', workMenuOpen === 'project' && 'chat-work-select--open')} data-testid="chat-panel-work-select">
             <button
@@ -3595,6 +3686,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
             </div>
           ) : null}
         </div>
+        </div>
       ) : null}
 
       {workDialogOpen ? (
@@ -3669,6 +3761,147 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
           </form>
         </div>
       ) : null}
+      {swarmflowConfigPanelOpen && swarmflowConfigAnchor && activeSessionId && swarmflowActive && (() => {
+        // 方向自适应：齿轮下方空间不足时向上展开，避免卡片被视口底部截断
+        const panelHeight = 180;
+        const spaceBelow = window.innerHeight - swarmflowConfigAnchor.bottom;
+        const openUpward = spaceBelow < panelHeight + 16;
+        const panelStyle: CSSProperties = {
+          position: 'fixed',
+          ...(openUpward
+            ? { bottom: window.innerHeight - swarmflowConfigAnchor.top + 8 }
+            : { top: swarmflowConfigAnchor.top }),
+          left: swarmflowConfigAnchor.right + 8,
+          zIndex: 9999,
+        };
+        return createPortal(
+        <div
+          ref={swarmflowConfigPanelRef}
+          className="chat-swarmflow-config-panel"
+          data-testid="chat-panel-swarmflow-config-panel"
+          style={panelStyle}
+          onClick={(e) => e.stopPropagation()}
+        >
+          <div className="chat-swarmflow-config-panel__header">
+            <span className="chat-swarmflow-config-panel__title">{t('swarmflow.configTitle')}</span>
+            <button
+              type="button"
+              onClick={() => setSwarmflowConfigPanelOpen(false)}
+              className="chat-swarmflow-config-panel__close"
+              aria-label={t('common.close')}
+              data-testid="chat-panel-swarmflow-config-close"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          </div>
+          <div className="chat-swarmflow-config-panel__field">
+            <label className="chat-swarmflow-config-panel__label">{t('swarmflow.budgetPanelHint')}</label>
+              {(() => {
+                // 从 store 的 swarmflowBudget（实际 token 数）反推输入框值 + 单位
+                const budgetVal = swarmflowBudget;
+                const isUnlimited = budgetVal == null;
+                let inputValue = '';
+                let inputUnit: 'token' | 'K' | 'M' = 'K';
+                if (!isUnlimited && budgetVal > 0) {
+                  if (budgetVal >= 1_000_000 && budgetVal % 1_000_000 === 0) {
+                    inputValue = String(budgetVal / 1_000_000);
+                    inputUnit = 'M';
+                  } else if (budgetVal >= 1000 && budgetVal % 1000 === 0) {
+                    inputValue = String(budgetVal / 1000);
+                    inputUnit = 'K';
+                  } else {
+                    inputValue = String(budgetVal);
+                    inputUnit = 'token';
+                  }
+                }
+                const computeBudget = (val: string, unit: 'token' | 'K' | 'M') => {
+                  if (!val.trim()) return null;
+                  const n = Number(val.trim());
+                  // token 是最小计费单位,后端 int() 截断浮点会丢精度,
+                  // 故前端只接受正整数;浮点 / 非数字 / ≤0 一律视作无效。
+                  if (!Number.isInteger(n) || n <= 0) return null;
+                  const multiplier = unit === 'M' ? 1_000_000 : unit === 'K' ? 1000 : 1;
+                  return n * multiplier;
+                };
+                return (
+                  <>
+                    <div className="chat-swarmflow-config-panel__budget-row">
+                      <Input
+                        type="number"
+                        step={1}
+                        min={1}
+                        value={inputValue}
+                        placeholder={isUnlimited ? '' : t('swarmflow.budgetPlaceholder')}
+                        readOnly={swarmflowToggleDisabled}
+                        onChange={(v) => {
+                          if (swarmflowToggleDisabled) return;
+                          const unit = inputUnit;
+                          const actual = computeBudget(v, unit);
+                          // 输入有效数字→设置上限（自动取消"无限制"）；
+                          // 输入空/非数字→回退无限制。
+                          useSessionStore.getState().setSwarmflowActive(
+                            activeSessionId, true, actual,
+                          );
+                        }}
+                      />
+                      <Select
+                        value={inputUnit}
+                        disabled={swarmflowToggleDisabled}
+                        options={[
+                          { value: 'token', label: 'token' },
+                          { value: 'K', label: 'K (×1,000)' },
+                          { value: 'M', label: 'M (×1,000,000)' },
+                        ]}
+                        onChange={(val) => {
+                          if (swarmflowToggleDisabled) return;
+                          const unit = val as 'token' | 'K' | 'M';
+                          const actual = computeBudget(inputValue || '500', unit);
+                          useSessionStore.getState().setSwarmflowActive(
+                            activeSessionId, true, actual,
+                          );
+                        }}
+                      />
+                    </div>
+                    <label className="chat-swarmflow-config-panel__unlimited-row">
+                      <input
+                        type="checkbox"
+                        checked={isUnlimited}
+                        disabled={swarmflowToggleDisabled}
+                        onChange={(e) => {
+                          if (swarmflowToggleDisabled) return;
+                          if (e.target.checked) {
+                            // 勾选"无限制"→ budget=null，数字自动清空（反推时 inputValue=''）
+                            useSessionStore.getState().setSwarmflowActive(
+                              activeSessionId, true, null,
+                            );
+                          } else {
+                            // 取消勾选→给默认值 500K
+                            useSessionStore.getState().setSwarmflowActive(
+                              activeSessionId, true, 500000,
+                            );
+                          }
+                        }}
+                      />
+                      <span className="text-xs text-text-muted">{t('swarmflow.budgetUnlimited')}</span>
+                    </label>
+                    {!isUnlimited && (() => {
+                      const actual = computeBudget(inputValue, inputUnit);
+                      return actual != null ? (
+                        <div className="chat-swarmflow-config-panel__actual-hint">
+                          {t('swarmflow.budgetActualHint', { count: actual.toLocaleString() })}
+                        </div>
+                      ) : null;
+                    })()}
+                  </>
+                );
+              })()}
+              {swarmflowToggleDisabled && (
+                <span className="chat-swarmflow-config-panel__readonly-hint">{t('swarmflow.configReadonlyHint')}</span>
+              )}
+            </div>
+        </div>,
+        document.body,
+      );})()}
         </div>
       </div>
     </>
@@ -3885,173 +4118,6 @@ function ComposerSuggestionMenu({
           );
         })}
       </div>
-    </div>
-  );
-}
-
-function ModelSelector({
-  disabled = false,
-}: {
-  disabled?: boolean;
-}) {
-  const chatAvailableModels = useSessionStore((s) => s.chatAvailableModels);
-  const activeSessionId = useChatStore((s) => s.activeSessionId);
-  const selectedModelName = useSessionStore((s) => s.runtimes[activeSessionId ?? '']?.selectedModelName ?? null);
-  const defaultModelName = useSessionStore((s) => s.defaultModelName);
-  const setSelectedModelName = useSessionStore((s) => s.setSelectedModelName);
-  const { t } = useTranslation();
-
-  const [isOpen, setIsOpen] = useState(false);
-  const [menuDirection, setMenuDirection] = useState<'up' | 'down'>('up');
-  const [menuAnchor, setMenuAnchor] = useState<DOMRect | null>(null);
-  const menuRef = useRef<HTMLDivElement>(null);
-  const menuPortalRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    if (!isOpen) return;
-    const handler = (e: PointerEvent) => {
-      if (
-        !menuRef.current?.contains(e.target as Node) &&
-        !menuPortalRef.current?.contains(e.target as Node)
-      ) setIsOpen(false);
-    };
-    document.addEventListener('pointerdown', handler);
-    return () => document.removeEventListener('pointerdown', handler);
-  }, [isOpen]);
-
-  if (chatAvailableModels.length === 0) return null;
-
-  // 单 Agent 与集群（team）模式共用同一套解析，展示会话自选模型（含 metadata 恢复值），
-  // 失配时回退默认模型。与实际发给后端的 model_name（sessionStore.getEffectiveModelName）
-  // 复用同一套解析逻辑，避免模型改名/改别名后 UI 显示值和实际请求参数走出两份不同的
-  // 兜底结果（bug003）。
-  const selectedModel =
-    resolveChatModelSelection(chatAvailableModels, selectedModelName, defaultModelName) ??
-    chatAvailableModels[0];
-
-  const handleSelect = (modelKey: string) => {
-    setIsOpen(false);
-    if (activeSessionId) setSelectedModelName(activeSessionId, modelKey);
-  };
-
-  const handleAddModel = () => {
-    setIsOpen(false);
-    requestSettingsModule('models');
-  };
-
-  return (
-    <div
-      ref={menuRef}
-      className={clsx('chat-mode-select', isOpen && 'chat-mode-select--open')}
-      data-testid="chat-panel-model-selector-root"
-    >
-      <button
-        type="button"
-        className="chat-mode-select__trigger"
-        title={t('chat.modelSelector.tooltip')}
-        onClick={() => {
-          if (disabled) return;
-          if (!isOpen && menuRef.current) {
-            const rect = menuRef.current.getBoundingClientRect();
-            setMenuDirection(window.innerHeight - rect.bottom >= 200 ? 'down' : 'up');
-            setMenuAnchor(rect);
-          }
-          setIsOpen((v) => !v);
-        }}
-        style={disabled ? { cursor: 'default' } : undefined}
-        aria-disabled={disabled}
-        aria-haspopup="menu"
-        aria-expanded={isOpen}
-        data-testid="chat-panel-model-selector-trigger"
-      >
-        <span className="chat-mode-select__value">
-          <span className="chat-mode-select__icon" aria-hidden="true">
-            <ModelProviderIcon model={selectedModel} />
-          </span>
-          <span className="chat-mode-select__label">
-            {selectedModel.alias || selectedModel.model_name}
-          </span>
-        </span>
-        {!disabled && (
-          <svg className="chat-mode-select__chevron" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth={1.8} aria-hidden="true">
-            <path strokeLinecap="round" strokeLinejoin="round" d="M6 8l4 4 4-4" />
-          </svg>
-        )}
-      </button>
-
-      {isOpen && menuAnchor && createPortal(
-        <div
-          ref={menuPortalRef}
-          className="chat-mode-select__menu model-select__menu"
-          role="menu"
-          data-testid="chat-panel-model-selector-menu"
-          style={menuDirection === 'up'
-            ? { position: 'fixed', bottom: window.innerHeight - menuAnchor.top + 10, left: menuAnchor.left, zIndex: 9999 }
-            : { position: 'fixed', top: menuAnchor.bottom + 10, left: menuAnchor.left, zIndex: 9999 }
-          }
-        >
-          {(() => {
-            const isFree = (m: ModelEntry) => m.is_free === true;
-            const freeModels = chatAvailableModels.filter(isFree);
-            const configuredModels = chatAvailableModels.filter((m) => !isFree(m));
-            const renderGroup = (label: string, models: ModelEntry[]) =>
-              models.length === 0 ? null : (
-                <>
-                  <div className="model-select__section-header" data-testid="chat-panel-model-selector-section-header" data-variant={label === t('chat.modelSelector.free') ? 'free' : 'configured'}>{label}</div>
-                  {models.map((m, idx) => {
-                    const key = m.alias || m.model_name;
-                    const isActive = key === (selectedModel.alias || selectedModel.model_name);
-                    return (
-                      <button
-                        type="button"
-                        key={`${m.model_name}-${idx}`}
-                        onClick={() => handleSelect(key)}
-                        className={clsx(
-                          'chat-mode-select__option',
-                          isActive && 'chat-mode-select__option--active',
-                        )}
-                        role="menuitemradio"
-                        aria-checked={isActive}
-                        data-testid="chat-panel-model-selector-option"
-                        data-variant={key}
-                      >
-                        <span className="chat-mode-select__option-main">
-                          <span className="chat-mode-select__icon" aria-hidden="true">
-                            <ModelProviderIcon model={m} />
-                          </span>
-                          <span className="chat-mode-select__label">{key}</span>
-                        </span>
-                        {isActive && (
-                          <svg className="chat-mode-select__check" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth={2} aria-hidden="true">
-                            <path strokeLinecap="round" strokeLinejoin="round" d="M5 10.5l3 3L15 6.5" />
-                          </svg>
-                        )}
-                      </button>
-                    );
-                  })}
-                </>
-              );
-            return (
-              <>
-                {renderGroup(t('chat.modelSelector.free'), freeModels)}
-                {renderGroup(t('chat.modelSelector.configured'), configuredModels)}
-              </>
-            );
-          })()}
-          <button
-            type="button"
-            className="model-select__add-btn"
-            data-testid="chat-panel-model-selector-add"
-            onClick={handleAddModel}
-          >
-            <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth={2} width={14} height={14} aria-hidden="true">
-              <path strokeLinecap="round" strokeLinejoin="round" d="M10 4v12M4 10h12" />
-            </svg>
-            {t('chat.modelSelector.addModel')}
-          </button>
-        </div>,
-        document.body
-      )}
     </div>
   );
 }

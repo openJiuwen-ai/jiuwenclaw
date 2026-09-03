@@ -8,18 +8,21 @@ the user's Documents folder instead:
         work/
         outputs/
 
-The task-to-directory registry keeps a session in the same directory when a
-conversation is resumed on a later day or after its title changes.  New task
-directories use ASCII-only ``chat-<n>`` names; the original query/title is
-stored in ``metadata.json`` instead of being included in the path.  Registry
-metadata is kept in JiuwenSwarm's private agent workspace rather than beside
-user-facing task directories.
+The date directory is based on the session's creation date, so a conversation
+that first sends a projectless request on a later day still starts under the
+session's original date.  The task-to-directory registry keeps a session in
+the same directory when it is resumed on a later day or after its title
+changes.  New task directories use ASCII-only ``chat-<n>`` names; the original
+query/title is stored in ``metadata.json`` instead of being included in the
+path.  Registry metadata is kept in JiuwenSwarm's private agent workspace
+rather than beside user-facing task directories.
 """
 
 from __future__ import annotations
 
 import datetime as _datetime
 import json
+import math
 import os
 import re
 import sys
@@ -138,12 +141,19 @@ def get_projectless_task_workspace(
     session_id: str | None = None,
     task_name: str | None = None,
 ) -> ProjectlessTaskWorkspace:
-    """Create or reuse a stable workspace for a projectless task session."""
+    """Create or reuse a stable workspace for a projectless task session.
+
+    The date directory is anchored to the session's creation time, rather than
+    the time of the first request that needs a projectless workspace.  This is
+    important when ``session.create`` and the first ``chat.send`` happen on
+    different calendar days.  Legacy sessions without usable metadata fall
+    back to the current local date.
+    """
     tasks_dir = get_projectless_tasks_dir()
     safe_session = _slugify(session_id, fallback="default")
     registered_root = _read_registered_root(tasks_dir, safe_session)
     if registered_root is None:
-        task_date = _datetime.datetime.now().astimezone().strftime("%Y-%m-%d")
+        task_date = _get_session_task_date(session_id) or _local_today()
         registered_root = _allocate_task_root(
             tasks_dir,
             task_date,
@@ -172,6 +182,97 @@ def get_projectless_task_workspace(
         work_dir=work_dir,
         outputs_dir=outputs_dir,
     )
+
+
+def _local_today() -> str:
+    """Return today's date in the host's local timezone."""
+    return _datetime.datetime.now().astimezone().strftime("%Y-%m-%d")
+
+
+def _get_session_task_date(session_id: str | None) -> str | None:
+    """Read a session's immutable creation date for task-directory binding.
+
+    ``session_metadata`` stores ``created_at`` as a UTC Unix timestamp.  The
+    task directory is user-facing, so the timestamp is converted to the local
+    timezone before deriving ``YYYY-MM-DD``.  The filesystem creation time is
+    used only as a compatibility fallback for old sessions that have no
+    readable ``metadata.json``.
+    """
+    raw_session = str(session_id or "").strip()
+    session_path = Path(raw_session)
+    if (
+        not raw_session
+        or raw_session in {".", ".."}
+        or "/" in raw_session
+        or "\\" in raw_session
+        or session_path.is_absolute()
+        or session_path.name != raw_session
+    ):
+        return None
+
+    try:
+        # Keep this dependency lazy: projectless workspace resolution is used
+        # during bootstrap, while the session metadata module imports the
+        # broader runtime stack.
+        from jiuwenswarm.common.utils import get_agent_sessions_dir
+
+        session_dir = get_agent_sessions_dir() / raw_session
+    except (OSError, TypeError, ValueError):
+        return None
+
+    timestamp = None
+    try:
+        metadata_path = session_dir / _METADATA_FILENAME
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        created_at = (
+            metadata.get("created_at") if isinstance(metadata, dict) else None
+        )
+        timestamp = _coerce_timestamp(created_at)
+    except (OSError, TypeError, ValueError, OverflowError):
+        pass
+
+    if timestamp is None:
+        try:
+            timestamp = float(session_dir.stat().st_ctime)
+        except (OSError, ValueError, OverflowError):
+            return None
+
+    try:
+        local_timezone = _datetime.datetime.now().astimezone().tzinfo
+        return _datetime.datetime.fromtimestamp(
+            timestamp,
+            tz=local_timezone,
+        ).strftime("%Y-%m-%d")
+    except (OSError, OverflowError, ValueError):
+        return None
+
+
+def _coerce_timestamp(value: object) -> float | None:
+    """Convert numeric or ISO-8601 metadata timestamps to Unix seconds."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        timestamp = float(value)
+    elif isinstance(value, str) and value.strip():
+        raw_value = value.strip()
+        try:
+            timestamp = float(raw_value)
+        except ValueError:
+            try:
+                parsed = _datetime.datetime.fromisoformat(
+                    raw_value.replace("Z", "+00:00")
+                )
+            except ValueError:
+                return None
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(
+                    tzinfo=_datetime.datetime.now().astimezone().tzinfo
+                )
+            timestamp = parsed.timestamp()
+    else:
+        return None
+
+    return timestamp if timestamp > 0 and math.isfinite(timestamp) else None
 
 
 def _slugify(value: str | None, *, fallback: str) -> str:

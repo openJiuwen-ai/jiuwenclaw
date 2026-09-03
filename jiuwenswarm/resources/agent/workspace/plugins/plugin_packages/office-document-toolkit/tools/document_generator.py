@@ -2,7 +2,11 @@ from pathlib import Path
 
 from openjiuwen.core.foundation.tool import Tool, ToolCard
 
-from pdf_font_utils import select_pdf_font
+from text_utils import (
+    CJK_PDF_TO_WORD_NOTE,
+    collect_structured_content_text,
+    contains_cjk,
+)
 
 
 class DocumentGenerator(Tool):
@@ -70,6 +74,13 @@ class DocumentGenerator(Tool):
             "excel": ".xlsx",
             "ppt": ".pptx",
         }
+
+        requested_format = fmt
+        format_note = None
+        if fmt == "pdf" and contains_cjk(collect_structured_content_text(content)):
+            fmt = "word"
+            format_note = CJK_PDF_TO_WORD_NOTE
+
         ext = ext_map.get(fmt, f".{fmt}")
         output_path = base_dir / f"{filename}{ext}"
 
@@ -91,7 +102,7 @@ class DocumentGenerator(Tool):
                     "error": "文件生成失败，输出文件为空或不存在",
                 }
 
-            return {
+            result = {
                 "success": True,
                 "format": fmt,
                 "path": str(output_path),
@@ -100,6 +111,10 @@ class DocumentGenerator(Tool):
                 "size_bytes": output_path.stat().st_size,
                 "exists": True,
             }
+            if format_note:
+                result["requested_format"] = requested_format
+                result["note"] = format_note
+            return result
         except ImportError as e:
             return {
                 "success": False,
@@ -119,15 +134,13 @@ class DocumentGenerator(Tool):
         pdf.add_page()
         pdf.set_auto_page_break(auto=True, margin=15)
 
-        font_name = select_pdf_font(pdf)
-
         title = content.get("title", "")
         if title:
-            pdf.set_font(font_name, "B", 16)
+            pdf.set_font("Helvetica", "B", 16)
             pdf.multi_cell(0, 10, title)
             pdf.ln(5)
 
-        pdf.set_font(font_name, "", 11)
+        pdf.set_font("Helvetica", "", 11)
         for para in content.get("paragraphs", []):
             text = para if isinstance(para, str) else para.get("text", "")
             if text:

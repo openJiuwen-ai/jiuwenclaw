@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import json
 import subprocess
 import sys
@@ -166,6 +167,83 @@ def test_official_build_wrappers_auto_sync_before_uv(
     assert "--sync" in script
     assert script.index("--sync") < script.index(sync_command)
     assert "scripts/sync_version.py" not in script
+
+
+def test_desktop_release_builds_exclude_optional_cli_dependencies() -> None:
+    for relative_path in (
+        "scripts/build-macos.sh",
+        "scripts/build-exe.ps1",
+        "scripts/build-exe.bat",
+    ):
+        script = (PROJECT_ROOT / relative_path).read_text(encoding="utf-8")
+        sync_commands = [
+            line.strip().removeprefix("call ")
+            for line in script.splitlines()
+            if line.strip().removeprefix("call ").startswith("uv sync")
+        ]
+
+        assert sync_commands == ["uv sync --extra dev"]
+        assert "--extra claude" not in script
+        assert "--extra codex" not in script
+
+    spec = (PROJECT_ROOT / "scripts/jiuwenswarm.spec").read_text(encoding="utf-8")
+    # Optional CLI runtimes are not installed by the desktop build wrappers.
+    # Keep them in PyInstaller's excludes as a second guard against bundling
+    # packages that happen to exist in the developer's environment.
+    spec_tree = ast.parse(spec)
+    optional_cli_modules = {
+        "claude_agent_sdk",
+        "openai_codex",
+        "codex_cli_bin",
+    }
+
+    excludes_assignment = next(
+        (
+            node
+            for node in spec_tree.body
+            if isinstance(node, ast.Assign)
+            and any(
+                isinstance(target, ast.Name) and target.id == "excludes"
+                for target in node.targets
+            )
+        ),
+        None,
+    )
+    assert excludes_assignment is not None, (
+        "PyInstaller spec must define a top-level excludes list"
+    )
+    assert isinstance(excludes_assignment.value, ast.List)
+    excluded_modules = {
+        element.value
+        for element in excludes_assignment.value.elts
+        if isinstance(element, ast.Constant) and isinstance(element.value, str)
+    }
+    assert optional_cli_modules <= excluded_modules
+
+    analyses = [
+        node
+        for node in ast.walk(spec_tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "Analysis"
+    ]
+    assert analyses
+    for analysis in analyses:
+        excludes_keyword = next(
+            (keyword for keyword in analysis.keywords if keyword.arg == "excludes"),
+            None,
+        )
+        assert excludes_keyword is not None
+        assert isinstance(excludes_keyword.value, ast.Name)
+        assert excludes_keyword.value.id == "excludes"
+
+
+def test_windows_installer_uses_workswarm_upgrade_identity() -> None:
+    installer = (PROJECT_ROOT / "scripts/installer.iss").read_text(encoding="utf-8")
+
+    assert installer.count("AppId=") == 1
+    assert "AppId={{6DC96977-C194-44FE-812D-D4F0B576BD905}" in installer
+    assert "B8F3A2D1-7E4C-4A9B-8D6F-1C2E3F4A5B6C" not in installer
 
 
 def test_packaging_consumers_do_not_duplicate_canonical_version() -> None:

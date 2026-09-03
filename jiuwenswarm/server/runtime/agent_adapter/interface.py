@@ -69,12 +69,12 @@ from jiuwenswarm.extensions.hook_event import AgentServerHookEvents
 from jiuwenswarm.extensions.hooks_context import MemoryHookContext
 from jiuwenswarm.common.schema.message import EventType, ReqMethod
 from jiuwenswarm.common.utils import (
+    apply_free_search_runtime_defaults,
     configure_skill_library,
     get_agent_home_dir,
     get_agent_workspace_dir,
     get_env_file,
     migrate_team_skill_views,
-    reset_free_search_runtime_flags,
 )
 from jiuwenswarm.server.runtime.a2ui.integration import (
     TeamA2UIBlockBuffer,
@@ -320,6 +320,82 @@ def _history_user_extra(params: Any) -> dict[str, Any] | None:
     return _with_heartbeat_history_metadata(extra, params)
 
 
+def _web_agent_template_name(params: Any, channel_id: Any) -> str | None:
+    """Return the explicitly selected Agent id for a Web single-Agent turn."""
+    if str(channel_id or "").strip().lower() != "web":
+        return None
+    if not isinstance(params, dict):
+        return None
+    mode = str(params.get("mode") or "").strip().lower()
+    if mode == "auto_harness" or is_team_params(params):
+        return None
+    value = params.get("agent_template_name")
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip()
+    return normalized or None
+
+
+def _with_web_agent_template_metadata(
+    extra: dict[str, Any] | None,
+    params: Any,
+    channel_id: Any,
+    *,
+    event_type: str | None,
+    payload: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Attach the selected Agent id without changing non-Web event semantics."""
+    result = dict(extra or {})
+    if event_type not in {"chat.delta", "chat.final", "chat.reasoning", "chat.tool_call"}:
+        return result
+    if isinstance(payload, dict) and (
+        payload.get("slash_command")
+        or payload.get("source") in {"proactive_recommendation", "session_task_summary"}
+    ):
+        return result
+    if isinstance(params, dict) and (
+        params.get("slash_command")
+        or params.get("source") in {"proactive_recommendation", "session_task_summary"}
+    ):
+        return result
+    for candidate in (payload, params):
+        if not isinstance(candidate, dict):
+            continue
+        automation = candidate.get("automation")
+        if isinstance(automation, dict) and automation.get("kind") == "heartbeat":
+            return result
+    agent_template_name = _web_agent_template_name(params, channel_id)
+    if agent_template_name:
+        result["agent_template_name"] = agent_template_name
+    return result
+
+
+def _with_web_agent_template_payload(
+    payload: dict[str, Any] | None,
+    params: Any,
+    channel_id: Any,
+    *,
+    event_type: str | None = None,
+) -> dict[str, Any] | None:
+    """Copy a Web assistant payload with its request-scoped Agent identity."""
+    if not isinstance(payload, dict):
+        return payload
+    resolved_event_type = event_type or payload.get("event_type")
+    if not isinstance(resolved_event_type, str):
+        return payload
+    metadata = _with_web_agent_template_metadata(
+        None,
+        params,
+        channel_id,
+        event_type=resolved_event_type,
+        payload=payload,
+    )
+    agent_template_name = metadata.get("agent_template_name")
+    if not agent_template_name:
+        return payload
+    return {**payload, "agent_template_name": agent_template_name}
+
+
 def _compact_stats_from_payload(payload: dict[str, Any]) -> dict[str, Any]:
     stats: dict[str, Any] = {}
     for key in ("status", "phase", "processor", "model", "before", "after", "saved", "duration_ms"):
@@ -532,7 +608,7 @@ def _split_a2ui_stream_content(previous_probe: str, content: str) -> tuple[str, 
 
 
 load_dotenv_runtime(dotenv_path=get_env_file(), override=True)
-reset_free_search_runtime_flags()
+apply_free_search_runtime_defaults()
 
 
 def _trigger_auto_memory_extraction(
@@ -693,6 +769,12 @@ _PLUGIN_ROUTES: dict[ReqMethod, str] = {
 _PACKAGE_ROUTES: dict[ReqMethod, str] = {
     ReqMethod.AGENT_GROUPS_LIST: "list_agent_groups",
     ReqMethod.AGENT_GROUPS_SHOW: "show_agent_group",
+    ReqMethod.AGENT_GROUPS_FILE_LIST: "list_agent_group_files",
+    ReqMethod.AGENT_GROUPS_FILE_READ: "read_agent_group_file",
+    ReqMethod.AGENT_GROUPS_CREATE: "create_agent_group",
+    ReqMethod.AGENT_GROUPS_IMPORT_LOCAL: "import_agent_group",
+    ReqMethod.AGENT_GROUPS_INSTALL: "install_agent_group",
+    ReqMethod.AGENT_GROUPS_UNINSTALL: "uninstall_agent_group",
     ReqMethod.AGENT_TEMPLATES_LIST: "list_agent_templates",
     ReqMethod.AGENT_TEMPLATES_SHOW: "show_agent_template",
     ReqMethod.AGENT_TEMPLATES_FILE_LIST: "list_agent_template_files",
@@ -1038,6 +1120,7 @@ class JiuWenSwarm:
             config_base: dict[str, Any] | None = None,
             env_overrides: dict[str, Any] | None = None,
             target_session_id: str | None = None,
+            reload_scopes: set[str] | None = None,
     ) -> None:
         """从配置重新加载.
 
@@ -1045,6 +1128,7 @@ class JiuWenSwarm:
             config_base: 可选的完整配置快照；传入时优先使用它而不是读取本地 config.yaml。
             env_overrides: 可选的环境变量增量；仅覆盖请求中出现的 key。
             target_session_id: 可选的目标 session id；传入时限制 session adapter 级联热更新范围。
+            reload_scopes: 可选的精确配置作用域，用于定向热更新。
         """
         adapter = self._ensure_adapter()
         if hasattr(adapter, "try_stop_dreaming"):
@@ -1053,6 +1137,7 @@ class JiuWenSwarm:
             config_base,
             env_overrides,
             target_session_id=target_session_id,
+            reload_scopes=reload_scopes,
         )
         logger.info("[JiuWenSwarm] Agent config reloaded: sdk=%s", self._sdk_name)
         if hasattr(adapter, "try_start_dreaming"):
@@ -1968,6 +2053,24 @@ class JiuWenSwarm:
                 if group is None:
                     raise ValueError(f"agent_group not found: {name!r}")
                 payload = {"group": group}
+            elif method == ReqMethod.AGENT_GROUPS_FILE_LIST:
+                payload = {
+                    "tree": package_manager.list_agent_group_files(str(name or ""))
+                }
+            elif method == ReqMethod.AGENT_GROUPS_FILE_READ:
+                payload = package_manager.read_agent_group_file(
+                    str(name or ""), str(params.get("path", ""))
+                )
+            elif method == ReqMethod.AGENT_GROUPS_CREATE:
+                payload = package_manager.create_agent_group(params)
+            elif method == ReqMethod.AGENT_GROUPS_IMPORT_LOCAL:
+                payload = package_manager.import_agent_group(params)
+            elif method == ReqMethod.AGENT_GROUPS_INSTALL:
+                package_manager.install_agent_group(params)
+                payload = {}
+            elif method == ReqMethod.AGENT_GROUPS_UNINSTALL:
+                package_manager.uninstall_agent_group(params)
+                payload = {}
             elif method == ReqMethod.AGENT_TEMPLATES_LIST:
                 payload = {
                     "templates": package_manager.list_agent_templates(params)
@@ -2496,6 +2599,12 @@ class JiuWenSwarm:
                 raise
             if isinstance(content, str):
                 result.payload["content"] = content_str
+            result.payload = _with_web_agent_template_payload(
+                result.payload,
+                request.params,
+                request.channel_id,
+                event_type="chat.final",
+            )
             append_history_record(
                 session_id=session_id,
                 request_id=request.request_id,
@@ -2504,7 +2613,16 @@ class JiuWenSwarm:
                 event_type="chat.final",
                 content=content_str,
                 timestamp=time.time(),
-                extra=_with_heartbeat_history_metadata(None, request.params),
+                extra=_with_heartbeat_history_metadata(
+                    _with_web_agent_template_metadata(
+                        None,
+                        request.params,
+                        request.channel_id,
+                        event_type="chat.final",
+                        payload=result.payload,
+                    ),
+                    request.params,
+                ),
                 mode=request.params.get("mode", "unknown"),
             )
             _schedule_feedback_once("success")
@@ -2868,10 +2986,15 @@ class JiuWenSwarm:
                 event_type="chat.reasoning",
                 content="",
                 timestamp=(started_at or now_ms) / 1000,
-                extra={
-                    "reasoning_content": reasoning_text,
-                    "reasoning_updated_at": updated_at or started_at or now_ms,
-                },
+                extra=_with_web_agent_template_metadata(
+                    {
+                        "reasoning_content": reasoning_text,
+                        "reasoning_updated_at": updated_at or started_at or now_ms,
+                    },
+                    request.params,
+                    cid,
+                    event_type="chat.reasoning",
+                ),
                 mode=request.params.get("mode", "unknown"),
             )
 
@@ -2907,7 +3030,13 @@ class JiuWenSwarm:
             if not isinstance(extra_fields, dict):
                 extra_fields = {}
             extra_fields = _with_heartbeat_history_metadata(
-                extra_fields, request.params
+                _with_web_agent_template_metadata(
+                    extra_fields,
+                    request.params,
+                    cid,
+                    event_type="chat.final",
+                ),
+                request.params,
             ) or {}
             record_timestamp = _resolve_final_record_timestamp(
                 event_type="chat.final",
@@ -3203,13 +3332,27 @@ class JiuWenSwarm:
                             data = _normalize_nested_stream_chunk(data)
                             if data is None:
                                 continue
+                        if isinstance(data.payload, dict):
+                            payload_event_type = data.payload.get("event_type")
+                            enriched_payload = _with_web_agent_template_payload(
+                                data.payload,
+                                request.params,
+                                cid,
+                                event_type=(
+                                    payload_event_type
+                                    if isinstance(payload_event_type, str)
+                                    else None
+                                ),
+                            )
+                            if enriched_payload is not data.payload:
+                                data = replace(data, payload=enriched_payload)
                         if isinstance(data.payload, dict) and isinstance(data.payload.get("event_type"), str):
                             et = str(data.payload.get("event_type"))
                             if et == "chat.error":
                                 completion_status = "error"
                                 abort_terminal_status = "error"
                             _note_goal_stream_payload(et, data.payload)
-                            should_record = et.startswith("chat.")
+                            should_record = et.startswith("chat.") or et == "context.usage"
                             final_segment_started_at: float | None = None
                             if not should_record and et == EventType.TEAM_MESSAGE.value:
                                 should_record = True
@@ -3351,7 +3494,14 @@ class JiuWenSwarm:
                                 if not isinstance(extra_fields, dict):
                                     extra_fields = {}
                                 extra_fields = _with_heartbeat_history_metadata(
-                                    extra_fields, request.params
+                                    _with_web_agent_template_metadata(
+                                        extra_fields,
+                                        request.params,
+                                        cid,
+                                        event_type=et,
+                                        payload=payload_dict,
+                                    ),
+                                    request.params,
                                 ) or {}
                                 record_timestamp = _resolve_final_record_timestamp(
                                     event_type=et,
@@ -3382,12 +3532,17 @@ class JiuWenSwarm:
                                     final_answer_chunks.clear()
                         yield data
                     elif isinstance(data, dict) and isinstance(data.get("event_type"), str):
+                        data = _with_web_agent_template_payload(
+                            data,
+                            request.params,
+                            cid,
+                        ) or data
                         et = str(data.get("event_type"))
                         if et == "chat.error":
                             completion_status = "error"
                             abort_terminal_status = "error"
                         _note_goal_stream_payload(et, data)
-                        should_record = et.startswith("chat.")
+                        should_record = et.startswith("chat.") or et == "context.usage"
                         final_segment_started_at = None
                         if not should_record and et == EventType.TEAM_MESSAGE.value:
                             should_record = True
@@ -3524,7 +3679,14 @@ class JiuWenSwarm:
                             if not isinstance(extra_fields, dict):
                                 extra_fields = {}
                             extra_fields = _with_heartbeat_history_metadata(
-                                extra_fields, request.params
+                                _with_web_agent_template_metadata(
+                                    extra_fields,
+                                    request.params,
+                                    cid,
+                                    event_type=et,
+                                    payload=data,
+                                ),
+                                request.params,
                             ) or {}
                             record_timestamp = _resolve_final_record_timestamp(
                                 event_type=et,
@@ -3662,7 +3824,12 @@ class JiuWenSwarm:
                 content=finalized_assistant_message,
                 timestamp=time.time(),
                 extra=_with_heartbeat_history_metadata(
-                    _attach_reasoning_content(history_metadata),
+                    _with_web_agent_template_metadata(
+                        _attach_reasoning_content(history_metadata),
+                        request.params,
+                        cid,
+                        event_type="chat.final",
+                    ),
                     request.params,
                 ),
                 mode=request.params.get("mode", "unknown"),
@@ -3670,12 +3837,20 @@ class JiuWenSwarm:
             final_answer_content = finalized_assistant_message
             final_answer_chunks = []
             _schedule_feedback_once(completion_status)
-            yield _make_a2ui_final_chunk(
+            final_chunk = _make_a2ui_final_chunk(
                 request_id=rid,
                 channel_id=cid,
                 session_id=session_id,
                 content=finalized_assistant_message,
             )
+            enriched_payload = _with_web_agent_template_payload(
+                final_chunk.payload,
+                request.params,
+                cid,
+            )
+            if enriched_payload is not final_chunk.payload:
+                final_chunk = replace(final_chunk, payload=enriched_payload)
+            yield final_chunk
 
         _schedule_feedback_once(completion_status)
 

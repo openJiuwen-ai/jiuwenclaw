@@ -39,9 +39,18 @@ Notes on verified endpoints:
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any
+
+from openjiuwen.core.foundation.llm import (
+    get_provider_reasoning_rules,
+    get_reasoning_capability,
+    get_reasoning_capability_catalog,
+)
+
+logger = logging.getLogger(__name__)
 
 
 class PlanKind(str, Enum):
@@ -112,7 +121,7 @@ _PRESETS: list[VendorPreset] = [
         icon_key="qwen",
         models_endpoint="https://dashscope.aliyuncs.com/compatible-mode/v1/models",
         models_needs_key=True,
-        anthropic_base="https://token-plan.cn-beijing.maas.aliyuncs.com/anthropic",
+        anthropic_base="https://token-plan.cn-beijing.maas.aliyuncs.com/apps/anthropic",
     ),
     VendorPreset(
         vendor_key="minimax", display_name="MiniMax", plan=PlanKind.TOKEN_PLAN,
@@ -127,15 +136,13 @@ _PRESETS: list[VendorPreset] = [
     ),
     VendorPreset(
         vendor_key="maas", display_name="Maas盘古", plan=PlanKind.TOKEN_PLAN,
-        client_provider="OpenAI",  # 华为云盘古借壳 OpenAI provider;实际走 ModelArts MaaS,默认OpenAI格式
+        client_provider="ModelArts",
         api_base="https://api.modelarts-maas.com/plan/v2",
-        default_model="pangu-large",
-        model_options=("pangu-ultra", "pangu-large", "pangu-small"),
+        endpoint_profile="modelarts",
+        default_model="glm-5.1",
+        model_options=("glm-5.1", "kimi-k2.6", "deepseek-v4-flash"),
         icon_key="pangu",
-        # 已知限制:此 URL 存在(实测 401 而非 404),但 ModelArts MaaS 不接受简单
-        # Bearer,要求华为云 SDK 签名(X-Sdk-Date + V4 签名 Authorization)。当前
-        # fetch_models handler 只发 Bearer,故 maas 拉列表恒 401 → 回退预设。签名支持待补。
-        models_endpoint="https://api.modelarts-maas.com/openai/v1/models",
+        models_endpoint="https://api.modelarts-maas.com/v2/models",
         models_needs_key=True,
         anthropic_base="https://api.modelarts-maas.com/plan/anthropic",
     ),
@@ -159,8 +166,9 @@ _PRESETS: list[VendorPreset] = [
     ),
     VendorPreset(
         vendor_key="mimo", display_name="小米Mimo", plan=PlanKind.TOKEN_PLAN,
-        client_provider="OpenAI",
+        client_provider="MiMo",
         api_base="https://token-plan-cn.xiaomimimo.com/v1",  # 套餐调用走套餐域名(需套餐 key)
+        endpoint_profile="mimo",
         default_model="mimo-v2.5-pro",
         model_options=("mimo-v2.5-pro", "mimo-v2.5"),
         icon_key="mimo",
@@ -261,8 +269,6 @@ _PRESETS: list[VendorPreset] = [
             "deepseek-v4-pro",
             "deepseek-v4-flash",
             "deepseek-v4-flash-latest",
-            "deepseek-v3.2",
-            "deepseek-r1",
         ),
         icon_key="deepseek",
         models_endpoint="https://api.deepseek.com/models",
@@ -274,7 +280,7 @@ _PRESETS: list[VendorPreset] = [
         client_provider="OpenAI",
         api_base="https://api.moonshot.cn/v1",
         default_model="kimi-k3",
-        model_options=("kimi-k3", "kimi-k2.7-code", "kimi-k2.6", "kimi-k2-thinking", "kimi-latest"),
+        model_options=("kimi-k3", "kimi-k2.7-code", "kimi-k2.6", "kimi-k2-thinking"),
         icon_key="kimi",
         models_endpoint="https://api.moonshot.cn/v1/models",
         models_needs_key=True,
@@ -332,16 +338,23 @@ _PRESETS: list[VendorPreset] = [
     ),
     VendorPreset(
         vendor_key="maas", display_name="Maas盘古", plan=PlanKind.CUSTOM_API,
-        client_provider="OpenAI",
-        api_base="https://api.modelarts-maas.com/openai/v1",
-        default_model="pangu-large",
-        model_options=("pangu-ultra", "pangu-large", "pangu-small"),
+        client_provider="ModelArts",
+        api_base="https://api.modelarts-maas.com/v2",
+        endpoint_profile="modelarts",
+        default_model="openpangu-2.0-pro",
+        model_options=(
+            "openpangu-2.0-pro",
+            "openpangu-2.0-flash",
+            "glm-5.2",
+            "glm-5.1",
+            "kimi-k2.6",
+            "deepseek-v4-pro",
+            "deepseek-v4-flash",
+        ),
         icon_key="pangu",
-        # 已知限制:同 Token Plan 的 maas 条目,ModelArts MaaS 需华为云 SDK 签名,
-        # handler 仅发 Bearer 故恒 401 → 回退预设。签名支持待补。
-        models_endpoint="https://api.modelarts-maas.com/openai/v1/models",
+        models_endpoint="https://api.modelarts-maas.com/v2/models",
         models_needs_key=True,
-        anthropic_base="https://api.modelarts-maas.com/anthropic/v1",
+        anthropic_base="https://api.modelarts-maas.com/anthropic",
     ),
     VendorPreset(
         vendor_key="volcengine", display_name="火山引擎", plan=PlanKind.CUSTOM_API,
@@ -376,8 +389,9 @@ _PRESETS: list[VendorPreset] = [
     ),
     VendorPreset(
         vendor_key="mimo", display_name="小米Mimo", plan=PlanKind.CUSTOM_API,
-        client_provider="OpenAI",
+        client_provider="MiMo",
         api_base="https://api.xiaomimimo.com/v1",
+        endpoint_profile="mimo",
         default_model="mimo-v2.5-pro",
         model_options=("mimo-v2.5-pro", "mimo-v2.5"),
         icon_key="mimo",
@@ -423,9 +437,46 @@ def get_all_presets() -> list[VendorPreset]:
     return list(_PRESETS)
 
 
+def _reasoning_capabilities(preset: VendorPreset) -> dict[str, dict[str, Any]]:
+    capabilities: dict[str, dict[str, Any]] = {}
+    for model in preset.model_options:
+        # 逐模型隔离：能力查询是静态表 lookup，正常不会抛，但 vendors.list 是
+        # 前端配置页入口 RPC，不能因单个模型异常导致整个厂商列表挂掉。失败
+        # 时跳过该模型，前端会回落到 reasoning_rules / model_fallbacks。
+        try:
+            protocols = {
+                "openai": get_reasoning_capability(
+                    provider=preset.client_provider,
+                    model=model,
+                    protocol="openai",
+                    api_base=preset.api_base,
+                    endpoint_profile=preset.endpoint_profile,
+                ).to_dict(),
+            }
+            if preset.anthropic_base:
+                protocols["anthropic"] = get_reasoning_capability(
+                    provider=ANTHROPIC_CLIENT_PROVIDER,
+                    model=model,
+                    protocol="anthropic",
+                    api_base=preset.anthropic_base,
+                ).to_dict()
+        except Exception:
+            logger.warning(
+                "skip reasoning capability for vendor=%s model=%s",
+                preset.vendor_key,
+                model,
+                exc_info=True,
+            )
+            continue
+        capabilities[model] = protocols
+    return capabilities
+
+
 def to_frontend_payload() -> dict[str, Any]:
     """Grouped payload for the ``vendors.list`` RPC (plan -> [vendor cards])."""
-    out: dict[str, list[dict[str, Any]]] = {}
+    out: dict[str, Any] = {
+        "reasoning": get_reasoning_capability_catalog(),
+    }
     for plan in PlanKind:
         out[plan.value] = [
             {
@@ -441,6 +492,15 @@ def to_frontend_payload() -> dict[str, Any]:
                 "icon_key": p.icon_key,
                 "models_endpoint": p.models_endpoint,
                 "models_needs_key": p.models_needs_key,
+                "reasoning_capabilities": _reasoning_capabilities(p),
+                # Provider-scoped pattern 规则：给 models_endpoint 拉取到的、
+                # 不在 model_options 精确表里的新模型用，避免前端退到跨厂商
+                # model_fallbacks 时与后端 provider 级校验产生漂移。
+                "reasoning_rules": get_provider_reasoning_rules(
+                    provider=p.client_provider,
+                    api_base=p.api_base,
+                    endpoint_profile=p.endpoint_profile,
+                ),
                 # Anthropic 格式(可选切换): 仅当 anthropic_base 非空时可用,
                 # 切换后落库 client_provider=ANTHROPIC_CLIENT_PROVIDER、
                 # api_base=anthropic_base(core 用 AnthropicModelClient 走 /v1/messages)。

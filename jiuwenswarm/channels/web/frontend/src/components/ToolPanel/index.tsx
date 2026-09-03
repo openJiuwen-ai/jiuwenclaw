@@ -36,7 +36,8 @@ import type { CodeReviewTarget } from '../../features/code-mode/types';
 import { useCodeGitDiffWatch } from '../../features/code-mode/useCodeGitDiffWatch';
 import { type SingleAgentToolTab } from '../../features/singleAgentPanelState';
 import { SubagentExpandedPanel } from '../subagent/SubagentExpandedPanel';
-import { useSubagentStore } from '../../stores/subagentStore';
+import { SubagentStatusIcon } from '../subagent/SubagentStatusIcon';
+import { useSubagentStore, selectSubagents } from '../../stores/subagentStore';
 import { useMinWidth } from '../../hooks/useResponsive';
 import './ToolPanel.css';
 
@@ -71,6 +72,7 @@ interface ToolPanelProps {
   singleAgentPanelExpanded: boolean;
   singleAgentPanelActiveTab: SingleAgentToolTab;
   singleAgentPanelSelectedArtifactId?: string;
+  singleAgentPanelSelectedSubagentId?: string | null;
   setTeamAreaExpanded: (expanded: boolean) => void;
   setTeamAreaActiveTab: (tab: TabType) => void;
   setTeamAreaActiveDetailTab: (detailTab: TeamDetailTab) => void;
@@ -80,6 +82,7 @@ interface ToolPanelProps {
   setSingleAgentPanelExpanded: (expanded: boolean) => void;
   setSingleAgentPanelActiveTab: (tab: SingleAgentToolTab) => void;
   setSingleAgentPanelSelectedArtifactId: (artifactId: string) => void;
+  setSingleAgentPanelSelectedSubagentId: (subagentId: string | null) => void;
   shouldFullscreen?: boolean;
   onCloseFloating?: () => void;
 }
@@ -122,6 +125,7 @@ export function ToolPanel({
   singleAgentPanelExpanded,
   singleAgentPanelActiveTab,
   singleAgentPanelSelectedArtifactId,
+  singleAgentPanelSelectedSubagentId,
   setTeamAreaExpanded,
   setTeamAreaActiveTab,
   setTeamAreaActiveDetailTab,
@@ -131,6 +135,7 @@ export function ToolPanel({
   setSingleAgentPanelExpanded,
   setSingleAgentPanelActiveTab,
   setSingleAgentPanelSelectedArtifactId,
+  setSingleAgentPanelSelectedSubagentId,
   shouldFullscreen = false,
   onCloseFloating,
 }: ToolPanelProps) {
@@ -156,6 +161,21 @@ export function ToolPanel({
   const { completedTasks: teamCompletedTasks, progressTasks, teamTasks, totalTasks: teamTotalTasks, now } = useTaskPlanningMetrics();
   const artifactsCount = useSessionArtifactsCount();
   const subagentCount = useSubagentStore(state => Object.keys(state.runtimes[resolvedSessionId]?.subagentsById ?? {}).length);
+  const subagentRuntime = useSubagentStore(state => state.runtimes[resolvedSessionId]);
+  const subagentList = selectSubagents(subagentRuntime);
+  const subagentTasks = useMemo(
+    () =>
+      subagentList.map(subagent => ({
+        task_id: subagent.subagent_id,
+        title: subagent.display_name,
+        content: subagent.role || subagent.task_description || undefined,
+        status: (subagent.status === 'running' ? 'in_progress' : 'completed') as TeamTaskStatus,
+        assignee: subagent.subagent_id,
+        timestamp: subagent.updated_at,
+      })),
+    [subagentList],
+  );
+  const [subagentsExpanded, setSubagentsExpanded] = useState(false);
   const sessionArtifacts = useSessionArtifacts();
   const artifactTasks = useMemo(
     () =>
@@ -261,6 +281,8 @@ export function ToolPanel({
   useEffect(() => {
     if (!onCloseFloating || isUltraWide) return;
     const handler = (e: MouseEvent) => {
+      const target = e.target;
+      if (target instanceof Element && target.closest('[data-team-area-toggle]')) return;
       const el = floatingPanelRef.current;
       if (!el) return;
       if (el.contains(e.target as Node)) return;
@@ -425,7 +447,11 @@ export function ToolPanel({
                   onDetailTabChange={setTeamAreaActiveDetailTab}
                 />
               ) : (
-                <SubagentExpandedPanel sessionId={resolvedSessionId} />
+                <SubagentExpandedPanel
+                  sessionId={resolvedSessionId}
+                  selectedSubagentId={singleAgentPanelSelectedSubagentId ?? null}
+                  onSelectSubagent={setSingleAgentPanelSelectedSubagentId}
+                />
               )
             }
             renderPlanningContent={() =>
@@ -472,11 +498,11 @@ export function ToolPanel({
         completedTasks: todoCompletedTasks,
         expanded: planningExpanded,
       };
-  const expandTo = (tab: TabType) => {
+  const expandTo = (tab: TabType | SingleAgentToolTab, teamMemberId?: string) => {
     if (isTeam) {
-      setTeamAreaActiveTab(tab);
+      setTeamAreaActiveTab(tab as TabType);
       if (tab === 'team') {
-        setTeamAreaSelectedMemberId('');
+        setTeamAreaSelectedMemberId(teamMemberId ?? '');
       }
       setTeamAreaExpanded(true);
     } else {
@@ -540,6 +566,49 @@ export function ToolPanel({
             renderStatusIcon={task => (
               <TeamMemberAvatar member={task.assignee ?? ''} alt={task.title ?? ''} className="h-4 w-4 rounded-full shrink-0" imageClassName="rounded-full" />
             )}
+            onTaskClick={memberId => expandTo('team', memberId)}
+          />
+        </CollapsibleSection>
+      ),
+    },
+    !isTeam && subagentCount > 0 && {
+      key: 'subagents',
+      testId: 'tool-panel-subagents-pane',
+      render: () => (
+        <CollapsibleSection
+          title={t('subagent.title')}
+          icon={<img src={teamIcon} width={16} height={16} aria-hidden="true" />}
+          childCount={subagentTasks.length}
+          maxCollapsedCount={4}
+          onExpand={() => {
+            setSingleAgentPanelSelectedSubagentId(null);
+            expandTo('subagents');
+          }}
+          onExpandAll={() => setSubagentsExpanded(true)}
+          dataTestId="tool-panel-subagents"
+          defaultCollapsed
+          autoExpandOnContent
+        >
+          <CompactTaskList
+            tasks={subagentTasks}
+            members={[]}
+            hideAssignee
+            maxCollapsedCount={4}
+            expanded={subagentsExpanded}
+            emptyText={t('subagent.empty')}
+            emptyIllustration={emptyMembersIcon}
+            renderStatusIcon={task => {
+              const subagent = subagentList.find(s => s.subagent_id === task.task_id);
+              if (!subagent) return null;
+              return <SubagentStatusIcon status={subagent.status} closedReason={subagent.closed_reason} turnOutcome={subagent.turn_outcome} />;
+            }}
+            renderTaskIcon={task => (
+              <TeamMemberAvatar member={task.assignee ?? ''} alt={task.title ?? ''} className="h-4 w-4 rounded-full shrink-0" imageClassName="rounded-full" />
+            )}
+            onTaskClick={taskId => {
+              setSingleAgentPanelSelectedSubagentId(taskId);
+              expandTo('subagents');
+            }}
           />
         </CollapsibleSection>
       ),

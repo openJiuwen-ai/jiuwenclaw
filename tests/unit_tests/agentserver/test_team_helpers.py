@@ -12,6 +12,7 @@ from typing import Any
 from unittest.mock import AsyncMock, Mock
 
 import pytest
+from openjiuwen.agent_teams.runtime.background_task_controller import BackgroundTaskController
 from openjiuwen.agent_teams.schema.team import TeamRole
 
 from jiuwenswarm.server.runtime.agent_adapter import evolution_helpers
@@ -834,7 +835,7 @@ async def test_team_evolution_monitor_skips_without_pending_signal_approval(
     rail.auto_save = auto_save
 
     monkeypatch.setattr(
-        "jiuwenswarm.server.gateway_push.WebSocketGatewayPushTransport",
+        "jiuwenswarm.runtime.host_services.RuntimeHostPushTransport",
         _FakeTransport,
     )
 
@@ -862,7 +863,7 @@ async def test_team_evolution_monitor_pushes_status_with_real_request_id(monkeyp
     rail = _FakeRail([[reasoning_event, approval_event]], pending_first=False)
 
     monkeypatch.setattr(
-        "jiuwenswarm.server.gateway_push.WebSocketGatewayPushTransport",
+        "jiuwenswarm.runtime.host_services.RuntimeHostPushTransport",
         _FakeTransport,
     )
     monkeypatch.setattr(
@@ -907,7 +908,7 @@ async def test_team_evolution_monitor_waits_for_real_request_id(monkeypatch):
     rail = _FakeRail([[reasoning_event], [approval_event]], pending_first=False)
 
     monkeypatch.setattr(
-        "jiuwenswarm.server.gateway_push.WebSocketGatewayPushTransport",
+        "jiuwenswarm.runtime.host_services.RuntimeHostPushTransport",
         _FakeTransport,
     )
     monkeypatch.setattr(
@@ -957,7 +958,7 @@ async def test_team_evolution_monitor_starts_cycle_for_started_progress_without_
     rail = _FakeRail([[progress_event], [outcome_event]], pending_first=False)
 
     monkeypatch.setattr(
-        "jiuwenswarm.server.gateway_push.WebSocketGatewayPushTransport",
+        "jiuwenswarm.runtime.host_services.RuntimeHostPushTransport",
         _FakeTransport,
     )
     monkeypatch.setattr(team_helpers, "parse_stream_chunk", lambda evt: None)
@@ -1015,7 +1016,7 @@ async def test_team_evolution_monitor_maps_sdk_progress_stages(monkeypatch):
     rail = _FakeRail([[detecting_event], [generating_event], [outcome_event]], pending_first=False)
 
     monkeypatch.setattr(
-        "jiuwenswarm.server.gateway_push.WebSocketGatewayPushTransport",
+        "jiuwenswarm.runtime.host_services.RuntimeHostPushTransport",
         _FakeTransport,
     )
     monkeypatch.setattr(team_helpers, "parse_stream_chunk", lambda evt: None)
@@ -1085,7 +1086,7 @@ async def test_team_evolution_monitor_uses_meta_request_id_and_ends_on_cancelled
     )
 
     monkeypatch.setattr(
-        "jiuwenswarm.server.gateway_push.WebSocketGatewayPushTransport",
+        "jiuwenswarm.runtime.host_services.RuntimeHostPushTransport",
         _FakeTransport,
     )
     monkeypatch.setattr(team_helpers, "parse_stream_chunk", lambda evt: None)
@@ -1166,7 +1167,7 @@ async def test_team_evolution_monitor_filters_progress_by_request_id(monkeypatch
     )
 
     monkeypatch.setattr(
-        "jiuwenswarm.server.gateway_push.WebSocketGatewayPushTransport",
+        "jiuwenswarm.runtime.host_services.RuntimeHostPushTransport",
         _FakeTransport,
     )
     monkeypatch.setattr(team_helpers, "parse_stream_chunk", lambda evt: None)
@@ -1208,7 +1209,7 @@ async def test_team_evolution_monitor_uses_delivery_context_metadata(monkeypatch
         return message
 
     monkeypatch.setattr(
-        "jiuwenswarm.server.gateway_push.WebSocketGatewayPushTransport",
+        "jiuwenswarm.runtime.host_services.RuntimeHostPushTransport",
         _FakeTransport,
     )
     monkeypatch.setattr(
@@ -1259,7 +1260,7 @@ async def test_team_evolution_monitor_reads_terminal_outcome_from_host_events(
     rail = _FakeRail([[outcome_event]], pending_first=True)
 
     monkeypatch.setattr(
-        "jiuwenswarm.server.gateway_push.WebSocketGatewayPushTransport",
+        "jiuwenswarm.runtime.host_services.RuntimeHostPushTransport",
         _FakeTransport,
     )
     monkeypatch.setattr(team_helpers, "parse_stream_chunk", lambda evt: None)
@@ -1297,7 +1298,7 @@ async def test_team_evolution_monitor_maps_noop_progress_to_no_evolution_generat
     rail = _FakeRail([[progress_event]], pending_first=False)
 
     monkeypatch.setattr(
-        "jiuwenswarm.server.gateway_push.WebSocketGatewayPushTransport",
+        "jiuwenswarm.runtime.host_services.RuntimeHostPushTransport",
         _FakeTransport,
     )
     monkeypatch.setattr(team_helpers, "parse_stream_chunk", lambda evt: None)
@@ -1341,7 +1342,7 @@ async def test_team_evolution_monitor_uses_approval_request_id_without_provision
             return []
 
     monkeypatch.setattr(
-        "jiuwenswarm.server.gateway_push.WebSocketGatewayPushTransport",
+        "jiuwenswarm.runtime.host_services.RuntimeHostPushTransport",
         _FakeTransport,
     )
     monkeypatch.setattr(team_helpers, "parse_stream_chunk", lambda evt: None)
@@ -1381,7 +1382,7 @@ async def test_team_evolution_monitor_keeps_idle_listener_after_timeout(monkeypa
     rail = _FakeRail([], pending_first=True)
 
     monkeypatch.setattr(
-        "jiuwenswarm.server.gateway_push.WebSocketGatewayPushTransport",
+        "jiuwenswarm.runtime.host_services.RuntimeHostPushTransport",
         _FakeTransport,
     )
     monkeypatch.setattr(team_helpers, "TEAM_EVOLUTION_IDLE_SLEEP_SEC", 0.001)
@@ -1412,7 +1413,7 @@ async def test_team_evolution_monitor_times_out_after_idle_progress(monkeypatch)
     rail = _FakeProgressOnlyRail()
 
     monkeypatch.setattr(
-        "jiuwenswarm.server.gateway_push.WebSocketGatewayPushTransport",
+        "jiuwenswarm.runtime.host_services.RuntimeHostPushTransport",
         _FakeTransport,
     )
     monkeypatch.setattr(team_helpers, "TEAM_EVOLUTION_IDLE_SLEEP_SEC", 0.001)
@@ -1442,7 +1443,7 @@ async def test_team_evolution_monitor_uses_sdk_timeout_before_legacy_fallback(mo
     rail = _SdkTimeoutProgressRail()
 
     monkeypatch.setattr(
-        "jiuwenswarm.server.gateway_push.WebSocketGatewayPushTransport",
+        "jiuwenswarm.runtime.host_services.RuntimeHostPushTransport",
         _FakeTransport,
     )
     monkeypatch.setattr(team_helpers, "TEAM_EVOLUTION_IDLE_SLEEP_SEC", 0.001)
@@ -2027,22 +2028,6 @@ async def test_interactive_followup_attaches_after_headless_heartbeat(monkeypatc
             return SimpleNamespace(team_name="unit-team")
 
         async def interact(self, session_id: str, query: str):
-            async def _complete_round() -> None:
-                await asyncio.sleep(0)
-                await self.broadcast_event(
-                    session_id,
-                    {"event_type": "chat.final", "content": "visible"},
-                )
-                await self.broadcast_event(
-                    session_id,
-                    {
-                        "event_type": "chat.processing_status",
-                        "is_processing": False,
-                        "is_complete": True,
-                    },
-                )
-
-            asyncio.create_task(_complete_round())
             return True, None
 
     manager = _FakeManager()
@@ -2067,13 +2052,29 @@ async def test_interactive_followup_attaches_after_headless_heartbeat(monkeypatc
             {"query": "continue visibly"},
             object(),
         )
-        first = await asyncio.wait_for(anext(response_stream), timeout=1.0)
+        first_event = asyncio.create_task(anext(response_stream))
+        for _ in range(100):
+            waiters = manager.get_waiters("sess-headless-first")
+            if waiters:
+                break
+            await asyncio.sleep(0.01)
+        assert manager.has_interactive_waiter("sess-headless-first") is True
+        request_queue = waiters[0][1]
+        await request_queue.put({"event_type": "chat.final", "content": "visible"})
+        await request_queue.put(
+            {
+                "event_type": "chat.processing_status",
+                "is_processing": False,
+                "is_complete": True,
+            }
+        )
+        await admission.end_team_user("sess-headless-first")
+        first = await asyncio.wait_for(first_event, timeout=1.0)
         second = await asyncio.wait_for(anext(response_stream), timeout=1.0)
 
         assert first.payload == {"event_type": "chat.final", "content": "visible"}
         assert second.payload["event_type"] == "chat.processing_status"
         assert second.payload["is_complete"] is True
-        assert manager.has_interactive_waiter("sess-headless-first") is True
         assert admission.is_user_active("sess-headless-first") is False
 
         await response_stream.aclose()
@@ -2143,7 +2144,7 @@ async def test_cancelled_heartbeat_followup_aborts_submitted_team_round(monkeypa
 
 
 @pytest.mark.anyio
-async def test_interactive_team_followup_hands_admission_to_round_state(monkeypatch):
+async def test_interactive_team_followup_uses_round_only_for_lifecycle(monkeypatch):
     from jiuwenswarm.agents.harness.code.rails.heartbeat.execution import (
         SessionRunAdmission,
     )
@@ -2194,20 +2195,172 @@ async def test_interactive_team_followup_hands_admission_to_round_state(monkeypa
     assert admission.is_user_active("sess-team-user") is True
     assert manager.is_round_active("sess-team-user") is True
 
+    terminal_token = team_helpers.bind_team_heartbeat_service(
+        SimpleNamespace(admission=admission)
+    )
+    try:
+        await team_helpers._broadcast_event(
+            "web",
+            "sess-team-user",
+            {"event_type": "chat.final", "content": "continued"},
+        )
+        await team_helpers._broadcast_event(
+            "web",
+            "sess-team-user",
+            {
+                "event_type": "chat.processing_status",
+                "is_processing": False,
+                "is_complete": True,
+            },
+        )
+    finally:
+        team_helpers.reset_team_heartbeat_service(terminal_token)
+    assert manager.is_round_active("sess-team-user") is False
+    assert admission.is_user_active("sess-team-user") is False
+
+
+@pytest.mark.anyio
+async def test_concurrent_team_steers_reach_interact_without_round_wait(monkeypatch):
+    from jiuwenswarm.agents.harness.code.rails.heartbeat.execution import (
+        SessionRunAdmission,
+    )
+    from jiuwenswarm.agents.harness.team.team_manager import TeamManager
+
+    class _FakeManager(TeamManager):
+        def __init__(self) -> None:
+            super().__init__()
+            self.interact_calls: list[str] = []
+
+        def has_stream_task(self, session_id: str) -> bool:
+            return True
+
+        async def get_swarm_enriched_team_spec(self, **kwargs):
+            return SimpleNamespace(team_name="unit-team")
+
+        async def interact(self, session_id: str, query: str):
+            self.interact_calls.append(query)
+            return True, None
+
+    manager = _FakeManager()
+    manager.add_waiter("sess-concurrent-steer", "req-browser", asyncio.Queue())
+    monkeypatch.setattr(team_helpers, "get_team_manager", lambda _channel_id: manager)
+    monkeypatch.setattr(team_helpers, "_persist_team_file_monitor_roots", lambda *args: None)
+    admission = SessionRunAdmission()
+
+    async def _submit(request_id: str, query: str) -> list[Any]:
+        request = SimpleNamespace(
+            session_id="sess-concurrent-steer",
+            request_id=request_id,
+            channel_id="web",
+            metadata={},
+            params={"mode": "team"},
+            user_id="owner",
+        )
+        return [
+            chunk
+            async for chunk in team_helpers.process_team_message_stream(
+                request,
+                {"query": query},
+                object(),
+            )
+        ]
+
+    token = team_helpers.bind_team_heartbeat_service(
+        SimpleNamespace(admission=admission)
+    )
+    try:
+        results = await asyncio.wait_for(
+            asyncio.gather(
+                _submit("req-steer-a", "Hangzhou weather"),
+                _submit("req-steer-b", "Shanghai weather"),
+            ),
+            timeout=1.0,
+        )
+    finally:
+        team_helpers.reset_team_heartbeat_service(token)
+
+    assert len(results) == 2
+    assert len(manager.interact_calls) == 2
+    assert manager.is_round_active("sess-concurrent-steer") is True
+    assert admission.is_user_active("sess-concurrent-steer") is True
     await manager.broadcast_event(
-        "sess-team-user",
-        {"event_type": "chat.final", "content": "continued"},
+        "sess-concurrent-steer",
+        {"event_type": "chat.reasoning", "content": "working"},
     )
     await manager.broadcast_event(
-        "sess-team-user",
+        "sess-concurrent-steer",
         {
             "event_type": "chat.processing_status",
             "is_processing": False,
             "is_complete": True,
         },
     )
-    assert manager.is_round_active("sess-team-user") is False
-    assert admission.is_user_active("sess-team-user") is False
+    assert admission.is_user_active("sess-concurrent-steer") is False
+
+
+@pytest.mark.anyio
+async def test_cron_team_followup_retains_bounded_round_ownership(monkeypatch):
+    from jiuwenswarm.agents.harness.code.rails.heartbeat.execution import (
+        SessionRunAdmission,
+    )
+    from jiuwenswarm.agents.harness.team.team_manager import TeamManager
+
+    interacted = asyncio.Event()
+
+    class _FakeManager(TeamManager):
+        def has_stream_task(self, session_id: str) -> bool:
+            return True
+
+        async def get_swarm_enriched_team_spec(self, **kwargs):
+            return SimpleNamespace(team_name="unit-team")
+
+        async def interact(self, session_id: str, query: str):
+            interacted.set()
+            return True, None
+
+    manager = _FakeManager()
+    manager.add_waiter("sess-cron-bounded", "req-browser", asyncio.Queue())
+    monkeypatch.setattr(team_helpers, "get_team_manager", lambda _channel_id: manager)
+    monkeypatch.setattr(team_helpers, "_persist_team_file_monitor_roots", lambda *args: None)
+    admission = SessionRunAdmission()
+    request = SimpleNamespace(
+        session_id="sess-cron-bounded",
+        request_id="cron-job:run-1",
+        channel_id="web",
+        metadata={},
+        params={"mode": "team"},
+        user_id="owner",
+    )
+
+    token = team_helpers.bind_team_heartbeat_service(
+        SimpleNamespace(admission=admission)
+    )
+
+    async def _consume() -> None:
+        async for _chunk in team_helpers.process_team_message_stream(
+            request,
+            {"query": "scheduled work"},
+            object(),
+        ):
+            pass
+
+    task = asyncio.create_task(_consume())
+    try:
+        await asyncio.wait_for(interacted.wait(), timeout=1.0)
+        assert manager.is_round_owner("sess-cron-bounded", "cron-job:run-1") is True
+        assert admission.is_user_active("sess-cron-bounded") is True
+        assert (
+            await admission.try_begin_heartbeat("sess-cron-bounded", "hb-overlap")
+            is False
+        )
+    finally:
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        team_helpers.reset_team_heartbeat_service(token)
+
+    assert manager.is_round_active("sess-cron-bounded") is False
+    assert admission.is_user_active("sess-cron-bounded") is False
 
 
 @pytest.mark.anyio
@@ -4018,9 +4171,10 @@ async def test_bounded_team_round_keeps_admission_through_late_event_grace():
     old_queue: asyncio.Queue = asyncio.Queue()
 
     await admission.begin_team_user(session_id)
+    await admission.complete_team_user_submission(session_id, accepted=True)
 
     async def _release() -> None:
-        await admission.end_user(session_id)
+        await admission.end_team_user(session_id)
 
     manager.add_waiter(session_id, "cron-old", old_queue, exclusive=True)
     manager.begin_round(
@@ -4932,10 +5086,15 @@ async def test_consume_workflow_events_converts_to_team_events_for_web(monkeypat
         "web", "sess-wf-web", handler,
     )
 
-    # No raw workflow.updated leaks to web; only team.* envelopes.
+    # All channels receive the raw workflow.updated (web tree view) plus the
+    # activation notice; web additionally receives converted team.* envelopes.
     assert broadcasted
-    assert all(e["event_type"] in ("team.member", "team.task") for e in broadcasted)
-    types = [e["event"]["type"] for e in broadcasted]
+    raw_types = [e["event_type"] for e in broadcasted]
+    assert "swarmflow.activated" in raw_types
+    assert "workflow.updated" in raw_types
+    team_events = [e for e in broadcasted if e["event_type"] in ("team.member", "team.task")]
+    assert team_events
+    types = [e["event"]["type"] for e in team_events]
     assert "team.task.claimed" in types
     assert "team.member.spawned" in types
 
@@ -5753,3 +5912,214 @@ def test_persist_team_file_monitor_roots_noop_when_unchanged(monkeypatch: pytest
     team_helpers._persist_team_file_monitor_roots("sess-1", team_spec)
 
     assert len(written) == 0
+
+
+def test_get_background_task_controller_returns_controller() -> None:
+    controller = team_helpers.get_background_task_controller("sess_bgctl_one")
+
+    assert isinstance(controller, BackgroundTaskController)
+
+
+def test_get_background_task_controller_is_idempotent() -> None:
+    controller_a = team_helpers.get_background_task_controller("sess_bgctl_same")
+    controller_b = team_helpers.get_background_task_controller("sess_bgctl_same")
+
+    assert controller_a is controller_b
+
+
+def test_get_background_task_controller_distinct_sessions_differ() -> None:
+    controller_a = team_helpers.get_background_task_controller("sess_bgctl_x")
+    controller_b = team_helpers.get_background_task_controller("sess_bgctl_y")
+
+    assert controller_a is not controller_b
+
+
+async def test_consume_stream_passes_session_scoped_background_task_controller(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The Runner streaming call forwards the session's BackgroundTaskController."""
+    captured: dict[str, Any] = {}
+
+    async def _fake_stream(**kwargs: Any):
+        captured.update(kwargs)
+        if False:  # pragma: no cover - make this an async generator
+            yield None
+
+    monkeypatch.setattr(
+        team_helpers.Runner,
+        "run_agent_team_streaming",
+        _fake_stream,
+    )
+    monkeypatch.setattr(team_helpers, "_broadcast_event", _noop_broadcast)
+    monkeypatch.setattr(team_helpers, "_broadcast_team_state_snapshot", _noop_broadcast)
+
+    session_id = "sess_bgctl_stream"
+    await team_helpers._consume_stream_with_query(
+        "web",
+        session_id,
+        SimpleNamespace(team_name="unit-team", enable_swarmflow=True),
+        "hello",
+        round_id=1,
+    )
+
+    assert isinstance(
+        captured.get("background_task_controller"),
+        BackgroundTaskController,
+    )
+    assert captured["background_task_controller"] is team_helpers.get_background_task_controller(
+        session_id
+    )
+
+
+def test_persist_and_restore_session_budget(monkeypatch: pytest.MonkeyPatch) -> None:
+    """session budget round-trips through session metadata (session_budget key)."""
+    from jiuwenswarm.server.runtime.session import session_metadata
+
+    store: dict[str, Any] = {"session_id": "sess-budget", "title": "t"}
+    monkeypatch.setattr(
+        session_metadata,
+        "_read_metadata",
+        lambda session_id, cache_bust=True: dict(store),
+    )
+    written: list[tuple[str, dict]] = []
+    monkeypatch.setattr(
+        session_metadata,
+        "_enqueue_write",
+        lambda session_id, metadata: written.append((session_id, dict(metadata))),
+    )
+
+    snapshot = {"total": 500000, "spent": 280000, "remaining": 220000, "scope": "session", "exhausted": False}
+    team_helpers.persist_session_budget("sess-budget", snapshot)
+
+    assert written == [("sess-budget", {**store, "session_budget": snapshot})]
+    # restore reads it back
+    monkeypatch.setattr(
+        session_metadata,
+        "_read_metadata",
+        lambda session_id, cache_bust=True: {**store, "session_budget": snapshot},
+    )
+    assert team_helpers.restore_session_budget("sess-budget") == snapshot
+
+
+def test_restore_session_budget_absent_returns_none(monkeypatch: pytest.MonkeyPatch) -> None:
+    from jiuwenswarm.server.runtime.session import session_metadata
+
+    monkeypatch.setattr(
+        session_metadata,
+        "_read_metadata",
+        lambda session_id, cache_bust=True: {"session_id": "sess-budget"},
+    )
+    assert team_helpers.restore_session_budget("sess-budget") is None
+
+
+def test_persist_and_restore_session_swarmflow_config(monkeypatch: pytest.MonkeyPatch) -> None:
+    """persist/restore session-level swarmflow config round-trips through metadata."""
+    from jiuwenswarm.server.runtime.session import session_metadata
+
+    store: dict[str, Any] = {"session_id": "sess-swarmflow-cfg", "title": "t"}
+    monkeypatch.setattr(
+        session_metadata,
+        "_read_metadata",
+        lambda session_id, cache_bust=True: dict(store),
+    )
+    written: list[tuple[str, dict]] = []
+    monkeypatch.setattr(
+        session_metadata,
+        "_enqueue_write",
+        lambda session_id, metadata: written.append((session_id, dict(metadata))),
+    )
+
+    config = {"enable_swarmflow": True, "swarmflow_budget": 50000}
+    team_helpers.persist_session_swarmflow_config("sess-swarmflow-cfg", config)
+
+    assert written == [("sess-swarmflow-cfg", {**store, "session_swarmflow_config": config})]
+    monkeypatch.setattr(
+        session_metadata,
+        "_read_metadata",
+        lambda session_id, cache_bust=True: {**store, "session_swarmflow_config": config},
+    )
+    assert team_helpers.restore_session_swarmflow_config("sess-swarmflow-cfg") == config
+
+
+def test_restore_session_swarmflow_config_absent_returns_none(monkeypatch: pytest.MonkeyPatch) -> None:
+    from jiuwenswarm.server.runtime.session import session_metadata
+
+    monkeypatch.setattr(
+        session_metadata,
+        "_read_metadata",
+        lambda session_id, cache_bust=True: {"session_id": "sess-swarmflow-cfg"},
+    )
+    assert team_helpers.restore_session_swarmflow_config("sess-swarmflow-cfg") is None
+
+
+def test_resolve_session_swarmflow_config_request_overrides_config() -> None:
+    """request params override config.yaml values."""
+    from jiuwenswarm.server.runtime.agent_adapter.team_helpers import (
+        _resolve_session_swarmflow_config,
+    )
+
+    params = {"enable_swarmflow": True, "swarmflow_budget": 50000}
+    config_base = {
+        "modes": {"team": {"jiuwen_team": {"enable_swarmflow": False, "swarmflow_budget": 200000}}}
+    }
+    assert _resolve_session_swarmflow_config(params, config_base, session_id="s1") == {
+        "enable_swarmflow": True,
+        "swarmflow_budget": 50000,
+    }
+
+
+def test_resolve_session_swarmflow_config_falls_back_to_config() -> None:
+    """without request params, config.yaml values are used."""
+    from jiuwenswarm.server.runtime.agent_adapter.team_helpers import (
+        _resolve_session_swarmflow_config,
+    )
+
+    params: dict[str, Any] = {}
+    config_base = {
+        "modes": {"team": {"jiuwen_team": {"enable_swarmflow": True, "swarmflow_budget": 200000}}}
+    }
+    assert _resolve_session_swarmflow_config(params, config_base, session_id="s1") == {
+        "enable_swarmflow": True,
+        "swarmflow_budget": 200000,
+    }
+
+
+def test_resolve_session_swarmflow_config_falls_back_to_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """without request params, persisted metadata is used (config disabled)."""
+    from jiuwenswarm.server.runtime.agent_adapter import team_helpers
+    from jiuwenswarm.server.runtime.agent_adapter.team_helpers import (
+        _resolve_session_swarmflow_config,
+        persist_session_swarmflow_config,
+    )
+    from jiuwenswarm.server.runtime.session import session_metadata
+
+    store: dict[str, Any] = {"session_id": "sess-resolve-meta"}
+    written: list[tuple[str, dict]] = []
+    monkeypatch.setattr(
+        session_metadata,
+        "_read_metadata",
+        lambda session_id, cache_bust=True: dict(store),
+    )
+    monkeypatch.setattr(
+        session_metadata,
+        "_enqueue_write",
+        lambda session_id, metadata: written.append((session_id, dict(metadata))),
+    )
+
+    config = {"enable_swarmflow": True, "swarmflow_budget": 30000}
+    persist_session_swarmflow_config("sess-resolve-meta", config)
+    # restore reads the written metadata
+    store = {"session_id": "sess-resolve-meta", "session_swarmflow_config": config}
+    monkeypatch.setattr(
+        session_metadata,
+        "_read_metadata",
+        lambda session_id, cache_bust=True: dict(store),
+    )
+
+    config_base = {"modes": {"team": {"jiuwen_team": {"enable_swarmflow": False}}}}
+    assert _resolve_session_swarmflow_config({}, config_base, session_id="sess-resolve-meta") == {
+        "enable_swarmflow": True,
+        "swarmflow_budget": 30000,
+    }

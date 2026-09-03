@@ -1,7 +1,12 @@
-import { ArrowLeft, Check, ChevronDown, ChevronUp, Minus, Plus, Search, Trash2, X } from 'lucide-react';
+import { ArrowLeft, Check, ChevronDown, ChevronUp, Minus, X } from 'lucide-react';
 import { createPortal } from 'react-dom';
 import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import { useTranslation } from 'react-i18next';
+import AddIcon from '../../assets/agent-management/add.svg?react';
+import DeleteIcon from '../../assets/agent-management/remove.svg?react';
+import PlusIcon from '../../assets/agent-management/agent-plus.svg?react';
+import SearchIcon from '../../assets/agent-management/agent-search.svg?react';
+import UninstallIcon from '../../assets/agent-management/uninstall.svg?react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import type { AgentDraft, McpOption, RequestStatus, SkillOption } from '../../features/agentManagement';
@@ -232,13 +237,11 @@ export function AgentEditor({
             <span>{t('agentManagement.form.descriptionLabel')}</span>
             <textarea
               rows={2}
-              maxLength={226}
               value={draft.description}
               onChange={event => update({ description: event.target.value })}
               placeholder={t('agentManagement.form.descriptionPlaceholder')}
               aria-invalid={Boolean(touched && errors.description)}
             />
-            <small className="agent-management-field-count">{draft.description.length}/226</small>
             {touched && errors.description ? <small className="agent-management-field-error">{errors.description}</small> : null}
           </label>
           <div className="agent-management-form-field--wide agent-management-form-field--tag-picker" ref={tagPickerRef}>
@@ -339,7 +342,7 @@ export function AgentEditor({
                       aria-label={t('agentManagement.form.customTagPlaceholder')}
                     />
                     <button type="button" onClick={addCustomTag} disabled={!customTagInput.trim()}>
-                      <Plus size={14} aria-hidden="true" />
+                      <PlusIcon aria-hidden="true" />
                       {t('agentManagement.form.addCustomTag')}
                     </button>
                   </div>
@@ -392,7 +395,7 @@ export function AgentEditor({
             </button>
             <div><h2>{t('agentManagement.form.mcpLabel')}</h2></div>
           </div>
-          <button ref={mcpDialogTriggerRef} type="button" className="agent-management-inline-action" onClick={openMcpDialog}><Plus size={14} aria-hidden="true" />{t('agentManagement.form.addMcp')}</button>
+          <button ref={mcpDialogTriggerRef} type="button" className="agent-management-inline-action" onClick={openMcpDialog}><PlusIcon aria-hidden="true" />{t('agentManagement.form.addMcp')}</button>
         </div>
         {mcpOpen ? (
           selectedMcps.length > 0 ? (
@@ -403,7 +406,7 @@ export function AgentEditor({
                     <span className="agent-management-capability-card__icon">{mcp.name.slice(0, 1).toUpperCase()}</span>
                     <strong>{mcp.name}</strong>
                     <button type="button" className="agent-management-capability-card__remove" aria-label={t('agentManagement.form.removeMcp', { name: mcp.name })} onClick={() => update({ mcpRefs: draft.mcpRefs.filter(id => id !== mcp.id) })}>
-                      <Trash2 size={16} aria-hidden="true" />
+                      <UninstallIcon aria-hidden="true" />
                     </button>
                   </div>
                   <small>{mcp.description}</small>
@@ -422,7 +425,7 @@ export function AgentEditor({
             </button>
             <div><h2>{t('agentManagement.form.skillsLabel')}</h2></div>
           </div>
-          <button ref={skillDialogTriggerRef} type="button" className="agent-management-inline-action" onClick={openSkillDialog}><Plus size={14} aria-hidden="true" />{t('agentManagement.form.addSkill')}</button>
+          <button ref={skillDialogTriggerRef} type="button" className="agent-management-inline-action" onClick={openSkillDialog}><PlusIcon aria-hidden="true" />{t('agentManagement.form.addSkill')}</button>
         </div>
         {skillsOpen ? (
           <>
@@ -435,7 +438,7 @@ export function AgentEditor({
                     <div className="agent-management-capability-card__heading">
                       <span className="agent-management-capability-card__icon">{skill.name.slice(0, 1).toUpperCase()}</span>
                       <strong>{skill.name}</strong>
-                      <button type="button" className="agent-management-capability-card__remove" aria-label={t('agentManagement.form.removeSkill', { name: skill.name })} onClick={() => update({ skillRefs: draft.skillRefs.filter(id => id !== skill.id) })}><Trash2 size={16} aria-hidden="true" /></button>
+                      <button type="button" className="agent-management-capability-card__remove" aria-label={t('agentManagement.form.removeSkill', { name: skill.name })} onClick={() => update({ skillRefs: draft.skillRefs.filter(id => id !== skill.id) })}><UninstallIcon aria-hidden="true" /></button>
                     </div>
                     <small>{skill.description}</small>
                   </article>
@@ -454,7 +457,7 @@ export function AgentEditor({
             </button>
             <h2>{t('agentManagement.form.promptsLabel')}</h2>
           </div>
-          <button type="button" className="agent-management-inline-action" onClick={addPrompt}><Plus size={14} aria-hidden="true" />{t('agentManagement.form.addPrompt')}</button>
+          <button type="button" className="agent-management-inline-action" onClick={addPrompt}><PlusIcon aria-hidden="true" />{t('agentManagement.form.addPrompt')}</button>
         </div>
         {promptsOpen ? (
           draft.suggestedPrompts.length > 0 ? (
@@ -481,7 +484,7 @@ export function AgentEditor({
           <section ref={skillDialogRef} className="agent-management-selection-dialog" role="dialog" aria-modal="true" aria-labelledby="agent-skill-dialog-title">
             <header><h2 id="agent-skill-dialog-title">{t('agentManagement.form.selectSkill')}</h2><button type="button" onClick={() => setSkillDialogOpen(false)} aria-label={t('common.cancel')}><X size={16} aria-hidden="true" /></button></header>
             <label className="agent-management-selection-search">
-              <Search size={16} aria-hidden="true" />
+              <SearchIcon aria-hidden="true" />
               <input type="search" value={skillQuery} onChange={event => setSkillQuery(event.target.value)} placeholder={t('agentManagement.form.selectionSearchPlaceholder')} />
             </label>
             <div className={`agent-management-selection-dialog__body${skillsStatus === 'success' && filteredSkills.length === 0 ? ' is-empty' : ''}`}>
@@ -490,7 +493,7 @@ export function AgentEditor({
               {skillsStatus === 'success' && filteredSkills.length === 0 ? <div className="agent-management-selection-empty-state"><p>{t('agentManagement.form.skillsEmpty')}</p></div> : null}
               {skillsStatus === 'success' && filteredSkills.length > 0 ? <div className="agent-management-selection-grid">{filteredSkills.map(skill => {
                 const selected = skillDraft.includes(skill.id);
-                return <button key={skill.id} type="button" className={`agent-management-selection-card${selected ? ' is-selected' : ''}`} onClick={() => setSkillDraft(current => selected ? current.filter(id => id !== skill.id) : [...current, skill.id])} aria-pressed={selected}><span className="agent-management-capability-card__icon">{skill.name.slice(0, 1).toUpperCase()}</span><span><strong>{skill.name}</strong><small>{skill.description}</small></span><span className="agent-management-selection-card__action" aria-hidden="true">{selected ? <Minus size={16} /> : <Plus size={16} />}</span></button>;
+                return <button key={skill.id} type="button" className={`agent-management-selection-card${selected ? ' is-selected' : ''}`} onClick={() => setSkillDraft(current => selected ? current.filter(id => id !== skill.id) : [...current, skill.id])} aria-pressed={selected}><span className="agent-management-capability-card__icon">{skill.name.slice(0, 1).toUpperCase()}</span><span><strong>{skill.name}</strong><small>{skill.description}</small></span><span className="agent-management-selection-card__action" aria-hidden="true">{selected ? <DeleteIcon /> : <AddIcon />}</span></button>;
               })}</div> : null}
             </div>
             <footer><span>{t('agentManagement.form.selectedCount', { count: skillDraft.length })}</span><div><button type="button" className="agent-management-button agent-management-button--secondary" onClick={() => setSkillDialogOpen(false)}>{t('common.cancel')}</button><button type="button" className="agent-management-button agent-management-button--primary" onClick={() => { update({ skillRefs: skillDraft }); setSkillDialogOpen(false); }}>{t('common.confirm')}</button></div></footer>
@@ -515,7 +518,7 @@ export function AgentEditor({
                 </div> : null}
               </div>
               <label className="agent-management-selection-search">
-                <Search size={16} aria-hidden="true" />
+                <SearchIcon aria-hidden="true" />
                 <input type="search" value={mcpQuery} onChange={event => setMcpQuery(event.target.value)} placeholder={t('agentManagement.form.selectionSearchPlaceholder')} />
               </label>
             </div>
@@ -525,7 +528,7 @@ export function AgentEditor({
               {mcpStatus === 'success' && filteredMcps.length === 0 ? <div className="agent-management-selection-empty-state"><p>{t('agentManagement.form.mcpEmpty')}</p></div> : null}
               {mcpStatus === 'success' && filteredMcps.length > 0 ? <div className="agent-management-selection-grid">{filteredMcps.map(mcp => {
                 const selected = mcpDraft.includes(mcp.id);
-                return <button key={mcp.id} type="button" className={`agent-management-selection-card${selected ? ' is-selected' : ''}`} onClick={() => setMcpDraft(current => selected ? current.filter(id => id !== mcp.id) : [...current, mcp.id])} aria-pressed={selected}><span className="agent-management-capability-card__icon">{mcp.name.slice(0, 1).toUpperCase()}</span><span><strong>{mcp.name}</strong><small>{mcp.description}</small></span><span className="agent-management-selection-card__action" aria-hidden="true">{selected ? <Minus size={16} /> : <Plus size={16} />}</span></button>;
+                return <button key={mcp.id} type="button" className={`agent-management-selection-card${selected ? ' is-selected' : ''}`} onClick={() => setMcpDraft(current => selected ? current.filter(id => id !== mcp.id) : [...current, mcp.id])} aria-pressed={selected}><span className="agent-management-capability-card__icon">{mcp.name.slice(0, 1).toUpperCase()}</span><span><strong>{mcp.name}</strong><small>{mcp.description}</small></span><span className="agent-management-selection-card__action" aria-hidden="true">{selected ? <DeleteIcon /> : <AddIcon />}</span></button>;
               })}</div> : null}
             </div>
             <footer><span>{t('agentManagement.form.selectedCount', { count: mcpDraft.length })}</span><div><button type="button" className="agent-management-button agent-management-button--secondary" onClick={() => setMcpDialogOpen(false)}>{t('common.cancel')}</button><button type="button" className="agent-management-button agent-management-button--primary" onClick={() => { update({ mcpRefs: mcpDraft }); setMcpDialogOpen(false); }}>{t('common.confirm')}</button></div></footer>

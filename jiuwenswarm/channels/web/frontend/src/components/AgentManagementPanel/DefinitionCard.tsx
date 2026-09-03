@@ -1,6 +1,6 @@
-import { Bell } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { getAgentAvatarUrl, type AgentCatalogItem } from '../../features/agentManagement';
+import ReminderIcon from '../../assets/agent-management/remind.svg?react';
 
 type DefinitionCardProps = {
   item: AgentCatalogItem;
@@ -41,7 +41,7 @@ export function DefinitionCard({ item, scope, busy, onOpen, onUse, onReconnect, 
               <span className="agent-management-card__title">{item.displayName}</span>
               {scope === 'mine' && item.updateAvailable ? (
                 <span className="agent-management-card__update">
-                  <Bell size={16} aria-hidden="true" />
+                  <ReminderIcon aria-hidden="true" />
                   <span className="agent-management-card__update-dot" aria-hidden="true" />
                   <span className="agent-management-card__update-tooltip" role="status">
                     {t('agentManagement.states.newVersion')}
