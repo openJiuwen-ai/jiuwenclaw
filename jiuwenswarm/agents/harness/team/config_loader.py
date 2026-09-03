@@ -12,6 +12,7 @@ from typing import Any
 from openjiuwen.agent_teams.paths import get_agent_teams_home
 
 from jiuwenswarm.common.config import get_config
+from jiuwenswarm.common.reasoning_injector import build_reasoning_model_request_kwargs
 from jiuwenswarm.server.runtime.opencode_zen import get_zen_free_model_entries
 
 logger = logging.getLogger(__name__)
@@ -251,6 +252,38 @@ def _resolve_default_model_config(
     return {}
 
 
+def _sanitize_team_member_model(model: dict[str, Any]) -> dict[str, Any]:
+    """Map internal ``reasoning_level`` onto provider-neutral request kwargs.
+
+    Team members construct ``ModelRequestConfig`` from this dict. Leaving the
+    UI hint in ``model_request_config`` lets core ``extra=allow`` forward it to
+    ``AsyncCompletions.create()`` as ``reasoning_level``.
+    """
+    if not isinstance(model, dict):
+        return model
+    model_client_config = dict(model.get("model_client_config") or {})
+    # Keep UI hints that only exist on ``model_config_obj``, then let an
+    # already-built ``model_request_config`` override overlapping keys.
+    model_config_obj = dict(model.get("model_config_obj") or {})
+    model_config_obj.update(dict(model.get("model_request_config") or {}))
+    sanitized = dict(model)
+    sanitized.pop("model_config_obj", None)
+    sanitized["model_client_config"] = model_client_config
+    # Same fill rule as the previous ``_build_default_model_dict``: keep an
+    # already-declared request ``model``; only fall back to
+    # ``model_client_config.model_name`` when it is missing. Injector rewrites
+    # ``model_request_config["model"]`` from this name.
+    declared_model = str(
+        model_config_obj.get("model") or model_config_obj.get("model_name") or ""
+    ).strip()
+    sanitized["model_request_config"] = build_reasoning_model_request_kwargs(
+        model_client_config=model_client_config,
+        model_config_obj=model_config_obj,
+        model_name=declared_model or str(model_client_config.get("model_name") or ""),
+    )
+    return sanitized
+
+
 def _build_default_model_dict(
     config_base: dict[str, Any],
     *,
@@ -261,21 +294,19 @@ def _build_default_model_dict(
         requested_model_name=requested_model_name,
     )
     model_client_config = dict(model_config.get("model_client_config", {}))
-    model_request_config = dict(model_config.get("model_config_obj", {}))
-
     model_name = model_client_config.get("model_name", "")
-    if model_name and "model" not in model_request_config:
-        model_request_config["model"] = model_name
 
     logger.info(
         "[TeamConfigLoader] model config loaded: model_name=%s, provider=%s",
         model_name,
         model_client_config.get("client_provider", "unknown"),
     )
-    return {
-        "model_client_config": model_client_config,
-        "model_request_config": model_request_config,
-    }
+    return _sanitize_team_member_model(
+        {
+            "model_client_config": model_client_config,
+            "model_config_obj": dict(model_config.get("model_config_obj", {})),
+        }
+    )
 
 
 def _resolve_storage_config(storage_raw: dict[str, Any]) -> dict[str, Any]:
@@ -319,6 +350,9 @@ def _build_agent_spec_dict(
     merged.setdefault("workspace", deepcopy(default_workspace))
     merged.setdefault("max_iterations", max_iterations)
     merged.setdefault("completion_timeout", completion_timeout)
+    member_model = merged.get("model")
+    if isinstance(member_model, dict):
+        merged["model"] = _sanitize_team_member_model(member_model)
     return merged
 
 

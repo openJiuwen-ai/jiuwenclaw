@@ -3326,7 +3326,10 @@ const showWorkspaceDivider = effectiveTeamAreaExpanded && !showConversationNotFo
 
       {proactiveToastVisible && proactiveToastMessage && (
         <div className="app-toast-wrapper app-toast-wrapper--top-center" data-testid="app-proactive-notification-toast">
-          <div className="bg-warn-subtle text-warn px-4 py-2 rounded-lg shadow-lg animate-rise text-sm" data-testid="app-proactive-notification-toast-message">
+          <div
+            className="max-w-[640px] whitespace-pre-line bg-warn-subtle text-warn px-4 py-3 rounded-lg shadow-lg animate-rise text-sm leading-5"
+            data-testid="app-proactive-notification-toast-message"
+          >
             {proactiveToastMessage}
           </div>
         </div>

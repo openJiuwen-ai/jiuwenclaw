@@ -614,6 +614,9 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
         next_tools: list[Any] = []
         changed = False
         for tool in tools:
+            if getattr(tool, "name", None) == "skill_index":
+                next_tools.append(tool)
+                continue
             params = getattr(tool, "parameters", None)
             if not isinstance(params, dict):
                 next_tools.append(tool)
