@@ -1094,6 +1094,7 @@ def test_cli_policy_update_all_update_default_policy(
                 "policy", "update-all",
                 "--policy-mode", "override",
                 "--update-default-policy",
+                "--no-update-existing-sandboxes",
                 "--policy", json.dumps({
                     "network": {
                         "egress": original_network["egress"],

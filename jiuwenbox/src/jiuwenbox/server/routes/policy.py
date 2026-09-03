@@ -30,9 +30,10 @@ async def get_default_policy():
     """Return the default policy new sandboxes inherit.
 
     This is the in-memory ``SandboxManager.policy`` -- i.e. the YAML loaded at
-    startup plus any ``PUT /policies`` update that passed
-    ``update_default_policy: true``. Sandboxes created without a ``policy``
-    body (or with ``policy_mode: append``) are resolved against it.
+    startup (or ``update_policy.yaml`` when present), plus any
+    ``PUT /policies`` update that passed ``update_default_policy: true``.
+    Sandboxes created without a ``policy`` body (or with ``policy_mode: append``)
+    are resolved against it.
     """
     return _mgr().policy.model_dump(mode="json")
 
@@ -61,18 +62,19 @@ class UpdatePolicyRequest(BaseModel):
     policy_mode: PolicyMode = PolicyMode.OVERRIDE
 
 
-class UpdateAllPoliciesRequest(UpdatePolicyRequest):
-    """Batch payload: same as :class:`UpdatePolicyRequest` plus a switch that
-    also rebases the server's default policy.
+class UpdateAllPoliciesRequest(BaseModel):
+    """Batch policy update: full sandbox fragment for default, network for live.
 
-    When ``update_default_policy`` is true the same egress/ingress update is
-    merged into the in-memory default policy, so sandboxes created *later*
-    without an explicit ``policy`` (or with ``policy_mode: append``) inherit
-    it. The change is process-local: the policy YAML on disk is never
-    rewritten, so a server restart falls back to the file's content.
+    ``update_default_policy`` deep-merges ``policy`` into the server default
+    and overwrites ``update_policy.yaml`` with the merged result.
+    ``update_existing_sandboxes`` hot-updates only network egress/ingress on
+    registered sandboxes. ``inference_privacy_proxies`` in ``policy`` is ignored.
     """
 
+    policy: dict[str, Any]
+    policy_mode: PolicyMode = PolicyMode.OVERRIDE
     update_default_policy: bool = False
+    update_existing_sandboxes: bool = True
 
 
 class UpdatePolicySkippedItem(BaseModel):
@@ -97,21 +99,23 @@ class UpdateAllPoliciesResponse(BaseModel):
 
 @router.put("/policies", response_model=UpdateAllPoliciesResponse)
 async def update_all_policies(request: UpdateAllPoliciesRequest):
-    """Apply a network ingress/egress update to every registered sandbox."""
+    """Apply a policy fragment to the default template and/or every sandbox."""
     mgr = _mgr()
     result = await mgr.update_all_policies(
         policy_data=request.policy,
         policy_mode=request.policy_mode,
         update_default_policy=request.update_default_policy,
+        update_existing_sandboxes=request.update_existing_sandboxes,
     )
     logger.info(
-        "batch network policy update: updated=%d skipped=%d failed=%d mode=%s "
-        "default_updated=%s",
+        "batch policy update: updated=%d skipped=%d failed=%d mode=%s "
+        "default_updated=%s existing=%s",
         len(result["updated"]),
         len(result["skipped"]),
         len(result["failed"]),
         request.policy_mode.value,
         result["default_updated"],
+        request.update_existing_sandboxes,
     )
     return result
 

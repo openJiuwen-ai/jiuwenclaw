@@ -271,15 +271,29 @@ class PolicyEngine:
         self,
         base_policy: SecurityPolicy,
         extra_policy: SecurityPolicy | Mapping[str, object],
+        *,
+        mode: str = "append",
     ) -> SecurityPolicy:
-        """Append a policy fragment onto a base policy."""
+        """Deep-merge a policy fragment onto a base policy.
+
+        ``append``: dict recurse, list dedupe-append, scalar replace.
+        ``override``: dict recurse, list replace, scalar replace.
+        Leaves absent from ``extra_policy`` are preserved in both modes.
+        """
+        if mode not in ("append", "override"):
+            raise PolicyValidationError(
+                f"Unsupported policy merge mode {mode!r}; expected 'append' or 'override'"
+            )
         if isinstance(extra_policy, SecurityPolicy):
             extra_data = extra_policy.model_dump(mode="json")
         else:
             extra_data = dict(extra_policy)
 
         base_data = base_policy.model_dump(mode="json")
-        merged = self._merge_value(base_data, extra_data)
+        if mode == "override":
+            merged = self._merge_value_override(base_data, extra_data)
+        else:
+            merged = self._merge_value(base_data, extra_data)
         return SecurityPolicy.model_validate(merged)
 
     def _merge_value(self, base: object, extra: object) -> object:
@@ -301,6 +315,24 @@ class PolicyEngine:
                 if item not in merged:
                     merged.append(item)
             return merged
+
+        return extra
+
+    def _merge_value_override(self, base: object, extra: object) -> object:
+        if extra is None:
+            return base
+
+        if isinstance(base, dict) and isinstance(extra, Mapping):
+            merged = dict(base)
+            for key, value in extra.items():
+                if key in merged:
+                    merged[key] = self._merge_value_override(merged[key], value)
+                else:
+                    merged[key] = value
+            return merged
+
+        if isinstance(base, list) and isinstance(extra, list):
+            return list(extra)
 
         return extra
 

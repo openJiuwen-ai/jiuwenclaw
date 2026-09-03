@@ -34,7 +34,7 @@ from jiuwenbox.server.conch_policy import (
     map_conch_volume_mounts,
     merge_conch_create_env,
     resolve_conch_run_as,
-    resolve_conch_template_id,
+    resolve_conch_template_name,
 )
 from jiuwenbox.server.runtime.base import (
     RuntimeAdapter,
@@ -287,7 +287,7 @@ def format_conch_control_plane_error(exc: BaseException) -> str:
 def summarize_conch_create_args(
     *,
     sandbox_id: str,
-    template_id: str | None,
+    template_name: str | None,
     resource_kwargs: dict[str, Any],
     volume_mounts: list[dict[str, Any]] | None,
     network: dict[str, Any] | None,
@@ -305,7 +305,7 @@ def summarize_conch_create_args(
         )
     return {
         "sandbox_id": sandbox_id,
-        "template_id": template_id,
+        "template_name": template_name,
         **resource_kwargs,
         "volume_mounts": mounts,
         "network": network,
@@ -317,7 +317,7 @@ def format_conch_create_failure(
     exc: BaseException,
     *,
     sandbox_id: str,
-    template_id: str | None,
+    template_name: str | None,
     resource_kwargs: dict[str, Any],
     volume_mounts: list[dict[str, Any]] | None,
     network: dict[str, Any] | None,
@@ -327,7 +327,7 @@ def format_conch_create_failure(
     remote = format_conch_control_plane_error(exc)
     args = summarize_conch_create_args(
         sandbox_id=sandbox_id,
-        template_id=template_id,
+        template_name=template_name,
         resource_kwargs=resource_kwargs,
         volume_mounts=volume_mounts,
         network=network,
@@ -464,7 +464,7 @@ class ConchRuntime(RuntimeAdapter):
         policy = SecurityPolicy.model_validate(
             yaml.safe_load(Path(policy_path).read_text())
         )
-        template_id = resolve_conch_template_id(policy)
+        template_name = resolve_conch_template_name(policy)
         volume_mounts = map_conch_volume_mounts(policy)
         network = map_conch_network_policy(policy.conch.network, omit_empty=True)
         resource_kwargs = build_conch_resource_kwargs(policy.conch)
@@ -477,7 +477,7 @@ class ConchRuntime(RuntimeAdapter):
 
         def _create() -> Any:
             return sdk.sandbox.create(
-                template_id=template_id,
+                template_name=template_name,
                 sandbox_id=sandbox_id,
                 volume_mounts=volume_mounts or None,
                 env=create_env or None,
@@ -493,7 +493,7 @@ class ConchRuntime(RuntimeAdapter):
                 format_conch_create_failure(
                     exc,
                     sandbox_id=sandbox_id,
-                    template_id=template_id,
+                    template_name=template_name,
                     resource_kwargs=resource_kwargs,
                     volume_mounts=volume_mounts,
                     network=network,

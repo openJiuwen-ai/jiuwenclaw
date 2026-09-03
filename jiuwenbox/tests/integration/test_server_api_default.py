@@ -1311,6 +1311,7 @@ def restore_default_policy(client):
         client.put("/api/v1/policies", json={
             "policy_mode": "override",
             "update_default_policy": True,
+            "update_existing_sandboxes": False,
             "policy": {
                 "network": {
                     "egress": network["egress"],
@@ -1971,10 +1972,10 @@ class TestDefaultPolicyAPI:
 
         put_resp = client.put("/api/v1/policies", json={
             "update_default_policy": True,
+            "update_existing_sandboxes": False,
             "policy": {
-                "network": {
-                    "mode": "host",
-                    "egress": {"default": "allow"},
+                "filesystem_policy": {
+                    "read_write": ["relative/not-absolute"],
                 },
             },
         })
@@ -1982,6 +1983,7 @@ class TestDefaultPolicyAPI:
 
         after = client.get("/api/v1/policies").json()
         assert after["network"] == before["network"]
+        assert after.get("filesystem_policy") == before.get("filesystem_policy")
 
     @staticmethod
     def test_single_sandbox_update_never_touches_default(
@@ -2013,6 +2015,71 @@ class TestDefaultPolicyAPI:
 
         after = client.get("/api/v1/policies").json()
         assert after["network"] == before["network"]
+
+
+    @staticmethod
+    def test_put_policies_skips_existing_when_flag_false(
+        client,
+        create_sandbox_with_policy,
+        restore_default_policy,
+    ):
+        marker = TestDefaultPolicyAPI.MARKER_IP
+        sandbox = create_sandbox_with_policy(
+            policy=_minimal_isolated_policy(),
+        )
+        before = client.get(f"/api/v1/policies/{sandbox['id']}").json()
+
+        put_resp = client.put("/api/v1/policies", json={
+            "policy_mode": "append",
+            "update_default_policy": True,
+            "update_existing_sandboxes": False,
+            "policy": {
+                "network": {
+                    "egress": {"blocked_ips": [marker]},
+                },
+            },
+        })
+        assert put_resp.status_code == 200, put_resp.text
+        result = put_resp.json()
+        assert result["updated"] == []
+        assert result["skipped"] == []
+        assert result["failed"] == []
+        assert result["default_updated"] is True
+        assert marker in TestDefaultPolicyAPI._blocked_ips(result["default_policy"])
+
+        after = client.get(f"/api/v1/policies/{sandbox['id']}").json()
+        assert after["network"]["egress"] == before["network"]["egress"]
+
+        create_resp = client.post("/api/v1/sandboxes", json={})
+        assert create_resp.status_code == 201, create_resp.text
+        inherited = client.get(
+            f"/api/v1/policies/{create_resp.json()['id']}"
+        ).json()
+        assert marker in TestDefaultPolicyAPI._blocked_ips(inherited)
+
+    @staticmethod
+    def test_put_policies_full_fragment_updates_default_timeout(
+        client,
+        restore_default_policy,
+        restore_timeout,
+    ):
+        put_resp = client.put("/api/v1/policies", json={
+            "policy_mode": "override",
+            "update_default_policy": True,
+            "update_existing_sandboxes": False,
+            "policy": {
+                "timeout": {
+                    "idle_timeout": 1234,
+                    "idle_check_interval": 61,
+                },
+            },
+        })
+        assert put_resp.status_code == 200, put_resp.text
+        assert put_resp.json()["default_policy"]["timeout"]["idle_timeout"] == 1234
+        timeout_resp = client.get("/api/v1/timeout")
+        assert timeout_resp.status_code == 200
+        assert timeout_resp.json()["idle_timeout"] == 1234
+        assert timeout_resp.json()["idle_check_interval"] == 61
 
 
 @pytest.fixture

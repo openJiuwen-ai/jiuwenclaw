@@ -507,8 +507,12 @@ class _CliClient:
         policy: Any,
         policy_mode: str | None = None,
         update_default_policy: bool = False,
+        update_existing_sandboxes: bool = True,
     ) -> dict[str, Any]:
-        body: dict[str, Any] = {"policy": policy}
+        body: dict[str, Any] = {
+            "policy": policy,
+            "update_existing_sandboxes": update_existing_sandboxes,
+        }
         if policy_mode is not None:
             body["policy_mode"] = policy_mode
         if update_default_policy:
@@ -966,6 +970,7 @@ def cmd_policy_update_all(args: argparse.Namespace, client: _CliClient) -> Any:
         policy=_resolve_policy_arg(args),
         policy_mode=args.policy_mode,
         update_default_policy=args.update_default_policy,
+        update_existing_sandboxes=args.update_existing_sandboxes,
     )
 
 
@@ -1357,8 +1362,8 @@ def build_parser() -> argparse.ArgumentParser:
     p = policy_subs.add_parser(
         "update-all",
         help=(
-            "update network ingress/egress for all sandboxes "
-            "(accepts policy.network and/or policy.conch.network)"
+            "update default and/or all sandboxes "
+            "(full sandbox policy for default; network for existing sandboxes)"
         ),
     )
     _add_policy_update_args(p)
@@ -1366,8 +1371,17 @@ def build_parser() -> argparse.ArgumentParser:
         "--update-default-policy",
         action="store_true",
         help=(
-            "also rebase the server default policy so sandboxes created "
-            "later inherit these rules (process-local, lost on restart)"
+            "rebase the server default policy and overwrite "
+            "update_policy.yaml with the merged result"
+        ),
+    )
+    p.add_argument(
+        "--update-existing-sandboxes",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "hot-update network rules on existing sandboxes "
+            "(default: true; use --no-update-existing-sandboxes to skip)"
         ),
     )
     p.set_defaults(_handler=cmd_policy_update_all)

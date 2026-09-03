@@ -104,8 +104,8 @@ bwrap deployments do not need the SDK.
 
 - `conchd` is running and reachable
 - `CONCH_SDK_CONFIG` points at a valid Conch SDK config
-- A template id is available via policy `conch.template_id`, env
-  `JIUWENBOX_CONCH_TEMPLATE_ID`, or conchd `sandbox.default_template_id`
+- A template name is available via policy `conch.template_name`, env
+  `JIUWENBOX_CONCH_TEMPLATE_NAME`, or conchd `sandbox.default_template_name`
 - Bind mounts need Conch volume/virtiofs support on the host
 - Network IP filters need CNI + iptables and the corresponding kernel capabilities
 
@@ -113,7 +113,7 @@ bwrap deployments do not need the SDK.
 
 | Field | Purpose |
 | --- | --- |
-| `template_id` | Conch template (also overridable via `JIUWENBOX_CONCH_TEMPLATE_ID`) |
+| `template_name` | Conch template (also overridable via `JIUWENBOX_CONCH_TEMPLATE_NAME`) |
 | `vcpu_num` / `vcpu_max` | Optional VM vCPU boot count and max; omit → SDK/`sdk-config.yaml` defaults |
 | `ram_mb` | Optional VM memory in MB; omit → SDK default |
 | `run_as_user` / `run_as_group` | Optional pair; host resolves names/digits to uid:gid at create. Omit both → conch-agent identity. Unknown names → **400** (no nobody fallback). Independent of top-level `process.run_as_*` |
@@ -127,7 +127,7 @@ Example:
 
 ```yaml
 conch:
-  template_id: tmpl_xxx
+  template_name: tmpl_xxx
   vcpu_num: 2
   vcpu_max: 4
   ram_mb: 4096
@@ -147,7 +147,7 @@ conch:
 | Variable | Purpose |
 | --- | --- |
 | `CONCH_SDK_CONFIG` | Path to Conch SDK config (required for Conch sandboxes) |
-| `JIUWENBOX_CONCH_TEMPLATE_ID` | Fallback template id when policy `conch.template_id` is empty |
+| `JIUWENBOX_CONCH_TEMPLATE_NAME` | Fallback template name when policy `conch.template_name` is empty |
 | `JIUWENBOX_CONCH_NETWORK_TEST_IP` | Optional stable IPv4 for Conch network e2e enforcement tests |
 
 ### Lifecycle note
@@ -160,7 +160,7 @@ for cold recreate (delete + create with the same id and current policy).
 ### CLI examples
 
 ```bash
-export JIUWENBOX_CONCH_TEMPLATE_ID=tmpl_xxx
+export JIUWENBOX_CONCH_TEMPLATE_NAME=tmpl_xxx
 jiuwenbox sandbox create --sandbox-runtime conch
 jiuwenbox sandbox create --sandbox-runtime conch --policy-file conch-policy.yaml
 jiuwenbox policy update <ID> --policy \
@@ -378,8 +378,11 @@ ls /tmp/jiuwenbox-logs
 
 ## Policy Files
 
-The server loads one static default policy at startup. Policy dynamic update is
-not enabled.
+The server loads `~/.jiuwenbox/update_policy.yaml` as the default policy when
+that file exists; otherwise it loads `JIUWENBOX_POLICY_PATH` (or the bundled
+`default-policy.yaml`). `PUT /api/v1/policies` with `update_default_policy: true`
+merges the request into the in-memory default and overwrites
+`update_policy.yaml` with the full merged result.
 
 ### Field Reference
 
@@ -895,16 +898,16 @@ flag to maintain in sync:
 
 `tests/integration/test_server_api_conch.py` covers `sandbox_runtime` validation
 without Conch, plus lifecycle/exec/files/network cases marked `@pytest.mark.conch`.
-Those opt in with `JIUWENBOX_CONCH_TEMPLATE_ID` and talk to jiuwenbox over HTTP
+Those opt in with `JIUWENBOX_CONCH_TEMPLATE_NAME` and talk to jiuwenbox over HTTP
 only — Conch SDK / `CONCH_SDK_CONFIG` / conchd must be configured on the
 **server** host, not necessarily on the pytest client:
 
 ```bash
 # server: install SDK, set CONCH_SDK_CONFIG, run conchd + jiuwenbox
 # client:
-export JIUWENBOX_CONCH_TEMPLATE_ID=tmpl_xxx
+export JIUWENBOX_CONCH_TEMPLATE_NAME=tmpl_xxx
 # optional:
-# export JIUWENBOX_CONCH_TEMPLATE_ID_OVERRIDE=tmpl_yyy
+# export JIUWENBOX_CONCH_TEMPLATE_NAME_OVERRIDE=tmpl_yyy
 # export JIUWENBOX_CONCH_NETWORK_TEST_IP=198.51.100.10
 python3 -m pytest tests/integration/test_server_api_conch.py -v \
   --server-endpoint 127.0.0.1:8321
@@ -1012,11 +1015,12 @@ jiuwenbox sandbox rm "$ID" --yes
 # Policy
 jiuwenbox policy get "$ID"
 jiuwenbox policy get-default
-# Update network rules everywhere, and let later sandboxes inherit them too
+# Persist default-policy update without touching existing sandboxes
 jiuwenbox policy update-all --policy-mode append --update-default-policy \
+  --no-update-existing-sandboxes \
   --policy '{"network":{"egress":{"blocked_ips":["203.0.113.50/32"]}}}'
 jiuwenbox policy get-default
-# Update network rules everywhere, and let later sandboxes inherit them too
+# Hot-update network rules on existing sandboxes too
 jiuwenbox policy update-all --policy-mode append --update-default-policy \
   --policy '{"network":{"egress":{"blocked_ips":["203.0.113.50/32"]}}}'
 
