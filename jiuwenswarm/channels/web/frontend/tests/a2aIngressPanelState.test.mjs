@@ -245,7 +245,11 @@ test('A2A security reloads saved credentials for visibility, replacement and can
   assert.equal(validateA2AIngressDraft({ ...draft, credential: '', credential_configured: false }), 'credential');
   assert.equal(validateA2AIngressDraft({ ...draft, credential: 'short' }), 'credential');
   assert.equal(validateA2AIngressDraft({ ...draft, clear_credential: true }), 'credential');
-  assert.equal(validateA2AIngressDraft({ ...draft, api_key_header: 'Authorization' }), 'api_key_header');
+  assert.equal(validateA2AIngressDraft({ ...draft, auth_type: 'api_key', api_key_header: 'Authorization' }), 'api_key_header');
+  assert.equal(validateA2AIngressDraft({ ...draft, auth_type: 'none', api_key_header: 'Authorization' }), null);
+  assert.equal(validateA2AIngressDraft({ ...draft, api_key_header: '' }), null);
+  assert.equal(toA2AIngressPatch({ ...draft, auth_type: 'none', api_key_header: 'Authorization' }).api_key_header, 'X-API-Key');
+  assert.equal(toA2AIngressPatch({ ...draft, api_key_header: 'X-Custom-Key' }).api_key_header, 'X-Custom-Key');
   const replacement = { ...draft, credential: 'test-replacement-credential' };
   assert.equal(validateA2AIngressDraft(replacement), null);
   assert.equal(toA2AIngressPatch(replacement).credential, replacement.credential);

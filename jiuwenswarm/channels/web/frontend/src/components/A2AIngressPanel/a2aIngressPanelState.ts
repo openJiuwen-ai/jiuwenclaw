@@ -109,6 +109,25 @@ export interface A2AOutboundDispatchHistory {
   total: number;
 }
 
+export const DEFAULT_API_KEY_HEADER = 'X-API-Key';
+const RESERVED_API_KEY_HEADERS = [
+  'authorization',
+  'host',
+  'content-length',
+  'content-type',
+  'connection',
+  'transfer-encoding',
+  'cookie',
+  'set-cookie',
+  'accept',
+  'origin',
+];
+
+export function isValidA2AIngressApiKeyHeader(value: string): boolean {
+  const header = value.trim();
+  return /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/.test(header) && !RESERVED_API_KEY_HEADERS.includes(header.toLowerCase());
+}
+
 const DEFAULT_DRAFT: A2AIngressDraft = {
   host: '127.0.0.1',
   port: '19100',
@@ -121,7 +140,7 @@ const DEFAULT_DRAFT: A2AIngressDraft = {
   app_version: '0.1.0',
   expose_reasoning: true,
   auth_type: 'none',
-  api_key_header: 'X-API-Key',
+  api_key_header: DEFAULT_API_KEY_HEADER,
   card_auth_required: false,
   credential: '',
   credential_configured: false,
@@ -281,13 +300,7 @@ export function validateA2AIngressDraft(draft: A2AIngressDraft): string | null {
   if (draft.credential && (!/^[!-~]{16,512}$/.test(draft.credential) || draft.clear_credential)) return 'credential';
   if (draft.auth_type !== 'none' && !draft.credential && (!draft.credential_configured || draft.clear_credential)) return 'credential';
   if (draft.card_auth_required && draft.auth_type === 'none') return 'card_auth_required';
-  if (
-    !/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/.test(draft.api_key_header.trim()) ||
-    ['authorization', 'host', 'content-length', 'content-type', 'connection', 'transfer-encoding', 'cookie', 'set-cookie', 'accept', 'origin'].includes(
-      draft.api_key_header.trim().toLowerCase(),
-    )
-  )
-    return 'api_key_header';
+  if (draft.auth_type === 'api_key' && !isValidA2AIngressApiKeyHeader(draft.api_key_header)) return 'api_key_header';
   if (!draft.host.trim()) return 'host';
   const port = Number(draft.port);
   if (!Number.isInteger(port) || port < 1 || port > 65535) return 'port';
@@ -309,7 +322,10 @@ export function toA2AIngressPatch(draft: A2AIngressDraft): Record<string, string
     app_version: draft.app_version.trim(),
     expose_reasoning: draft.expose_reasoning,
     auth_type: draft.auth_type,
-    api_key_header: draft.api_key_header.trim(),
+    api_key_header:
+      draft.auth_type === 'api_key' || isValidA2AIngressApiKeyHeader(draft.api_key_header)
+        ? draft.api_key_header.trim()
+        : DEFAULT_API_KEY_HEADER,
     card_auth_required: draft.card_auth_required,
     ...(draft.credential ? { credential: draft.credential } : {}),
     ...(draft.clear_credential ? { clear_credential: true } : {}),

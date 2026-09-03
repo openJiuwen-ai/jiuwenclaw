@@ -2,7 +2,7 @@ import { useId, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { ChevronDown, Eye, EyeOff } from 'lucide-react';
 import { ConfigFieldHintLabel } from '../ConfigPanel/ConfigFieldHintLabel';
-import type { A2AIngressDraft } from './a2aIngressPanelState';
+import { DEFAULT_API_KEY_HEADER, isValidA2AIngressApiKeyHeader, type A2AIngressDraft } from './a2aIngressPanelState';
 
 export function A2AIngressSecurityFields({
   draft,
@@ -35,9 +35,13 @@ export function A2AIngressSecurityFields({
               className={`${inputClass} appearance-none pr-10 transition-colors hover:border-border-strong disabled:cursor-not-allowed disabled:opacity-50`}
               value={draft.auth_type}
               onChange={event => {
-                onChange('auth_type', event.target.value as A2AIngressDraft['auth_type']);
-                if (event.target.value === 'none') onChange('card_auth_required', false);
+                const nextType = event.target.value as A2AIngressDraft['auth_type'];
+                onChange('auth_type', nextType);
+                if (nextType === 'none') onChange('card_auth_required', false);
                 else onChange('clear_credential', false);
+                if (nextType !== 'api_key' && !isValidA2AIngressApiKeyHeader(draft.api_key_header)) {
+                  onChange('api_key_header', DEFAULT_API_KEY_HEADER);
+                }
               }}
             >
               {(['none', 'bearer', 'api_key'] as const).map(type => (
