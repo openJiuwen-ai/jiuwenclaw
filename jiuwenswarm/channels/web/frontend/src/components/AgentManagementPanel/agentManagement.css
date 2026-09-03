@@ -167,7 +167,6 @@
 
 .agent-management-card {
   position: relative;
-  min-width: 0;
   height: 160px;
   overflow: visible;
   border: 1px solid var(--color-border-default);
