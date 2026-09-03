@@ -88,6 +88,41 @@ def test_extract_legacy_params_delivery_channel_takes_priority_over_targets() ->
     assert out["targets"] == "web"
 
 
+def test_extract_legacy_params_maps_system_event_text() -> None:
+    payload = {
+        "name": "water-reminder",
+        "schedule": {"kind": "cron", "expr": "0 10 * * *", "tz": "Asia/Shanghai"},
+        "payload": {"kind": "systemEvent", "text": "该喝水啦！"},
+        "sessionTarget": "current",
+    }
+
+    out = _extract_legacy_params(payload, context=SimpleNamespace(channel_id="web"), require_schedule=True)
+
+    assert out["cron_expr"] == "0 10 * * *"
+    assert out["timezone"] == "Asia/Shanghai"
+    assert out["description"] == "该喝水啦！"
+
+
+def test_extract_legacy_params_rejects_empty_system_event() -> None:
+    payload = {
+        "schedule": {"kind": "cron", "expr": "0 10 * * *"},
+        "payload": {"kind": "systemEvent", "text": "  "},
+    }
+
+    with pytest.raises(ValueError, match="requires message.*text"):
+        _extract_legacy_params(payload, context=SimpleNamespace(channel_id="web"), require_schedule=True)
+
+
+def test_extract_legacy_params_rejects_unknown_payload_kind() -> None:
+    payload = {
+        "schedule": {"kind": "cron", "expr": "0 10 * * *"},
+        "payload": {"kind": "webhook", "text": "not supported"},
+    }
+
+    with pytest.raises(ValueError, match="Unsupported cron payload kind: webhook"):
+        _extract_legacy_params(payload, context=SimpleNamespace(channel_id="web"), require_schedule=True)
+
+
 @pytest.mark.asyncio
 async def test_cron_backend_create_job_pushes_and_resets_route() -> None:
     cron_tools = _FakeCronTools()
@@ -114,6 +149,25 @@ async def test_cron_backend_create_job_pushes_and_resets_route() -> None:
     assert cron_tools.routes[0].session_id == "sess-1"
     assert cron_tools.reset_tokens == ["token-1"]
     assert cron_tools.create_payloads[0]["id"] == "job-1"
+
+
+@pytest.mark.asyncio
+async def test_cron_backend_run_now_prefers_local_scheduler() -> None:
+    class _FakeScheduler:
+        async def trigger_run_now(self, job_id: str) -> str:
+            assert job_id == "job-1"
+            return "job-1:now"
+
+    class _LocalCronTools(_FakeCronTools):
+        async def ensure_scheduler(self):
+            return _FakeScheduler()
+
+        async def run_now(self, job_id: str):
+            raise AssertionError("Gateway fallback must not be used when local scheduler is available")
+
+    backend = _CronToolsCronBackend(cron_tools=_LocalCronTools(), message_handler=None)
+
+    assert await backend.run_now("job-1") == "job-1:now"
 
 
 def test_tenant_scope_from_context_reads_metadata() -> None:

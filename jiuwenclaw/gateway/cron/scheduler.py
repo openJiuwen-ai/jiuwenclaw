@@ -604,6 +604,18 @@ class CronSchedulerService:
         if metadata is None:
             metadata = {}
 
+        # app_agentserver has no Gateway MessageHandler. Preserve the local
+        # Relay route with the job so its final result can be delivered through
+        # AgentWebSocketServer.send_push after this request has long completed.
+        relay_delivery = getattr(job, "relay_delivery", None)
+        if channel_id == "web" and isinstance(relay_delivery, dict):
+            route = {
+                key: str(relay_delivery.get(key) or "").strip()
+                for key in ("user_id", "thread_id", "agent_id")
+            }
+            if all(route.values()):
+                metadata["officeclaw_cron_route"] = route
+
         # 获取 group_digital_avatar 和 my_user_id 配置
         _group_digital_avatar = False
         _my_user_id = ""

@@ -8,7 +8,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
-from jiuwenclaw.gateway.cron.models import CronJob, CronTarget
+from jiuwenclaw.gateway.cron.models import CronJob, CronTarget, normalize_relay_delivery
 from jiuwenclaw.utils import get_agent_home_dir
 
 
@@ -66,6 +66,7 @@ class CronJobStore:
         delete_after_run: bool | None = None,
         service_id: str | None = None,
         agent_id: str | None = None,
+        relay_delivery: dict[str, str] | None = None,
     ) -> CronJob:
         now = time.time()
         sid = str(session_id).strip() if isinstance(session_id, str) and session_id.strip() else None
@@ -74,6 +75,7 @@ class CronJobStore:
         dar = bool(delete_after_run) if delete_after_run is not None else False
         tenant_sid = str(service_id or "default").strip() or "default"
         tenant_aid = str(agent_id or "default").strip() or "default"
+        relay_route = normalize_relay_delivery(relay_delivery)
         job = CronJob(
             id=str(job_id or "").strip() or uuid.uuid4().hex,
             name=str(name or "").strip(),
@@ -91,6 +93,7 @@ class CronJobStore:
             delete_after_run=dar,
             service_id=tenant_sid,
             agent_id=tenant_aid,
+            relay_delivery=relay_route,
         )
         # validate via round-trip
         CronJob.from_dict(job.to_dict())
@@ -159,6 +162,8 @@ class CronJobStore:
                 updated,
                 agent_id=str(patch.get("agent_id") or "default").strip() or "default",
             )
+        if "relay_delivery" in patch:
+            updated = replace(updated, relay_delivery=normalize_relay_delivery(patch.get("relay_delivery")))
 
         updated.updated_at = time.time()
         CronJob.from_dict(updated.to_dict())

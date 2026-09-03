@@ -67,6 +67,18 @@ class _CronToolsCronBackend(CronToolBackend):
             else None
         )
         chat_type = str(metadata.get("chat_type") or "").strip() or None
+        relay_route = metadata.get("officeclaw_cron_route")
+        relay_user_id: str | None = None
+        relay_thread_id: str | None = None
+        relay_agent_id: str | None = None
+        if channel_id.lower() == "officeclaw" and isinstance(relay_route, dict):
+            raw_user_id = relay_route.get("user_id")
+            raw_thread_id = relay_route.get("thread_id")
+            raw_agent_id = relay_route.get("agent_id")
+            if all(isinstance(value, str) for value in (raw_user_id, raw_thread_id, raw_agent_id)):
+                relay_user_id = raw_user_id.strip() or None
+                relay_thread_id = raw_thread_id.strip() or None
+                relay_agent_id = raw_agent_id.strip() or None
         service_id, agent_id = _tenant_scope_from_context(context)
         return CronToolRoute(
             request_id=request_id,
@@ -75,6 +87,9 @@ class _CronToolsCronBackend(CronToolBackend):
             chat_type=chat_type,
             service_id=service_id,
             agent_id=agent_id,
+            relay_user_id=relay_user_id,
+            relay_thread_id=relay_thread_id,
+            relay_agent_id=relay_agent_id,
         )
 
     async def list_jobs(self, *, include_disabled: bool = True) -> list[dict[str, Any]]:
@@ -150,6 +165,15 @@ class _CronToolsCronBackend(CronToolBackend):
         return list(rows or [])
 
     async def run_now(self, job_id: str) -> str:
+        # Relay/HarmonyOS starts an Agent-side scheduler for each tenant. Prefer
+        # triggering that scheduler directly so the unified cron tool's
+        # action=run works even when no Gateway websocket is available.
+        ensure_scheduler = getattr(self._cron_tools, "ensure_scheduler", None)
+        scheduler = await ensure_scheduler() if ensure_scheduler is not None else None
+        if scheduler is not None:
+            run_id = await scheduler.trigger_run_now(job_id)
+            return str(run_id or "")
+
         token = self._cron_tools.push_cron_route(CronToolRoute())
         try:
             run_result = await self._cron_tools.run_now(job_id)
@@ -274,14 +298,30 @@ def _extract_legacy_params(
         ).strip() or "Asia/Shanghai"
 
         payload_block = data.get("payload") if isinstance(data.get("payload"), dict) else {}
-        payload_kind = str(payload_block.get("kind") or "agentTurn").strip()
-        if payload_kind and payload_kind != "agentTurn":
-            raise ValueError("Only agentTurn cron jobs are supported by the current gateway bridge")
-        description = str(
-            payload_block.get("message")
-            or data.get("description")
-            or ""
-        )
+        payload_kind = str(payload_block.get("kind") or "").strip()
+        if not payload_kind:
+            # Keep the legacy flat shape working, while accepting the unified
+            # shape when it only contains the system-event text field.
+            payload_kind = "systemEvent" if payload_block.get("text") else "agentTurn"
+        if payload_kind == "agentTurn":
+            description = str(
+                payload_block.get("message")
+                or data.get("description")
+                or ""
+            ).strip()
+        elif payload_kind == "systemEvent":
+            description = str(
+                payload_block.get("text")
+                or data.get("description")
+                or ""
+            ).strip()
+        else:
+            raise ValueError(
+                f"Unsupported cron payload kind: {payload_kind}; "
+                "supported kinds are agentTurn and systemEvent"
+            )
+        if require_schedule and not description:
+            raise ValueError("cron payload requires message (agentTurn) or text (systemEvent)")
 
         delivery = data.get("delivery") if isinstance(data.get("delivery"), dict) else {}
         logger.info(

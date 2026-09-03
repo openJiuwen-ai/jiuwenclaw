@@ -31,6 +31,76 @@ class NopCronMessageHandler:
         )
 
 
+class RelayCronMessageHandler:
+    """Deliver AgentServer-only web cron results through the live Relay websocket."""
+
+    def __init__(self, gateway_push: Any | None = None) -> None:
+        self._gateway_push = gateway_push
+
+    @staticmethod
+    def _route_from_metadata(metadata: Any) -> dict[str, str] | None:
+        if not isinstance(metadata, dict):
+            return None
+        raw = metadata.get("officeclaw_cron_route")
+        if not isinstance(raw, dict):
+            return None
+        route: dict[str, str] = {}
+        for key in ("user_id", "thread_id", "agent_id"):
+            value = raw.get(key)
+            if not isinstance(value, str):
+                return None
+            normalized = value.strip()
+            if not normalized or len(normalized) > 512:
+                return None
+            route[key] = normalized
+        return route
+
+    async def publish_robot_messages(self, msg: Any) -> None:
+        if str(getattr(msg, "channel_id", "") or "").strip() != "web":
+            return
+        route = self._route_from_metadata(getattr(msg, "metadata", None))
+        payload = getattr(msg, "payload", None)
+        if route is None or not isinstance(payload, dict):
+            logger.debug("[RelayCronMessageHandler] skip cron push without Relay route")
+            return
+        content = payload.get("content")
+        cron = payload.get("cron")
+        if not isinstance(content, str) or not content.strip() or not isinstance(cron, dict):
+            logger.debug("[RelayCronMessageHandler] skip non-cron robot message")
+            return
+        job_id = str(cron.get("job_id") or "").strip()
+        run_id = str(cron.get("run_id") or "").strip()
+        if not job_id or not run_id:
+            logger.debug("[RelayCronMessageHandler] skip cron push without job/run identity")
+            return
+
+        gateway_push = self._gateway_push
+        if gateway_push is None:
+            from jiuwenclaw.agentserver.gateway_push import WebSocketGatewayPushTransport
+
+            gateway_push = WebSocketGatewayPushTransport()
+            self._gateway_push = gateway_push
+        kind = "placeholder" if cron.get("is_placeholder") else "final"
+        await gateway_push.send_push(
+            {
+                "request_id": f"cron-delivery:{job_id}:{run_id}:{kind}",
+                "channel_id": "officeclaw",
+                "payload": {
+                    "event_type": "chat.cron_delivery",
+                    "content": content,
+                    "cron": dict(cron),
+                },
+                "metadata": {"officeclaw_cron_route": route},
+            }
+        )
+        logger.info(
+            "[RelayCronMessageHandler] forwarded cron result job=%s run_id=%s kind=%s",
+            job_id,
+            run_id,
+            kind,
+        )
+
+
 class InProcessAgentServerClient:
     """Invoke ``TenantAgentPool.process_message`` without a WebSocket hop.
 
@@ -110,8 +180,8 @@ def resolve_agent_side_cron_deps(
         except Exception:
             handler = None
     if handler is None:
-        handler = NopCronMessageHandler()
-        logger.info("[CronLocal] using NopCronMessageHandler (no Gateway MessageHandler)")
+        handler = RelayCronMessageHandler()
+        logger.info("[CronLocal] using RelayCronMessageHandler (no Gateway MessageHandler)")
 
     return client, handler
 
