@@ -123,6 +123,7 @@ import {
   setA2UIActionHandler,
 } from './features/a2ui/actionBridge';
 import { saveBlob } from './utils/desktopSave';
+import { restoreSessionEquipment } from './utils/enabledExtensions';
 import { generateUuidV4 } from './utils/uuid';
 import { ModelSetupGuide, type ModelSetupGuideStep } from './features/modelSetupGuide/ModelSetupGuide';
 import { isSetupGuideEnabled } from './features/modelSetupGuide/modelSetupGuideState';
@@ -1420,6 +1421,9 @@ function AppContent({
       });
       upsertSessionMetadata(session, { setCurrent: sessionIdRef.current === targetSessionId });
       useWorkspaceStore.getState().upsertSession(session);
+      if (session.session_equipment && typeof session.session_equipment === 'object') {
+        restoreSessionEquipment(targetSessionId, session.session_equipment);
+      }
       if (sessionIdRef.current === targetSessionId) {
         setMissingSessionId((current) => (current === targetSessionId ? null : current));
         // 同 handleRestoreSession：拿到后端 metadata 里的 model 后还原 selectedModelName，

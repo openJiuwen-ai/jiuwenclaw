@@ -86,7 +86,6 @@ from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
 from jiuwenswarm.common.schema.message import ReqMethod, Message, Mode
 _mark_startup_import_phase("gateway_core_imports_loaded")
 
-
 _logging_yaml = get_root_dir() / "config" / "logging.yaml"
 if _logging_yaml.exists():
     from openjiuwen.core.common.logging.log_config import configure_log
