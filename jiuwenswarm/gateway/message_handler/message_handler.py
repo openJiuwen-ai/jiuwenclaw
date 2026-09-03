@@ -247,6 +247,8 @@ class MessageHandler(ABC):
         self._acp_session_alias_lock = asyncio.Lock()
         self._external_session_aliases: dict[tuple[str, str], str] = {}
         self._external_session_alias_lock = asyncio.Lock()
+        self._external_cancel_waiters: dict[str, asyncio.Future[None]] = {}
+        self._external_cancel_ack_timeout_seconds = 5.0
 
         # per-channel 控制状态：支持 \new_session / \mode 指令。
         # 使用 ChannelType 的 value 作为标准键，避免散落的硬编码字符串。
@@ -393,6 +395,80 @@ class MessageHandler(ABC):
             "[MessageHandler] _user_messages 入队: id=%s channel_id=%s session_id=%s",
             msg.id, msg.channel_id, msg.session_id,
         )
+
+    async def handle_external_channel_cancel(self, msg: "Message") -> None:
+        """Queue an A2A cancel in order and wait for AgentServer acknowledgement."""
+        from jiuwenswarm.common.schema.message import ReqMethod
+
+        if msg.channel_id != "a2a" or msg.req_method != ReqMethod.CHAT_CANCEL:
+            raise ValueError("external channel cancel requires an A2A CHAT_CANCEL message")
+        request_id = str(msg.id)
+        waiter = asyncio.get_running_loop().create_future()
+        if request_id in self._external_cancel_waiters:
+            raise RuntimeError(f"duplicate external cancel request: {request_id}")
+        self._external_cancel_waiters[request_id] = waiter
+        try:
+            await self.handle_message(msg)
+            try:
+                await asyncio.wait_for(
+                    asyncio.shield(waiter),
+                    timeout=self._external_cancel_ack_timeout_seconds,
+                )
+            except TimeoutError:
+                logger.warning(
+                    "[MessageHandler] A2A cancel acknowledgement timed out after %.1fs; "
+                    "releasing caller while downstream cancellation continues: "
+                    "id=%s session_id=%s",
+                    self._external_cancel_ack_timeout_seconds,
+                    request_id,
+                    msg.session_id,
+                )
+        finally:
+            self._external_cancel_waiters.pop(request_id, None)
+            if not waiter.done():
+                waiter.cancel()
+
+    def _finish_external_channel_cancel(
+        self, request_id: str, error: BaseException | None = None
+    ) -> None:
+        waiter = self._external_cancel_waiters.get(str(request_id))
+        if waiter is None or waiter.done():
+            return
+        if error is None:
+            waiter.set_result(None)
+        else:
+            waiter.set_exception(error)
+
+    @staticmethod
+    def _is_external_channel_cancel(msg: "Message | None") -> bool:
+        from jiuwenswarm.common.schema.message import ReqMethod
+
+        return (
+            msg is not None
+            and msg.channel_id == "a2a"
+            and msg.req_method == ReqMethod.CHAT_CANCEL
+        )
+
+    def _schedule_external_channel_cancel(self, msg: "Message") -> None:
+        async def cancel_and_finish() -> None:
+            try:
+                cancelled = await self._cancel_agent_work_for_session(
+                    msg,
+                    msg.session_id,
+                    agent_notify="await",
+                )
+                if not cancelled:
+                    raise RuntimeError("AgentServer rejected A2A cancellation")
+            except BaseException as exc:
+                self._finish_external_channel_cancel(msg.id, exc)
+            else:
+                self._finish_external_channel_cancel(msg.id)
+
+        task = asyncio.create_task(
+            cancel_and_finish(), name=f"gw-a2a-cancel-{str(msg.id)[:24]}"
+        )
+        self._fire_and_forget_tasks.add(task)
+        task.add_done_callback(self._fire_and_forget_tasks.discard)
 
     async def _maybe_register_godview(self, msg: "Message") -> None:
         """V2: auto-register a GodView subscriber for the channel.
@@ -1154,13 +1230,19 @@ class MessageHandler(ABC):
 
         payload = resp.payload if isinstance(resp.payload, dict) else {}
         if payload.get("event_type") == "chat.interrupt_result":
+            # resp.ok only reflects transport-level success; the payload's own
+            # "success" (e.g. AgentServer found nothing to cancel) determines
+            # whether the interrupt actually happened. Only treat a missing/True
+            # value as success so callers don't get a false-positive ack.
+            interrupt_succeeded = bool(resp.ok) and payload.get("success") is not False
             if not publish_interrupt_result:
                 logger.info(
-                    "[MessageHandler] 已静默 AgentServer 中断结果: request_id=%s ok=%s",
+                    "[MessageHandler] 已静默 AgentServer 中断结果: request_id=%s ok=%s success=%s",
                     resp.request_id,
                     resp.ok,
+                    interrupt_succeeded,
                 )
-                return bool(resp.ok)
+                return interrupt_succeeded
             out = self._response_to_message(
                 resp,
                 sid_for_agent,
@@ -1169,16 +1251,17 @@ class MessageHandler(ABC):
             )
             await self.publish_robot_messages(out)
             logger.info(
-                "[MessageHandler] 已转发 AgentServer 中断结果: request_id=%s ok=%s",
+                "[MessageHandler] 已转发 AgentServer 中断结果: request_id=%s ok=%s success=%s",
                 resp.request_id,
                 resp.ok,
+                interrupt_succeeded,
             )
 
             # 发送被中断工具的 tool_result 给前端
             await self._send_cancelled_tool_results(
                 msg.channel_id, sid_for_agent, payload, msg.metadata
             )
-            return bool(resp.ok)
+            return interrupt_succeeded
 
         error_message = "任务终止失败"
         if isinstance(payload, dict):
@@ -3969,6 +4052,9 @@ class MessageHandler(ABC):
         from jiuwenswarm.common.schema.message import ReqMethod
 
         while self._running:
+            msg: Message | None = None
+            external_cancel_handed_off = False
+            external_cancel_error: BaseException | None = None
             try:
                 msg = await self.consume_user_messages(timeout=None)
                 if msg is None:
@@ -3981,8 +4067,18 @@ class MessageHandler(ABC):
                     continue
 
                 # 将当前 Channel 的控制状态应用到消息上
-                await self._resolve_external_channel_session(msg)
-                self._apply_channel_state(msg)
+                try:
+                    await self._resolve_external_channel_session(msg)
+                    self._apply_channel_state(msg)
+                except Exception as exc:
+                    if msg.channel_id == "a2a" and msg.req_method == ReqMethod.CHAT_CANCEL:
+                        self._finish_external_channel_cancel(msg.id, exc)
+                        logger.exception(
+                            "[MessageHandler] A2A cancel session resolution failed: id=%s",
+                            msg.id,
+                        )
+                        continue
+                    raise
                 channel_type = self._resolve_control_channel_type(msg)
                 if (
                     channel_type in self._control_channel_types
@@ -4239,13 +4335,17 @@ class MessageHandler(ABC):
                         _supp_task.add_done_callback(_enqueue_supplement_after_interrupt)
 
                     elif intent == "cancel":
-                        # fire_and_forget：避免慢 cancel 阻塞 _forward_loop，
-                        # 导致后续 session.create 等请求在队列中等待、前端超时。
-                        await self._cancel_agent_work_for_session(
-                            msg,
-                            msg.session_id,
-                            agent_notify="fire_and_forget",
-                        )
+                        if msg.channel_id == "a2a":
+                            self._schedule_external_channel_cancel(msg)
+                            external_cancel_handed_off = True
+                        else:
+                            # Other channels stay non-blocking so a slow interrupt
+                            # cannot stall unrelated sessions in _forward_loop.
+                            await self._cancel_agent_work_for_session(
+                                msg,
+                                msg.session_id,
+                                agent_notify="fire_and_forget",
+                            )
 
                     elif intent in ("pause", "resume"):
                         # 暂停/恢复：不取消流式任务，转发给 AgentServer 处理 ReAct 循环
@@ -4492,7 +4592,28 @@ class MessageHandler(ABC):
                         msg.id, msg.channel_id,
                     )
             except asyncio.CancelledError:
+                external_cancel_error = RuntimeError(
+                    "MessageHandler stopped before A2A cancellation completed"
+                )
                 break
+            except Exception as exc:
+                external_cancel_error = exc
+                if self._is_external_channel_cancel(msg):
+                    logger.exception(
+                        "[MessageHandler] A2A cancel preprocessing failed: id=%s",
+                        msg.id,
+                    )
+                    continue
+                raise
+            finally:
+                if self._is_external_channel_cancel(
+                    msg
+                ) and not external_cancel_handed_off:
+                    self._finish_external_channel_cancel(
+                        msg.id,
+                        external_cancel_error
+                        or RuntimeError("A2A cancellation was not dispatched"),
+                    )
 
     async def process_stream(
         self,
