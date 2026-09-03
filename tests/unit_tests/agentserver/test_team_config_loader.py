@@ -133,6 +133,188 @@ def test_load_team_spec_dict_uses_first_models_defaults_entry_for_team(monkeypat
     assert model["model_request_config"]["temperature"] == 0.1
 
 
+def test_load_team_spec_dict_maps_reasoning_level_off_and_drops_internal_hint():
+    """Cluster members must not forward UI ``reasoning_level`` to the OpenAI SDK."""
+    config = {
+        "models": {
+            "defaults": [
+                {
+                    "model_client_config": {
+                        "api_base": "https://example.test/v1",
+                        "api_key": "sk-test",
+                        "model_name": "Deepseek-V4-Flash-0731",
+                        "client_provider": "OpenAI",
+                    },
+                    "model_config_obj": {
+                        "temperature": 0.95,
+                        "reasoning_level": "off",
+                    },
+                    "is_default": True,
+                }
+            ]
+        },
+        **_wrap_modes_team(
+            {
+                "demo_team": {
+                    "team_name": "demo_team",
+                    "agents": {
+                        "leader": {},
+                        "teammate": {},
+                    },
+                }
+            }
+        ),
+    }
+
+    spec = load_team_spec_dict(config_base=config)
+
+    for role in ("leader", "teammate"):
+        request_config = spec["agents"][role]["model"]["model_request_config"]
+        assert "reasoning_level" not in request_config
+        assert request_config["reasoning"] == {"mode": "disabled"}
+        assert request_config["model"] == "Deepseek-V4-Flash-0731"
+        assert request_config["temperature"] == 0.95
+
+
+def test_load_team_spec_dict_sanitizes_explicit_member_model_reasoning_level():
+    """A member that already has its own model dict still needs the UI hint stripped."""
+    config = {
+        "models": {
+            "default": {
+                "model_client_config": {
+                    "model_name": "fallback-model",
+                    "client_provider": "OpenAI",
+                },
+                "model_config_obj": {},
+            }
+        },
+        **_wrap_modes_team(
+            {
+                "demo_team": {
+                    "team_name": "demo_team",
+                    "agents": {
+                        "leader": {
+                            "model": {
+                                "model_client_config": {
+                                    "api_base": "https://example.test/v1",
+                                    "api_key": "sk-test",
+                                    "model_name": "Deepseek-V4-Flash-0731",
+                                    "client_provider": "OpenAI",
+                                },
+                                "model_request_config": {
+                                    "model": "Deepseek-V4-Flash-0731",
+                                    "temperature": 0.2,
+                                    "reasoning_level": "off",
+                                },
+                            }
+                        },
+                    },
+                }
+            }
+        ),
+    }
+
+    spec = load_team_spec_dict(config_base=config)
+
+    request_config = spec["agents"]["leader"]["model"]["model_request_config"]
+    assert "reasoning_level" not in request_config
+    assert request_config["reasoning"] == {"mode": "disabled"}
+    assert request_config["temperature"] == 0.2
+
+
+def test_load_team_spec_dict_keeps_declared_request_model_over_client_model_name():
+    """An explicit member request ``model`` must not be overwritten by client model_name."""
+    config = {
+        "models": {
+            "default": {
+                "model_client_config": {
+                    "model_name": "fallback-model",
+                    "client_provider": "OpenAI",
+                },
+                "model_config_obj": {},
+            }
+        },
+        **_wrap_modes_team(
+            {
+                "demo_team": {
+                    "team_name": "demo_team",
+                    "agents": {
+                        "leader": {
+                            "model": {
+                                "model_client_config": {
+                                    "api_base": "https://example.test/v1",
+                                    "api_key": "sk-test",
+                                    "model_name": "client-listed-name",
+                                    "client_provider": "OpenAI",
+                                },
+                                "model_request_config": {
+                                    "model": "request-declared-name",
+                                    "temperature": 0.2,
+                                    "reasoning_level": "off",
+                                },
+                            }
+                        },
+                    },
+                }
+            }
+        ),
+    }
+
+    spec = load_team_spec_dict(config_base=config)
+
+    request_config = spec["agents"]["leader"]["model"]["model_request_config"]
+    assert request_config["model"] == "request-declared-name"
+    assert "reasoning_level" not in request_config
+    assert request_config["reasoning"] == {"mode": "disabled"}
+
+
+def test_load_team_spec_dict_keeps_ui_hint_from_model_config_obj_when_request_config_exists():
+    """A leftover ``model_config_obj.reasoning_level`` must still be mapped."""
+    config = {
+        "models": {
+            "default": {
+                "model_client_config": {
+                    "model_name": "fallback-model",
+                    "client_provider": "OpenAI",
+                },
+                "model_config_obj": {},
+            }
+        },
+        **_wrap_modes_team(
+            {
+                "demo_team": {
+                    "team_name": "demo_team",
+                    "agents": {
+                        "leader": {
+                            "model": {
+                                "model_client_config": {
+                                    "api_base": "https://example.test/v1",
+                                    "api_key": "sk-test",
+                                    "model_name": "Deepseek-V4-Flash-0731",
+                                    "client_provider": "OpenAI",
+                                },
+                                "model_config_obj": {"reasoning_level": "off"},
+                                "model_request_config": {
+                                    "model": "Deepseek-V4-Flash-0731",
+                                    "temperature": 0.3,
+                                },
+                            }
+                        },
+                    },
+                }
+            }
+        ),
+    }
+
+    spec = load_team_spec_dict(config_base=config)
+
+    request_config = spec["agents"]["leader"]["model"]["model_request_config"]
+    assert "reasoning_level" not in request_config
+    assert "model_config_obj" not in spec["agents"]["leader"]["model"]
+    assert request_config["reasoning"] == {"mode": "disabled"}
+    assert request_config["temperature"] == 0.3
+
+
 def test_load_team_spec_dict_supports_member_specific_agents(monkeypatch, tmp_path):
     """Predefined members should resolve to member_name-keyed DeepAgentSpec entries."""
     fake_agent_teams_home = tmp_path / ".agent_teams"

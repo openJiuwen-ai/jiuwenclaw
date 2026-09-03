@@ -1544,6 +1544,19 @@ def _transform_front_team_model_config(model_raw: dict[str, Any]) -> dict[str, A
         else:
             model_request_config["model"] = raw_model
 
+    if model_request_config:
+        from jiuwenswarm.common.reasoning_injector import build_reasoning_model_request_kwargs
+
+        model_request_config = build_reasoning_model_request_kwargs(
+            model_client_config=model_client_config,
+            model_config_obj=model_request_config,
+            model_name=str(
+                model_request_config.get("model")
+                or model_client_config.get("model_name")
+                or ""
+            ),
+        )
+
     transformed: dict[str, Any] = {}
     if model_client_config:
         model_client_config.setdefault("timeout", 1800)
