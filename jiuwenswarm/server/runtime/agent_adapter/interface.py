@@ -3091,8 +3091,6 @@ class JiuWenSwarm:
                         # 通知消费者，把窗口压到接近零。
                         try:
                             await asyncio.wait_for(stream_iter.aclose(), timeout=3)
-                        except asyncio.CancelledError:
-                            raise
                         except asyncio.TimeoutError:
                             # aclose 超时：生成器仍未关闭，租约可能仍被占。打点
                             # 便于线上发现僵尸收尾链路（adapter 的 close 阻塞在远端
@@ -3104,6 +3102,8 @@ class JiuWenSwarm:
                                 rid, session_id, _put_count,
                             )
                         except Exception:
+                            # 只吞非取消异常；CancelledError 继承自 BaseException，
+                            # 不会被此处捕获，会自然向上传播，无需显式 re-raise。
                             logger.warning(
                                 "[JiuWenSwarm] adapter stream aclose failed: request_id=%s",
                                 rid,

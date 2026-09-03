@@ -175,14 +175,24 @@ async def test_consumer_cancel_reaches_producer_within_one_chunk(monkeypatch) ->
                 asyncio.current_task().cancel()
 
     task = asyncio.create_task(consume())
+    # 等消费者任务结束（被取消或正常返回）。return_exceptions 避免 gather
+    # 把 CancelledError 抛到测试用例本身。
     result = await asyncio.gather(task, return_exceptions=True)
-    # 给 producer 收尾（aclose + finished 日志）留出调度机会
-    for _ in range(5):
+    # 充分让出事件循环，确保 producer 的 finally（aclose + finished 日志 +
+    # stream_done.set）跑完。用轮询等待 adapter.stream 收尾稳定，避免
+    # “Exception ignored in coroutine”类 unraisable 告警（async gen finalizer
+    # 在测试结束前未完成会被 pytest 当作失败）。
+    for _ in range(50):
+        stream = adapter.stream
+        if stream is not None and stream.aclose_called:
+            break
         await asyncio.sleep(0)
 
     assert isinstance(result[0], asyncio.CancelledError)
     stream = adapter.stream
-    assert stream is not None
+    assert stream is not None, (
+        "producer 未启动（adapter.stream 为 None）——取消过早注入"
+    )
     # 取消在一个 chunk 内送达：绝不能排空全部积压
     assert stream.produced < adapter.total, (
         f"producer 排空了全部 {stream.produced}/{adapter.total} 个 chunk，"
