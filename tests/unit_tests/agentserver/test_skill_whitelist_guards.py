@@ -9,7 +9,7 @@ import pytest
 from jiuwenswarm.common.utils import (
     get_agent_skills_dir,
     get_multi_tenant_skill_dirs,
-    get_tenant_agent_jiuwenclaw_workspace_dir,
+    get_tenant_agent_workspace_dir,
 )
 from jiuwenswarm.server.runtime.skill.skill_whitelist import is_skill_whitelist_tenant
 
@@ -44,9 +44,11 @@ def test_tenant_workspace_defaults_without_key() -> None:
     from jiuwenswarm.server.runtime.tenant_context import clear_tenant_bindings
 
     clear_tenant_bindings()
-    path = get_tenant_agent_jiuwenclaw_workspace_dir()
+    path = get_tenant_agent_workspace_dir()
     assert path.name == "workspace"
-    assert "workspace_default" in str(path)
+    # 个人版固定 service_default/agent_default；未设 enterprise 时走该路径。
+    assert "service_default" in str(path)
+    assert "agent_default" in str(path)
 
 
 def test_multi_tenant_skill_dirs_single_tenant_fallback() -> None:
