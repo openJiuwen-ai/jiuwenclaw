@@ -109,6 +109,7 @@ Most installations do not need these variables. The `BROWSER_MANAGED_*` series a
 | Environment variable | Default | Description |
 |---|---|---|
 | `BROWSER_PROFILE_NAME` | `Default` (`.env.template`) / `jiuwenclaw` (runtime default) | Browser profile name; see `.env.template` line 101. |
+| `BROWSER_DRIVER` | `managed` in JiuwenSwarm | Browser driver mode. |
 | `BROWSER_MANAGED_BINARY` | auto-detected (from `browser.chrome_path`) | Path to the managed Chrome executable; at runtime the system sets this automatically based on `browser.chrome_path` in `config.yaml`. |
 | `BROWSER_MANAGED_PORT` | `9333` | Port for the unkeyed managed Chrome instance (different from `BROWSER_RUNTIME_MCP_PORT`; the latter is the MCP wrapper port, default 8940); keyed instances allocate free ports automatically. |
 | `BROWSER_MANAGED_USER_DATA_DIR` | managed profile directory (default under the runtime state root) | Overrides the managed profile directory. |

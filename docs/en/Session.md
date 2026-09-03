@@ -29,7 +29,7 @@ JiuwenSwarm session data is stored in the local workspace with the following str
         ├── sess_19ddd41cbc0_fd1e4d/    # Regular session directory
         │   ├── metadata.json          # Session metadata
         │   └── history.jsonl          # Conversation history
-        ├── sess_19ddd5cc729_09bb02/   # Another session
+        ├── cron_19ddd5cc729_09bb02/   # Cron session
         │   ├── metadata.json
         │   └── history.jsonl
         └── ...

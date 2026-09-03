@@ -78,7 +78,7 @@ react:
 /evolve_list <skill_name> [--sort score]
 ```
 
-系统会列出所有包含待演进记录的 Skill 及具体内容摘要。
+系统会列出指定 Skill 的待演进记录及具体内容摘要。
 
 ![信息总览](../assets/images/skill演进_查看和整理经验.png)
 

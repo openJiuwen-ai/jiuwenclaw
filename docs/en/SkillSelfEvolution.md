@@ -72,13 +72,13 @@ The system scans recent dialogue and execution records, generates evolution expe
 
 ### 2.4 View Evolution Status
 
-To see which skills have pending evolution experience, you can enter:
+To view the pending evolution records for a specific skill, you can enter:
 
 ```bash
 /evolve_list <skill_name> [--sort score]
 ```
 
-The system lists all skills containing pending evolution records and their specific content summaries.
+The system lists the pending evolution records and their content summaries for the specified skill.
 
 ![Evolution overview](../assets/images/skill演进_查看和整理经验.png)
 

@@ -249,7 +249,7 @@ C:\Users\<username>\.jiuwenswarm\
 | `agent/workspace/SOUL_ZH.md` | Values and persona (Chinese) | Customizable | Affects tone and style |
 | `agent/workspace/USER.md` | User profile and preferences | Auto-managed by system | Affects personalization; update via agent conversation |
 | `agent/workspace/skills/` | Skills | Add skills | Extends capabilities |
-| `agent/workspace/memory/` | Memory store (MEMORY.md, USER.md, daily logs) | Do not edit by hand | Risk of corrupting memory data |
+| `agent/workspace/memory/` | Memory store (MEMORY.md, daily_memory/) | Do not edit by hand | Risk of corrupting memory data |
 | `agent/workspace/todo/` | Agent todo items storage | Auto-managed by system | Affects task tracking; manage via agent conversation |
 | `todo/` | Global todo items storage | Auto-managed by system | Affects task tracking; manage via agent conversation |
 | `logs/` | Logs | View only | Used for troubleshooting |
