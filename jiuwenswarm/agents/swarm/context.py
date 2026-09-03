@@ -73,10 +73,12 @@ class SwarmBuildContext(BuildContext):
             temporary working directory) is resolved in the rail from each
             member's workspace root, not carried here — it is per-member.
         team_outputs_dir: The final-deliverables directory (under
-            ``task_workspace_root``), inherited from the base ``BuildContext``
-            so the openjiuwen configurator and the team policy rail can surface
-            it to the team info body without a platform-specific accessor.
-            None when project_dir is set.
+            ``task_workspace_root``). Declared here explicitly (though the
+            base ``BuildContext`` also carries it once openjiuwen catches up)
+            so construction does not depend on the pinned openjiuwen version,
+            and the openjiuwen configurator and the team policy rail can
+            surface it to the team info body without a platform-specific
+            accessor. None when project_dir is set.
         team_skill_visibility_path: Team-level Skill visibility metadata file
             (``team_ws_root/skills-visibility.json``). Replaces the former
             ``team_skills_dir``: a team owns no Skill directory of its own, only
@@ -114,6 +116,7 @@ class SwarmBuildContext(BuildContext):
     team_id: str = ""
     team_ws_root: str | None = None
     task_workspace_root: str | None = None
+    team_outputs_dir: str | None = None
     team_skill_visibility_path: str | None = None
     global_skills_dir: str | None = None
     trajectory_span_processor: Any = None
