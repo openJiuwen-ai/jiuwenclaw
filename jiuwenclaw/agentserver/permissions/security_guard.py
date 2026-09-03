@@ -31,18 +31,34 @@ _OLE2_MAGIC = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
 _DATASPACES_UTF16LE = "DataSpaces".encode("utf-16-le")
 
 
+def _resolve_path(path: str) -> str:
+    """规范化路径：解析 ``..``、符号链接、相对路径为绝对规范路径。
+
+    守卫必须用与实际读取（OS/IDE 解析后）一致的路径去查 ICPM / 比对 / 读字节，
+    否则 ``..`` / 符号链接 / 相对路径会让守卫查的目录与实际读取的文件不一致，
+    形成 KIA 绕过（例如守卫查 ``C:\\projects\\..\\secret`` 无 KIA，实际读取的却是
+    ``C:\\secret\\kia.md``）。统一在此 realpath 后再交给 ICPM 与 RMS 检测。
+    """
+    try:
+        return os.path.realpath(os.path.abspath(path))
+    except (OSError, ValueError):
+        # 路径含非法字符等异常 — 退回原值，由后续 ICPM/读取各自处理
+        return path
+
+
 def detect_rms_file(path: str) -> str | None:
     """Detect RMS encryption in a file. Returns reason string if RMS, None if clean."""
-    ext = pathlib.Path(path).suffix.lower()
+    resolved = _resolve_path(path)
+    ext = pathlib.Path(resolved).suffix.lower()
     if ext not in _RMS_CHECKED_EXTENSIONS:
         return None
     try:
-        with open(path, "rb") as f:
+        with open(resolved, "rb") as f:
             header = f.read(8)
         if not header.startswith(_OLE2_MAGIC):
             return None
         # OLE2 file — read more to check for DataSpaces storage (RMS indicator)
-        with open(path, "rb") as f:
+        with open(resolved, "rb") as f:
             chunk = f.read(8192)
         if _DATASPACES_UTF16LE in chunk:
             return f"RMS-encrypted Office file: {ext}"
@@ -71,9 +87,12 @@ async def check_kia_file(path: str) -> bool:
         import http.client
         import json
 
+        # 先规范化路径（解析 .. / 符号链接 / 相对路径），确保守卫查的目录与
+        # 实际读取的文件一致，否则 .. / symlink / 相对路径可绕过 KIA 守卫。
+        resolved = _resolve_path(path)
         # ICPM service only accepts Windows backslash format paths
         # Normalize to backslash format for ICPM API
-        normalized_path = path.replace("/", "\\")
+        normalized_path = resolved.replace("/", "\\")
 
         dir_path = _get_parent_directory(normalized_path)
         conn = http.client.HTTPConnection("127.0.0.1", 32200, timeout=3)
