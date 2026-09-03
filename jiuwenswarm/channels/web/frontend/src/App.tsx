@@ -3005,11 +3005,6 @@ function AppContent({
             />
           </div>
         )}
-        {activeNav === 'experiments' && (
-          <div className="app-section">
-            <RsiPage />
-          </div>
-        )}
         {activeNav === 'teams' && (
           <div className="app-section">
             <TeamPanel onSessionsDeleted={handleTeamSessionsDeleted} />
