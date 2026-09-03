@@ -22,11 +22,17 @@ def _prefer_current_checkout() -> None:
     if not sys.path or sys.path[0] != repo_root_s:
         sys.path.insert(0, repo_root_s)
 
-    loaded = sys.modules.get("jiuwenswarm")
-    loaded_file = getattr(loaded, "__file__", None)
-    if loaded_file is None:
-        return
-    if Path(loaded_file).resolve().is_relative_to(package_root):
+    stale_checkout_loaded = False
+    for name, module in list(sys.modules.items()):
+        if name != "jiuwenswarm" and not name.startswith("jiuwenswarm."):
+            continue
+        loaded_file = getattr(module, "__file__", None)
+        if loaded_file is not None and not Path(loaded_file).resolve().is_relative_to(
+            package_root
+        ):
+            stale_checkout_loaded = True
+            break
+    if not stale_checkout_loaded:
         return
 
     stale_modules = [
