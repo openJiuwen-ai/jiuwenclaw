@@ -983,11 +983,31 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
   const resolveEventSessionId = useCallback(
     (payload: Record<string, unknown>): string | null => {
       const payloadSessionId = getPayloadSessionId(payload);
-      if (!payloadSessionId) return null;
-      ensureSessionRuntimes(payloadSessionId);
-      return payloadSessionId;
+      if (payloadSessionId) {
+        ensureSessionRuntimes(payloadSessionId);
+        return payloadSessionId;
+      }
+      // cron 广播 session_id 为空（后端对 web 通道置空），
+      // 用 cronMeta.exec_session_id 或 lastRunSessionId 路由到定时任务专属会话
+      const cronMeta = payload.cron as Record<string, unknown> | undefined;
+      if (cronMeta && typeof cronMeta === 'object') {
+        const execSessionId = typeof cronMeta.exec_session_id === 'string' ? (cronMeta.exec_session_id as string).trim() : '';
+        if (execSessionId) {
+          ensureSessionRuntimes(execSessionId);
+          return execSessionId;
+        }
+        const cronJobId = typeof cronMeta.job_id === 'string' ? cronMeta.job_id.trim() : '';
+        if (cronJobId) {
+          const lastSid = useCronStore.getState().lastRunSessionId[cronJobId] ?? '';
+          if (lastSid) {
+            ensureSessionRuntimes(lastSid);
+            return lastSid;
+          }
+        }
+      }
+      return null;
     },
-    []
+    [ensureSessionRuntimes]
   );
 
   useEffect(() => {
@@ -2551,28 +2571,6 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         }
 
         let sessionId = resolveEventSessionId(payload);
-        // cron 广播 session_id 为空（后端对 web 通道置空），
-        // 优先使用 cronMeta.exec_session_id 路由到定时任务专属会话。
-        // 若后端未提供 exec_session_id，用 job_id 查 lastRunSessionId（"立即执行"时存入）。
-        if (!sessionId && cronMeta) {
-          const execSessionId =
-            typeof cronMeta.exec_session_id === 'string'
-              ? (cronMeta.exec_session_id as string).trim()
-              : '';
-          if (execSessionId) {
-            sessionId = execSessionId;
-            ensureSessionRuntimes(sessionId);
-          } else {
-            const cronJobIdFallback = typeof cronMeta.job_id === 'string' ? cronMeta.job_id.trim() : '';
-            if (cronJobIdFallback) {
-              const lastSid = useCronStore.getState().lastRunSessionId[cronJobIdFallback] ?? '';
-              if (lastSid) {
-                sessionId = lastSid;
-                ensureSessionRuntimes(sessionId);
-              }
-            }
-          }
-        }
         if (!sessionId) return;
         // cron 最终结果（非占位）广播到达：自动跳转到执行会话，加载完整历史
         // （含用户消息、agent 回复、session 标题），避免用户手动点击左侧 session。
