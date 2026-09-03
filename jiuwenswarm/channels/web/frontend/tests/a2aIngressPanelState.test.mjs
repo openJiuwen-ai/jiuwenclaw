@@ -53,6 +53,12 @@ test('A2A ingress snapshot preserves desired configuration for the form', () => 
     app_description: 'Test description',
     app_version: '1.2.3',
     expose_reasoning: false,
+    auth_type: 'none',
+    api_key_header: 'X-API-Key',
+    card_auth_required: false,
+    credential: '',
+    credential_configured: false,
+    clear_credential: false,
   });
 });
 
@@ -71,6 +77,9 @@ test('A2A ingress form validates locally and sends typed patch values', () => {
     app_description: 'Test description',
     app_version: '1.2.3',
     expose_reasoning: false,
+    auth_type: 'none',
+    api_key_header: 'X-API-Key',
+    card_auth_required: false,
   });
 });
 
@@ -216,4 +225,34 @@ test('A2A outbound history skips malformed rows without discarding valid records
   assert.equal(history?.items[0].dispatch_id, 'disp-1');
   assert.equal(history?.items[0].updated_at, '2026-08-27T01:00:10Z');
   assert.equal(history?.total, 2);
+});
+
+test('A2A security reloads saved credentials for visibility, replacement and cancellation', () => {
+  const savedCredential = 'test-saved-credential-long';
+  const normalized = normalizeA2AIngressSnapshot({
+    ...snapshot,
+    desired_auth_type: 'bearer',
+    credential_configured: true,
+    credential: savedCredential,
+  });
+  assert.equal(JSON.stringify(normalized).includes(savedCredential), false);
+  const draft = draftFromA2AIngressSnapshot(normalized, savedCredential);
+  assert.equal(draft.credential, savedCredential);
+  assert.equal(validateA2AIngressDraft(draft), null);
+  assert.equal(toA2AIngressPatch(draft).credential, savedCredential);
+  assert.equal(Object.hasOwn(toA2AIngressPatch({ ...draft, credential: '' }), 'credential'), false);
+  assert.equal(Object.hasOwn(toA2AIngressPatch(draft), 'credential_configured'), false);
+  assert.equal(validateA2AIngressDraft({ ...draft, credential: '', credential_configured: false }), 'credential');
+  assert.equal(validateA2AIngressDraft({ ...draft, credential: 'short' }), 'credential');
+  assert.equal(validateA2AIngressDraft({ ...draft, clear_credential: true }), 'credential');
+  assert.equal(validateA2AIngressDraft({ ...draft, api_key_header: 'Authorization' }), 'api_key_header');
+  const replacement = { ...draft, credential: 'test-replacement-credential' };
+  assert.equal(validateA2AIngressDraft(replacement), null);
+  assert.equal(toA2AIngressPatch(replacement).credential, replacement.credential);
+  const cleared = { ...draft, auth_type: 'none', credential: '', clear_credential: true };
+  assert.equal(validateA2AIngressDraft(cleared), null);
+  assert.equal(toA2AIngressPatch(cleared).clear_credential, true);
+  assert.equal(draftFromA2AIngressSnapshot(normalized, savedCredential).credential, savedCredential);
+  assert.equal(draftFromA2AIngressSnapshot(normalized).credential, '');
+  assert.equal(draftFromA2AIngressSnapshot(normalizeA2AIngressSnapshot(snapshot)).credential, '');
 });

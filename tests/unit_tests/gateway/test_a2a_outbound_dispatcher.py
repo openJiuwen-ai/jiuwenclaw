@@ -9,6 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 from a2a.types import (
+    AgentCard,
     Artifact,
     Message,
     Part,
@@ -20,6 +21,7 @@ from a2a.types import (
     TaskStatus,
     TaskStatusUpdateEvent,
 )
+from google.protobuf.json_format import MessageToDict, ParseDict
 
 from jiuwenswarm.agents.harness.common.rails.a2a_outbound_toolkit_rail import (
     A2AOutboundToolkitRail,
@@ -656,7 +658,13 @@ async def test_required_remote_auth_without_credential_is_not_left_submitting() 
         "agent-1",
         lambda current: replace(
             current,
-            agent_card={**current.agent_card, "securityRequirements": [{"bearer": []}]},
+            agent_card={
+                **current.agent_card,
+                "securityRequirements": [{"schemes": {"bearer": {}}}],
+                "securitySchemes": {
+                    "bearer": {"httpAuthSecurityScheme": {"scheme": "bearer"}}
+                },
+            },
         ),
     )
 
@@ -700,10 +708,15 @@ def test_client_credentials_follow_agent_card_security_scheme(scheme, expected):
         if scheme.get("httpAuthSecurityScheme", {}).get("scheme") == "basic"
         else "secret"
     )
-    card = {
-        "securityRequirements": [{"auth": []}],
-        "securitySchemes": {"auth": scheme},
-    }
+    card = MessageToDict(
+        ParseDict(
+            {
+                "securityRequirements": [{"schemes": {"auth": {}}}],
+                "securitySchemes": {"auth": scheme},
+            },
+            AgentCard(),
+        )
+    )
 
     assert (
         A2AOutboundDispatcher._credential_transport_options(card, credential)
@@ -713,7 +726,7 @@ def test_client_credentials_follow_agent_card_security_scheme(scheme, expected):
 
 def test_client_rejects_unsupported_mtls_credential_contract():
     card = {
-        "securityRequirements": [{"mtls": []}],
+        "securityRequirements": [{"schemes": {"mtls": {}}}],
         "securitySchemes": {"mtls": {"mtlsSecurityScheme": {}}},
     }
 
@@ -725,7 +738,7 @@ def test_client_rejects_unsupported_mtls_credential_contract():
 
 def test_empty_security_requirement_allows_anonymous_access():
     card = {
-        "securityRequirements": [{"bearer": []}, {}],
+        "securityRequirements": [{"schemes": {"bearer": {}}}, {}],
         "securitySchemes": {"bearer": {"httpAuthSecurityScheme": {"scheme": "bearer"}}},
     }
 
@@ -733,17 +746,21 @@ def test_empty_security_requirement_allows_anonymous_access():
     assert A2AOutboundDispatcher._credential_transport_options(card, "") == ({}, {}, {})
 
 
-def test_card_without_security_contract_still_sends_configured_credential():
-    """Regression: a card without securityRequirements must not silently drop a
-    configured credential_ref (previously fell back to a bearer header)."""
+def test_card_without_security_contract_rejects_configured_credentials():
     card = {"securitySchemes": {}}
 
     assert A2AOutboundDispatcher._credential_required(card) is False
-    assert A2AOutboundDispatcher._credential_transport_options(card, "secret") == (
-        {"Authorization": "Bearer secret"},
-        {},
-        {},
-    )
+    assert A2AOutboundDispatcher._credential_transport_options(card, "") == ({}, {}, {})
+    with pytest.raises(A2AOutboundError) as error:
+        A2AOutboundDispatcher._credential_transport_options(card, "secret")
+    assert error.value.code is A2AOutboundErrorCode.AUTH_SCHEME_MISSING
+
+
+def test_scheme_name_alone_does_not_infer_bearer_authentication():
+    card = {"securityRequirements": [{"schemes": {"bearer": {}}}]}
+    with pytest.raises(A2AOutboundError) as error:
+        A2AOutboundDispatcher._credential_transport_options(card, "secret")
+    assert error.value.code is A2AOutboundErrorCode.AUTH_REQUIRED
 
 
 @pytest.mark.asyncio
@@ -1324,10 +1341,7 @@ async def test_reverse_rpc_emits_cancel_notification_when_tool_is_canceled(
             A2A_TOOL_DISPATCH_TASK,
             A2A_TOOL_CANCEL_CALL,
         ]
-        assert (
-            pushes[1]["body"]["params"]["jsonrpc_id"]
-            == pushes[0]["body"]["id"]
-        )
+        assert pushes[1]["body"]["params"]["jsonrpc_id"] == pushes[0]["body"]["id"]
     finally:
         if not pending.done():
             pending.cancel()

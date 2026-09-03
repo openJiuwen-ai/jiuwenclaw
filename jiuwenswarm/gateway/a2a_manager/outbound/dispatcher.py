@@ -241,7 +241,9 @@ class A2AOutboundDispatcher:
         ):
             terms.add(token)
             if all("\u3400" <= char <= "\u9fff" for char in token) and len(token) > 2:
-                terms.update(token[index:index + 2] for index in range(len(token) - 1))
+                terms.update(
+                    token[index : index + 2] for index in range(len(token) - 1)
+                )
         return terms
 
     async def dispatch(
@@ -595,14 +597,13 @@ class A2AOutboundDispatcher:
         credential = self._credentials.get(agent.credential_ref)
         if self._credential_required(agent.agent_card) and not credential:
             raise A2AOutboundError(A2AOutboundErrorCode.AUTH_REQUIRED)
+        headers, params, cookies = self._credential_transport_options(
+            agent.agent_card, credential
+        )
         if self._client_builder is not None:
             return await self._client_builder(agent, credential)
         target = await self._discovery.validate_network_target(
             agent.selected_interface.url
-        )
-        headers, params, cookies = self._credential_transport_options(
-            agent.agent_card,
-            credential,
         )
         http_client = httpx.AsyncClient(
             transport=create_pinned_transport({target.host: target.pinned_address}),
@@ -675,7 +676,8 @@ class A2AOutboundDispatcher:
     def _credential_required(card: dict[str, Any]) -> bool:
         requirements = card.get("securityRequirements") or []
         return bool(requirements) and not any(
-            isinstance(requirement, dict) and not requirement
+            isinstance(requirement, dict)
+            and (not requirement or requirement == {"schemes": {}})
             for requirement in requirements
         )
 
@@ -688,39 +690,27 @@ class A2AOutboundDispatcher:
             return {}, {}, {}
         requirements = card.get("securityRequirements") or []
         if not requirements:
-            # Card doesn't declare a security contract (common for agents registered
-            # before A2A security schemes were adopted). Fall back to the previous
-            # unconditional bearer-header behavior instead of silently dropping a
-            # configured credential, which would turn into a remote 401.
-            return (
-                {
-                    "Authorization": (
-                        credential
-                        if credential.lower().startswith("bearer ")
-                        else f"Bearer {credential}"
-                    )
-                },
-                {},
-                {},
-            )
+            raise A2AOutboundError(A2AOutboundErrorCode.AUTH_SCHEME_MISSING)
         schemes = card.get("securitySchemes") or {}
         for requirement in requirements:
             if not isinstance(requirement, dict):
                 continue
             if not requirement:
                 return {}, {}, {}
+            required_schemes = requirement.get("schemes")
+            if not isinstance(required_schemes, dict):
+                continue
+            if not required_schemes:
+                return {}, {}, {}
             headers: dict[str, str] = {}
             params: dict[str, str] = {}
             cookies: dict[str, str] = {}
             supported = True
-            for scheme_name in requirement:
+            for scheme_name in required_schemes:
                 scheme = schemes.get(scheme_name)
                 if not isinstance(scheme, dict):
-                    if str(scheme_name).lower() == "bearer":
-                        scheme = {"httpAuthSecurityScheme": {"scheme": "bearer"}}
-                    else:
-                        supported = False
-                        break
+                    supported = False
+                    break
                 api_key = scheme.get("apiKeySecurityScheme")
                 http_auth = scheme.get("httpAuthSecurityScheme")
                 if isinstance(api_key, dict):

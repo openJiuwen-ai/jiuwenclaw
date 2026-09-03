@@ -557,6 +557,26 @@
     "messageCount": "{{count}} 条消息"
   },
   "a2aIngress": {
+    "security": {
+      "title": "安全配置",
+      "description": "配置调用方认证与响应信息的开放范围。远程访问请通过 HTTPS 反向代理保护传输。",
+      "types": {
+        "none": "无认证",
+        "bearer": "Bearer Token",
+        "api_key": "API Key（请求头）"
+      },
+      "configured": "已保存凭据",
+      "notConfigured": "尚未配置凭据",
+      "credentialPlaceholder": "输入安全凭据",
+      "credentialHint": "16–512 个可打印 ASCII 字符，不含空格。可生成随机凭据；保存后点击眼睛可查看或复制原文。留空保留已保存的凭据，删除请勾选清除。",
+      "generate": "生成随机凭据",
+      "show": "显示凭据",
+      "hide": "隐藏凭据",
+      "clear": "清除已保存凭据（需先选择无认证）",
+      "cardHint": "开启后，无需凭据即可查看服务名称、能力和接口地址（Agent Card）；关闭后，查看这些信息也需要认证。配置认证后，所有实际调用始终需要凭据。",
+      "effective": "当前生效的认证方式：{{method}}",
+      "pendingApply": "已存储的安全配置与当前运行配置不同。点击“保存”会立即应用并重启正在运行的入站服务。"
+    },
     "title": "A2A 调度中心",
     "subtitle": "管理 JiuwenSwarm 对外提供的 A2A 服务。",
     "tabs": { "ariaLabel": "A2A 调度中心页面", "config": "入站配置", "outbound": "出站配置", "history": "处理历史" },
@@ -569,13 +589,10 @@
     "restartHint": "停止并重新启动入站服务，现有连接可能短暂中断。",
     "refreshStatus": "刷新状态",
     "refreshHint": "重新读取当前状态和配置，不会重启服务。",
-    "save": "保存配置",
-    "saveAndApply": "保存并应用",
-    "applying": "应用中...",
-    "saved": "配置已保存，尚未应用到正在运行的服务。",
-    "savedAndApplied": "配置已保存并应用。",
+    "save": "保存",
+    "saved": "配置已保存并应用。",
     "disconnected": "当前未连接到 Gateway，无法读取或修改 A2A 服务。",
-    "saveBeforeLifecycleAction": "配置有未保存的修改，请先保存后再启用、停用或重启服务。",
+    "saveBeforeLifecycleAction": "配置有未保存的修改，请先保存或取消，再启用、停用或重启服务。",
     "states": { "disabled": "已关闭", "starting": "启动中", "running": "运行中", "stopping": "停止中", "error": "异常" },
     "status": {
       "title": "服务状态",
@@ -584,8 +601,18 @@
       "effectiveCardUrl": "实际 Agent Card 地址",
       "notListening": "当前未监听"
     },
-    "config": { "title": "入站服务配置", "description": "保存只更新目标配置；“保存并应用”会重载正在运行的服务。" },
+    "config": { "title": "入站服务配置", "description": "保存后立即应用，正在运行的服务将重启；取消可放弃本次修改。" },
     "outbound": {
+      "credentialHelp": {
+        "method": "Agent Card 声明的认证方式：{{method}}。",
+        "value": "填写对方提供的凭据原文，调用时按认证方式自动携带。已保存凭据可点击眼睛查看；留空保留原值，删除请勾选清除。",
+        "header": "请求头",
+        "query": "查询参数",
+        "cookie": "Cookie",
+        "unknown": "未识别的认证方式",
+        "undeclared": "未声明认证方式；若配置凭据，派发会报错",
+        "or": " 或 "
+      },
       "localDebug": {
         "title": "本地 Agent 调试",
         "description": "控制是否允许发现和调用本机 loopback 地址上的明文 HTTP Agent。设置保存后立即生效。",
@@ -619,7 +646,7 @@
         "protocol": "协议",
         "expiresAt": "候选过期时间",
         "displayName": "显示名称",
-        "credential": "API Key / Bearer（可选，不会回显）",
+        "credential": "安全凭据",
         "revision": "Card 版本",
         "credentialState": "凭据",
         "lastChecked": "最近检查",
@@ -699,11 +726,15 @@
       }
     },
     "fields": {
+      "auth_type": "认证方式",
+      "api_key_header": "API Key 请求头名称",
+      "credential": "安全凭据",
+      "card_auth_required": "允许匿名查看服务信息",
       "host": "监听地址",
       "port": "监听端口",
       "rpc_path": "RPC 路径",
       "card_path": "Agent Card 路径",
-      "extended_card_path": "公开 Agent Card 别名路径（无认证）",
+      "extended_card_path": "扩展 Agent Card 路径",
       "protocol_version": "协议版本",
       "app_name": "Agent 名称",
       "app_description": "Agent 描述",

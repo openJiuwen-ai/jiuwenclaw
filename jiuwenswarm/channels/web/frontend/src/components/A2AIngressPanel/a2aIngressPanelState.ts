@@ -28,6 +28,13 @@ export interface A2AIngressSnapshot {
   started_at: number | null;
   last_error: string | null;
   config_revision: number;
+  desired_auth_type: 'none' | 'bearer' | 'api_key';
+  desired_api_key_header: string;
+  desired_card_auth_required: boolean;
+  credential_configured: boolean;
+  effective_auth_type: string | null;
+  effective_card_auth_required: boolean | null;
+  security_pending_apply: boolean;
 }
 
 export interface A2AIngressDraft {
@@ -41,6 +48,12 @@ export interface A2AIngressDraft {
   app_description: string;
   app_version: string;
   expose_reasoning: boolean;
+  auth_type: 'none' | 'bearer' | 'api_key';
+  api_key_header: string;
+  card_auth_required: boolean;
+  credential: string;
+  credential_configured: boolean;
+  clear_credential: boolean;
 }
 
 export type A2AIngressRequestStatus = 'processing' | 'completed' | 'failed' | 'canceled';
@@ -107,6 +120,12 @@ const DEFAULT_DRAFT: A2AIngressDraft = {
   app_description: 'A2A ingress for JiuwenSwarm Gateway',
   app_version: '0.1.0',
   expose_reasoning: true,
+  auth_type: 'none',
+  api_key_header: 'X-API-Key',
+  card_auth_required: false,
+  credential: '',
+  credential_configured: false,
+  clear_credential: false,
 };
 
 function asString(value: unknown, fallback = ''): string {
@@ -151,6 +170,13 @@ export function normalizeA2AIngressSnapshot(value: unknown): A2AIngressSnapshot 
     started_at: typeof payload.started_at === 'number' ? payload.started_at : null,
     last_error: typeof payload.last_error === 'string' ? payload.last_error : null,
     config_revision: asNumber(payload.config_revision),
+    desired_auth_type: payload.desired_auth_type === 'bearer' || payload.desired_auth_type === 'api_key' ? payload.desired_auth_type : 'none',
+    desired_api_key_header: asString(payload.desired_api_key_header, 'X-API-Key'),
+    desired_card_auth_required: payload.desired_card_auth_required === true,
+    credential_configured: payload.credential_configured === true,
+    effective_auth_type: typeof payload.effective_auth_type === 'string' ? payload.effective_auth_type : null,
+    effective_card_auth_required: typeof payload.effective_card_auth_required === 'boolean' ? payload.effective_card_auth_required : null,
+    security_pending_apply: payload.security_pending_apply === true,
   };
 }
 
@@ -229,7 +255,7 @@ export function normalizeA2AOutboundDispatchHistory(value: unknown): A2AOutbound
   return { items, total: asNumber(payload.total, items.length) };
 }
 
-export function draftFromA2AIngressSnapshot(snapshot: A2AIngressSnapshot): A2AIngressDraft {
+export function draftFromA2AIngressSnapshot(snapshot: A2AIngressSnapshot, credential = ''): A2AIngressDraft {
   return {
     host: snapshot.desired_host,
     port: String(snapshot.desired_port),
@@ -241,10 +267,27 @@ export function draftFromA2AIngressSnapshot(snapshot: A2AIngressSnapshot): A2AIn
     app_description: snapshot.desired_app_description,
     app_version: snapshot.desired_app_version,
     expose_reasoning: snapshot.desired_expose_reasoning,
+    auth_type: snapshot.desired_auth_type,
+    api_key_header: snapshot.desired_api_key_header,
+    card_auth_required: snapshot.desired_card_auth_required,
+    credential,
+    credential_configured: snapshot.credential_configured,
+    clear_credential: false,
   };
 }
 
 export function validateA2AIngressDraft(draft: A2AIngressDraft): string | null {
+  if (!['none', 'bearer', 'api_key'].includes(draft.auth_type)) return 'auth_type';
+  if (draft.credential && (!/^[!-~]{16,512}$/.test(draft.credential) || draft.clear_credential)) return 'credential';
+  if (draft.auth_type !== 'none' && !draft.credential && (!draft.credential_configured || draft.clear_credential)) return 'credential';
+  if (draft.card_auth_required && draft.auth_type === 'none') return 'card_auth_required';
+  if (
+    !/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/.test(draft.api_key_header.trim()) ||
+    ['authorization', 'host', 'content-length', 'content-type', 'connection', 'transfer-encoding', 'cookie', 'set-cookie', 'accept', 'origin'].includes(
+      draft.api_key_header.trim().toLowerCase(),
+    )
+  )
+    return 'api_key_header';
   if (!draft.host.trim()) return 'host';
   const port = Number(draft.port);
   if (!Number.isInteger(port) || port < 1 || port > 65535) return 'port';
@@ -265,6 +308,11 @@ export function toA2AIngressPatch(draft: A2AIngressDraft): Record<string, string
     app_description: draft.app_description.trim(),
     app_version: draft.app_version.trim(),
     expose_reasoning: draft.expose_reasoning,
+    auth_type: draft.auth_type,
+    api_key_header: draft.api_key_header.trim(),
+    card_auth_required: draft.card_auth_required,
+    ...(draft.credential ? { credential: draft.credential } : {}),
+    ...(draft.clear_credential ? { clear_credential: true } : {}),
   };
 }
 

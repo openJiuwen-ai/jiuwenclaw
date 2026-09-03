@@ -1,4 +1,4 @@
-"""Compatibility loader for the existing A2A ingress environment variables."""
+"""Load and persist A2A ingress environment configuration."""
 
 from __future__ import annotations
 
@@ -10,6 +10,8 @@ from collections.abc import Mapping
 from pathlib import Path
 
 import portalocker
+
+from jiuwenswarm.common.local_env_config import decrypt, encrypt
 
 from .models import A2AIngressConfig, A2AIngressError
 
@@ -28,6 +30,10 @@ A2A_INGRESS_ENV_MAP = {
     "app_description": "A2A_SERVER_APP_DESCRIPTION",
     "app_version": "A2A_SERVER_APP_VERSION",
     "expose_reasoning": "A2A_SERVER_EXPOSE_REASONING",
+    "auth_type": "A2A_SERVER_AUTH_TYPE",
+    "api_key_header": "A2A_SERVER_API_KEY_HEADER",
+    "card_auth_required": "A2A_SERVER_CARD_AUTH_REQUIRED",
+    "credential": "A2A_SERVER_API_KEY",
 }
 A2A_OUTBOUND_ALLOW_LOOPBACK_HTTP_ENV = "A2A_OUTBOUND_ALLOW_LOOPBACK_HTTP"
 _ENV_ASSIGNMENT_RE = re.compile(
@@ -53,9 +59,7 @@ def _persist_dotenv_updates(env_path: Path, updates: Mapping[str, str]) -> None:
     lock_path = env_path.with_name(f"{env_path.name}.lock")
     try:
         with _DOTENV_WRITE_LOCK:
-            with portalocker.Lock(
-                str(lock_path), timeout=_DOTENV_LOCK_TIMEOUT_SECONDS
-            ):
+            with portalocker.Lock(str(lock_path), timeout=_DOTENV_LOCK_TIMEOUT_SECONDS):
                 lines = (
                     env_path.read_text(encoding="utf-8").splitlines(keepends=True)
                     if env_path.is_file()
@@ -66,13 +70,17 @@ def _persist_dotenv_updates(env_path: Path, updates: Mapping[str, str]) -> None:
                 for line in lines:
                     match = _ENV_ASSIGNMENT_RE.match(line)
                     key = match.group("key") if match else ""
-                    if key not in pending:
+                    if key not in updates:
                         output.append(line)
+                        continue
+                    if key not in pending:
                         continue
                     output.append(
                         f"{match.group('indent')}{match.group('export') or ''}{key}="
                         f'"{_quote_dotenv_value(pending.pop(key))}"\n'
                     )
+                if output and not output[-1].endswith("\n"):
+                    output[-1] += "\n"
                 output.extend(
                     f'{key}="{_quote_dotenv_value(value)}"\n'
                     for key, value in pending.items()
@@ -108,8 +116,15 @@ def _bool(env: Mapping[str, str], name: str, default: bool) -> bool:
 
 
 def load_a2a_ingress_config(env: Mapping[str, str] | None = None) -> A2AIngressConfig:
-    """Load ``A2A_SERVER_*`` without changing current deployment defaults."""
+    """Load and validate ``A2A_SERVER_*`` configuration."""
     source = os.environ if env is None else env
+    card_auth_text = (
+        str(source.get("A2A_SERVER_CARD_AUTH_REQUIRED", "false")).strip().lower()
+    )
+    if card_auth_text not in _TRUE_VALUES | _FALSE_VALUES:
+        raise A2AIngressError(
+            "A2A_CONFIG_INVALID", "A2A_SERVER_CARD_AUTH_REQUIRED must be a boolean"
+        )
     port_text = _value(source, "A2A_SERVER_PORT", "19100")
     try:
         port = int(port_text)
@@ -122,6 +137,10 @@ def load_a2a_ingress_config(env: Mapping[str, str] | None = None) -> A2AIngressC
             "A2A_CONFIG_INVALID", "A2A_SERVER_PORT must be between 1 and 65535"
         )
 
+    stored_credential = _value(source, "A2A_SERVER_API_KEY", "")
+    credential = (
+        decrypt("A2A_SERVER_API_KEY", stored_credential) if stored_credential else ""
+    )
     return A2AIngressConfig(
         enabled=_bool(source, "A2A_SERVER_ENABLED", False),
         host=_value(source, "A2A_SERVER_HOST", "127.0.0.1"),
@@ -142,6 +161,10 @@ def load_a2a_ingress_config(env: Mapping[str, str] | None = None) -> A2AIngressC
         ),
         app_version=_value(source, "A2A_SERVER_APP_VERSION", "0.1.0"),
         expose_reasoning=_bool(source, "A2A_SERVER_EXPOSE_REASONING", True),
+        auth_type=_value(source, "A2A_SERVER_AUTH_TYPE", "none"),
+        api_key_header=_value(source, "A2A_SERVER_API_KEY_HEADER", "X-API-Key"),
+        card_auth_required=card_auth_text in _TRUE_VALUES,
+        credential=credential,
     ).validate()
 
 
@@ -193,6 +216,12 @@ class A2AIngressConfigRepository:
             "app_description": config.app_description,
             "app_version": config.app_version,
             "expose_reasoning": "true" if config.expose_reasoning else "false",
+            "auth_type": config.auth_type,
+            "api_key_header": config.api_key_header,
+            "card_auth_required": "true" if config.card_auth_required else "false",
+            "credential": encrypt("A2A_SERVER_API_KEY", config.credential)
+            if config.credential
+            else "",
         }
         return {A2A_INGRESS_ENV_MAP[name]: value for name, value in values.items()}
 

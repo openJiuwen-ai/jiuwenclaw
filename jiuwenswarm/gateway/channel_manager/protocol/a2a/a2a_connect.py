@@ -7,13 +7,18 @@ import os
 import socket
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from jiuwenswarm.gateway.channel_manager.base import BaseChannel
 from jiuwenswarm.common.e2a.acp.acp_tool_updates import is_reasoning_event
 from jiuwenswarm.common.schema.message import EventType, Message, ReqMethod
 from jiuwenswarm.gateway.routing.session_sharing import RoutingTarget
+from .security import (
+    A2AAuthenticationMiddleware,
+    agent_card_security,
+    validate_security,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -79,6 +84,10 @@ class A2AChannelConfig:
     # dropped. Reasoning is never written into the final `response` artifact
     # either way.
     expose_reasoning: bool = True
+    auth_type: str = "none"
+    api_key_header: str = "X-API-Key"
+    card_auth_required: bool = False
+    credential_hash: str = field(default="", repr=False)
 
 
 @dataclass
@@ -423,7 +432,9 @@ class A2AChannel(BaseChannel):
             _raise_missing_a2a_sdk(exc)
         import uvicorn
 
+        validate_security(self.config)
         agent_card = AgentCard(
+            **agent_card_security(self.config),
             name=self.config.app_name,
             description=self.config.app_description,
             version=self.config.app_version,
@@ -469,7 +480,10 @@ class A2AChannel(BaseChannel):
                     card_url=self.config.extended_card_path,
                 )
             )
-        fastapi_app = FastAPI(routes=routes)
+        fastapi_app = FastAPI(
+            routes=routes, docs_url=None, redoc_url=None, openapi_url=None
+        )
+        fastapi_app.add_middleware(A2AAuthenticationMiddleware, config=self.config)
 
         uv_cfg = uvicorn.Config(
             app=fastapi_app,
