@@ -2116,6 +2116,54 @@ function AppContent({
     })();
   }, [isConnected, sessionId, refreshGoal, resumeGoal]);
 
+  // 会话进入 / 刷新 / 断线重连时问一次后端「当前还在不在计划里」，把输入框下方的「计划」
+  // 标签恢复回来。planStore 是纯内存、刷新即空，标签只看 planStore.active，所以必须像
+  // Goal 一样回后端问一次——否则刷新后标签一直缺失，只能靠「切走再切回」触发
+  // performSessionRestore 的 *.plan 兜底（且那条兜底对「建会话后才开 plan 的单 agent
+  // 会话」无效，因为它 metadata.mode 是光杆 agent）。
+  // 依赖后端 RPC session.plan_status（PR #5794）；后端未合入前 catch 掉未知 method，
+  // 静默无效果、不造成回归。单 agent 与集群均覆盖。
+  // 只在「进入已有会话 / 刷新」时问：本页面刚新建（提权）的会话 plan 状态以本地为准，
+  // 不问后端——新建 team 会话时后端 metadata.mode 处于 team.work.plan / team 的写入
+  // 竞态窗口，问回来的 false 会把刚从 'new' 搬过来的 active:true 顶掉（标签丢失）。
+  useEffect(() => {
+    if (!isConnected || !sessionId || sessionId === NEW_CONVERSATION_ID) return;
+    if (sessionIdsCreatedInThisPageRef.current.has(sessionId)) return;
+    let cancelled = false;
+    const targetSessionId = sessionId;
+    void (async () => {
+      // 参考 useWebSocket.ts 的 performGoalGet：轻量退避重试，失败到底就什么都不做，
+      // 不插聊天错误消息、不改本地标签。
+      const retryDelaysMs = [400, 1200];
+      for (let attempt = 0; !cancelled; attempt += 1) {
+        try {
+          const payload = await request<{ in_plan?: boolean }>('session.plan_status', {
+            session_id: targetSessionId,
+          });
+          if (cancelled || sessionIdRef.current !== targetSessionId) return;
+          // 用户刚手动打开开关、还没发消息：本地未提交态优先，别被后端「还没落盘」的
+          // 结果顶掉（覆盖「新会话提权」「响应晚于用户手动操作」两个竞态）。
+          if (usePlanStore.getState().hasPendingExplicitEntry(targetSessionId)) return;
+          // 只用 in_plan===true 开标签，false 不关：team 会话的 metadata.mode 有多方
+          // 写入竞态（sync_team_identity_metadata 会盖回 team），in_plan:false 不可靠，
+          // 不能拿它顶掉本地状态。关标签仍由 plan.mode_exited 推送和用户手动操作负责。
+          if (payload?.in_plan) {
+            // 不带 explicitEntry：刷新恢复的是「已经在计划里」，不是「用户刚打开开关」，
+            // 不能触发 plan_entry_source 一次性标记。
+            usePlanStore.getState().setActive(targetSessionId, true);
+          }
+          return;
+        } catch {
+          if (attempt >= retryDelaysMs.length) return;
+          await new Promise((resolve) => window.setTimeout(resolve, retryDelaysMs[attempt]));
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [isConnected, sessionId, request]);
+
   const requestComposerFocus = useCallback(() => {
     setComposerFocusNonce((nonce) => nonce + 1);
   }, []);
