@@ -197,7 +197,8 @@ for (const language of ['zh', 'en']) {
   test(language + ': null fields remain unknown and no old category or KV value survives', async () => {
     await mount(language, async ({ receive, click }) => {
       await receive(structuredClone(fixture));
-      await click(document.querySelector('.context-usage-trigger'));
+      const trigger = document.querySelector('.context-usage-trigger');
+      await click(trigger);
       const next = structuredClone(fixture);
       next.context_window = { input_tokens: null, limit_tokens: null, occupancy_rate: null };
       next.session_kv_cache_hit_rate = null;
@@ -209,10 +210,11 @@ for (const language of ['zh', 'en']) {
       const metric = document.querySelector('.context-usage-detail__metric').textContent;
       assert.match(metric, language === 'zh' ? /未报告/ : /Not reported/);
       assert.doesNotMatch(metric, /0%|1K|2.0K/);
-      assert.match(
-        document.querySelector('.context-usage-detail__kv').textContent,
-        language === 'zh' ? /未报告/ : /Not reported/,
-      );
+      assert.equal(document.querySelector('.context-usage-detail__kv'), null);
+      await click(document.querySelector('.context-usage-detail__close'));
+      const tooltip = document.querySelector('[role="tooltip"]');
+      assert.equal(tooltip.querySelectorAll('.context-usage-tooltip__row').length, 1);
+      assert.doesNotMatch(tooltip.textContent, language === 'zh' ? /KV命中率/ : /KV hit rate/);
       assert.equal(document.querySelector('[role="alert"]'), null);
     });
   });
