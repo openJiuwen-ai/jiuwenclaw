@@ -143,6 +143,106 @@ def test_has_persistable_assistant_payload_subagent_activity():
     ) is True
 
 
+def test_has_persistable_assistant_payload_usage_summary():
+    assert session_history._has_persistable_assistant_payload(
+        content_text="",
+        event_type="chat.usage_summary",
+        extra={
+            "usage": {
+                "input_tokens": 100,
+                "output_tokens": 20,
+                "total_tokens": 120,
+            },
+            "model": "test-model",
+        },
+    ) is True
+
+
+def test_has_persistable_assistant_payload_context_usage_requires_snapshot_fields():
+    assert session_history._has_persistable_assistant_payload(
+        content_text="",
+        event_type="context.usage",
+        extra={"rate": 0},
+    ) is False
+    assert session_history._has_persistable_assistant_payload(
+        content_text="",
+        event_type="context.usage",
+        extra={"context_window": {}, "parts": {}},
+    ) is True
+
+
+def test_append_history_persists_complete_context_usage_payload(tmp_path, monkeypatch):
+    monkeypatch.setattr(session_history, "get_agent_sessions_dir", lambda: tmp_path)
+
+    payload = {
+        "event_type": "context.usage",
+        "schema_version": "context-usage.v1",
+        "phase": "post_call",
+        "request_id": "context-request",
+        "product_session_id": "s-context-usage",
+        "context_window": {"limit_tokens": 2000, "input_tokens": 1000},
+        "parts": {"tools": {"category": "tools", "tokens": 136}},
+        "kv_cache": {"session": {"weighted_hit_rate": 0.6}},
+        "measurement": {"tokenizer": "unicode_codepoints"},
+    }
+    session_history.append_history_record(
+        session_id="s-context-usage",
+        request_id="r1",
+        channel_id="web",
+        role="assistant",
+        event_type="context.usage",
+        content="",
+        timestamp=1.0,
+        extra={key: value for key, value in payload.items() if key != "event_type"},
+    )
+
+    data = _wait_history("s-context-usage", min_count=1)
+    assert len(data) == 1
+    assert data[0]["event_type"] == "context.usage"
+    assert data[0]["context_window"] == payload["context_window"]
+    assert data[0]["parts"] == payload["parts"]
+    assert data[0]["kv_cache"] == payload["kv_cache"]
+    assert data[0]["measurement"] == payload["measurement"]
+
+
+def test_append_history_persists_usage_summary(tmp_path, monkeypatch):
+    monkeypatch.setattr(session_history, "get_agent_sessions_dir", lambda: tmp_path)
+
+    session_history.append_history_record(
+        session_id="s-usage-summary",
+        request_id="r1",
+        channel_id="web",
+        role="assistant",
+        event_type="chat.usage_summary",
+        content="",
+        timestamp=1.0,
+        extra={
+            "usage": {
+                "input_tokens": 100,
+                "output_tokens": 20,
+                "total_tokens": 120,
+                "input_cost": 0.01,
+                "output_cost": 0.02,
+                "total_cost": 0.03,
+            },
+            "model": "test-model",
+        },
+    )
+
+    data = _wait_history("s-usage-summary", min_count=1)
+    assert len(data) == 1
+    assert data[0]["event_type"] == "chat.usage_summary"
+    assert data[0]["usage"] == {
+        "input_tokens": 100,
+        "output_tokens": 20,
+        "total_tokens": 120,
+        "input_cost": 0.01,
+        "output_cost": 0.02,
+        "total_cost": 0.03,
+    }
+    assert data[0]["model"] == "test-model"
+
+
 def test_has_persistable_assistant_payload_processing_status_still_rejected():
     assert session_history._has_persistable_assistant_payload(
         content_text="",

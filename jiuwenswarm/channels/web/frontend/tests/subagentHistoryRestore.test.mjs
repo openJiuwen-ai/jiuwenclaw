@@ -3,11 +3,11 @@ import test from 'node:test';
 
 import {
   mergeHistoryToolReplayItems,
+  parseHistoryJsonFileToTimelinePreview,
   parseSubagentHistoryReplay,
   recoverSubagentToolHistory,
   shouldProcessHistoryPayload,
   parseHistoryJsonFileToPreviewMessages,
-  parseHistoryJsonFileToTimelinePreview,
 } from '../node_modules/.cache/subagent-history/historyRestore.mjs';
 
 const sessionId = 'web_session';
@@ -105,6 +105,110 @@ test('subagent history replays persisted activity without treating it as final t
       tool_call_id: 'call-4',
     },
   });
+});
+
+test('session history restores persisted usage summary onto the preceding assistant message', () => {
+  const preview = parseHistoryJsonFileToTimelinePreview([
+    {
+      id: 'r1:user',
+      role: 'user',
+      timestamp: 1787019579,
+      content: 'hello',
+    },
+    {
+      id: 'r1:assistant',
+      role: 'assistant',
+      event_type: 'chat.final',
+      timestamp: 1787019580,
+      content: 'world',
+    },
+    {
+      id: 'r1:assistant',
+      role: 'assistant',
+      event_type: 'chat.usage_summary',
+      timestamp: 1787019581,
+      content: '',
+      usage: {
+        input_tokens: 100,
+        output_tokens: 20,
+        total_tokens: 120,
+        input_cost: 0.01,
+        output_cost: 0.02,
+        total_cost: 0.03,
+      },
+    },
+  ], sessionId);
+
+  assert.equal(preview.messages.length, 2);
+  assert.deepEqual(preview.messages[1].usageSummary, {
+    input_tokens: 100,
+    output_tokens: 20,
+    total_tokens: 120,
+    input_cost: 0.01,
+    output_cost: 0.02,
+    total_cost: 0.03,
+  });
+});
+
+test('session history restores the complete context usage payload without adding a chat message', () => {
+  const contextUsage = {
+    event_type: 'context.usage',
+    schema_version: 'context-usage.v1',
+    phase: 'post_call',
+    request_id: 'context-request',
+    product_session_id: sessionId,
+    depth: 0,
+    team_id: null,
+    member_name: null,
+    timestamp: '2026-08-18T02:19:41.000Z',
+    context_window: {
+      limit_tokens: 2000,
+      input_tokens: 1000,
+      occupancy_rate: 0.5,
+      local_estimated_input_tokens: 231,
+    },
+    parts: {
+      messages: {
+        category: 'messages',
+        tokens: 806,
+        percentage_of_window: 0.403,
+        source: 'provider_usage_residual',
+      },
+    },
+    kv_cache: { session: { weighted_hit_rate: 0.6 } },
+    session_kv_cache_hit_rate: 0.6,
+    measurement: { tokenizer: 'unicode_codepoints', estimated: true },
+  };
+  const preview = parseHistoryJsonFileToTimelinePreview([
+    {
+      id: 'r2:user',
+      role: 'user',
+      timestamp: 1787019580,
+      content: 'hello',
+    },
+    {
+      id: 'r2:assistant',
+      role: 'assistant',
+      event_type: 'chat.final',
+      timestamp: 1787019581,
+      content: 'world',
+    },
+    {
+      id: 'r2:context',
+      role: 'assistant',
+      event_type: 'context.usage',
+      timestamp: 1787019582,
+      content: '',
+      ...contextUsage,
+    },
+  ], sessionId);
+
+  assert.equal(preview.messages.length, 2);
+  assert.equal(preview.contextUsageSnapshot.request_id, 'context-request');
+  assert.deepEqual(preview.contextUsageSnapshot.context_window, contextUsage.context_window);
+  assert.deepEqual(preview.contextUsageSnapshot.parts, contextUsage.parts);
+  assert.deepEqual(preview.contextUsageSnapshot.kv_cache, contextUsage.kv_cache);
+  assert.deepEqual(preview.contextUsageSnapshot.measurement, contextUsage.measurement);
 });
 
 test('subagent history replays persisted roster status updates', () => {

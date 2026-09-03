@@ -68,6 +68,10 @@ export function parseContextUsageSnapshot(value: unknown): ContextUsageSnapshot 
     validatedParts.push([key, { category: key, tokens: part.tokens, percentage_of_window: part.percentage_of_window }]);
   }
 
+  const timestamp = typeof value.timestamp === 'string' && value.timestamp.trim()
+    ? value.timestamp
+    : undefined;
+
   return {
     event_type: value.event_type,
     schema_version: value.schema_version,
@@ -84,6 +88,7 @@ export function parseContextUsageSnapshot(value: unknown): ContextUsageSnapshot 
     },
     parts: Object.fromEntries(validatedParts),
     session_kv_cache_hit_rate: sessionCacheHitRate,
+    ...(timestamp ? { timestamp } : {}),
   };
 }
 

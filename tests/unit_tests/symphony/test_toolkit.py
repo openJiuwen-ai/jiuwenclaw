@@ -473,6 +473,9 @@ async def test_plan_timeout_classifies_cancelled_graph_build_as_terminal_timeout
         build_entered.set()
         await asyncio.Event().wait()
 
+    async def successful_probe(_config):
+        return None
+
     async def stale_graph_status():
         return {"success": True, "exists": True, "stale": True}
 
@@ -492,6 +495,10 @@ async def test_plan_timeout_classifies_cancelled_graph_build_as_terminal_timeout
     monkeypatch.setattr(
         "jiuwenswarm.symphony.service.probe_model_connection",
         passing_model_probe,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.symphony.service.probe_model_connection",
+        successful_probe,
     )
     monkeypatch.setattr(
         "jiuwenswarm.symphony.service.service_build_graph",

@@ -80,6 +80,13 @@ function loadAgentSelectionIntent(sessionId: string): AgentSelectionIntent {
   }
 }
 
+function contextUsageTimestamp(snapshot: ContextUsageSnapshot | null): number | null {
+  const raw = snapshot?.timestamp;
+  if (typeof raw !== 'string' || !raw.trim()) return null;
+  const parsed = Date.parse(raw);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
 function saveAgentSelectionIntent(sessionId: string, intent: AgentSelectionIntent) {
   if (typeof localStorage === 'undefined') return;
   if (sessionId === TRANSIENT_NEW_CONVERSATION_ID) {
@@ -776,6 +783,17 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     set((state) => {
       const runtime = state.runtimes[sessionId];
       if (!runtime || runtime.mode !== 'agent') return state;
+      const incomingTimestamp = contextUsageTimestamp(snapshot);
+      const currentTimestamp = contextUsageTimestamp(runtime.contextUsageSnapshot);
+      // history.get pages are loaded newest-first. Keep an older page from
+      // replacing the latest live/history snapshot already shown in the UI.
+      if (
+        incomingTimestamp !== null &&
+        currentTimestamp !== null &&
+        incomingTimestamp < currentTimestamp
+      ) {
+        return state;
+      }
       return {
         runtimes: {
           ...state.runtimes,

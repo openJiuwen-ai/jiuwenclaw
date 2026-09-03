@@ -1641,9 +1641,9 @@ class WebChannel(BaseWsChannel):
         """
         if not clients:
             return
-        # context.usage 是发给前端的完整上下文 Token 使用信息。它不写入
-        # 会话 history，因此在真正进入 WebSocket writer 前记录最终帧，便于
-        # 核对前端实际收到的 context_window、parts 及兼容别名。
+        # context.usage 是发给前端的完整上下文 Token 使用信息。它同时写入
+        # 会话 history；这里额外记录最终发送帧，便于核对前端实际收到的
+        # context_window、parts 及兼容别名。
         if frame.get("event") == "context.usage":
             await self._persist_frontend_context_usage(frame)
         for client in clients:

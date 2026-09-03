@@ -1161,6 +1161,9 @@ function AppContent({
     // 这里若再 merge，localStorage 里的完成卡不在本页 messages 里就会被再次注入，
     // prepend 又不按 id 去重，导致完成卡重复。
     prependMessages(sid, stampGoalObjectiveMessages(sid, result.messages));
+    if (result.contextUsageSnapshot) {
+      useSessionStore.getState().receiveContextUsage(result.contextUsageSnapshot);
+    }
     for (const item of result.toolReplay) {
       if (item.kind === 'tool_call') {
         const n = normalizeToolCallPayload(item.payload);
@@ -1893,6 +1896,9 @@ function AppContent({
             historyRestoreHandlesRef.current.delete(sessionId);
           }
         });
+      },
+      onContextUsage: (payload) => {
+        useSessionStore.getState().receiveContextUsage(payload);
       },
       onEmpty: (emptyTotalPages) => {
         replaceHistoryMessages(sessionId, mergePersistedGoalCompletionMessages(sessionId, []));
