@@ -142,8 +142,6 @@ async def serve_qwen_omni_websocket(websocket: WebSocket) -> None:
                 await asyncio.gather(*tasks, return_exceptions=True)
     except (ConnectionClosed, WebSocketDisconnect):
         pass
-    except asyncio.CancelledError:
-        raise
     except Exception as exc:  # noqa: BLE001 - isolate one upstream session
         message = _safe_upstream_error(exc, config.api_key)
         logger.warning("Qwen-Omni Realtime relay failed: %s", message)
