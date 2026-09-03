@@ -12,6 +12,7 @@ import pytest
 from openjiuwen.agent_teams.runtime.pool import RuntimeState
 
 from jiuwenswarm.agents.harness.team.team_manager import (
+    _bind_named_member_models,
     TeamManager,
     TeamRailMountContext,
     MemberInfo,
@@ -94,6 +95,62 @@ def setup_function() -> None:
 
 def teardown_function() -> None:
     reset_team_manager()
+
+
+def test_named_predefined_member_gets_its_declared_model_pool_binding() -> None:
+    """A specialist must not silently fall back to the generic teammate model."""
+    deepseek_model = {
+        "model_client_config": {
+            "api_base": "https://deepseek.example/v1",
+            "api_key": "sk-deepseek",
+            "model_name": "deepseek-v4-flash",
+            "client_provider": "OpenAI",
+        },
+        "model_request_config": {"model": "deepseek-v4-flash", "temperature": 0.8},
+    }
+    qwen_model = {
+        "model_client_config": {
+            "api_base": "https://dashscope.example/v1",
+            "api_key": "sk-qwen",
+            "model_name": "qwen3.7-max",
+            "client_provider": "OpenAI",
+        },
+        "model_request_config": {"model": "qwen3.7-max", "temperature": 0.7},
+    }
+    spec_dict = {
+        "agents": {
+            "leader": {"model": deepseek_model},
+            "teammate": {"model": deepseek_model},
+            "visual_engineer": {"model": qwen_model},
+        },
+        "leader": {"member_name": "team_leader"},
+        "predefined_members": [
+            {"member_name": "gameplay_engineer", "role_type": "teammate"},
+            {"member_name": "visual_engineer", "role_type": "teammate"},
+        ],
+    }
+    config = {
+        "models": {
+            "defaults": [
+                {
+                    "model_client_config": deepseek_model["model_client_config"],
+                    "model_config_obj": {"temperature": 0.8},
+                }
+            ]
+        }
+    }
+
+    _bind_named_member_models(spec_dict, config)
+
+    members = {member["member_name"]: member for member in spec_dict["predefined_members"]}
+    assert members["visual_engineer"]["model_name"] == "qwen3.7-max"
+    assert "model_name" not in members["gameplay_engineer"]
+    assert spec_dict["leader"]["model_name"] == "deepseek-v4-flash"
+    assert spec_dict["model_pool_strategy"] == "by_model_name"
+    assert {entry["model_name"] for entry in spec_dict["model_pool"]} == {
+        "deepseek-v4-flash",
+        "qwen3.7-max",
+    }
 
 
 def test_get_team_manager_is_singleton() -> None:
