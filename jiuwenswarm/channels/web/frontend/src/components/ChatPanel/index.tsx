@@ -18,7 +18,7 @@ import { InputArea, type InputAreaHandle } from './InputArea';
 import ChatOverviewIcon from '../../assets/chat-overview.svg?react';
 import PanelCollapseIcon from '../../assets/panel-collapse.svg?react';
 import lineUpIcon from '../../assets/lineUp.svg';
-import beeFlyingIcon from '../../assets/bee-flying.png';
+import beeFlyingIcon from '../../assets/bee-flying.webp';
 import beeStaticIcon from '../../assets/bee-static.png';
 import { NEW_CONVERSATION_ID } from '../../multi-session/state/newConversationLifecycle';
 import loadSendIcon from '../../assets/load-send.svg';
@@ -469,14 +469,16 @@ function WelcomeHeading() {
   if (isZh) {
     return (
       <>
-        <span className="chat-welcome__heading-highlight">WorkSwarm</span> 轻松解决工作每个问题！
+        <span className="chat-welcome__heading-highlight">WorkSwarm</span>
+        <span>轻松解决工作每个问题！</span>
       </>
     );
   }
 
   return (
     <>
-      <span className="chat-welcome__heading-highlight">WorkSwarm</span> makes work easier!
+      <span className="chat-welcome__heading-highlight">WorkSwarm</span>
+      <span>makes work easier!</span>
     </>
   );
 }
@@ -1438,15 +1440,18 @@ export const ChatPanel = React.memo(function ChatPanel({
             </>
           ) : (
             <div className="chat-welcome" data-testid="chat-panel-welcome">
-              <div
-                ref={bubbleRef}
-                className={`chat-welcome__banner chat-welcome__banner--bubble${bubbleVisible ? ' chat-welcome__banner--bubble--visible' : ''}`}
-                data-testid="chat-panel-welcome-banner-bubble"
-              >
-                {t('chat.welcomeBubbleText')}
-              </div>
-              <h2 className="chat-welcome__heading" data-testid="chat-panel-welcome-heading"><WelcomeHeading /></h2>
+              <h2
+                className="chat-welcome__heading"
+                data-testid="chat-panel-welcome-heading"
+              ><WelcomeHeading /></h2>
               <div className="chat-welcome__composer" data-testid="chat-panel-welcome-composer">
+                <div
+                  ref={bubbleRef}
+                  className={`chat-welcome__banner chat-welcome__banner--bubble${bubbleVisible ? ' chat-welcome__banner--bubble--visible' : ''}`}
+                  data-testid="chat-panel-welcome-banner-bubble"
+                >
+                  {t('chat.welcomeBubbleText')}
+                </div>
                 <BeeBanner className="chat-welcome__banner chat-welcome__banner--bee" altText={t('chat.welcomeLogoAlt')} onTrigger={() => setBubbleVisible(true)} />
                 <ActiveTeamGroupEntry isProcessing={isProcessing} teamAreaExpanded={teamAreaExpanded} />
                 <AgentActivityCard isProcessing={isProcessing} onSendTask={handleSendMessage} />

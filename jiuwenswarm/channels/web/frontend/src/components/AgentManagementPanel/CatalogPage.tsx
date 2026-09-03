@@ -149,7 +149,7 @@ export function CatalogPage({
   const hasQuery = query.trim().length > 0 || Boolean(category);
 
   return (
-    <section className="agent-management-catalog" data-testid={`agent-catalog-${scope}`}>
+    <>
       {!isMine ? (
         <div className="agent-management-toolbar">
           <CategoryRow category={category} onChange={onCategoryChange} />
@@ -157,7 +157,7 @@ export function CatalogPage({
       ) : null}
 
       {status === 'loading' ? (
-        <div className={`agent-management-card-grid ${isMine ? 'is-mine' : ''}`} aria-label={t('common.loading')}>
+        <div className="card-grid-auto" style={{ paddingTop: '16px' }} aria-label={t('common.loading')}>
           {Array.from({ length: PAGE_SIZE }, (_, index) => (
             <SkeletonCard key={index} />
           ))}
@@ -180,7 +180,7 @@ export function CatalogPage({
         </div>
       ) : (
         <>
-          <div className={`agent-management-card-grid ${isMine ? 'is-mine' : ''}`}>
+          <div className="card-grid-auto" style={{ paddingTop: '16px' }}>
             {items.map(item => (
               <DefinitionCard
                 key={item.id}
@@ -213,7 +213,7 @@ export function CatalogPage({
           ) : null}
         </>
       )}
-    </section>
+    </>
   );
 }
 

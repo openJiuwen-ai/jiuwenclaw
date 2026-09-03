@@ -34,7 +34,6 @@
     "chat": "对话",
     "work": "任务",
     "agent": "专家",
-    "teams": "团队",
     "sessions": "会话",
     "cron": "定时任务",
     "skills": "技能",
@@ -573,30 +572,6 @@
   "references": {
     "tab": "参考信息",
     "empty": "当前暂无参考信息"
-  },
-  "teams": {
-    "title": "团队管理",
-    "subtitle": "查看团队目录或删除团队",
-    "teamList": "团队列表",
-    "count": "当前 {{count}} 个团队",
-    "sessionCount": "{{count}} 个会话",
-    "directory": "团队目录",
-    "noneSelected": "未选择团队",
-    "empty": "暂无团队",
-    "selectFirst": "请先选择团队",
-    "loadingDirectory": "加载团队目录中...",
-    "emptyDirectory": "暂无团队目录文件",
-    "deleteTeam": "删除团队",
-    "deleting": "删除中...",
-    "deleteConfirm": "确认删除团队 {{team}} ?\n将删除团队运行时、关联会话及目录。",
-    "folder": "文件夹",
-    "notPreviewable": "不可预览",
-    "selectFile": "请选择一个文件查看",
-    "errors": {
-      "loadTeams": "团队列表加载失败",
-      "loadDirectory": "团队目录加载失败",
-      "deleteTeam": "删除团队失败：{{team}}"
-    }
   },
   "statusBar": {
     "evolving": "正在检测是否需要技能演进...",
@@ -1672,7 +1647,11 @@
       "errorInvalidVersion": "版本号格式应为 x.y.z（如 1.0.0）",
       "errorDisplayNameTooLong": "显示名不能超过 {{max}} 个字符",
       "pathNotFound": "无法确定技能目录",
-      "forceOverwrite": "强制覆盖（版本已存在时覆盖原插件）"
+      "forceOverwrite": "强制覆盖（版本已存在时覆盖原插件）",
+      "skillNameTooltip": "字段名:name。小写字母、数字与连字符，须与目录内skill根文件夹命名规则一致，例如my-demo-skill。",
+      "displayNameTooltip": "字段名:display_name。在技能列表与详情中展示的名称。",
+      "descriptionTooltip": "字段名:description。留空时，市场简介将使用 SKILL.md中 YAML头部的description。填写则写入plugin.yaml，可覆盖为与文件头不同的文案。",
+      "tagsTooltip": "字段名:tags。多个标签用英文或中文逗号分隔。"
     },
     "oauthLogin": {
       "title": "登录以发布技能",
@@ -1732,7 +1711,7 @@
     "contentPreview": "内容预览",
     "noDescription": "暂无描述",
     "noContent": "暂无内容",
-    "searchPlaceholder": "搜索技能名称、描述或标签",
+    "searchPlaceholder": "搜索技能",
     "totalCount": "共 {{count}} 个",
     "listError": "获取技能失败，请检查后端服务",
     "featuredTeamSkills": "精选团队技能",
@@ -1756,6 +1735,9 @@
       "noPreview": "无法预览此文件",
       "contentPreview": "内容预览",
       "selectFileToPreview": "请选择左侧文件进行预览",
+      "defaultVersion": "默认",
+      "unavailableVersion": "不可用",
+      "notPreviewable": "不可预览",
       "tabs": {
         "contentDetail": "内容详情",
         "filePreview": "文件预览",
@@ -2128,7 +2110,10 @@
       "packFailed": "打包失败",
       "downloadFailed": "下载打包文件失败",
       "published": "技能 {{name}} 发布成功",
-      "publishFailed": "发布失败"
+      "publishFailed": "发布失败",
+      "rebuilding": "正在重建技能，请耐心等待",
+      "rebuildCompleted": "技能重建完成",
+      "rebuildFailed": "重建失败: {{detail}}"
     },
     "errors": {
       "installFailed": "安装失败",
@@ -3148,7 +3133,7 @@
       "cancelRun": "停止本次运行",
       "pause": "暂停",
       "resume": "恢复",
-      "resumeFromCompletedHint": "任务已完成或到期，需先在「编辑」里把调度／停止条件改成未来时间，任务会自动重新激活",
+      "resumeFromCompletedHint": "任务已完成或到期，请先在「编辑」里把调度／停止条件改好，再点击「恢复」",
       "delete": "删除",
       "deleteConfirm": "确定删除心跳任务「{{name}}」吗？",
       "filterLabel": "状态",

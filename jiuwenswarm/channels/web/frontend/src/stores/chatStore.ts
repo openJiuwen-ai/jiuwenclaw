@@ -341,7 +341,19 @@ export const useChatStore = create<ChatState>()(subscribeWithSelector((set, get)
             ...runtime,
             messages: [...runtime.messages, ...messages],
             messageRenderKeySeq,
-            ...(message.role === 'user' ? { assistantStreamSplit: false, reasoningSegments: runtime.reasoningSegments.filter((s) => s.closed) } : {}),
+            ...(message.role === 'user'
+              ? {
+                  assistantStreamSplit: false,
+                  // 上一轮被中断（暂停/停止）时思考段可能永远等不到 closeReasoning；
+                  // 新一轮开始只把它冻结收尾，不能整段丢弃——否则上一轮思考块连同头像
+                  // 会凭空消失（刷新后历史又能恢复）。closedAt 落在最后一个真实 delta 帧。
+                  reasoningSegments: runtime.reasoningSegments.map((segment) =>
+                    segment.closed
+                      ? segment
+                      : { ...segment, closed: true, closedAt: segment.updatedAt ?? Date.now() }
+                  ),
+                }
+              : {}),
           },  
         },
       };

@@ -1,4 +1,4 @@
-.agent-management-panel {
+[data-testid="agent-management-panel"] {
   --agent-content-max: 1400px;
   --agent-page-gutter: 32px;
   --agent-radius-chip: 4px;
@@ -13,14 +13,12 @@
   color: var(--color-text-primary);
 }
 
-.agent-management-panel--create .agent-management-editor,
-.agent-management-panel--detail .agent-management-detail {
+[data-testid="agent-management-panel"][data-variant="create"] .agent-management-editor,
+[data-testid="agent-management-panel"][data-variant="detail"] .agent-management-detail {
   transform: translateX(4px);
 }
 
-.agent-management-header,
-.agent-management-primary-row,
-.agent-management-catalog,
+.agent-management-detail,
 .agent-management-detail,
 .agent-management-editor {
   width: min(calc(100% - (var(--agent-page-gutter) * 2)), var(--agent-content-max));
@@ -28,15 +26,6 @@
   margin-left: auto;
 }
 
-.agent-management-header {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 24px;
-  padding-top: 64px;
-}
-
-.agent-management-header h1,
 .agent-management-editor h1 {
   margin: 0;
   color: var(--color-text-strong);
@@ -45,32 +34,8 @@
   line-height: 36px;
 }
 
-.agent-management-header p {
-  margin: 4px 0 0;
-  color: var(--color-text-secondary);
-  font-size: 14px;
-  line-height: 22px;
-}
 
-.agent-management-primary-row {
-  display: flex;
-  align-items: flex-end;
-  justify-content: space-between;
-  gap: 24px;
-  margin-top: 33px;
-}
 
-.agent-management-primary-tabs {
-  display: flex;
-  flex: 1 1 auto;
-  align-items: stretch;
-  gap: 32px;
-  min-width: 0;
-}
-
-.agent-management-primary-tabs button,
-.agent-management-primary-tab,
-.agent-management-category,
 .agent-management-detail-tabs button {
   position: relative;
   border: 0;
@@ -79,31 +44,6 @@
   cursor: pointer;
 }
 
-.agent-management-primary-tabs button {
-  min-height: 32px;
-  padding: 0 0 8px;
-  font-size: 16px;
-  font-weight: 500;
-  line-height: 22px;
-}
-
-.agent-management-primary-tab {
-  display: inline-flex;
-  min-height: 32px;
-  align-items: flex-start;
-  padding: 0 0 8px;
-  font-size: 16px;
-  font-weight: 500;
-  line-height: 24px;
-  white-space: nowrap;
-}
-
-.agent-management-primary-tab--disabled {
-  color: var(--color-text-tertiary);
-  cursor: not-allowed;
-}
-
-.agent-management-primary-tabs button::after,
 .agent-management-detail-tabs button::after {
   position: absolute;
   right: 0;
@@ -114,14 +54,11 @@
   content: '';
 }
 
-.agent-management-primary-tabs button.is-active,
-.agent-management-category.is-active,
 .agent-management-detail-tabs button.is-active {
   color: var(--color-text-primary);
   font-weight: 600;
 }
 
-.agent-management-primary-tabs button.is-active::after,
 .agent-management-detail-tabs button.is-active::after {
   background: var(--color-text-primary);
 }
@@ -132,38 +69,6 @@
   gap: 16px;
   flex: 0 0 auto;
   padding-bottom: 0;
-}
-
-.agent-management-search {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  width: 360px;
-  height: 32px;
-  border: 1px solid var(--color-border-default);
-  border-radius: var(--radius-md);
-  background: var(--color-surface-card);
-  color: var(--color-text-secondary);
-  padding: 0 12px;
-}
-
-.agent-management-search input {
-  width: 100%;
-  min-width: 0;
-  border: 0;
-  outline: 0;
-  background: transparent;
-  color: var(--color-text-primary);
-  font-size: 14px;
-}
-
-.agent-management-search input:focus,
-.agent-management-search input:focus-visible {
-  box-shadow: none;
-}
-
-.agent-management-search:focus-within {
-  box-shadow: none;
 }
 
 .agent-management-create-menu {
@@ -258,11 +163,6 @@
   background: var(--color-text-primary);
 }
 
-.agent-management-catalog {
-  padding-top: 16px;
-  padding-bottom: 40px;
-}
-
 .agent-management-toolbar {
   min-height: 24px;
 }
@@ -344,20 +244,12 @@
   border-right: 0;
 }
 
-.agent-management-card-grid {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 16px;
-  margin-top: 33px;
-}
-
-.agent-management-panel--mine .agent-management-card {
+[data-testid="agent-management-panel"][data-variant="mine"] .agent-management-card {
   height: 160px;
 }
 
 .agent-management-card {
   position: relative;
-  min-width: 0;
   height: 160px;
   overflow: visible;
   border: 1px solid var(--color-border-default);
@@ -2716,33 +2608,12 @@
   white-space: nowrap;
 }
 
-@media (max-width: 1100px) {
-  .agent-management-search {
-    width: 280px;
-  }
-}
-
 @media (max-width: 800px) {
-  .agent-management-panel {
-    --agent-page-gutter: 20px;
-  }
-
-  .agent-management-primary-row,
-  .agent-management-detail__header {
-    align-items: flex-start;
-    flex-direction: column;
-  }
-
-  .agent-management-primary-actions,
-  .agent-management-search {
-    width: 100%;
-  }
-
   .agent-management-primary-actions {
+    width: 100%;
     padding-bottom: 16px;
   }
 
-  .agent-management-card-grid,
   .agent-management-detail-capabilities,
   .agent-management-detail-capability-grid,
   .agent-management-prompt-list,
@@ -2804,16 +2675,6 @@
 }
 
 @media (max-width: 560px) {
-  .agent-management-primary-tabs {
-    gap: 24px;
-  }
-
-  .agent-management-category-row {
-    margin-right: calc(var(--agent-page-gutter) * -1);
-    margin-left: calc(var(--agent-page-gutter) * -1);
-    padding: 0 var(--agent-page-gutter);
-  }
-
   .agent-management-card {
     height: auto;
   }

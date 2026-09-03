@@ -670,6 +670,39 @@ def _file_entry_matches_path(entry: Any, path: str) -> bool:
     )
 
 
+def _uses_projectless_task_workspace(
+    params: dict[str, Any],
+    channel_id: str,
+) -> bool:
+    """Return whether the request should use an isolated task workspace.
+
+    TUI sends its launch directory as ``project_dir``/``cwd``.  That is an
+    explicit project workspace even when the request mode resolves to
+    ``agent`` or ``code``; only requests without either directory should use
+    the Documents/JiuwenSwarm projectless task workspace.
+    """
+    for key in ("project_dir", "cwd"):
+        value = params.get(key)
+        if isinstance(value, (str, os.PathLike)) and str(value).strip():
+            return False
+
+    raw_work_mode = params.get("work_mode")
+    if not isinstance(raw_work_mode, str) or raw_work_mode.strip().lower() not in {
+        "code",
+        "work",
+    }:
+        from jiuwenswarm.server.runtime.session.work_mode import (
+            default_work_mode_for_channel,
+        )
+
+        raw_work_mode = default_work_mode_for_channel(channel_id)
+    manager_mode, _, _ = resolve_agent_request_mode(
+        params.get("mode", "agent"),
+        work_mode=raw_work_mode,
+    )
+    return manager_mode in {"agent", "code"}
+
+
 def _canonicalize_sandbox_files_path(path: str) -> str:
     """把 TUI 传来的 ``path`` 展开成 absolute resolved 形式 (绝对、去 ``..``、
     展开 ``~``、按需展开 symlink) 后作为 ``sandbox.files.{allow,deny}`` 的
@@ -9558,18 +9591,23 @@ class AgentWebSocketServer:
                         find_or_create_code_project_for_tui_params,
                     )
 
-                    project = find_or_create_code_project_for_tui_params(params)
-                    if project is not None:
-                        params["project_id"] = project.project_id
-                        params["project_dir"] = project.project_dir
-                        params["work_mode"] = project.work_mode
+                    if not _uses_projectless_task_workspace(params, channel_id):
+                        project = find_or_create_code_project_for_tui_params(params)
+                        if project is not None:
+                            params["project_id"] = project.project_id
+                            params["project_dir"] = project.project_dir
+                            params["work_mode"] = project.work_mode
             # TUI 无显式 session_id（未带 --session）创建时：AgentServer 侧按
             # cwd/project_dir 解析真实的 code 项目并写回，避免落到默认 default_code
             # （AgentOS 迁移前由 TUI 本地解析，现收敛到 AgentServer 保证归属一致）。
             if (
                 not external_tui_session
                 and channel_id.strip().lower() == "tui"
+                and not _uses_projectless_task_workspace(params, channel_id)
             ):
+                # An explicit TUI cwd/project_dir is promoted to a registered
+                # code project. Requests without either directory keep the
+                # dated task workspace behavior.
                 from jiuwenswarm.server.runtime.session.project_store import (
                     find_or_create_code_project_for_tui_params,
                 )
@@ -9772,7 +9810,10 @@ class AgentWebSocketServer:
                 channel_metadata = None
                 if channel_id.strip().lower() == "tui":
                     workspace = str(params.get("cwd") or project_dir or "").strip()
-                    if workspace:
+                    if workspace and (
+                        not _uses_projectless_task_workspace(params, channel_id)
+                        or project_dir
+                    ):
                         channel_metadata = {
                             "cwd": workspace,
                             "project_dir": project_dir or workspace,

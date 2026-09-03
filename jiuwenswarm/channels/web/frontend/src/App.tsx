@@ -11,7 +11,6 @@ import { ChatPanel } from './components/ChatPanel';
 import { SessionSidebar } from './components/SessionSidebar';
 import { SkillPanel } from './components/SkillPanel';
 import { AgentManagementPanel } from './components/AgentManagementPanel';
-import { TeamPanel } from './components/TeamPanel';
 import { SessionsPanel } from './components/SessionsPanel';
 import CronPanel from './components/CronPanel';
 import HeartbeatPanel from './components/HeartbeatPanel';
@@ -835,8 +834,14 @@ function AppContent({
   // 单 agent 模式同样复用集群模式的展开布局（百分比宽度 + 可拖拽分割线），
   // 避免右侧面板与聊天面板平分空间导致宽度与集群模式不一致；auto_harness 走收起态分支。
   const panelExpanded = mode === 'team' ? teamAreaExpanded : singleAgentPanelExpanded;
-// 心跳面板打开时，团队/代码审核面板让出右侧工作区（两者互斥，不共同占用宽度）。
-  const isTeamAreaExpanded = mode !== 'auto_harness' && panelExpanded && toolPanelHasContent && !heartbeatPanelOpen;
+  // 心跳面板打开时，团队/代码审核面板让出右侧工作区（两者互斥，不共同占用宽度）。
+  const isTeamAreaExpanded = mode !== 'auto_harness' && panelExpanded && toolPanelHasContent && !heartbeatPanelOpen && !toolPanelHidden;
+
+  useEffect(() => {
+    if (panelExpanded && toolPanelHidden) {
+      setToolPanelHidden(false);
+    }
+  }, [panelExpanded, toolPanelHidden, setToolPanelHidden]);
 
   const { shouldFullscreen } = useResponsivePanelResize({
     isTeamAreaExpanded,
@@ -2774,43 +2779,11 @@ function AppContent({
     if (target === 'new') { enterNewConversation(mode, options); return; }
     if (isMobile) {
       setTeamAreaExpanded(false);
+      setSingleAgentPanelExpanded(false);
       setToolPanelHidden(true);
     }
     void handleRestoreSession(target.session_id, target.mode, target);
-  }, [enterNewConversation, handleRestoreSession, isMobile, mode, setTeamAreaExpanded, setToolPanelHidden]);
-
-  const handleTeamSessionsDeleted = useCallback(async (sessionIds: string[]) => {
-    const deletedSessionIds = new Set(sessionIds);
-    const sessionState = useSessionStore.getState();
-
-    for (const deletedSessionId of deletedSessionIds) {
-      forgetCreatedConversation(deletedSessionId);
-      sessionState.removeSession(deletedSessionId);
-      sessionState.removeRuntime(deletedSessionId);
-      useChatStore.getState().removeRuntime(deletedSessionId);
-      useSubagentStore.getState().removeRuntime(deletedSessionId);
-      useTodoStore.getState().removeRuntime(deletedSessionId);
-      useHarnessStore.getState().removeRuntime(deletedSessionId);
-      useGoalStore.getState().removeRuntime(deletedSessionId);
-    }
-
-    if (routeSessionId && deletedSessionIds.has(routeSessionId)) {
-      setMissingSessionId(routeSessionId);
-    }
-
-    const workspaceState = useWorkspaceStore.getState();
-    const loadedProjectIds = Object.keys(workspaceState.projectSessions);
-    await workspaceState.loadProjects();
-    await Promise.all(loadedProjectIds.map((projectId) => workspaceState.loadProjectSessions(projectId)));
-
-    const cronStore = useCronStore.getState();
-    for (const [jobId, sessions] of Object.entries(cronStore.cronSessions)) {
-      if (sessions.some((session) => deletedSessionIds.has(session.session_id))) {
-        const job = cronStore.jobs.find((item) => item.id === jobId);
-        void cronStore.loadCronSessions(job?.project_id || 'default', jobId);
-      }
-    }
-  }, [routeSessionId]);
+  }, [enterNewConversation, handleRestoreSession, isMobile, mode, setSingleAgentPanelExpanded, setTeamAreaExpanded, setToolPanelHidden]);
 
   const handleDeleteConversation = useCallback(async () => {
     if (!deleteTarget) return;
@@ -2867,6 +2840,7 @@ function AppContent({
         setConversationSidebarCollapsed(false);
         if (isMobile) {
           setTeamAreaExpanded(false);
+          setSingleAgentPanelExpanded(false);
           setToolPanelHidden(true);
         }
       }
@@ -2876,7 +2850,7 @@ function AppContent({
       }
       if (nav === 'skills') setHasVisitedSkills(true);
     },
-    [activeNav, isMobile, modelSetupGuideStep, setTeamAreaExpanded, setToolPanelHidden, t],
+    [activeNav, isMobile, modelSetupGuideStep, setSingleAgentPanelExpanded, setTeamAreaExpanded, setToolPanelHidden, t],
   );
 
   const skipModelSetupGuide = useCallback(() => {
@@ -3203,7 +3177,7 @@ const showWorkspaceDivider = effectiveTeamAreaExpanded && !showConversationNotFo
                     setSingleAgentPanelSelectedArtifactId={setSingleAgentPanelSelectedArtifactId}
                     setSingleAgentPanelSelectedSubagentId={setSingleAgentPanelSelectedSubagentId}
                     shouldFullscreen={shouldFullscreen}
-                    onCloseFloating={() => setToolPanelHidden(true)}
+                    onCloseFloating={() => handleToggleDetailPanel(null)}
                   />
                 )}
 
@@ -3216,21 +3190,14 @@ const showWorkspaceDivider = effectiveTeamAreaExpanded && !showConversationNotFo
           </>
         )}
         {activeNav === 'agents' && (
-          <div className="app-section">
-            <AgentManagementPanel
-              onUseAgent={handleUseAgent}
-              onUsePrompt={handleUseAgentPrompt}
-              onCreateViaChat={() => requestSessionNavigation('new', {
-                initialInputValue: t('agentManagement.actions.createViaChatPrompt'),
-                initialSelectedSkills: ['agent-creator'],
-              })}
-            />
-          </div>
-        )}
-        {activeNav === 'teams' && (
-          <div className="app-section">
-            <TeamPanel onSessionsDeleted={handleTeamSessionsDeleted} />
-          </div>
+          <AgentManagementPanel
+            onUseAgent={handleUseAgent}
+            onUsePrompt={handleUseAgentPrompt}
+            onCreateViaChat={() => requestSessionNavigation('new', {
+              initialInputValue: t('agentManagement.actions.createViaChatPrompt'),
+              initialSelectedSkills: ['agent-creator'],
+            })}
+          />
         )}
         {activeNav === 'sessions' && (
           <div className="app-section">
@@ -3361,6 +3328,32 @@ const showWorkspaceDivider = effectiveTeamAreaExpanded && !showConversationNotFo
                 )
               }
             />
+          <div className="app-page-body">
+            <div className="page-content">
+              <ConnectorMarketPanel
+                onCreateViaChat={() => window.dispatchEvent(new CustomEvent('jiuwen:new-conversation', {
+                  detail: {
+                    skillName: 'plugin-creator',
+                    suffixText: t('connectorMarket.chatPrompts.createPlugin'),
+                    metadata: { scene: 'create_plugin' },
+                  },
+                }))}
+                onUseExample={(initialInputValue, mcpName) =>
+                  requestSessionNavigation('new', { initialInputValue, initialEnabledMcps: [mcpName], forceMode: 'agent' })
+                }
+                onUsePluginExample={(initialInputValue, pluginId) =>
+                  requestSessionNavigation('new', { initialInputValue, initialEnabledPlugins: [pluginId], forceMode: 'agent' })
+                }
+                onUseExtension={({ kind, id }) =>
+                  requestSessionNavigation(
+                    'new',
+                    kind === 'plugin'
+                      ? { initialEnabledPlugins: [id], forceMode: 'agent' }
+                      : { initialEnabledMcps: [id], forceMode: 'agent' },
+                  )
+                }
+              />
+            </div>
           </div>
         )}
       </main>
