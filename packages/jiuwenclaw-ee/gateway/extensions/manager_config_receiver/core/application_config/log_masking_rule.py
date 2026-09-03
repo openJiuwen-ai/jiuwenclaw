@@ -30,6 +30,7 @@ def _rule_row_to_dict(row: dict[str, Any]) -> dict[str, Any]:
         "pattern": row.get("pattern"),
         "replacement": row.get("replacement"),
         "priority": row.get("priority", 0),
+        "with_fingerprint": bool(row.get("with_fingerprint", False)),
         "source": row.get("source"),
         "enabled": bool(row.get("enabled", True)),
         "data": row.get("data"),
@@ -67,6 +68,7 @@ async def _create_log_masking_rule_record(
         ),
         "replacement": normalize_replacement(request.replacement),
         "priority": int(request.priority),
+        "with_fingerprint": bool(request.with_fingerprint),
         "source": source,
         "enabled": bool(request.enabled),
         "data": request.data,
@@ -110,6 +112,8 @@ async def _update_log_masking_rule_record(
         updates["source"] = normalize_source(updates["source"])
     if "priority" in updates and updates["priority"] is not None:
         updates["priority"] = int(updates["priority"])
+    if "with_fingerprint" in updates and updates["with_fingerprint"] is not None:
+        updates["with_fingerprint"] = bool(updates["with_fingerprint"])
 
     updates["updated_at"] = utc_now()
     updated = await repo.update({"rule_id": rid}, updates)

@@ -31,7 +31,6 @@ Runtime layout:
 import asyncio
 import copy
 import ctypes
-import hashlib
 import json
 import os
 import re
@@ -2297,158 +2296,32 @@ def is_package_installation() -> bool:
     return _detect_installation_mode()
 
 
-# 统一敏感信息掩码值。
-_SENSITIVE_MASK = "******"
-_DATA_IMAGE_PATTERN = re.compile(
-    r"data:image/[A-Za-z0-9.+-]+;base64,[A-Za-z0-9+/=]+"
-)
-# 匹配常见敏感字段键值对（不要求值必须带引号），用于覆盖:
-# - token=abc
-# - api_key: sk-xxx
-# - authorization = Bearer ...
-# 分组说明：
-# 1) 敏感键名；2) 分隔符及两侧空白（: 或 =）；3) 可选起始引号；
-# 4) 值本体（用于脱敏后附指纹）；5) 可选结束引号。
-_KV_SENSITIVE_PATTERN = re.compile(
-    r"(?i)(?<![A-Za-z0-9])"
-    r"(password|passwd|pwd|secret|token|api[_-]?key|access[_-]?token|"
-    r"refresh[_-]?token|authorization|user[_-]?id|userid)"
-    r"(?![A-Za-z0-9])(\s*[:=]\s*)([\"']?)([^,\s\"'\]\}]+)([\"']?)"
-)
-# 匹配“键名包含敏感关键词”且“值被引号包裹”的场景，覆盖:
-# - 'CAT_CAFE_CALLBACK_TOKEN': 'xxxx'
-# - 'CAT_CAFE_USER_ID': 'CSDN-weixin'
-# - "my_private_key"="xxxx"
-# 分组说明：
-# 1) 完整的 key + 分隔符（含可选引号）
-# 2) 值的起始引号（' 或 "）
-# 3) 值内容（非贪婪）
-# 4) 结束引号（通过 (\2) 强制与起始引号一致）
-_NAMED_SENSITIVE_KV_PATTERN = re.compile(
-    r"(?i)([\"']?[A-Za-z0-9_.-]*"
-    r"(?:token|secret|password|passwd|pwd|api[_-]?key|authorization|"
-    r"credential|private[_-]?key|user[_-]?id|userid)"
-    r"[A-Za-z0-9_.-]*[\"']?\s*[:=]\s*)([\"'])(.*?)(\2)"
-)
-# 匹配 Authorization Bearer 令牌，保留 "Bearer " 前缀，仅掩码后面的令牌值。
-# 分组：1) "Bearer " 前缀；2) 令牌值本体（用于算指纹）。
-_BEARER_SENSITIVE_PATTERN = re.compile(r"(?i)\b(Bearer\s+)([A-Za-z0-9\-._~+/]+=*)")
-_SENSITIVE_PATTERNS: list[re.Pattern[str]] = [
-    # 匹配 JWT（header.payload.signature 三段式，常见以 eyJ 开头）。
-    re.compile(r"\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b"),
-    # 匹配 OpenAI 风格 key（sk- 前缀）。
-    re.compile(r"\bsk-[A-Za-z0-9]{8,}\b"),
-    # 匹配 GitHub Personal Access Token（ghp_ 前缀）。
-    re.compile(r"\bghp_[A-Za-z0-9]{20,}\b"),
-    # 匹配 GitLab Personal Access Token（glpat- 前缀）。
-    re.compile(r"\bglpat-[A-Za-z0-9_-]{20,}\b"),
-    # 匹配邮箱地址（避免日志中泄露个人身份信息）。
-    re.compile(r"\b[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[A-Za-z]{2,}\b"),
-    # 匹配中国大陆手机号（可带 +86 或 86 前缀，支持空格/短横线分隔）。
-    re.compile(r"(?<!\d)(?:\+?86[-\s]?)?1[3-9]\d{9}(?!\d)"),
-    # 匹配中国身份证号（18 位，最后一位可为 X/x）。
-    re.compile(r"(?<!\d)\d{17}[\dXx](?!\d)"),
-]
-# PII / 非凭证类 pattern：掩码但不附指纹（关联意义不大，且避免引入额外可逆性顾虑）。
-_SENSITIVE_PII_PATTERNS: tuple[re.Pattern[str], ...] = tuple(_SENSITIVE_PATTERNS[-3:])
-# 凭证类 prefix pattern：掩码并附指纹（同 key 指纹一致可关联、不可逆）。
-_SENSITIVE_CREDENTIAL_PATTERNS: tuple[re.Pattern[str], ...] = tuple(_SENSITIVE_PATTERNS[:4])
+# 日志文本脱敏统一走 infrastructure.log_masking（Filter + 引擎内置/库规则）。
+from jiuwenswarm.infrastructure.log_masking import SensitiveDataFilter  # noqa: E402
 
-
-def _fingerprint(value: str) -> str:
-    """返回 value 的 SHA256 前 4 字节（8 位 hex）指纹，用于脱敏后的关联。
-
-    不可逆：拿到 ``fp:7f3a2c19`` 无法还原原值。同一 key 每次指纹一致，
-    可在日志中把同一账号/会话的多次请求串起来排查；key 轮换后指纹自然变化。
-    """
-    if not value:
-        return ""
-    return hashlib.sha256(value.encode("utf-8", errors="replace")).hexdigest()[:8]
-
-
-# 已脱敏产物形态：纯 ****** 或 ******(fp:xxxxxxxx)。
-# 用于在二次脱敏时识别"已是脱敏值"，跳过重算指纹，避免产生"指纹的指纹"
-# 导致跨日志关联失效（如 stream_logger._mask_secrets 先脱敏，_write_raw 再脱敏）。
-_ALREADY_MASKED_PATTERN = re.compile(rf"^{re.escape(_SENSITIVE_MASK)}(\(fp:[0-9a-f]{{8}}\))?$")
-
-# LogMaskingEngine 回退失败计数（避免在日志 Filter 热路径上静默吞异常）。
+# LogMaskingEngine 调用失败计数（避免在日志热路径上静默吞异常）。
 _sanitize_engine_fallback_failures = 0
-# identity 前缀脱敏失败计数（Filter 热路径不能再打 logging，避免递归）。
-_identity_sanitize_failures = 0
-
-
-def _is_already_masked(value: Any) -> bool:
-    """判断 value 是否已是脱敏产物（纯掩码或带指纹），避免重复脱敏。"""
-    try:
-        v = str(value) if value is not None else ""
-    except Exception:
-        return False
-    return bool(v) and bool(_ALREADY_MASKED_PATTERN.match(v))
-
-
-def _masked_with_fp(value: Any) -> str:
-    """脱敏并附指纹：``******(fp:xxxxxxxx)``。value 为空或失败时退化为纯掩码。
-
-    若 value 本身已是脱敏产物（``******`` 或 ``******(fp:..)``），原样返回，
-    不重算指纹——避免对"指纹值"再算指纹导致跨日志关联失效。
-    """
-    try:
-        v = str(value) if value is not None else ""
-    except Exception:
-        return _SENSITIVE_MASK
-    if _is_already_masked(v):
-        return v
-    fp = _fingerprint(v)
-    if not fp:
-        return _SENSITIVE_MASK
-    return f"{_SENSITIVE_MASK}(fp:{fp})"
 
 
 def _sanitize_log_text(text: str) -> str:
+    """对自由文本做敏感信息脱敏，统一委托 ``LogMaskingEngine``。"""
     if not text:
         return text
+    try:
+        from jiuwenswarm.infrastructure.log_masking.engine import LogMaskingEngine
 
-    # 企业版：若已从 Gateway DB 下发脱敏规则，优先走 LogMaskingEngine。
-    if is_enterprise():
-        try:
-            from jiuwenswarm.infrastructure.log_masking.engine import LogMaskingEngine
-
-            engine = LogMaskingEngine.get_instance()
-            if engine.uses_external_rules:
-                return engine.sanitize(text)
-        except Exception as exc:
-            # 回退到本地正则脱敏。不能走 logging：本函数会被 SensitiveDataFilter 调用，
-            # 写日志会递归进脱敏路径。仅首次 stderr 提示，避免静默吞掉异常。
-            global _sanitize_engine_fallback_failures
-            _sanitize_engine_fallback_failures += 1
-            if _sanitize_engine_fallback_failures == 1:
-                print(
-                    "[jiuwenswarm] LogMaskingEngine sanitize failed, "
-                    f"falling back to local masking: {exc!r}",
-                    file=sys.stderr,
-                )
-
-    masked = text
-    masked = _DATA_IMAGE_PATTERN.sub("data:image/*;base64,******", masked)
-    # _KV_SENSITIVE_PATTERN: 组1=键名, 组2=分隔符, 组4=值（组3/5 为可选引号）。
-    masked = _KV_SENSITIVE_PATTERN.sub(
-        lambda m: f"{m.group(1)}{m.group(2)}{_masked_with_fp(m.group(4))}", masked
-    )
-    # _NAMED_SENSITIVE_KV_PATTERN: 组1=键+分隔符, 组2=起始引号, 组3=值, 组4=结束引号。
-    masked = _NAMED_SENSITIVE_KV_PATTERN.sub(
-        lambda m: f"{m.group(1)}{m.group(2)}{_masked_with_fp(m.group(3))}{m.group(4)}", masked
-    )
-    # _BEARER_SENSITIVE_PATTERN: 组1=Bearer 前缀, 组2=令牌值。
-    masked = _BEARER_SENSITIVE_PATTERN.sub(
-        lambda m: f"{m.group(1)}{_masked_with_fp(m.group(2))}", masked
-    )
-    # 凭证类 prefix key（JWT/sk-/ghp_/glpat-）：掩码并附指纹。
-    for pattern in _SENSITIVE_CREDENTIAL_PATTERNS:
-        masked = pattern.sub(lambda m, _p=pattern: _masked_with_fp(m.group(0)), masked)
-    # PII（邮箱/手机/身份证）：纯掩码，不附指纹。
-    for pattern in _SENSITIVE_PII_PATTERNS:
-        masked = pattern.sub(_SENSITIVE_MASK, masked)
-    return masked
+        return LogMaskingEngine.get_instance().sanitize(text)
+    except Exception as exc:
+        # 不能走 logging：可能被 Filter / source masking 调用，写日志会递归。
+        global _sanitize_engine_fallback_failures
+        _sanitize_engine_fallback_failures += 1
+        if _sanitize_engine_fallback_failures == 1:
+            print(
+                "[jiuwenswarm] LogMaskingEngine sanitize failed, "
+                f"returning unsanitized text: {exc!r}",
+                file=sys.stderr,
+            )
+        return text
 
 
 def mask_sensitive(text: Any) -> str:
@@ -2461,65 +2334,6 @@ def mask_sensitive(text: Any) -> str:
     if text is None:
         return ""
     return _sanitize_log_text(str(text))
-
-
-class SensitiveDataFilter(logging.Filter):
-    """Mask sensitive data in log messages, identity prefix, and tracebacks."""
-
-    def filter(self, record: logging.LogRecord) -> bool:
-        try:
-            message = record.getMessage()
-            record.msg = _sanitize_log_text(message)
-            record.args = ()
-        except Exception:
-            # Never block logging because of desensitization failure.
-            pass
-
-        # identity 由 IdentityFieldFilter 预先拼好；企业版已加载 DB 规则时与 msg
-        # 同引擎脱敏。非企业版不走本地 KV 回退，避免把前缀 user_id= 误伤成指纹掩码。
-        try:
-            identity = getattr(record, "identity", None)
-            if isinstance(identity, str) and identity and is_enterprise():
-                from jiuwenswarm.infrastructure.log_masking.engine import LogMaskingEngine
-
-                engine = LogMaskingEngine.get_instance()
-                if engine.uses_external_rules:
-                    record.identity = engine.sanitize(identity)
-        except Exception as exc:
-            # 不阻断日志输出；不能走 logging（本 Filter 在日志热路径上）。
-            global _identity_sanitize_failures
-            _identity_sanitize_failures += 1
-            if _identity_sanitize_failures == 1:
-                print(
-                    "[jiuwenswarm] identity sanitize failed, "
-                    f"falling back to raw identity: {exc!r}",
-                    file=sys.stderr,
-                )
-
-        # Traceback 由 Formatter.formatException() 在 record.exc_text 中单独渲染，
-        # 不经过 record.getMessage()，因此 message 脱敏覆盖不到。这里提前把
-        # traceback 文本脱敏写入 record.exc_text 并清空 record.exc_info，
-        # 使 logger.exception()/exc_info=True 的异常栈也不会泄露 api_key 等。
-        try:
-            exc_info = record.exc_info
-            if exc_info and not record.exc_text:
-                import traceback as _traceback
-
-                # exc_info 是 (type, value, tb) 三元组。Python 3.10+ 的
-                # traceback.format_exception 新签名只接受单个异常实例：
-                # format_exception(exc, /, limit=None, chain=True)。
-                # 旧的 format_exception(*exc_info)（拆包成 3 个位置参数）依赖
-                # 兼容层，未来版本可能移除；改用 exc_info[1]（异常实例）是
-                # 官方推荐写法，面向未来且行为等价（None 时输出 "NoneType: None"）。
-                formatted = "".join(_traceback.format_exception(exc_info[1]))
-                record.exc_text = _sanitize_log_text(formatted)
-                record.exc_info = None
-            elif record.exc_text:
-                record.exc_text = _sanitize_log_text(record.exc_text)
-        except Exception:
-            # 同样不因脱敏失败而阻断日志输出。
-            pass
-        return True
 
 
 def build_log_identity(record: logging.LogRecord) -> str:
@@ -2559,9 +2373,8 @@ def install_source_record_masking() -> None:
     - clawee（yuanrong faas）拉起的 AgentServer 内 openjiuwen SDK 自有 logger；
     - httpx/openai SDK 在 DEBUG 级别打印请求头（含 Authorization）。
 
-    复用带指纹的 ``_sanitize_log_text``，与 handler 层 ``SensitiveDataFilter``
-    共存为双保险：若 record 已在源头脱敏，handler 层的 ``_is_already_masked``
-    会跳过重算，不破坏指纹。幂等，重复调用安全。
+    复用 ``_sanitize_log_text``（委托 LogMaskingEngine），与 handler 层
+    ``SensitiveDataFilter`` 共存为双保险。幂等，重复调用安全。
     """
     global _source_record_masking_installed
     if _source_record_masking_installed:
@@ -2868,11 +2681,9 @@ class UserVisibleTagFilter(logging.Filter):
 class IdentityFieldFilter(logging.Filter):
     """从 IdentityStore 读身份，写入字段并预先拼好 ``record.identity``。始终放行。
 
-    须挂在 ``SensitiveDataFilter`` **之前**：先拼 identity，再由脱敏 Filter
-    同时处理 msg 与 identity，避免 Formatter 阶段才拼前缀导致规则打不中。
-
-    import 链失败时身份降级为 null——日志 filter 绝不因自身 import 失败而中断日志
-    （Python logging 不兜 filter 异常，filter 抛会透传到 logger.* 调用方）。
+    须挂在 ``SensitiveDataFilter`` **之前**，且必须在 **emit 调用线程**执行
+    （例如 ``QueueHandler``）：``IdentityStore`` 基于 contextvars，挂到
+    ``QueueListener`` 目标 handler 会在独立线程读到空身份。
     """
 
     def filter(self, record: logging.LogRecord) -> bool:
@@ -2957,10 +2768,12 @@ def setup_logger(log_level: Optional[str] = None) -> logging.Logger:
     - format（text/json/dual）：env JIUWENSWARM_LOG_FORMAT 或 config.yaml logging.format
     - console_enabled/file_enabled：输出开关
     - JSON：JsonUserVisibleFormatter（.json 文件）
-    - 身份字段：IdentityFieldFilter（每 handler，且挂在 SensitiveDataFilter 之前）
+    - 身份字段：IdentityFieldFilter（挂在 QueueHandler 上，emit 线程读取 contextvars）
     - user_visible Tag：UserVisibleTagFilter（text/dual）
     保留 dev-stable 既有的 SensitiveDataFilter + install_source_record_masking 双层脱敏。
-    Filter 顺序：IdentityFieldFilter → SensitiveDataFilter（msg + identity 同路径脱敏）。
+    Filter 顺序（QueueHandler / 调用线程）：IdentityFieldFilter → SensitiveDataFilter。
+    不可挂在 QueueListener 目标 handler 上：listener 在独立线程，读不到请求 contextvars，
+    identity 会恒为 null。
 
     File/console handlers are served by a ``QueueListener`` thread so emit/flush
     I/O does not block the asyncio event loop. Source-record masking still runs
@@ -3039,8 +2852,7 @@ def setup_logger(log_level: Optional[str] = None) -> logging.Logger:
             h.setFormatter(json_formatter)
         else:
             h.setFormatter(text_formatter)
-        h.addFilter(identity_filter)
-        h.addFilter(privacy_filter)
+        # identity / 脱敏挂在 QueueHandler（调用线程），此处只挂与输出相关的 filter。
         if tag_config:
             h.addFilter(UserVisibleTagFilter(tag_config))
         if name_filter is not None:
@@ -3077,15 +2889,15 @@ def setup_logger(log_level: Optional[str] = None) -> logging.Logger:
             stream_handler.setFormatter(text_formatter)
         if tag_config:
             stream_handler.addFilter(UserVisibleTagFilter(tag_config))
-        # identity 先于脱敏：先拼前缀，再统一 sanitize msg + identity
-        stream_handler.addFilter(identity_filter)
-        stream_handler.addFilter(privacy_filter)
         listener_targets.append(stream_handler)
 
     # QueueHandler keeps file I/O / flush off the asyncio event-loop thread.
     if listener_targets:
         queue_handler = QueueHandler(_log_queue)
         queue_handler.setLevel(logging.NOTSET)
+        # 必须在 emit 线程执行：IdentityStore 基于 contextvars，listener 线程读不到。
+        queue_handler.addFilter(identity_filter)
+        queue_handler.addFilter(privacy_filter)
         root.addHandler(queue_handler)
         if _SUPPORTS_RESPECT_HANDLER_LEVEL:
             _log_listener = QueueListener(
