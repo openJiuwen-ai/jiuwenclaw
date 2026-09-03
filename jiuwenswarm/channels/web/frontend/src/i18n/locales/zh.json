@@ -168,7 +168,17 @@
         "anthropicUnavailable": "当前提供商套餐不支持 Anthropic 协议"
       },
       "reasoning": {
-        "auto": "使用默认值"
+        "auto": "使用默认值",
+        "options": {
+          "off": "关闭",
+          "on": "开启",
+          "minimal": "最低",
+          "low": "低",
+          "medium": "中",
+          "high": "高",
+          "xhigh": "极高",
+          "max": "最高"
+        }
       },
       "openaiAccount": "OpenAI 账号",
       "agentOsReadonly": "AgentOS 只读",
