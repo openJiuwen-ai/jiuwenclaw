@@ -1,0 +1,8 @@
+records:
+  - id: VER-20260903-001-beta2-persist-migration
+    summary: Beta2 text persist migration; 399 backend passes and one known Windows metadata failure.
+    result: failed
+    status: active
+    level: unit
+    recorded_at: 2026-09-03T07:56:41Z
+    path: records/VER-20260903-001-beta2-persist-migration.yaml

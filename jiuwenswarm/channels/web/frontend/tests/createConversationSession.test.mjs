@@ -8,6 +8,7 @@ import {
   createConversationSession,
   isAlreadyExistsError,
   isRequestTimeoutError,
+  parsePersistSessionCommand,
   resolveCreatedSessionId,
 } from '../node_modules/.cache/create-conversation-session/multi-session/state/createConversationSession.js';
 
@@ -30,6 +31,29 @@ test('error helpers read error.code', () => {
   assert.equal(isAlreadyExistsError({ code: 'ALREADY_EXISTS' }), true);
 });
 
+test('parses Persist Session only from an exact leading command', () => {
+  assert.deepEqual(parsePersistSessionCommand('/persist build the login flow'), {
+    content: 'build the login flow',
+    persistSession: true,
+  });
+  assert.deepEqual(parsePersistSessionCommand('/persist + build the login flow'), {
+    content: '+ build the login flow',
+    persistSession: true,
+  });
+  assert.deepEqual(parsePersistSessionCommand('/persistent data'), {
+    content: '/persistent data',
+    persistSession: false,
+  });
+  assert.deepEqual(parsePersistSessionCommand('explain /persist usage'), {
+    content: 'explain /persist usage',
+    persistSession: false,
+  });
+  assert.deepEqual(parsePersistSessionCommand('/persist'), {
+    content: '',
+    persistSession: true,
+  });
+});
+
 test('uses the AgentServer-returned ID', async () => {
   const calls = [];
   const request = async (method, params, options) => {
@@ -39,10 +63,34 @@ test('uses the AgentServer-returned ID', async () => {
   const created = await createConversationSession(request, {
     create_token: 'stable-token',
     mode: 'agent',
+    persist_session: true,
   });
   assert.equal(created.session_id, 'web_real');
+  assert.equal(created.persist_session, false);
   assert.equal(calls[0].params.session_id, undefined);
+  assert.equal(calls[0].params.persist_session, true);
   assert.equal(calls[0].options.timeoutMs, SESSION_CREATE_TIMEOUT_MS);
+});
+
+test('plain-text persist creation retries keep the flag, project, and task intact', async () => {
+  const parsed = parsePersistSessionCommand('/PERSIST 跟进发布\n保持原有约定');
+  assert.equal(parsed.content, '跟进发布\n保持原有约定');
+  const calls = [];
+  const created = await createConversationSession(async (_method, params) => {
+    calls.push({ ...params });
+    if (calls.length === 1) throw Object.assign(new Error('timeout'), { code: 'REQUEST_TIMEOUT' });
+    return { session_id: 'persist-retry', persist_session: true };
+  }, {
+    create_token: 'persist-token',
+    persist_session: parsed.persistSession,
+    project_dir: '/projects/release',
+    title: parsed.content,
+  }, fastRetryOptions);
+  assert.equal(created.persist_session, true);
+  assert.deepEqual(calls[0], calls[1]);
+  assert.equal(calls[1].persist_session, true);
+  assert.equal(calls[1].project_dir, '/projects/release');
+  assert.equal(calls[1].title, '跟进发布\n保持原有约定');
 });
 
 test('response-loss retry reuses the same create_token', async () => {
@@ -54,7 +102,7 @@ test('response-loss retry reuses the same create_token', async () => {
       error.code = 'REQUEST_TIMEOUT';
       throw error;
     }
-    return { session_id: 'web_retry' };
+    return { session_id: 'web_retry', persist_session: true };
   };
   const created = await createConversationSession(
     request,
@@ -62,9 +110,14 @@ test('response-loss retry reuses the same create_token', async () => {
     fastRetryOptions,
   );
   assert.equal(created.session_id, 'web_retry');
+  assert.equal(created.persist_session, true);
   assert.deepEqual(calls.map((call) => call.params.create_token), [
     'retry-token',
     'retry-token',
+  ]);
+  assert.deepEqual(calls.map((call) => call.params.persist_session), [
+    undefined,
+    undefined,
   ]);
 });
 

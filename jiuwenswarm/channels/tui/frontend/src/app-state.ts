@@ -313,6 +313,7 @@ export class CliPiAppState {
    * `session.create` 原子恢复或登记，并明确绕过预热。
    */
   private bootSessionId: string | null = null;
+  private readonly bootPersistSession: boolean = false;
   /** 幂等守卫：boot session creation 只在首次 connection.ack 触发一次（重连/重发不重试）。 */
   private bootSessionHandled = false;
   /** connection.ack 到来时放行启动会话创建；构造期即存在，避免 connected 回调抢跑。 */
@@ -624,6 +625,7 @@ export class CliPiAppState {
   constructor(
     private readonly wsClient: WsClient,
     cliSession?: string,
+    cliPersistSession?: boolean,
     supervision?: {
       handoffPort?: HandoffPort | null;
       taskLifecycle?: TaskLifecyclePort | null;
@@ -634,6 +636,7 @@ export class CliPiAppState {
     },
   ) {
     this.sessionId = cliSession || generateCreateToken();
+    this.bootPersistSession = Boolean(cliPersistSession);
     this.bootSessionId = cliSession ? cliSession : null;
     const startGate = new Promise<void>((resolve) => {
       this.bootSessionStart = resolve;
@@ -3412,6 +3415,7 @@ export class CliPiAppState {
         "session.create",
         {
           ...(target ? { session_id: target } : { create_token: this.bootCreateToken }),
+          ...(!target && this.bootPersistSession ? { persist_session: true } : {}),
           previous_session_id: "",
           previous_mode: previousMode,
           mode: previousMode,

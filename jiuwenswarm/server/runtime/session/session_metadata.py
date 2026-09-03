@@ -181,6 +181,7 @@ def _apply_metadata_defaults_with_inference(
     # 常量默认字段:不触发写盘
     metadata.setdefault("project_dir", "")
     metadata.setdefault("project_id", "")
+    metadata.setdefault("persist_session", False)
     metadata.setdefault("model", "")
     metadata.setdefault("cron_id", "")
     metadata.setdefault("pinned", False)
@@ -614,6 +615,7 @@ def init_session_metadata(
     team_template_id: str = "",
     project_dir: str = "",
     project_id: str = "",
+    persist_session: bool = False,
     model: str = "",
     cron_id: str = "",
     work_mode: str = "",
@@ -644,6 +646,7 @@ def init_session_metadata(
         "round_id": 0,
         "project_dir": project_dir,
         "project_id": project_id,
+        "persist_session": bool(persist_session),
         "model": model,
         "cron_id": cron_id,
         "last_user_message_at": _current_timestamp(),
@@ -747,6 +750,7 @@ def update_session_metadata(
             "round_id": 0,
             "project_dir": project_dir or "",
             "project_id": project_id or "",
+            "persist_session": False,
             "model": model or "",
             "cron_id": "",
             "last_user_message_at": last_user_message_at if last_user_message_at is not None else _current_timestamp(),
@@ -842,6 +846,7 @@ def sync_session_request_metadata(
     explicit_mode_provided: bool = False,
     explicit_model_provided: bool = False,
     work_mode: str | None = None,
+    persist_session: bool | None = None,
 ) -> str | None:
     """校验请求带来的参数与磁盘 metadata.json 是否需要更新，并按字段语义写入。
 
@@ -865,6 +870,9 @@ def sync_session_request_metadata(
         时才覆盖磁盘值；未显式携带（如只读 RPC 用默认推断值）则保持磁盘原值，不腐蚀
         已锁定的会话 mode（如 team 会话被只读 RPC 默认推断成 agent）。调用方应传入
         canonical mode（"agent.plan"/"team"）。与 append_history_record 联动一致。
+      - persist_session：**初始化后不可变**。新 Session 由 ``session.create`` 显式写入；
+        仅为兼容旧客户端，历史 metadata 缺字段时允许第一条旧式 chat 请求完成一次初始化，
+        此后任何不一致请求只告警、不覆盖。
 
     Args:
         session_id: 会话 ID（空则直接返回 None，不做任何操作）
@@ -915,6 +923,7 @@ def sync_session_request_metadata(
             "round_id": 0,
             "project_dir": project_dir or "",
             "project_id": project_id or "",
+            "persist_session": persist_session if isinstance(persist_session, bool) else False,
             "model": model if (model is not None and explicit_model_provided) else "",
             "cron_id": cron_id or "",
             "last_user_message_at": last_user_message_at if last_user_message_at is not None else now,
@@ -925,6 +934,38 @@ def sync_session_request_metadata(
         }
         effective_project_dir = project_dir or None
     else:
+        # persist_session：Session 创建期锁定。历史 metadata 没有该字段时允许
+        # 旧式 chat.send 的 eternal_conversation_enabled 做一次迁移；字段一旦存在，
+        # 即使值为 False 也表示已经完成初始化，后续请求不得改变。
+        if "persist_session" not in metadata:
+            metadata["persist_session"] = (
+                persist_session if isinstance(persist_session, bool) else False
+            )
+            logger.info(
+                "会话 %s 初始化缺失的 persist_session=%s",
+                session_id,
+                metadata["persist_session"],
+            )
+        else:
+            stored_persist_session = metadata.get("persist_session") is True
+            if not isinstance(metadata.get("persist_session"), bool):
+                logger.warning(
+                    "会话 %s 的 persist_session 非布尔值，按 False 失败关闭",
+                    session_id,
+                )
+                stored_persist_session = False
+                metadata["persist_session"] = False
+            if (
+                isinstance(persist_session, bool)
+                and persist_session != stored_persist_session
+            ):
+                logger.warning(
+                    "会话 %s 的 persist_session 已锁定为 %s，忽略请求带来的不一致值 %s",
+                    session_id,
+                    stored_persist_session,
+                    persist_session,
+                )
+
         # 校验 project_dir：首次锁定 / 不一致告警不覆盖
         locked_project = metadata.get("project_dir")
         if isinstance(locked_project, str) and locked_project.strip():

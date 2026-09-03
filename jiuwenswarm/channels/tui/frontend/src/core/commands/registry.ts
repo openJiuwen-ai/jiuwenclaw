@@ -34,6 +34,7 @@ import { createModeCommand } from "./builtins/mode.js";
 import { createNewCommand } from "./builtins/new.js";
 import { createPermissionsCommand } from "./builtins/permissions.js";
 import { createPlanCommand } from "./builtins/plan.js";
+import { createPersistCommand } from "./builtins/persist.js";
 import { createResumeCommand } from "./builtins/resume.js";
 import { createRenameCommand } from "./builtins/rename.js";
 import { createRewindCommand } from "./builtins/rewind.js";
@@ -109,6 +110,7 @@ export function createBuiltinCommands(options: BuiltinCommandsOptions = {}): Sla
     createNewCommand(),
     createPermissionsCommand(),
     createPlanCommand(),
+    createPersistCommand(),
     createResumeCommand(),
     createRenameCommand(),
     createRewindCommand(),

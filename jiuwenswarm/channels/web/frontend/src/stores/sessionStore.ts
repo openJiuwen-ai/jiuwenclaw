@@ -331,6 +331,8 @@ export interface SessionRuntime {
   mode: AgentMode;
   selectedModelName: string | null;
   projectDirectory: string | null;
+  /** 新会话草稿值；真实 Session 创建后由后端 metadata 的权威值覆盖。 */
+  persistSession: boolean;
   contextCompressionRate: number;
   contextCompressionBefore: number | null;
   contextCompressionAfter: number | null;
@@ -359,6 +361,7 @@ function createEmptyRuntime(): SessionRuntime {
       try { return localStorage.getItem(MODEL_STORAGE_KEY); } catch { return null; }
     })(),
     projectDirectory: null,
+    persistSession: false,
     contextCompressionRate: 0,
     contextCompressionBefore: null,
     contextCompressionAfter: null,
@@ -417,6 +420,7 @@ interface SessionState {
   // B 类 actions（加 sessionId）
   setMode: (sessionId: string, mode: AgentMode) => void;
   setProjectDirectory: (sessionId: string, directory: string | null) => void;
+  setPersistSession: (sessionId: string, enabled: boolean) => void;
   setTeamTaskEvents: (sessionId: string, events: TeamTaskEvent[]) => void;
   addTeamTaskEvent: (sessionId: string, event: TeamTaskEvent) => void;
   setTeamTasks: (sessionId: string, tasks: TeamTask[]) => void;
@@ -552,6 +556,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       const nextRuntime: SessionRuntime = {
         ...baseRuntime,
         mode: normalizedSession.mode || baseRuntime.mode,
+        persistSession: normalizedSession.persist_session === true,
         teamHistoryMessages: baseRuntime.teamHistoryMessages,
       };
       return {
@@ -620,6 +625,19 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         runtimes: {
           ...state.runtimes,
           [sessionId]: { ...runtime, projectDirectory: directory },
+        },
+      };
+    });
+  },
+
+  setPersistSession: (sessionId, enabled) => {
+    set((state) => {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime) return state;
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: { ...runtime, persistSession: Boolean(enabled) },
         },
       };
     });
