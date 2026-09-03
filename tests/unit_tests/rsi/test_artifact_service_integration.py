@@ -3,6 +3,8 @@
 
 import asyncio
 import contextlib
+import json
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -14,9 +16,10 @@ from jiuwenswarm.server.rsi import RsiAgentServerHandlers
 
 
 class FakeRequest:
-    def __init__(self, method, params=None):
+    def __init__(self, method, params=None, session_id=None):
         self.req_method = method
         self.params = params or {}
+        self.session_id = session_id
 
 
 @pytest.fixture
@@ -55,6 +58,7 @@ async def test_program_provider_closes_service_loop(artifact_context, tmp_path: 
     program.mkdir()
     (program / "main.py").write_text("print('seed')\n", encoding="utf-8")
 
+    session_id = "sess-program-e2e"
     created = handlers.handle(FakeRequest(ReqMethod.RSI_TASK_CREATE, {
         "scenario": "ARTIFACT",
         "artifact_type": "PROGRAM",
@@ -62,7 +66,7 @@ async def test_program_provider_closes_service_loop(artifact_context, tmp_path: 
         "artifact_path": str(program),
         "model_refs": {"optimizer": "mock-optimizer"},
         "max_iterations": 2,
-    }))
+    }, session_id=session_id))
     assert created["ok"] is True
     task_id = created["payload"]["task_id"]
 
@@ -89,9 +93,19 @@ async def test_program_provider_closes_service_loop(artifact_context, tmp_path: 
 
     tree = handlers.handle(FakeRequest(ReqMethod.RSI_TREE_GET, {"task_id": task_id}))
     assert tree["ok"] is True
-    assert len(tree["payload"]["nodes"]) == 3
+    assert len(tree["payload"]["nodes"]) == 7
     assert tree["payload"]["nodes"][1]["type"] == "ADOPTED"
     assert tree["payload"]["nodes"][1]["changes"][0]["element"] == "PROGRAM"
+    iteration_nodes = [node for node in tree["payload"]["nodes"] if node["iteration"] > 0]
+    assert len({node["parent_id"] for node in iteration_nodes if node["iteration"] == 2}) == 3
+    assert all(node["extra"]["content"]["kind"] == "mock_artifact_candidate" for node in iteration_nodes)
+    assert all(node["snapshot_artifact_id"] for node in iteration_nodes)
+    tree_pushes = [
+        item for item in pushes
+        if item["payload"]["event_type"] == "rsi.training.tree.delta"
+    ]
+    assert len(tree_pushes) == 6
+    assert all(len(item["payload"]["nodes"]) == 1 for item in tree_pushes)
 
     usage = handlers.handle(FakeRequest(ReqMethod.RSI_USAGE_GET, {"task_id": task_id}))
     assert usage["ok"] is True
@@ -102,6 +116,11 @@ async def test_program_provider_closes_service_loop(artifact_context, tmp_path: 
     assert downloaded["payload"]["kind"] == "artifact_package"
     assert downloaded["payload"]["is_best"] is True
     assert Path(downloaded["payload"]["path"]).is_file()
+    assert Path(downloaded["payload"]["path"]).stat().st_size < 100_000
+    with zipfile.ZipFile(downloaded["payload"]["path"]) as archive:
+        assert "mock-optimization.json" in archive.namelist()
+        manifest = json.loads(archive.read("mock-optimization.json"))
+    assert manifest["source"]["read"] is False
 
     event_types = [item["payload"]["event_type"] for item in pushes]
     assert "rsi.training.progress" in event_types
@@ -118,6 +137,7 @@ async def test_program_provider_closes_service_loop(artifact_context, tmp_path: 
         and item["payload"]["status"] == "COMPLETED"
     ]
     assert terminal_status
+    assert all(item.get("session_id") == session_id for item in pushes)
     await _stop_worker(context)
 
 
@@ -212,7 +232,7 @@ async def test_provider_snapshots_survive_service_context_restart(tmp_path: Path
 
     tree = restarted_handlers.handle(FakeRequest(ReqMethod.RSI_TREE_GET, {"task_id": task_id}))
     assert tree["ok"] is True
-    assert len(tree["payload"]["nodes"]) == 3
+    assert len(tree["payload"]["nodes"]) == 7
 
     usage = restarted_handlers.handle(FakeRequest(ReqMethod.RSI_USAGE_GET, {"task_id": task_id}))
     assert usage["ok"] is True
@@ -239,4 +259,6 @@ async def test_mock_provider_does_not_rewind_terminal_state(tmp_path: Path):
 
     assert paused.status == "completed"
     assert terminated.status == "completed"
-    assert provider.read_state(task_id).status == "completed"
+    snapshot = provider.read_state(task_id)
+    assert snapshot.status == "completed"
+    assert snapshot.best_node_id == "node-2"

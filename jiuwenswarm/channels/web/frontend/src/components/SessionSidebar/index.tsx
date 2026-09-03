@@ -49,7 +49,6 @@ const connectorMarketNavIcon = (
   </svg>
 );
 
-// "实验"（RSI 优化）导航图标——烧瓶/演进树隐喻，单色 currentColor。
 const experimentsNavIcon = (
   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.5}>
     <path

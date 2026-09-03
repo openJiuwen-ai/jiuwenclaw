@@ -24,6 +24,16 @@ export function RsiDetail() {
     if (selectedTaskId) void refreshDetail(selectedTaskId);
   }, [selectedTaskId, refreshDetail]);
 
+  useEffect(() => {
+    if (!selectedTaskId) return;
+    const status = detail?.task?.status;
+    if (status !== 'created' && status !== 'queued' && status !== 'running') return;
+    const timer = window.setInterval(() => {
+      void refreshDetail(selectedTaskId);
+    }, 800);
+    return () => window.clearInterval(timer);
+  }, [selectedTaskId, detail?.task?.status, refreshDetail]);
+
   if ((detailLoading && !detail) || !detail?.task) {
     return <div className="rsi-loading">{t('rsi.list.loading', { defaultValue: '加载中…' })}</div>;
   }

@@ -27,13 +27,19 @@ export function RsiResultSummary({ task, report, usage }: RsiResultSummaryProps)
   const baseline = liveProgress?.baseline ?? task.progress.baseline ?? report?.baseline ?? null;
   const gain = score != null && baseline != null && baseline > 0 ? (score - baseline) / baseline : null;
   const gainFmt = formatGain(gain);
-  const bestName = task.best_artifact?.name ?? task.best_artifact?.artifact_id ?? null;
+  const bestName = task.best_artifact?.name
+    ?? report?.best_artifact?.name
+    ?? task.best_artifact?.artifact_id
+    ?? report?.best_artifact?.artifact_id
+    ?? null;
   const queued = task.status === 'created' || task.status === 'queued';
 
   const evalPassed = report?.metrics.eval_passed ?? null;
   const evalTotal = report?.metrics.eval_total ?? null;
   const prunedCount = report?.metrics.pruned_count ?? null;
-  const iterations = queued ? null : (report?.metrics.iterations ?? task.progress.iteration ?? null);
+  const iterations = queued
+    ? null
+    : (liveProgress?.iteration ?? report?.metrics.iterations ?? task.progress.iteration ?? null);
   const tokenUsage = usage?.usage ?? task.usage ?? null;
 
   // 指标列顺序：基线分数 → 用量 → 迭代次数 → 组合评测 →（剪枝，仅 harness）

@@ -215,9 +215,14 @@ class RsiWorker:
         consume_task = asyncio.create_task(consume_queue(queue, consumer))
         result: Any = None
         try:
-            if task_view.scenario == "ARTIFACT" and hasattr(adapter, "validate_input"):
+            if hasattr(adapter, "validate_input"):
+                input_path = (
+                    task_view.artifact_path or task_view.config.get("artifact_path")
+                    if task_view.scenario == "ARTIFACT"
+                    else task_view.input_file
+                )
                 validation = adapter.validate_input(
-                    task_view.artifact_path or task_view.config.get("artifact_path"),
+                    input_path,
                     scenario=task_view.scenario,
                     artifact_type=task_view.artifact_type,
                 )

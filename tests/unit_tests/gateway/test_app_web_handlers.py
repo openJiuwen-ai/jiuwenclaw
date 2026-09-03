@@ -414,6 +414,55 @@ async def test_session_list_forwards_via_e2a_proxy(
 
 
 @pytest.mark.asyncio
+async def test_rsi_download_forwards_container_identity_in_params() -> None:
+    channel = FakeWebChannel()
+    agent_client = _CapturingSessionListAgentClient()
+    _register_web_handlers(
+        WebHandlersBindParams(channel=channel, agent_client=agent_client)
+    )
+
+    await channel.methods["rsi.artifact.download"](
+        object(),
+        "req-rsi-download",
+        {"task_id": "rsi-task-1"},
+        "sess-rsi-1",
+        "user-rsi-1",
+    )
+
+    assert len(agent_client.envelopes) == 1
+    env = agent_client.envelopes[0]
+    assert env.method == "rsi.artifact.download"
+    assert env.user_id == "user-rsi-1"
+    assert env.params == {
+        "task_id": "rsi-task-1",
+        "session_id": "sess-rsi-1",
+        "_download_user_id": "user-rsi-1",
+    }
+
+
+@pytest.mark.asyncio
+async def test_rsi_commands_forward_session_id_for_async_push_routing() -> None:
+    channel = FakeWebChannel()
+    agent_client = _CapturingSessionListAgentClient()
+    _register_web_handlers(
+        WebHandlersBindParams(channel=channel, agent_client=agent_client)
+    )
+
+    await channel.methods["rsi.task.create"](
+        object(),
+        "req-rsi-create",
+        {"scenario": "HARNESS", "name": "mock", "model_refs": {"optimizer": "m"}},
+        "sess-rsi-create",
+        "user-rsi-1",
+    )
+
+    assert len(agent_client.envelopes) == 1
+    env = agent_client.envelopes[0]
+    assert env.method == "rsi.task.create"
+    assert env.params["session_id"] == "sess-rsi-create"
+
+
+@pytest.mark.asyncio
 async def test_session_list_keeps_single_user_shared_directory_fallback(monkeypatch) -> None:
     """A local AgentServer restart must not hide legacy sessions from Web."""
     channel = FakeWebChannel()

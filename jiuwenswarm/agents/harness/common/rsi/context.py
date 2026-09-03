@@ -120,7 +120,14 @@ class RsiServiceContext:
         task = self.store.get(task_id)
         return self.adapter_for(task.scenario, task.artifact_type)
 
-    def install_mock_artifact_adapters(self, *, model_resolver: Any = None) -> dict[str, Any]:
+    def install_mock_artifact_adapters(
+        self,
+        *,
+        model_resolver: Any = None,
+        iteration_delay: float = 0.0,
+        node_delay: float = 0.0,
+        branching_factor: int = 3,
+    ) -> dict[str, Any]:
         """Install deterministic artifact Providers for local service E2E tests."""
         from jiuwenswarm.agents.harness.common.rsi.mock_artifact_provider import (
             build_mock_artifact_adapters,
@@ -129,9 +136,36 @@ class RsiServiceContext:
         adapters = build_mock_artifact_adapters(
             self.tasks_root,
             model_resolver=model_resolver,
+            requires_model=False,
+            iteration_delay=iteration_delay,
+            node_delay=node_delay,
+            branching_factor=branching_factor,
         )
         self.register_adapters(adapters)
         return adapters
+
+    def install_mock_rsi_adapters(self, *, model_resolver: Any = None) -> dict[str, Any]:
+        """Install Harness + Program + Paper mock Providers for local E2E."""
+        from jiuwenswarm.agents.harness.common.rsi.provider_factory import (
+            build_mock_rsi_adapters,
+        )
+
+        adapters = build_mock_rsi_adapters(
+            self.tasks_root,
+            model_resolver=model_resolver,
+        )
+        self.register_adapters(adapters)
+        return adapters
+
+    def register_harness_provider(self, provider: Any) -> Any:
+        """Register the production ``HarnessProvider`` at the RSI seam."""
+        from jiuwenswarm.agents.harness.common.rsi.harness_adapter import (
+            HarnessEngineAdapter,
+        )
+
+        adapter = HarnessEngineAdapter(provider)
+        self.register_adapters({"HARNESS": adapter})
+        return adapter
 
     def register_artifact_providers(
         self,

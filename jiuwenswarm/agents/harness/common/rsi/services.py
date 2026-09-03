@@ -13,6 +13,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+from jiuwenswarm.agents.harness.common.tools.web_file_download import build_file_download_info
 from jiuwenswarm.agents.harness.common.rsi.adapter import validate_scenario
 from jiuwenswarm.agents.harness.common.rsi.artifact_adapter import (
     provider_best_artifact,
@@ -147,6 +148,14 @@ class RsiTaskService:
             "results": {},
             "active_ref_released": False,
         }
+        # The browser WebSocket session is transport metadata, but it must
+        # survive task creation so asynchronous Provider events can be routed
+        # back to the page that created the task.
+        rsi_session_id = str(
+            params.get("_rsi_session_id") or params.get("session_id") or ""
+        ).strip()
+        if rsi_session_id:
+            config["rsi_session_id"] = rsi_session_id
         task = RsiTask(
             task_id=task_id,
             name=name,
@@ -226,7 +235,7 @@ class RsiTaskService:
         task = self.store.get(task_id)
         if adapter is None and self.adapter_resolver is not None:
             adapter = self.adapter_resolver(task.scenario, task.artifact_type)
-        if adapter is not None and task.scenario == Scenario.ARTIFACT.value:
+        if adapter is not None:
             state = _read_provider_snapshot(adapter, "read_state", task_id)
             report = _read_provider_snapshot(adapter, "read_report", task_id)
             if state is not None or report is not None:
@@ -365,7 +374,7 @@ class RsiReportService:
         task = self.store.get(task_id)
         if adapter is None and self.adapter_resolver is not None:
             adapter = self.adapter_resolver(task.scenario, task.artifact_type)
-        if adapter is not None and task.scenario == Scenario.ARTIFACT.value:
+        if adapter is not None:
             state = _read_provider_snapshot(adapter, "read_state", task_id)
             report = _read_provider_snapshot(adapter, "read_report", task_id)
             if report is not None or state is not None:
@@ -407,9 +416,8 @@ class RsiTreeService:
             raise RsiBadRequest("task_id 必填")
         task = self.store.get(task_id) if self.store is not None else None
         if adapter is None and task is not None and self.adapter_resolver is not None:
-            if task.scenario == Scenario.ARTIFACT.value:
-                adapter = self.adapter_resolver(task.scenario, task.artifact_type)
-        if adapter is not None and (task is None or task.scenario == Scenario.ARTIFACT.value):
+            adapter = self.adapter_resolver(task.scenario, task.artifact_type)
+        if adapter is not None:
             tree = _read_provider_snapshot(adapter, "get_tree", task_id)
             if tree is not None:
                 return self.projector.sync_provider_tree(task_id, tree)
@@ -430,9 +438,8 @@ class RsiUsageService:
             raise RsiBadRequest("task_id 必填")
         task = self.store.get(task_id) if self.store is not None else None
         if adapter is None and task is not None and self.adapter_resolver is not None:
-            if task.scenario == Scenario.ARTIFACT.value:
-                adapter = self.adapter_resolver(task.scenario, task.artifact_type)
-        if adapter is not None and (task is None or task.scenario == Scenario.ARTIFACT.value):
+            adapter = self.adapter_resolver(task.scenario, task.artifact_type)
+        if adapter is not None:
             # During a live run the event consumer has the richest view
             # (including per-iteration cumulative snapshots).  Prefer it and
             # fall back to the durable Provider snapshot after a restart.
@@ -472,11 +479,16 @@ class RsiArtifactDownloadService:
             raise RsiBadRequest("task_id 必填")
         task = self.store.get(task_id)
         if adapter is None and self.adapter_resolver is not None:
-            if task.scenario == Scenario.ARTIFACT.value:
-                adapter = self.adapter_resolver(task.scenario, task.artifact_type)
+            adapter = self.adapter_resolver(task.scenario, task.artifact_type)
         artifact_id = str(params.get("artifact_id") or "").strip() or None
-        if adapter is not None and task.scenario == Scenario.ARTIFACT.value:
-            return self._locate_provider(task_id, artifact_id, adapter)
+        if adapter is not None:
+            return self._locate_provider(
+                task_id,
+                artifact_id,
+                adapter,
+                scenario=task.scenario,
+                params=params,
+            )
         artifact = self.artifact_service.locate(task_id, artifact_id)
         # 消费成功 → 放行后续 delete（在用产物语义：下载即消费）
         if artifact_id is None or artifact.is_best:
@@ -484,14 +496,24 @@ class RsiArtifactDownloadService:
                 self.store.mark_active_ref_released(task_id)
             except Exception as exc:  # noqa: BLE001
                 logger.warning("[RSI] 在用产物标记释放失败 task=%s: %s", task_id, exc)
-        return {
+        result = {
             "path": artifact.path,
             "kind": artifact.kind,
             "is_best": artifact.is_best,
             "filename": Path(artifact.path).name,
         }
+        result.update(_download_fields(result["path"], params))
+        return result
 
-    def _locate_provider(self, task_id: str, artifact_id: str | None, adapter: Any) -> dict[str, Any]:
+    def _locate_provider(
+        self,
+        task_id: str,
+        artifact_id: str | None,
+        adapter: Any,
+        *,
+        scenario: str,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
         try:
             raw_artifact = adapter.locate_artifact(task_id, artifact_id)
         except OSError as exc:
@@ -529,12 +551,39 @@ class RsiArtifactDownloadService:
                 self.store.mark_active_ref_released(task_id)
             except Exception as exc:  # noqa: BLE001
                 logger.warning("[RSI] 在用产物标记释放失败 task=%s: %s", task_id, exc)
-        return {
+        result = {
             "path": str(path),
-            "kind": "artifact_package",
+            "kind": (
+                "harness_plugin"
+                if str(scenario).upper() == Scenario.HARNESS.value
+                else "artifact_package"
+            ),
             "is_best": is_best,
             "filename": path.name,
         }
+        result.update(_download_fields(result["path"], params))
+        return result
+
+
+def _download_fields(path: str, params: dict[str, Any]) -> dict[str, str]:
+    """Issue the same short-lived HTTP file token used by chat attachments."""
+
+    session_id = str(params.get("session_id") or "").strip()
+    # ``proxy_unary_request`` promotes the canonical ``user_id`` to the E2A
+    # envelope and removes it from params.  Keep a dedicated internal copy for
+    # the returned browser URL so AgentOS can route the later HTTP request to
+    # the same user container.
+    user_id = str(params.get("_download_user_id") or params.get("user_id") or "").strip()
+    info = build_file_download_info(
+        path,
+        Path(path).name,
+        session_id=session_id,
+        user_id=user_id,
+    )
+    return {
+        "download_url": str(info["download_url"]),
+        "download_token": str(info["download_token"]),
+    }
 
 
 def _positive_int(raw: Any, *, default: int, field: str) -> int:

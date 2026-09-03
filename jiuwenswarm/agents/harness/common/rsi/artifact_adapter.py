@@ -92,17 +92,30 @@ def provider_node_to_dict(node: Any) -> dict[str, Any]:
     changes: list[dict[str, Any]] = []
     for change in raw.get("changes") or []:
         if isinstance(change, dict):
-            # agent-core keeps a richer intent record (group/function/target),
-            # while the Web contract exposes the stable three-field shape.
+            # Keep the legacy ``element`` field while preserving the richer
+            # Provider intent record for node-detail rendering.
+            group = str(
+                change.get("group")
+                or change.get("element")
+                or change.get("domain")
+                or ""
+            ).upper()
+            summary = change.get("summary") or change.get("reason") or change.get("description")
             changes.append(
                 {
-                    "element": str(change.get("element") or change.get("group") or "").upper(),
+                    "group": group,
+                    "element": group,
                     "operation": str(change.get("operation") or "").upper(),
-                    "reason": change.get("reason") or change.get("summary"),
+                    "function": change.get("function") or change.get("function_name"),
+                    "target": change.get("target") or change.get("member") or change.get("path"),
+                    "summary": summary,
+                    "reason": summary,
                 }
             )
 
     extra = raw.get("extra")
+    summary = raw.get("summary") if raw.get("summary") is not None else raw.get("description")
+    reason = raw.get("reason") if raw.get("reason") is not None else raw.get("failure_reason")
     return {
         "node_id": str(raw.get("node_id") or ""),
         "iteration": _safe_int(raw.get("iteration")),
@@ -110,11 +123,11 @@ def provider_node_to_dict(node: Any) -> dict[str, Any]:
         "type": normalized_type,
         "adopted": bool(raw.get("adopted")),
         "score": _safe_float_or_none(raw.get("score")),
-        "description": raw.get("summary") if raw.get("summary") is not None else raw.get("description"),
+        "summary": summary,
+        "description": summary,
         "snapshot_artifact_id": raw.get("snapshot_artifact_id"),
-        "failure_reason": (
-            raw.get("reason") if raw.get("reason") is not None else raw.get("failure_reason")
-        ),
+        "reason": reason,
+        "failure_reason": reason,
         "failure_class": raw.get("failure_class"),
         "changes": changes,
         "extra": dict(extra) if isinstance(extra, dict) else {},
@@ -225,6 +238,7 @@ class ArtifactEngineAdapter:
         provider: Any,
         *,
         model_resolver: Callable[[str | None], Any] | None = None,
+        requires_model: bool = True,
     ) -> None:
         normalized = str(artifact_type or "").strip().upper()
         if normalized not in {"PROGRAM", "PAPER"}:
@@ -232,6 +246,7 @@ class ArtifactEngineAdapter:
         self.artifact_type = normalized
         self.provider = provider
         self._model_resolver = model_resolver
+        self._requires_model = requires_model
         self.supports_pause = bool(getattr(provider, "supports_pause", normalized == "PROGRAM"))
         self.supports_resume = bool(getattr(provider, "supports_resume", normalized == "PROGRAM"))
 
@@ -274,7 +289,7 @@ class ArtifactEngineAdapter:
         # a resolved ``model`` object.  Support both shapes at the boundary.
         resolved_model = self._model_resolver(model_id) if self._model_resolver else None
         if "model" in request_fields:
-            if resolved_model is None:
+            if resolved_model is None and self._requires_model:
                 raise RsiNotReady(f"optimizer model 未注册: {model_id}")
             kwargs["model"] = resolved_model
         elif "model_config" in request_fields:
