@@ -430,7 +430,7 @@ body.workspace-resize-active iframe {
     align-items: flex-start;
     align-content: start;
     gap: 16px;
-    grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));
+    grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
   }
 
   /* 共享页面卡片（skill / agent / connector 各内容页卡片统一的宽度约束），
@@ -456,6 +456,7 @@ body.workspace-resize-active iframe {
     margin-right: max(48px, calc((100% - 1400px) / 2));
     background: var(--color-surface-card);
     padding-top: 64px;
+    padding-bottom: 24px;
   }
 
   .page-content .chat-picker-panel__tabs {

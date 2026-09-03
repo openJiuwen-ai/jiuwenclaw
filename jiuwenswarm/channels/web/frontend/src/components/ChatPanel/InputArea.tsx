@@ -3483,7 +3483,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
             </button>
           )} */}
 
-          {isAgentMode && <ContextUsageIndicator />}
+          {(isAgentMode || isTeamMode) && <ContextUsageIndicator />}
 
           <ChatModelSelector
             disabled={isProcessing || isCompactRunning || (!isAgentMode && activeSessionId !== NEW_CONVERSATION_ID)}
