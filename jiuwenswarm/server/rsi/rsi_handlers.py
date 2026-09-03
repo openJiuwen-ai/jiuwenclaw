@@ -37,6 +37,8 @@ _METHOD_DISPATCH: dict[str, str] = {
     "rsi.report.get": "report_get",
     "rsi.usage.get": "usage_get",
     "rsi.artifact.download": "artifact_download",
+    "rsi.artifact.files.list": "artifact_files_list",
+    "rsi.artifact.files.get": "artifact_files_get",
     "rsi.tree.get": "tree_get",
 }
 
@@ -154,6 +156,12 @@ class RsiAgentServerHandlers:
             params,
             adapter=self.context.adapter_for_task(params.get("task_id")),
         )
+
+    def _do_artifact_files_list(self, params: dict[str, Any]) -> dict[str, Any]:
+        return self.context.artifact_files_service.list_files(params)
+
+    def _do_artifact_files_get(self, params: dict[str, Any]) -> dict[str, Any]:
+        return self.context.artifact_files_service.read_file(params)
 
     def _do_tree_get(self, params: dict[str, Any]) -> dict[str, Any]:
         return self.context.tree_service.get(

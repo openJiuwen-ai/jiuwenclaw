@@ -41,11 +41,13 @@ interface RsiState {
   selectedTaskId: string | null;
   detail: Record<string, RsiDetailState>;
   detailLoading: boolean;
+  // 后端 RSI 状态没有 INSTALLED；安装成功后先在前端会话内标记，刷新后以后端状态为准。
+  installedTaskIds: Record<string, boolean>;
 
   // 列表
   loadList: () => Promise<void>;
-  // 选中实验，拉取详情
-  selectTask: (taskId: string | null) => Promise<void>;
+  // 选中实验；详情由 RsiDetail 挂载/切换时统一拉取
+  selectTask: (taskId: string | null) => void;
   // 刷新单个实验详情（task.get / report.get / usage.get / tree.get）
   refreshDetail: (taskId: string) => Promise<void>;
 
@@ -56,6 +58,7 @@ interface RsiState {
   upsertListItem: (item: RsiTaskListItem) => void;
   removeListItem: (taskId: string) => void;
   patchTaskStatus: (taskId: string, status: RsiTaskStatus) => void;
+  markTaskInstalled: (taskId: string) => void;
 
   // 推送事件归并
   applyStatusChanged: (payload: RsiTrainingStatusChangedPayload) => void;
@@ -84,6 +87,7 @@ export const useRsiStore = create<RsiState>((set, get) => ({
   selectedTaskId: null,
   detail: {},
   detailLoading: false,
+  installedTaskIds: {},
 
   loadList: async () => {
     set({ listLoading: true, listError: null });
@@ -99,11 +103,8 @@ export const useRsiStore = create<RsiState>((set, get) => ({
     }
   },
 
-  selectTask: async (taskId) => {
+  selectTask: (taskId) => {
     set({ selectedTaskId: taskId });
-    if (taskId) {
-      await get().refreshDetail(taskId);
-    }
   },
 
   refreshDetail: async (taskId) => {
@@ -163,16 +164,19 @@ export const useRsiStore = create<RsiState>((set, get) => ({
   },
 
   removeListItem: (taskId) => {
+    const installedTaskIds = { ...get().installedTaskIds };
+    delete installedTaskIds[taskId];
     set((state) => ({
       list: state.list.filter((t) => t.task_id !== taskId),
       detail: Object.fromEntries(Object.entries(state.detail).filter(([id]) => id !== taskId)),
       selectedTaskId: state.selectedTaskId === taskId ? null : state.selectedTaskId,
+      installedTaskIds,
     }));
   },
 
   patchTaskStatus: (taskId, status) => {
     set((state) => {
-      const list = state.list.map((t) => (t.task_id === taskId ? { ...t, status, running: status === 'running' } : t));
+      const list = state.list.map((t) => (t.task_id === taskId ? { ...t, status, running: status === 'RUNNING' } : t));
       const cur = state.detail[taskId];
       const detail = cur
         ? {
@@ -191,6 +195,12 @@ export const useRsiStore = create<RsiState>((set, get) => ({
     get().patchTaskStatus(payload.task_id, payload.status);
   },
 
+  markTaskInstalled: (taskId) => {
+    set((state) => ({
+      installedTaskIds: { ...state.installedTaskIds, [taskId]: true },
+    }));
+  },
+
   applyProgress: (payload) => {
     const tid = payload.task_id;
     set((state) => {
@@ -199,9 +209,9 @@ export const useRsiStore = create<RsiState>((set, get) => ({
         t.task_id === tid
           ? {
               ...t,
-              iter: { current: payload.iteration, total: payload.total },
+              iter: { current: payload.iteration, total: payload.total_iterations },
               score: payload.score,
-              base: payload.baseline ?? t.base,
+              base: payload.baseline ?? t.base ?? null,
             }
           : t,
       );
@@ -213,7 +223,7 @@ export const useRsiStore = create<RsiState>((set, get) => ({
             ...cur,
             liveProgress: {
               iteration: payload.iteration,
-              total: payload.total,
+              total: payload.total_iterations,
               score: payload.score,
               baseline: payload.baseline,
               usageCost: payload.usage?.cost_estimate ?? cur.liveProgress?.usageCost ?? null,
@@ -253,6 +263,7 @@ export const useRsiStore = create<RsiState>((set, get) => ({
       selectedTaskId: null,
       detail: {},
       detailLoading: false,
+      installedTaskIds: {},
     });
   },
 }));

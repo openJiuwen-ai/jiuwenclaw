@@ -7123,6 +7123,8 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         ("rsi.report.get", _HarnessReq.RSI_REPORT_GET),
         ("rsi.usage.get", _HarnessReq.RSI_USAGE_GET),
         ("rsi.artifact.download", _HarnessReq.RSI_ARTIFACT_DOWNLOAD),
+        ("rsi.artifact.files.list", _HarnessReq.RSI_ARTIFACT_FILES_LIST),
+        ("rsi.artifact.files.get", _HarnessReq.RSI_ARTIFACT_FILES_GET),
         ("rsi.tree.get", _HarnessReq.RSI_TREE_GET),
     ]
     for _method_name, _req_method in _RSI_METHODS:

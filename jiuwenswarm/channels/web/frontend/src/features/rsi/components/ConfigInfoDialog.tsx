@@ -1,5 +1,5 @@
 /**
- * RSI 配置信息弹窗（只读）：展示创建时的配置快照。
+ * RSI 配置信息弹窗（只读）：展示创建时的配置快照（当前后端字段）。
  */
 import { useEffect, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -26,7 +26,7 @@ export function ConfigInfoDialog({ open, task, onClose }: ConfigInfoDialogProps)
   if (!task) return null;
 
   const cfg = task.config;
-  const isProgram = task.scenario === 'artifact' && task.artifact_type === 'program';
+  const isProgram = task.scenario === 'ARTIFACT' && task.artifact_type === 'PROGRAM';
   const rows: Array<{ label: string; value: string }> = [
     { label: t('rsi.createDialog.nameLabel'), value: task.name },
     { label: t('rsi.createDialog.typeLabel'), value: scenarioLabel(task.scenario) },
@@ -35,7 +35,7 @@ export function ConfigInfoDialog({ open, task, onClose }: ConfigInfoDialogProps)
     rows.push({ label: t('rsi.createDialog.artifactTypeLabel'), value: artifactTypeLabel(task.artifact_type) });
   }
   rows.push({ label: t('rsi.createDialog.optimizerModelLabel'), value: cfg.model.optimizer });
-  if (task.scenario === 'harness' && cfg.model.tester) {
+  if (task.scenario === 'HARNESS' && cfg.model.tester) {
     rows.push({ label: t('rsi.createDialog.testerModelLabel'), value: cfg.model.tester });
   }
   if (cfg.optimization_instruction) {
@@ -43,7 +43,7 @@ export function ConfigInfoDialog({ open, task, onClose }: ConfigInfoDialogProps)
   }
   if (cfg.artifact_path) {
     rows.push({
-      label: task.artifact_type === 'program' ? t('rsi.createDialog.programLabel') : t('rsi.createDialog.paperLabel'),
+      label: task.artifact_type === 'PROGRAM' ? t('rsi.createDialog.programLabel') : t('rsi.createDialog.paperLabel'),
       value: cfg.artifact_path,
     });
   }

@@ -27,7 +27,7 @@ export function RsiDetail() {
   useEffect(() => {
     if (!selectedTaskId) return;
     const status = detail?.task?.status;
-    if (status !== 'created' && status !== 'queued' && status !== 'running') return;
+    if (status !== 'CREATED' && status !== 'QUEUED' && status !== 'RUNNING') return;
     const timer = window.setInterval(() => {
       void refreshDetail(selectedTaskId);
     }, 800);

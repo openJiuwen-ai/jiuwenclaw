@@ -16,6 +16,9 @@ function delay<T>(value: T, ms = LATENCY): Promise<T> {
   return new Promise((resolve) => setTimeout(() => resolve(value), ms));
 }
 
+export const RSI_LOCAL_ARTIFACT_PATH = 'C:/Users/ray_l/.jiuwenswarm/rsi/tasks/package';
+const LOCAL_TEST_ARTIFACT_PATH = RSI_LOCAL_ARTIFACT_PATH;
+
 export const rsiMockModelList: Array<{ id: string; name: string; is_free: boolean; provider?: string }> = [
   { id: 'model-qwen-max', name: 'Qwen-Max', is_free: false, provider: 'dashscope' },
   { id: 'model-qwen-plus', name: 'Qwen-Plus', is_free: true, provider: 'dashscope' },
@@ -27,57 +30,33 @@ const mockTasks: RsiTaskListItem[] = [
   {
     task_id: 'rsi-task-001',
     name: 'Harness 基线优化 A',
-    scenario: 'harness',
+    scenario: 'HARNESS',
     artifact_type: null,
-    status: 'running',
-    iter: { current: 128, total: 200 },
-    score: 66.7,
-    best: 'H-08',
-    base: 61.5,
-    gain: 0.0846,
-    running: true,
+    status: 'RUNNING',
     created_at: '2026-08-28T10:12:00Z',
   },
   {
     task_id: 'rsi-task-002',
     name: '论文润色 v2',
-    scenario: 'artifact',
-    artifact_type: 'paper',
-    status: 'completed',
-    iter: { current: 5, total: 5 },
-    score: 88.2,
-    best: 'P-05',
-    base: 79.0,
-    gain: 0.1165,
-    running: false,
+    scenario: 'ARTIFACT',
+    artifact_type: 'PAPER',
+    status: 'COMPLETED',
     created_at: '2026-08-25T09:30:00Z',
   },
   {
     task_id: 'rsi-task-003',
     name: '程序优化-工具链',
-    scenario: 'artifact',
-    artifact_type: 'program',
-    status: 'paused',
-    iter: { current: 2, total: 3 },
-    score: 72.4,
-    best: 'PR-02',
-    base: 68.0,
-    gain: 0.0647,
-    running: false,
+    scenario: 'ARTIFACT',
+    artifact_type: 'PROGRAM',
+    status: 'PAUSED',
     created_at: '2026-08-30T14:00:00Z',
   },
   {
     task_id: 'rsi-task-004',
     name: 'Harness 排队演示',
-    scenario: 'harness',
+    scenario: 'HARNESS',
     artifact_type: null,
-    status: 'queued',
-    iter: { current: 0, total: 5 },
-    score: null,
-    best: null,
-    base: 61.5,
-    gain: null,
-    running: false,
+    status: 'QUEUED',
     created_at: '2026-09-02T09:00:00Z',
   },
 ];
@@ -90,7 +69,7 @@ function buildMockTree(): RsiTreeGetResult {
     parentId: string | null,
     type: RsiTreeGetResult['nodes'][number]['type'],
     score: number | null,
-    summary: string | null,
+    description: string | null,
     changes: RsiTreeGetResult['nodes'][number]['changes'],
     opts: Partial<RsiTreeGetResult['nodes'][number]> = {},
   ): RsiTreeGetResult['nodes'][number] => ({
@@ -98,27 +77,27 @@ function buildMockTree(): RsiTreeGetResult {
     iteration,
     parent_id: parentId,
     type,
-    adopted: type === 'adopted',
+    adopted: type === 'ADOPTED',
     score,
-    summary,
-    snapshot_artifact_id: type === 'adopted' ? `${id}-snap` : null,
-    reason: opts.reason ?? null,
+    description,
+    snapshot_artifact_id: type === 'ADOPTED' ? `${id}-snap` : null,
+    failure_reason: opts.failure_reason ?? null,
     failure_class: opts.failure_class ?? null,
     changes,
     extra: opts.extra ?? null,
   });
 
   const nodes: RsiTreeGetResult['nodes'] = [
-    mk('H-00', 0, null, 'root', 61.5, '基线快照', null),
+    mk('H-00', 0, null, 'ROOT', 61.5, '基线快照', null),
     // iteration 1
-    mk('H-01', 1, 'H-00', 'adopted', 63.1, 'Prompt v2 调优', [
+    mk('H-01', 1, 'H-00', 'ADOPTED', 63.1, 'Prompt v2 调优', [
       { group: 'prompt', operation: 'modify', function: 'system', target: 'system_prompt', summary: '精简系统提示词' },
     ]),
     mk(
       'H-02',
       1,
       'H-00',
-      'rejected',
+      'REJECTED',
       60.2,
       'Skill 调整未通过',
       [
@@ -131,7 +110,7 @@ function buildMockTree(): RsiTreeGetResult {
         },
       ],
       {
-        reason: '评测分数低于父节点',
+        failure_reason: '评测分数低于父节点',
         failure_class: 'score_drop',
         extra: { potential_score: 58.4, other_score: 57.1, stability_score: 56.9, cost_score: 55.2 },
       },
@@ -140,28 +119,28 @@ function buildMockTree(): RsiTreeGetResult {
       'H-03',
       1,
       'H-00',
-      'pruned',
+      'PRUNED',
       null,
       '门控剪枝',
       [{ group: 'tool', operation: 'modify', function: 'code_run', target: 'sandbox', summary: '安全门未通过' }],
-      { reason: 'removed gate 未通过' },
+      { failure_reason: 'removed gate 未通过' },
     ),
     // iteration 2
-    mk('H-04', 2, 'H-01', 'adopted', 64.8, 'Rail v1 约束增强', [
+    mk('H-04', 2, 'H-01', 'ADOPTED', 64.8, 'Rail v1 约束增强', [
       { group: 'rail', operation: 'add', function: 'safety', target: 'output_filter', summary: '增加输出过滤护栏' },
     ]),
     mk(
       'H-05',
       2,
       'H-01',
-      'rejected',
+      'REJECTED',
       63.9,
       '工具替换效果不佳',
       [{ group: 'tool', operation: 'modify', function: 'code_run', target: 'runner', summary: '更换运行器' }],
-      { reason: '组合评测未达阈值' },
+      { failure_reason: '组合评测未达阈值' },
     ),
     // iteration 3
-    mk('H-06', 3, 'H-04', 'adopted', 65.5, 'Prompt v3 + Tool 调整', [
+    mk('H-06', 3, 'H-04', 'ADOPTED', 65.5, 'Prompt v3 + Tool 调整', [
       { group: 'prompt', operation: 'modify', function: 'system', target: 'system_prompt', summary: '强化角色设定' },
       { group: 'tool', operation: 'add', function: 'memory', target: 'recall', summary: '增加记忆召回工具' },
     ]),
@@ -169,7 +148,7 @@ function buildMockTree(): RsiTreeGetResult {
       'H-07',
       3,
       'H-04',
-      'provisional',
+      'PROVISIONAL',
       null,
       '【正在分析实验】节点默认最小宽度180px，开发评估下能不能根据内容适配，最大宽度280px，并且内容支持多行展示。评测中…',
       [{ group: 'skill', operation: 'modify', function: 'plan', target: 'planner', summary: '调整规划技能' }],
@@ -179,24 +158,31 @@ function buildMockTree(): RsiTreeGetResult {
       'H-08',
       4,
       'H-06',
-      'adopted',
+      'ADOPTED',
       66.7,
       'Prompt v4 → v5 + Rail v1 → v2',
       [
         { group: 'prompt', operation: 'modify', function: 'system', target: 'system_prompt', summary: '压缩提示词' },
         { group: 'rail', operation: 'modify', function: 'safety', target: 'output_filter', summary: '收紧护栏阈值' },
       ],
-      { extra: { potential_score: 65.8, other_score: 64.2, efficiency_score: 63.5 } },
+      {
+        extra: {
+          potential_score: 65.8,
+          other_score: 64.2,
+          efficiency_score: 63.5,
+          artifacts: [{ path: LOCAL_TEST_ARTIFACT_PATH }],
+        },
+      },
     ),
     mk(
       'H-09',
       4,
       'H-06',
-      'rejected',
+      'REJECTED',
       66.1,
       '调整未超过父节点',
       [{ group: 'tool', operation: 'modify', function: 'code_run', target: 'runner', summary: '微调运行参数' }],
-      { reason: '得分未超过 H-06' },
+      { failure_reason: '得分未超过 H-06' },
     ),
   ];
 
@@ -209,9 +195,9 @@ const mockTaskGet: Record<string, RsiTaskGetResult> = {
   'rsi-task-001': {
     task_id: 'rsi-task-001',
     name: 'Harness 基线优化 A',
-    scenario: 'harness',
+    scenario: 'HARNESS',
     artifact_type: null,
-    status: 'running',
+    status: 'RUNNING',
     config: {
       model: { optimizer: 'model-qwen-max', tester: 'model-qwen-plus' },
       max_iterations: 5,
@@ -230,9 +216,9 @@ const mockTaskGet: Record<string, RsiTaskGetResult> = {
   'rsi-task-002': {
     task_id: 'rsi-task-002',
     name: '论文润色 v2',
-    scenario: 'artifact',
-    artifact_type: 'paper',
-    status: 'completed',
+    scenario: 'ARTIFACT',
+    artifact_type: 'PAPER',
+    status: 'COMPLETED',
     config: {
       model: { optimizer: 'model-deepseek-v3', tester: null },
       max_iterations: 5,
@@ -251,9 +237,9 @@ const mockTaskGet: Record<string, RsiTaskGetResult> = {
   'rsi-task-003': {
     task_id: 'rsi-task-003',
     name: '程序优化-工具链',
-    scenario: 'artifact',
-    artifact_type: 'program',
-    status: 'paused',
+    scenario: 'ARTIFACT',
+    artifact_type: 'PROGRAM',
+    status: 'PAUSED',
     config: {
       model: { optimizer: 'model-glm-4', tester: null },
       max_iterations: 3,
@@ -272,9 +258,9 @@ const mockTaskGet: Record<string, RsiTaskGetResult> = {
   'rsi-task-004': {
     task_id: 'rsi-task-004',
     name: 'Harness 排队演示',
-    scenario: 'harness',
+    scenario: 'HARNESS',
     artifact_type: null,
-    status: 'queued',
+    status: 'QUEUED',
     config: {
       model: { optimizer: 'model-qwen-max', tester: 'model-qwen-plus' },
       max_iterations: 5,
@@ -290,31 +276,31 @@ const mockTaskGet: Record<string, RsiTaskGetResult> = {
 
 const mockReport: Record<string, RsiReportGetResult> = {
   'rsi-task-001': {
-    status: 'running',
+    status: 'RUNNING',
     best_score: 66.7,
     baseline: 61.5,
-    metrics: { eval_passed: 36, eval_total: 40, pruned_count: 2, iterations: 4, best_artifact_id: 'H-08-snap' },
-    usage: mockTaskGet['rsi-task-001'].usage,
+    metrics: { eval_passed: 36, eval_total: 40, pruned_count: 2, iterations: 4 },
+    usage: mockTaskGet['rsi-task-001'].usage ?? null,
     best_artifact: mockTaskGet['rsi-task-001'].best_artifact,
     report_summary: '前 4 轮迭代中 Prompt 与 Rail 协同优化，分数由 61.5 提升至 66.7，组合评测 36/40 通过。',
     markdown: null,
   },
   'rsi-task-002': {
-    status: 'completed',
+    status: 'COMPLETED',
     best_score: 88.2,
     baseline: 79.0,
-    metrics: { eval_passed: 19, eval_total: 20, pruned_count: null, iterations: 5, best_artifact_id: 'P-05-snap' },
-    usage: mockTaskGet['rsi-task-002'].usage,
+    metrics: { eval_passed: 19, eval_total: 20, pruned_count: null, iterations: 5 },
+    usage: mockTaskGet['rsi-task-002'].usage ?? null,
     best_artifact: mockTaskGet['rsi-task-002'].best_artifact,
     report_summary: '论文经 5 轮润色，逻辑连贯性与术语一致性显著提升。',
     markdown: null,
   },
   'rsi-task-003': {
-    status: 'paused',
+    status: 'PAUSED',
     best_score: 72.4,
     baseline: 68.0,
-    metrics: { eval_passed: 7, eval_total: 10, pruned_count: null, iterations: 200, best_artifact_id: null },
-    usage: mockTaskGet['rsi-task-003'].usage,
+    metrics: { eval_passed: 7, eval_total: 10, pruned_count: null, iterations: 200 },
+    usage: mockTaskGet['rsi-task-003'].usage ?? null,
     best_artifact: null,
     report_summary: '已暂停，前 2 轮迭代完成。',
     markdown: null,

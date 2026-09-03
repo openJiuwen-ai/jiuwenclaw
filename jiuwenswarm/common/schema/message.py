@@ -390,6 +390,8 @@ class ReqMethod(Enum):
     RSI_REPORT_GET = "rsi.report.get"
     RSI_USAGE_GET = "rsi.usage.get"
     RSI_ARTIFACT_DOWNLOAD = "rsi.artifact.download"
+    RSI_ARTIFACT_FILES_LIST = "rsi.artifact.files.list"
+    RSI_ARTIFACT_FILES_GET = "rsi.artifact.files.get"
     RSI_TREE_GET = "rsi.tree.get"
 
     # Schedule task management

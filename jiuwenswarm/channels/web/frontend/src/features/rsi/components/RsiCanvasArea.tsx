@@ -4,12 +4,20 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
+import bestIcon from '../../../assets/rsi/rsi-best.svg';
+import costIcon from '../../../assets/rsi/rsi-cost.svg';
+import emptyExamsIcon from '../../../assets/rsi/rsi-empty-exams.svg';
+import evaluatingIcon from '../../../assets/rsi/rsi-evaluating.svg';
+import expandIcon from '../../../assets/rsi/rsi-expand.svg';
+import pauseIcon from '../../../assets/rsi/rsi-pause.svg';
+import waitingIcon from '../../../assets/rsi/rsi-waiting.svg';
 import type { RsiTaskGetResult, RsiTreeGetResult } from '../types';
 import {
   legendDotClass,
   nodeDisplayName,
   formatCost,
   statusBadgeInfo,
+  type StatusBadgeKind,
   type NodeStatusKind,
   type NodeIconKind,
   nodeRuntimeKind,
@@ -34,7 +42,6 @@ const LEGEND: Array<{ kind: NodeStatusKind; labelKey: string }> = [
   { kind: 'pruned', labelKey: 'rsi.detail.legendPruned' },
 ];
 
-// 运行中图标（24x24 圆形底 + 6 根放射短线，表示运行中）
 // 节点上层黑色徽章图标：圆形黑底 + 白色状态图标（皇冠/对号/双箭头/时钟/减号）
 const STATUS_ICON_PATHS: Record<NodeIconKind, ReactNode> = {
   // 小皇冠
@@ -102,41 +109,12 @@ function StatusBadge({ icon }: { icon: NodeIconKind }) {
   );
 }
 
-function RunningIcon() {
-  const cx = 12;
-  const cy = 12;
-  const r1 = 4.5;
-  const r2 = 8.5;
-  const lines = Array.from({ length: 6 }, (_, i) => {
-    const a = (i * Math.PI) / 3;
-    const cos = Math.cos(a);
-    const sin = Math.sin(a);
-    return { x1: cx + r1 * cos, y1: cy + r1 * sin, x2: cx + r2 * cos, y2: cy + r2 * sin };
-  });
-  return (
-    <span className="rsi-canvas-statusbar__running" aria-hidden>
-      <svg viewBox="0 0 24 24" width="24" height="24">
-        {lines.map((l, i) => (
-          <line key={i} x1={l.x1.toFixed(2)} y1={l.y1.toFixed(2)} x2={l.x2.toFixed(2)} y2={l.y2.toFixed(2)} />
-        ))}
-      </svg>
-    </span>
-  );
-}
-
-// 圆环成本图标（24x24，圆环 + ¥）
-function CostRingIcon() {
-  return (
-    <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden>
-      <circle cx="12" cy="12" r="9" />
-      <text x="12" y="16" textAnchor="middle" fontSize="11" fill="currentColor" stroke="none">
-        ¥
-      </text>
-    </svg>
-  );
+function CostIcon() {
+  return <img className="rsi-canvas-statusbar__icon" src={costIcon} alt="" aria-hidden />;
 }
 
 interface RsiCanvasStatusBarProps {
+  statusKind: StatusBadgeKind;
   statusText: string;
   candidate: string | null;
   cost: number | null;
@@ -145,7 +123,15 @@ interface RsiCanvasStatusBarProps {
   onBack?: () => void;
 }
 
-function RsiCanvasStatusBar({ statusText, candidate, cost, progressPct, queued, onBack }: RsiCanvasStatusBarProps) {
+function RsiCanvasStatusBar({
+  statusKind,
+  statusText,
+  candidate,
+  cost,
+  progressPct,
+  queued,
+  onBack,
+}: RsiCanvasStatusBarProps) {
   const { t } = useTranslation();
   return (
     <div
@@ -170,13 +156,13 @@ function RsiCanvasStatusBar({ statusText, candidate, cost, progressPct, queued, 
         )}
         <div className="rsi-canvas-statusbar__left">
           <span className="rsi-canvas-statusbar__item">
-            <RunningIcon />
+            <TaskStatusIcon kind={statusKind} />
             <span className="rsi-canvas-statusbar__strong">{statusText}</span>
             {candidate && <span className="rsi-canvas-statusbar__weak">{candidate}</span>}
           </span>
           <span className="rsi-canvas-statusbar__divider" />
           <span className="rsi-canvas-statusbar__item">
-            <CostRingIcon />
+            <CostIcon />
             <span className="rsi-canvas-statusbar__weak">
               {t('rsi.detail.estimatedCost', { cost: formatCost(cost) })}
             </span>
@@ -200,6 +186,31 @@ function RsiCanvasStatusBar({ statusText, candidate, cost, progressPct, queued, 
         ))}
       </div>
     </div>
+  );
+}
+
+const CANVAS_STATUS_ICON_SRCS: Partial<Record<StatusBadgeKind, string>> = {
+  queued: waitingIcon,
+  running: evaluatingIcon,
+  paused: pauseIcon,
+  completed: bestIcon,
+  installed: bestIcon,
+};
+
+function TaskStatusIcon({ kind }: { kind: StatusBadgeKind }) {
+  const iconSrc = CANVAS_STATUS_ICON_SRCS[kind];
+  if (iconSrc) {
+    return <img className="rsi-canvas-statusbar__running" src={iconSrc} alt="" aria-hidden />;
+  }
+  return (
+    <svg className="rsi-canvas-statusbar__running" viewBox="0 0 24 24" fill="none" aria-hidden>
+      <circle cx="12" cy="12" r="11" fill="rgb(239,68,68)" />
+      <path
+        d="M12 7C11.4 7 11 7.4 11 8V12.5C11 13.1 11.4 13.5 12 13.5C12.6 13.5 13 13.1 13 12.5V8C13 7.4 12.6 7 12 7Z"
+        fill="white"
+      />
+      <path d="M12 17C12.55 17 13 16.55 13 16C13 15.45 12.55 15 12 15C11.45 15 11 15.45 11 16C11 16.55 11.45 17 12 17Z" fill="white" />
+    </svg>
   );
 }
 
@@ -374,14 +385,19 @@ function RsiNodeCard({
       </div>
       <div className="rsi-node__body">
         {kind === 'evaluating' ? (
-          <div className="rsi-node__eval-text">{ln.node.summary ?? '正在分析实现'}</div>
+          <div className="rsi-node__eval-text">{ln.node.description ?? '正在分析实现'}</div>
         ) : kind === 'pending' ? (
           <div className="rsi-node__score-line">
             <span className="rsi-node__score-num">--</span>
             <span className="rsi-node__score-label">分数</span>
           </div>
-        ) : scoreLines.length === 0 && ln.node.type === 'pruned' ? (
+        ) : scoreLines.length === 0 && ln.node.type === 'PRUNED' ? (
           <div className="rsi-node__eval-text">结果不通过</div>
+        ) : scoreLines.length === 0 ? (
+          <div className="rsi-node__score-line">
+            <span className="rsi-node__score-num">--</span>
+            <span className="rsi-node__score-label">分数</span>
+          </div>
         ) : (
           <>
             {shown.map((sl, i) => (
@@ -457,29 +473,50 @@ export function RsiCanvasArea({ task, tree }: RsiCanvasAreaProps) {
   const canvasRef = useRef<HTMLDivElement>(null);
   const fullscreenCanvasRef = useRef<HTMLDivElement>(null);
 
-  const running = task.status === 'running';
+  const running = task.status === 'RUNNING';
   // 排队中（created/queued）：画布展示排队占位，不渲染演进树
-  const queued = task.status === 'created' || task.status === 'queued';
+  const queued = task.status === 'CREATED' || task.status === 'QUEUED';
 
   const layout = useMemo(() => {
     if (!tree) return null;
     const roots = tree.nodes.filter((n) => n.parent_id === null);
     return layoutTree(roots, tree.nodes, collapsed, running, scoreExpanded);
   }, [tree, collapsed, running, scoreExpanded]);
+  const layoutRef = useRef(layout);
+  const centeredViewportKeyRef = useRef<string | null>(null);
+  const viewportKey = `${task.task_id}:${fullscreen}`;
 
-  // 切换实验时重置视口
   useEffect(() => {
-    setScale(0.8);
-    setTx(0);
-    setTy(0);
-  }, [task.task_id]);
+    layoutRef.current = layout;
+  }, [layout]);
 
-  // 进入全屏时恢复 100% 视口；退出全屏回到普通视图默认 80%
-  useEffect(() => {
-    setScale(fullscreen ? 1 : 0.8);
-    setTx(0);
-    setTy(0);
+  // 重置视口：仅任务切换/全屏切换时重置，避免运行态轮询覆盖用户手动平移缩放。
+  const centerViewport = useCallback(() => {
+    const nextScale = fullscreen ? 1 : 0.8;
+    const apply = () => {
+      const canvas = fullscreen ? fullscreenCanvasRef.current : canvasRef.current;
+      const viewportHeight = canvas?.clientHeight ?? 0;
+      const layoutHeight = layoutRef.current?.height ?? 0;
+      setScale(nextScale);
+      setTx(0);
+      setTy(Math.max(0, (viewportHeight - layoutHeight * nextScale) / 2));
+    };
+    if (fullscreen) requestAnimationFrame(apply);
+    else apply();
   }, [fullscreen]);
+
+  // 切换实验或进入/退出全屏时重置视口
+  useEffect(() => {
+    centeredViewportKeyRef.current = null;
+    centerViewport();
+  }, [task.task_id, fullscreen, centerViewport]);
+
+  // 首次收到布局后做一次纵向居中；后续增量刷新保持用户视口。
+  useEffect(() => {
+    if (!layout || centeredViewportKeyRef.current === viewportKey) return;
+    centeredViewportKeyRef.current = viewportKey;
+    centerViewport();
+  }, [layout, viewportKey, centerViewport]);
 
   const clampScale = useCallback((s: number) => Math.min(2, Math.max(0.3, s)), []);
 
@@ -550,10 +587,8 @@ export function RsiCanvasArea({ task, tree }: RsiCanvasAreaProps) {
   const zoomIn = useCallback(() => setScale((s) => clampScale(s * 1.2)), [clampScale]);
   const zoomOut = useCallback(() => setScale((s) => clampScale(s / 1.2)), [clampScale]);
   const zoomReset = useCallback(() => {
-    setScale(fullscreen ? 1 : 0.8);
-    setTx(0);
-    setTy(0);
-  }, [fullscreen]);
+    centerViewport();
+  }, [centerViewport]);
   // 静默消费 zoomReset：全屏弹窗关闭时重置视口
   void zoomReset;
 
@@ -575,25 +610,38 @@ export function RsiCanvasArea({ task, tree }: RsiCanvasAreaProps) {
   }, []);
 
   const title =
-    task.scenario === 'artifact' && task.artifact_type === 'program'
+    task.scenario === 'ARTIFACT' && task.artifact_type === 'PROGRAM'
       ? t('rsi.detail.programProcess')
       : t('rsi.detail.harnessProcess');
 
   // 状态条数据：运行态进度/成本来自 P2 推送（liveProgress），回退 task.progress/usage（§3.3/§3.4）
   const liveProgress = useRsiStore((s) => s.detail[task.task_id]?.liveProgress ?? null);
-  const provisionalNode = tree?.nodes.find((n) => n.type === 'provisional') ?? null;
-  const candidate = provisionalNode
-    ? t('rsi.detail.candidate', { defaultValue: '候选' }) + provisionalNode.node_id
-    : null;
-  const statusInfo = statusBadgeInfo(task.status);
-  const statusText = running
-    ? provisionalNode
+  const installedTask = useRsiStore((s) => Boolean(s.installedTaskIds[task.task_id]));
+  const installed = task.status === 'COMPLETED' && installedTask;
+  const statusInfo = statusBadgeInfo(task.status, installed);
+  const provisionalNode = tree?.nodes.find((n) => n.type === 'PROVISIONAL') ?? null;
+  const bestArtifactNode =
+    [...(tree?.nodes ?? [])]
+      .filter((node) => node.type === 'ADOPTED')
+      .sort((a, b) => b.iteration - a.iteration)[0] ?? null;
+  const bestArtifactId =
+    task.best_artifact?.artifact_id ?? bestArtifactNode?.snapshot_artifact_id ?? bestArtifactNode?.node_id ?? null;
+  const completedWithBest = task.status === 'COMPLETED' && Boolean(bestArtifactId);
+  const statusText = completedWithBest
+    ? t('rsi.detail.bestArtifactPrefix', { defaultValue: '最优产物' })
+    : running && provisionalNode
       ? t('rsi.detail.evaluating', { defaultValue: '正在评测' })
-      : statusInfo.label
-    : statusInfo.label;
+      : t('rsi.detail.' + statusInfo.labelKey);
+  const candidate = running
+    ? provisionalNode
+      ? t('rsi.detail.candidate', { defaultValue: '候选' }) + provisionalNode.node_id
+      : null
+    : completedWithBest
+      ? bestArtifactId
+      : null;
   const cost = liveProgress?.usageCost ?? task.usage?.cost_estimate ?? null;
-  const progressIter = liveProgress?.iteration ?? task.progress.iteration;
-  const progressTotal = liveProgress?.total ?? task.progress.total_iterations;
+  const progressIter = liveProgress?.iteration ?? task.progress?.iteration ?? 0;
+  const progressTotal = liveProgress?.total ?? task.progress?.total_iterations ?? 0;
   const progressPct = progressTotal > 0 ? Math.min(100, Math.round((progressIter / progressTotal) * 100)) : 0;
 
   return (
@@ -601,19 +649,7 @@ export function RsiCanvasArea({ task, tree }: RsiCanvasAreaProps) {
       <div className="rsi-canvas-area__subheader">
         <span className="rsi-canvas-area__title">{title}</span>
         <button type="button" className="rsi-canvas-area__expand" onClick={() => setFullscreen(true)}>
-          <svg
-            viewBox="0 0 16 16"
-            width="14"
-            height="14"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="1.5"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-            aria-hidden
-          >
-            <path d="M9 2h5v5M7 14H2V9M14 2 9 7M2 14l5-5" />
-          </svg>
+          <img className="rsi-canvas-area__expand-icon" src={expandIcon} alt="" aria-hidden />
           {t('rsi.detail.expandView', { defaultValue: '放大查看' })}
         </button>
       </div>
@@ -621,6 +657,7 @@ export function RsiCanvasArea({ task, tree }: RsiCanvasAreaProps) {
 
       <div className="rsi-canvas-wrap">
         <RsiCanvasStatusBar
+          statusKind={statusInfo.kind ?? 'failed'}
           statusText={statusText}
           candidate={candidate}
           cost={cost}
@@ -629,25 +666,17 @@ export function RsiCanvasArea({ task, tree }: RsiCanvasAreaProps) {
         />
         {queued ? (
           <div className="rsi-canvas-queued">
-            {/* 待办任务图标 */}
-            <svg
-              viewBox="0 0 48 48"
-              width="56"
-              height="56"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="1.6"
-              aria-hidden
-            >
-              <rect x="10" y="6" width="28" height="36" rx="4" />
-              <path d="M18 6V3h12v3" strokeLinecap="round" strokeLinejoin="round" />
-              <path d="M16 20h6M16 28h6M16 36h6" strokeLinecap="round" />
-              <path d="M28 22l3 3 5-6" strokeLinecap="round" strokeLinejoin="round" />
-            </svg>
+            <img className="rsi-canvas-queued__icon" src={emptyExamsIcon} alt="" aria-hidden />
             <div className="rsi-canvas-queued__text">
-              本实验<span className="rsi-canvas-queued__strong">正在排队中</span>
+              <span className="rsi-canvas-queued__strong">
+                {t('rsi.detail.queuedTitle', { defaultValue: '本实验正在排队中' })}
+              </span>
             </div>
-            <div className="rsi-canvas-queued__sub">下面还有 1 个任务正在优化中，请耐心等待</div>
+            <div className="rsi-canvas-queued__sub">
+              {t('rsi.detail.queuedHint', {
+                defaultValue: '下面还有 1 个任务正在优化中，请耐心等待',
+              })}
+            </div>
           </div>
         ) : (
           <div
@@ -745,6 +774,7 @@ export function RsiCanvasArea({ task, tree }: RsiCanvasAreaProps) {
       >
         <div className="rsi-fullscreen-canvas__inner">
           <RsiCanvasStatusBar
+            statusKind={statusInfo.kind ?? 'failed'}
             statusText={statusText}
             candidate={candidate}
             cost={cost}

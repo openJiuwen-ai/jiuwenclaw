@@ -25,12 +25,14 @@ RSI_METHOD_NAMES = {
     "rsi.report.get",
     "rsi.usage.get",
     "rsi.artifact.download",
+    "rsi.artifact.files.list",
+    "rsi.artifact.files.get",
     "rsi.tree.get",
 }
 
 
 class TestReqMethod:
-    def test_13_rsi_methods_registered(self):
+    def test_15_rsi_methods_registered(self):
         present = {m.value for m in ReqMethod if m.value.startswith("rsi.")}
         assert present == RSI_METHOD_NAMES
 
@@ -107,6 +109,59 @@ class TestDispatch:
 
         with pytest.raises(RsiPathInvalid, match="path is not readable"):
             _ensure_provider_valid(result)
+
+    def test_artifact_files_list_and_get(self, handlers):
+        h, ctx, _ = handlers
+        result = h.handle(FakeRequest(ReqMethod.RSI_TASK_CREATE, {
+            "scenario": "HARNESS", "name": "artifact-files",
+            "input_file": "C:/d.json", "model_refs": {"optimizer": "o", "tester": "e"},
+        }))
+        assert result["ok"]
+        task_id = result["payload"]["task_id"]
+        artifact_dir = Path(ctx.store.tasks_root) / task_id / "artifact"
+        artifact_dir.mkdir(parents=True)
+        artifact_file = artifact_dir / "main.tex"
+        artifact_file.write_text("\\section{Title}\n", encoding="utf-8", newline="\n")
+
+        result = h.handle(FakeRequest(ReqMethod.RSI_ARTIFACT_FILES_LIST, {
+            "task_id": task_id,
+            "path": str(artifact_dir),
+        }))
+        assert result["ok"]
+        assert any(item["name"] == "main.tex" for item in result["payload"]["files"])
+
+        result = h.handle(FakeRequest(ReqMethod.RSI_ARTIFACT_FILES_GET, {
+            "task_id": task_id,
+            "path": str(artifact_file),
+        }))
+        assert result["ok"]
+        assert result["payload"]["encoding"] == "text"
+        assert result["payload"]["content"] == "\\section{Title}\n"
+
+        result = h.handle(FakeRequest(ReqMethod.RSI_TASK_CREATE, {
+            "scenario": "HARNESS", "name": "other-task",
+            "input_file": "C:/d.json", "model_refs": {"optimizer": "o", "tester": "e"},
+        }))
+        assert result["ok"]
+        other_task_id = result["payload"]["task_id"]
+
+        other_dir = Path(ctx.store.tasks_root) / other_task_id / "artifact"
+        other_dir.mkdir(parents=True)
+        other_file = other_dir / "secret.tex"
+        other_file.write_text("secret", encoding="utf-8")
+        result = h.handle(FakeRequest(ReqMethod.RSI_ARTIFACT_FILES_LIST, {
+            "task_id": task_id,
+            "path": str(other_file),
+        }))
+        assert not result["ok"]
+        assert result["code"] == "PATH_INVALID"
+
+        result = h.handle(FakeRequest(ReqMethod.RSI_ARTIFACT_FILES_GET, {
+            "task_id": f"../{task_id}",
+            "path": str(artifact_file),
+        }))
+        assert not result["ok"]
+        assert result["code"] == "TASK_NOT_FOUND"
 
 
 class TestP1Push:
