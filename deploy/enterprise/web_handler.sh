@@ -4,42 +4,13 @@ set -euo >/dev/null 2>&1
 gen_web_file() {
     local template_file="${CONFIG["WEB_TEMPLATE_FILE"]}"
     local file="${CONFIG["WEB_FILE"]}"
-    local enable_external_obs="${DEPLOY_VARS["ENABLE_EXTERNAL_OBS"]}"
-    local obs_url="${DEPLOY_VARS["MINIO_NAME"]}-headless.default:9000"
 
-    render_config_template "${template_file}" "${file}" "DEPLOY_VARS"
-
-    if [ "${DEPLOY_VARS["ENABLE_EXTERNAL_OBS"]}" == "true" ]; then
-        obs_url="${DEPLOY_VARS["OBS_URL"]}"
+    # 内置 MinIO 时 .env 的 OBS_URL 可能为空；模板占位符需要可达 endpoint
+    if [ -z "${DEPLOY_VARS["OBS_URL"]:-}" ] || [ "${DEPLOY_VARS["ENABLE_EXTERNAL_OBS"]}" != "true" ]; then
+        DEPLOY_VARS["OBS_URL"]="${DEPLOY_VARS["MINIO_NAME"]}-headless.default:9000"
     fi
 
-    yq eval '
-    select(.kind == "Deployment").spec.template.spec.containers[0].env += [
-        {
-            "name": "JIUWENCLAW_MINIO_ENDPOINT",
-            "value": "'"${obs_url}"'"
-        },
-        {
-            "name": "JIUWENCLAW_MINIO_ACCESS_KEY",
-            "value": "'"${DEPLOY_VARS["OBS_ACCESS_KEY"]}"'"
-        },
-        {
-            "name": "JIUWENCLAW_MINIO_BUCKET",
-            "value": "'"${DEPLOY_VARS["OBS_BUCKET"]}"'"
-        },
-        {
-            "name": "JIUWENCLAW_MINIO_SECURE",
-            "value": "'"${DEPLOY_VARS["OBS_SECURE"]}"'"
-        },
-        {
-            "name": "JIUWENCLAW_MINIO_PUBLIC_BASE_URL",
-            "value": "'"${DEPLOY_VARS["OBS_PUBLIC_BASE_URL"]}"'"
-        },
-        {
-            "name": "JIUWENCLAW_MINIO_REGION",
-            "value": "'"${DEPLOY_VARS["OBS_REGION"]}"'"
-        }
-    ]' -i "${file}"
+    render_config_template "${template_file}" "${file}" "DEPLOY_VARS"
 
     if [ "${DEPLOY_VARS["DB_TYPE"]}" == "postgresql" ]; then
         yq eval '

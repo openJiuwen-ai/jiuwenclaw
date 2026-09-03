@@ -1,5 +1,5 @@
 /**
- * 北向 A2 HTTP/SSE 客户端（``VITE_WEB_TRANSPORT=http`` / ``a2``）。
+ * 北向 A2 HTTP/SSE 客户端（``getWebTransport()==='http'``：显式 transport 或企业默认）。
  * 对外口与 WebClient 相同：connect / request / on。映射与泵流只发生在这里。
  */
 import {

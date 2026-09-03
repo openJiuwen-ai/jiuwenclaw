@@ -884,7 +884,7 @@ def _enterprise_file_download_hint(language: str) -> str:
 
 
 def _normalize_files_for_agent_prompt(files: dict | list | Any) -> dict | list | Any:
-    """企业态：有 url 时去掉 Gateway 本地 path，避免 Agent 优先 read_file 失败。"""
+    """企业态：有 url 且尚未预落盘时去掉 Gateway 本地 path，避免 Agent 优先 read_file 失败。"""
     if not is_enterprise():
         return files
     if isinstance(files, list):
@@ -895,7 +895,8 @@ def _normalize_files_for_agent_prompt(files: dict | list | Any) -> dict | list |
                 continue
             updated = dict(file_info)
             file_url = str(updated.get("url") or updated.get("uri") or "").strip()
-            if file_url:
+            # materializer 成功后保留 path，供工具直接读本地 uploads/
+            if file_url and not updated.get("_materialized"):
                 updated.pop("path", None)
             normalized.append(updated)
         return normalized
@@ -1171,6 +1172,49 @@ class JiuWenSwarm:
                 collapse_nested_agent_workspace_dir(Path(user_ws) / "agent" / "workspace")
             )
         return str(collapse_nested_agent_workspace_dir(get_agent_workspace_dir()))
+
+    async def _materialize_enterprise_attachments(
+        self,
+        request: AgentRequest,
+        session_id: str,
+    ) -> None:
+        """企业版：将 URL 附件预下载到工作区 uploads/，写入 path 供工具使用。"""
+        if not is_enterprise():
+            return
+        if not isinstance(request.params, dict):
+            return
+
+        files = request.params.get("files")
+        if files is None:
+            return
+
+        from jiuwenswarm.server.runtime.enterprise_attachment_materializer import (
+            enterprise_files_need_download,
+            materialize_url_attachments,
+        )
+
+        if not enterprise_files_need_download(files if isinstance(files, (list, dict)) else None):
+            return
+
+        workspace_dir = self._resolve_workspace_dir()
+        param_project_dir = request.params.get("project_dir")
+        if isinstance(param_project_dir, str) and param_project_dir.strip():
+            workspace_dir = param_project_dir.strip()
+
+        materialized = await materialize_url_attachments(
+            files if isinstance(files, (list, dict)) else [],
+            workspace_dir,
+            request_id=request.request_id or "",
+        )
+        if materialized is not files:
+            params = dict(request.params)
+            params["files"] = materialized
+            request.params = params
+            logger.info(
+                "[JiuWenSwarm] enterprise attachments materialized: request_id=%s session_id=%s",
+                request.request_id,
+                session_id,
+            )
 
     def _bind_tenant_request_context(self) -> tuple[Any, Any]:
         from jiuwenswarm.server.runtime.tenant_context import bind_tenant_workspace_dirs
@@ -2536,6 +2580,7 @@ class JiuWenSwarm:
 
         tenant_tokens, mem_token = self._bind_tenant_request_context()
         try:
+            await self._materialize_enterprise_attachments(request, session_id)
             # 兜底：注入上一轮 SkillTurbo 中断时保存的节点产物摘要，让 LLM 知道
             # 「已完成的工作」而非盲目从头重跑。失败不阻断主流程。
             # dev-stable 无 plan_pause / interrupt_resume prepare 链，此处只做最小子集。
@@ -2831,6 +2876,7 @@ class JiuWenSwarm:
 
         rid = request.request_id
         cid = request.channel_id
+        await self._materialize_enterprise_attachments(request, session_id)
         try:
             # 兜底：注入上一轮 SkillTurbo 中断时保存的节点产物摘要，让 LLM 知道
             # 「已完成的工作」而非盲目从头重跑。失败不阻断主流程。

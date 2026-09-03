@@ -107,6 +107,19 @@ spec:
               value: "<<JIUWENSWARM_EDITION>>"
             - name: GATEWAY_RUNTIME_MANAGER_URL
               value: "<<GATEWAY_RUNTIME_MANAGER_URL>>"
+            # 对象存储（upload-obs / 出站代理）；OBS_SECRET_KEY 来自上方 secretRef
+            - name: OBS_URL
+              value: "<<OBS_URL>>"
+            - name: OBS_ACCESS_KEY
+              value: "<<OBS_ACCESS_KEY>>"
+            - name: OBS_BUCKET
+              value: "<<OBS_BUCKET>>"
+            - name: OBS_SECURE
+              value: "<<OBS_SECURE>>"
+            - name: OBS_PUBLIC_BASE_URL
+              value: "<<OBS_PUBLIC_BASE_URL>>"
+            - name: OBS_REGION
+              value: "<<OBS_REGION>>"
             # downward API：注入当前 Pod 身份，供 RuntimeManagementAgentClient
             # 构建 agentserver pod 的 ownerReference（指向本 Pod），实现级联清理。
             - name: POD_NAME

@@ -22,7 +22,9 @@ from jiuwenswarm.common.e2a.constants import (
     E2A_CANCEL_SOURCE_CLIENT_DISCONNECT,
     E2A_INTERNAL_CANCEL_SOURCE_KEY,
     E2A_WIRE_INTERNAL_METADATA_KEYS,
+    FILE_TRANSFER_EVENT_TYPES,
 )
+from jiuwenswarm.gateway.message_handler.file_transfer_mixin import FileTransferMixin
 from jiuwenswarm.common.config import get_evolution_auto_save_enabled
 from jiuwenswarm.gateway.routing.session_map import SessionMap
 from jiuwenswarm.gateway.routing.agent_request_timeout import (
@@ -179,7 +181,7 @@ if TYPE_CHECKING:
 
 
 # ---------- 双队列实现：入队经 AgentServerClient 发往 AgentServer ----------
-class MessageHandler(ABC):
+class MessageHandler(FileTransferMixin, ABC):
     """
     维护两个异步消息队列，入队消息通过 AgentServerClient 发送给 AgentServer：
 
@@ -247,6 +249,8 @@ class MessageHandler(ABC):
         self._acp_session_alias_lock = asyncio.Lock()
         self._external_session_aliases: dict[tuple[str, str], str] = {}
         self._external_session_alias_lock = asyncio.Lock()
+        self._external_cancel_waiters: dict[str, asyncio.Future[None]] = {}
+        self._external_cancel_ack_timeout_seconds = 5.0
 
         # per-channel 控制状态：支持 \new_session / \mode 指令。
         # 使用 ChannelType 的 value 作为标准键，避免散落的硬编码字符串。
@@ -283,6 +287,9 @@ class MessageHandler(ABC):
         except Exception as e:
             logger.warning("[MessageHandler] Failed to init GatewayHookHandler: %s", e)
             self._gateway_hook_handler = None
+
+        # 文件传输处理器（延迟初始化；默认关闭，见 resolve_file_transfer_enabled）
+        self._file_transfer_handler = None
 
     def get_session_sharing_registry(self) -> SessionSharingRegistry:
         """返回 SessionSharingRegistry 实例，供 V2 共享会话路由使用."""
@@ -393,6 +400,80 @@ class MessageHandler(ABC):
             "[MessageHandler] _user_messages 入队: id=%s channel_id=%s session_id=%s",
             msg.id, msg.channel_id, msg.session_id,
         )
+
+    async def handle_external_channel_cancel(self, msg: "Message") -> None:
+        """Queue an A2A cancel in order and wait for AgentServer acknowledgement."""
+        from jiuwenswarm.common.schema.message import ReqMethod
+
+        if msg.channel_id != "a2a" or msg.req_method != ReqMethod.CHAT_CANCEL:
+            raise ValueError("external channel cancel requires an A2A CHAT_CANCEL message")
+        request_id = str(msg.id)
+        waiter = asyncio.get_running_loop().create_future()
+        if request_id in self._external_cancel_waiters:
+            raise RuntimeError(f"duplicate external cancel request: {request_id}")
+        self._external_cancel_waiters[request_id] = waiter
+        try:
+            await self.handle_message(msg)
+            try:
+                await asyncio.wait_for(
+                    asyncio.shield(waiter),
+                    timeout=self._external_cancel_ack_timeout_seconds,
+                )
+            except TimeoutError:
+                logger.warning(
+                    "[MessageHandler] A2A cancel acknowledgement timed out after %.1fs; "
+                    "releasing caller while downstream cancellation continues: "
+                    "id=%s session_id=%s",
+                    self._external_cancel_ack_timeout_seconds,
+                    request_id,
+                    msg.session_id,
+                )
+        finally:
+            self._external_cancel_waiters.pop(request_id, None)
+            if not waiter.done():
+                waiter.cancel()
+
+    def _finish_external_channel_cancel(
+        self, request_id: str, error: BaseException | None = None
+    ) -> None:
+        waiter = self._external_cancel_waiters.get(str(request_id))
+        if waiter is None or waiter.done():
+            return
+        if error is None:
+            waiter.set_result(None)
+        else:
+            waiter.set_exception(error)
+
+    @staticmethod
+    def _is_external_channel_cancel(msg: "Message | None") -> bool:
+        from jiuwenswarm.common.schema.message import ReqMethod
+
+        return (
+            msg is not None
+            and msg.channel_id == "a2a"
+            and msg.req_method == ReqMethod.CHAT_CANCEL
+        )
+
+    def _schedule_external_channel_cancel(self, msg: "Message") -> None:
+        async def cancel_and_finish() -> None:
+            try:
+                cancelled = await self._cancel_agent_work_for_session(
+                    msg,
+                    msg.session_id,
+                    agent_notify="await",
+                )
+                if not cancelled:
+                    raise RuntimeError("AgentServer rejected A2A cancellation")
+            except BaseException as exc:
+                self._finish_external_channel_cancel(msg.id, exc)
+            else:
+                self._finish_external_channel_cancel(msg.id)
+
+        task = asyncio.create_task(
+            cancel_and_finish(), name=f"gw-a2a-cancel-{str(msg.id)[:24]}"
+        )
+        self._fire_and_forget_tasks.add(task)
+        task.add_done_callback(self._fire_and_forget_tasks.discard)
 
     async def _maybe_register_godview(self, msg: "Message") -> None:
         """V2: auto-register a GodView subscriber for the channel.
@@ -1154,13 +1235,19 @@ class MessageHandler(ABC):
 
         payload = resp.payload if isinstance(resp.payload, dict) else {}
         if payload.get("event_type") == "chat.interrupt_result":
+            # resp.ok only reflects transport-level success; the payload's own
+            # "success" (e.g. AgentServer found nothing to cancel) determines
+            # whether the interrupt actually happened. Only treat a missing/True
+            # value as success so callers don't get a false-positive ack.
+            interrupt_succeeded = bool(resp.ok) and payload.get("success") is not False
             if not publish_interrupt_result:
                 logger.info(
-                    "[MessageHandler] 已静默 AgentServer 中断结果: request_id=%s ok=%s",
+                    "[MessageHandler] 已静默 AgentServer 中断结果: request_id=%s ok=%s success=%s",
                     resp.request_id,
                     resp.ok,
+                    interrupt_succeeded,
                 )
-                return bool(resp.ok)
+                return interrupt_succeeded
             out = self._response_to_message(
                 resp,
                 sid_for_agent,
@@ -1169,16 +1256,17 @@ class MessageHandler(ABC):
             )
             await self.publish_robot_messages(out)
             logger.info(
-                "[MessageHandler] 已转发 AgentServer 中断结果: request_id=%s ok=%s",
+                "[MessageHandler] 已转发 AgentServer 中断结果: request_id=%s ok=%s success=%s",
                 resp.request_id,
                 resp.ok,
+                interrupt_succeeded,
             )
 
             # 发送被中断工具的 tool_result 给前端
             await self._send_cancelled_tool_results(
                 msg.channel_id, sid_for_agent, payload, msg.metadata
             )
-            return bool(resp.ok)
+            return interrupt_succeeded
 
         error_message = "任务终止失败"
         if isinstance(payload, dict):
@@ -2876,6 +2964,25 @@ class MessageHandler(ABC):
 
         if chunk.channel_id == _ACP_CHANNEL_ID:
             session_id = self._resolve_acp_external_session_id(session_id, bus_metadata)
+
+        # AgentServer → Gateway 分块文件下载（file.download.*）
+        if isinstance(chunk.payload, dict):
+            event_type = chunk.payload.get("event_type", "")
+            if event_type in FILE_TRANSFER_EVENT_TYPES:
+                await self._handle_file_transfer_event(
+                    event_type,
+                    dict(chunk.payload),
+                    session_id,
+                    chunk.channel_id or "",
+                    bus_metadata,
+                )
+                logger.info(
+                    "[MessageHandler] server_push 文件下载事件已处理: request_id=%s event_type=%s",
+                    rid,
+                    event_type,
+                )
+                return
+
         if isinstance(chunk.payload, dict) and chunk.payload.get("event_type") == "cron.response":
             await self._handle_cron_push_payload(
                 payload=dict(chunk.payload),
@@ -3318,6 +3425,66 @@ class MessageHandler(ABC):
         payload = getattr(chunk, "payload", None)
         if isinstance(payload, dict) and payload.get("event_type") == "keepalive":
             return False
+        # 分布式文件下载事件：拼包后发 chat.file，不转发原始分片到 Channel
+        if isinstance(payload, dict):
+            event_type = payload.get("event_type", "")
+            if event_type in FILE_TRANSFER_EVENT_TYPES:
+                await self._handle_file_transfer_event(
+                    event_type,
+                    dict(payload),
+                    session_id,
+                    getattr(chunk, "channel_id", "") or "",
+                    request_metadata,
+                )
+                return False
+            # 企业 OBS 出站：chat.file 仅含 MinIO url → 改写为 Gateway 代理 href（不落盘、无 HMAC）
+            from jiuwenswarm.gateway.message_handler.outbound_file_materialize import (
+                chat_file_needs_obs_materialize,
+                materialize_outbound_files,
+            )
+
+            if chat_file_needs_obs_materialize(payload):
+                channel_id = getattr(chunk, "channel_id", "") or ""
+                files_in = payload.get("files") if isinstance(payload.get("files"), list) else []
+                tokenized = materialize_outbound_files(files_in)
+                if not tokenized:
+                    logger.error(
+                        "[MessageHandler] OBS 出站 URL 改写失败，跳过 chat.file "
+                        "session_id=%s request_id=%s",
+                        session_id,
+                        getattr(chunk, "request_id", ""),
+                    )
+                    return False
+                from jiuwenswarm.common.schema.message import EventType, Message
+
+                meta: dict[str, Any] = {}
+                if isinstance(request_metadata, dict):
+                    meta.update(request_metadata)
+                targets = payload.get("send_file_targets")
+                if targets:
+                    meta["send_file_targets"] = targets
+                file_msg = Message(
+                    id=f"file_obs_{getattr(chunk, 'request_id', '') or int(time.time() * 1000)}",
+                    type="event",
+                    channel_id=channel_id,
+                    session_id=session_id,
+                    params={},
+                    timestamp=time.time(),
+                    ok=True,
+                    payload={
+                        "event_type": EventType.CHAT_FILE.value,
+                        "files": tokenized,
+                    },
+                    event_type=EventType.CHAT_FILE,
+                    metadata=meta or None,
+                )
+                await self.publish_robot_messages(file_msg)
+                logger.info(
+                    "[MessageHandler] OBS 出站已改写为 Gateway 代理 URL channel_id=%s count=%d",
+                    channel_id,
+                    len(tokenized),
+                )
+                return False
         if not await self._handle_evolution_chunk(chunk, session_id, request_metadata):
             return False
         out = self._chunk_to_message(
@@ -3969,6 +4136,9 @@ class MessageHandler(ABC):
         from jiuwenswarm.common.schema.message import ReqMethod
 
         while self._running:
+            msg: Message | None = None
+            external_cancel_handed_off = False
+            external_cancel_error: BaseException | None = None
             try:
                 msg = await self.consume_user_messages(timeout=None)
                 if msg is None:
@@ -3981,8 +4151,18 @@ class MessageHandler(ABC):
                     continue
 
                 # 将当前 Channel 的控制状态应用到消息上
-                await self._resolve_external_channel_session(msg)
-                self._apply_channel_state(msg)
+                try:
+                    await self._resolve_external_channel_session(msg)
+                    self._apply_channel_state(msg)
+                except Exception as exc:
+                    if msg.channel_id == "a2a" and msg.req_method == ReqMethod.CHAT_CANCEL:
+                        self._finish_external_channel_cancel(msg.id, exc)
+                        logger.exception(
+                            "[MessageHandler] A2A cancel session resolution failed: id=%s",
+                            msg.id,
+                        )
+                        continue
+                    raise
                 channel_type = self._resolve_control_channel_type(msg)
                 if (
                     channel_type in self._control_channel_types
@@ -4239,13 +4419,17 @@ class MessageHandler(ABC):
                         _supp_task.add_done_callback(_enqueue_supplement_after_interrupt)
 
                     elif intent == "cancel":
-                        # fire_and_forget：避免慢 cancel 阻塞 _forward_loop，
-                        # 导致后续 session.create 等请求在队列中等待、前端超时。
-                        await self._cancel_agent_work_for_session(
-                            msg,
-                            msg.session_id,
-                            agent_notify="fire_and_forget",
-                        )
+                        if msg.channel_id == "a2a":
+                            self._schedule_external_channel_cancel(msg)
+                            external_cancel_handed_off = True
+                        else:
+                            # Other channels stay non-blocking so a slow interrupt
+                            # cannot stall unrelated sessions in _forward_loop.
+                            await self._cancel_agent_work_for_session(
+                                msg,
+                                msg.session_id,
+                                agent_notify="fire_and_forget",
+                            )
 
                     elif intent in ("pause", "resume"):
                         # 暂停/恢复：不取消流式任务，转发给 AgentServer 处理 ReAct 循环
@@ -4436,6 +4620,18 @@ class MessageHandler(ABC):
                 agent_msg = await self._prepare_agent_dispatch_message(msg)
                 await self._trigger_before_chat_request_hook(agent_msg)
                 env = self.message_to_e2a(agent_msg)
+
+                # 分布式文件传输：Gateway 本地文件 → AgentServer（默认关闭；企业版走 URL）
+                try:
+                    if self._should_transfer_files(env):
+                        env = await self._transfer_files_to_agent_server(env, msg)
+                except Exception as e:
+                    logger.exception(
+                        "[MessageHandler] 文件传输过程异常: request_id=%s error=%s, 继续使用原路径",
+                        env.request_id,
+                        e,
+                    )
+
                 stream_rid = env.request_id or msg.id
                 try:
                     if env.is_stream:
@@ -4492,7 +4688,28 @@ class MessageHandler(ABC):
                         msg.id, msg.channel_id,
                     )
             except asyncio.CancelledError:
+                external_cancel_error = RuntimeError(
+                    "MessageHandler stopped before A2A cancellation completed"
+                )
                 break
+            except Exception as exc:
+                external_cancel_error = exc
+                if self._is_external_channel_cancel(msg):
+                    logger.exception(
+                        "[MessageHandler] A2A cancel preprocessing failed: id=%s",
+                        msg.id,
+                    )
+                    continue
+                raise
+            finally:
+                if self._is_external_channel_cancel(
+                    msg
+                ) and not external_cancel_handed_off:
+                    self._finish_external_channel_cancel(
+                        msg.id,
+                        external_cancel_error
+                        or RuntimeError("A2A cancellation was not dispatched"),
+                    )
 
     async def process_stream(
         self,
@@ -4994,10 +5211,12 @@ class MessageHandler(ABC):
         self._running = True
         self._forward_task = asyncio.create_task(self._forward_loop())
         logger.info("[MessageHandler] 转发循环已启动 (_user_messages -> AgentServer -> _robot_messages)")
+        await self._maybe_start_file_transfer_cleanup()
 
     async def stop_forwarding(self) -> None:
         """停止转发任务."""
         self._running = False
+        await self._maybe_stop_file_transfer_cleanup()
 
         # 取消所有流式任务
         # 注意：原实现 ``await task`` 无超时。流式任务在 ``async for chunk`` 循环中

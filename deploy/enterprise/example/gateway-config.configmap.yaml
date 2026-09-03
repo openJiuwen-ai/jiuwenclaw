@@ -396,7 +396,7 @@ data:
         start: 08:00
         end: 22:00
     # web_enterprise 聊天附件上传（自部署 MinIO / S3 兼容对象存储）
-    # 环境变量可覆盖：JIUWENCLAW_MINIO_ENDPOINT / ACCESS_KEY / SECRET_KEY / BUCKET / SECURE / PUBLIC_BASE_URL
+    # 环境变量：OBS_*（与 deploy/enterprise/.env.example 对齐）
     minio:
       endpoint:
       access_key:
@@ -655,19 +655,17 @@ data:
       asset_name_pattern: "jiuwenclaw-setup-{version}.exe"
       sha256_name_pattern: "jiuwenclaw-setup-{version}.exe.sha256"
       timeout_seconds: 20
-    # 文件传输配置（分布式部署模式）
-    # 当 Gateway 和 AgentServer 分开部署时，需要启用此配置
+    # 文件传输（Agent→Gateway 下载分片 push）。默认关闭；企业下载主路径为 OBS URL。
+    # 逃生阀（需 PushRegistry 订户）：显式 enabled: true，或 Agent 设 JIUWENSWARM_FILE_DOWNLOAD_VIA_PUSH=1。
+    # 上传仍走 MinIO URL（is_enterprise 跳过 GW→Agent）。
     file_transfer:
-      # 是否启用分布式模式（true=启用 WebSocket 文件传输）
-      enabled: false
+      # enabled: true  # 仅逃生时打开；默认勿开
       # 分片大小（字节），默认 64KB
       chunk_size: 65536
       # 最大文件大小（字节），默认 100MB，0=不限制
       max_file_size: 104857600
       # 传输超时时间（秒），默认 300 秒
       transfer_timeout: 300
-      # 单分片最大重试次数
-      max_retries: 3
       # 接收文件存储目录（相对于 workspace）
       received_files_dir: "received_files"
       # 临时文件清理间隔（秒）

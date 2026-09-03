@@ -59,6 +59,18 @@ def make_ws_push_subscriber_id(ws: Any) -> str:
     return f"{WS_PUSH_SUBSCRIBER_ID_PREFIX}:{id(ws)}"
 
 
+def subscriber_kind(subscriber_id: str) -> str:
+    """从订阅 id 前缀推断订户类型（便于日志区分 WS / HTTP-SSE）。"""
+    sid = str(subscriber_id or "")
+    if sid.startswith("http-sse:"):
+        return "http-sse"
+    if sid.startswith(f"{WS_PUSH_SUBSCRIBER_ID_PREFIX}:"):
+        return "gateway-ws"
+    if sid == WS_PUSH_SUBSCRIBER_ID_PREFIX:
+        return "gateway-ws"
+    return "other"
+
+
 #: 单个订阅者的推送投递上限（秒）。超时即判定该订阅者停滞并注销 ——
 #: 见 :meth:`PushRegistry.push` 的 note。
 SEND_TIMEOUT = 5.0
@@ -159,8 +171,9 @@ class PushRegistry:
             self._reverse_rpc_owner_id = None
             self._notify_reverse_rpc_owner_lost()
         logger.info(
-            "[PushRegistry] 订阅者接入: id=%s session_id=%s "
-            "channel_id=%s 当前订阅数=%d",
+            "[PushRegistry] 订阅者接入: kind=%s id=%s session_id=%s channel_id=%s "
+            "当前订阅数=%d",
+            subscriber_kind(subscriber_id),
             subscriber_id,
             session_id,
             channel_id,
@@ -239,10 +252,12 @@ class PushRegistry:
             return 0
 
         delivered = 0
+        by_kind: dict[str, int] = {}
         # 先快照：扇出过程中可能有订阅者注册/注销
         for subscriber_id, sub in list(self._subscribers.items()):
             if not sub.matches(wire):
                 continue
+            kind = subscriber_kind(subscriber_id)
             try:
                 if sub.drop_on_stall:
                     sent = await asyncio.wait_for(
@@ -254,10 +269,12 @@ class PushRegistry:
                     sent = await sub.sink.send_wire(wire)
                 if sent:
                     delivered += 1
+                    by_kind[kind] = by_kind.get(kind, 0) + 1
             except asyncio.TimeoutError:
                 logger.warning(
-                    "[PushRegistry] 推送超时(%.1fs)，注销停滞订阅者: id=%s",
+                    "[PushRegistry] 推送超时(%.1fs)，注销停滞订阅者: kind=%s id=%s",
                     SEND_TIMEOUT,
+                    kind,
                     subscriber_id,
                 )
                 self.unregister(subscriber_id)
@@ -266,9 +283,32 @@ class PushRegistry:
             # 那里兜底是 BaseException，才**必须**显式 re-raise）。
             except Exception as exc:  # noqa: BLE001 - 单个订阅者故障不影响其它
                 logger.warning(
-                    "[PushRegistry] 推送失败，注销订阅者: id=%s error=%s", subscriber_id, exc
+                    "[PushRegistry] 推送失败，注销订阅者: kind=%s id=%s error=%s",
+                    kind,
+                    subscriber_id,
+                    exc,
                 )
                 self.unregister(subscriber_id)
+
+        if delivered > 0:
+            event_type = ""
+            body = wire.get("body") if isinstance(wire.get("body"), dict) else {}
+            payload = wire.get("payload") if isinstance(wire.get("payload"), dict) else {}
+            nested = body.get("payload") if isinstance(body.get("payload"), dict) else {}
+            for src in (payload, nested, body):
+                et = src.get("event_type") if isinstance(src, dict) else None
+                if isinstance(et, str) and et.strip():
+                    event_type = et.strip()
+                    break
+            logger.info(
+                "[PushRegistry] 扇出完成: delivered=%d by_kind=%s "
+                "request_id=%s session_id=%s event_type=%s",
+                delivered,
+                by_kind,
+                wire.get("request_id"),
+                wire.get("session_id"),
+                event_type,
+            )
         return delivered
 
 
