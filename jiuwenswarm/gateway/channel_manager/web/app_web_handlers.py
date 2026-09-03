@@ -1515,6 +1515,82 @@ class WebHandlersBindParams:
     a2a_manager: Any = None
 
 
+_SESSION_LIST_PAGE_SIZE = 200  # Agent ``session.list`` 分页上限，与 handlers/session.py 一致
+
+
+async def _fetch_all_sessions_from_agent(
+    agent_client: Any,
+    *,
+    user_id: str | None = None,
+    channel_id: str = "web",
+) -> list[dict[str, Any]]:
+    """Remote 模式下从 AgentServer ``session.list`` 分页拉取全量会话 metadata。"""
+    from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
+    from jiuwenswarm.common.schema.message import ReqMethod
+
+    if agent_client is None:
+        return []
+
+    all_sessions: list[dict[str, Any]] = []
+    offset = 0
+    total: int | None = None
+    authenticated_user_id = str(user_id or "").strip() or None
+
+    while True:
+        env = e2a_from_agent_fields(
+            request_id=f"session-list-{uuid.uuid4().hex[:12]}",
+            channel_id=channel_id,
+            req_method=ReqMethod.SESSION_LIST,
+            params={"limit": _SESSION_LIST_PAGE_SIZE, "offset": offset},
+            is_stream=False,
+            timestamp=time.time(),
+            user_id=authenticated_user_id,
+        )
+        try:
+            response = await agent_client.send_request(env)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "[session.list] Agent 拉取失败 offset=%s: %s",
+                offset,
+                exc,
+            )
+            break
+
+        if not getattr(response, "ok", False):
+            payload = response.payload if isinstance(response.payload, dict) else {}
+            logger.warning(
+                "[session.list] Agent 返回失败 offset=%s: %s",
+                offset,
+                payload.get("error") or payload,
+            )
+            break
+
+        payload = response.payload if isinstance(response.payload, dict) else {}
+        batch = payload.get("sessions")
+        if not isinstance(batch, list):
+            break
+
+        for item in batch:
+            if isinstance(item, dict):
+                all_sessions.append(item)
+
+        raw_total = payload.get("total")
+        if isinstance(raw_total, int) and not isinstance(raw_total, bool):
+            total = raw_total
+        elif total is None:
+            total = len(all_sessions)
+
+        if not batch:
+            break
+        offset += len(batch)
+        if total is not None and offset >= total:
+            break
+        if len(batch) < _SESSION_LIST_PAGE_SIZE:
+            break
+
+    return all_sessions
+
+
 def _attribute_session_project(
     meta: dict[str, Any],
     visible_by_id: set[str],
@@ -4074,7 +4150,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         if limit is not None:
             limit = max(1, limit)
 
-        from jiuwenswarm.server.runtime.session.session_metadata import collect_all_sessions_metadata
+        from jiuwenswarm.gateway.routing.session_index import is_remote_storage
 
         all_projects = project_store.list_projects(include_hidden=True, cache_bust=True)
         visible_by_id = {p.project_id for p in all_projects if not p.hidden}
@@ -4090,7 +4166,25 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         def _belongs(meta: dict[str, Any]) -> bool:
             return _attribute_session_project(meta, visible_by_id) == project_id
 
-        sessions = collect_all_sessions_metadata()
+        if is_remote_storage():
+            ac = _resolve(agent_client)
+            if ac is None:
+                await channel.send_response(
+                    ws,
+                    req_id,
+                    ok=False,
+                    error="AgentServer is unavailable",
+                    code="SERVICE_UNAVAILABLE",
+                )
+                return
+            sessions = await _fetch_all_sessions_from_agent(
+                ac,
+                channel_id=channel.channel_id,
+            )
+        else:
+            from jiuwenswarm.server.runtime.session.session_metadata import collect_all_sessions_metadata
+
+            sessions = collect_all_sessions_metadata()
         # 仅非置顶 cron 会话(cron_id 非空) + 归属匹配 + 可选按 cron_id 过滤
         # 注意: cron 会话的 channel_id 通常为 "__cron__"(默认模式)或 job.targets(team 模式),
         # 不固定为 "web",因此不过滤 channel_id,否则 cron 面板会变空。
@@ -6725,12 +6819,14 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             await channel.send_response(ws, req_id, ok=False, error="patch must be object", code="BAD_REQUEST")
             return
         try:
-            if hasattr(reg, "web_update_job"):
-                job = await reg.web_update_job(job_id, patch, sid, aid)
-            else:
-                from jiuwenswarm.gateway.cron.enterprise_gate import extract_routing_triple
+            from jiuwenswarm.gateway.cron.enterprise_gate import extract_routing_triple
 
-                g, b, u = extract_routing_triple(params)
+            g, b, u = extract_routing_triple(params)
+            if hasattr(reg, "web_update_job"):
+                job = await reg.web_update_job(
+                    job_id, patch, sid, aid, group_id=g, bot_id=b, user_id=u
+                )
+            else:
                 job = await cc.update_job(job_id, patch, group_id=g, bot_id=b, user_id=u)
             await channel.send_response(ws, req_id, ok=True, payload={"job": job})
         except KeyError:
@@ -6762,12 +6858,14 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             )
             return
         try:
-            if hasattr(reg, "web_delete_job"):
-                deleted = await reg.web_delete_job(job_id, sid, aid)
-            else:
-                from jiuwenswarm.gateway.cron.enterprise_gate import extract_routing_triple
+            from jiuwenswarm.gateway.cron.enterprise_gate import extract_routing_triple
 
-                g, b, u = extract_routing_triple(params)
+            g, b, u = extract_routing_triple(params)
+            if hasattr(reg, "web_delete_job"):
+                deleted = await reg.web_delete_job(
+                    job_id, sid, aid, group_id=g, bot_id=b, user_id=u
+                )
+            else:
                 deleted = await cc.delete_job(job_id, group_id=g, bot_id=b, user_id=u)
         except PermissionError as e:
             await channel.send_response(ws, req_id, ok=False, error=str(e), code="FORBIDDEN")
@@ -6803,12 +6901,20 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             )
             return
         try:
-            if hasattr(reg, "web_toggle_job"):
-                job = await reg.web_toggle_job(job_id, bool(enabled), sid, aid)
-            else:
-                from jiuwenswarm.gateway.cron.enterprise_gate import extract_routing_triple
+            from jiuwenswarm.gateway.cron.enterprise_gate import extract_routing_triple
 
-                g, b, u = extract_routing_triple(params)
+            g, b, u = extract_routing_triple(params)
+            if hasattr(reg, "web_toggle_job"):
+                job = await reg.web_toggle_job(
+                    job_id,
+                    bool(enabled),
+                    sid,
+                    aid,
+                    group_id=g,
+                    bot_id=b,
+                    user_id=u,
+                )
+            else:
                 job = await cc.toggle_job(job_id, bool(enabled), group_id=g, bot_id=b, user_id=u)
             await channel.send_response(ws, req_id, ok=True, payload={"job": job})
         except KeyError:
