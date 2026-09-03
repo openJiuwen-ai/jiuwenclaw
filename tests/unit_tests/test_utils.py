@@ -431,7 +431,8 @@ class TestHardcodedPathsPhase2:
         workspace = get_user_workspace_dir()
         expected_path = (
             workspace
-            / "workspace_default"
+            / "service_default"
+            / "agent_default"
             / "agent"
             / "home"
             / "cron_jobs.json"
@@ -457,7 +458,8 @@ class TestHardcodedPathsPhase2:
         workspace = get_user_workspace_dir()
         expected_path = (
             workspace
-            / "workspace_default"
+            / "service_default"
+            / "agent_default"
             / "agent"
             / "workspace"
             / "task-data.json"
@@ -482,7 +484,8 @@ class TestHardcodedPathsPhase2:
         workspace = get_user_workspace_dir()
         expected_path = (
             workspace
-            / "workspace_default"
+            / "service_default"
+            / "agent_default"
             / "agent"
             / "workspace"
             / "USER.md"
@@ -500,6 +503,31 @@ class TestAdditionalHardcodedPaths:
     """
 
     @staticmethod
+    def test_multi_tenant_workspace_dir_edition_layout(monkeypatch, tmp_path):
+        """个人版固定 service_default/agent_default；企业版按 workspace_key 分桶。"""
+        from jiuwenswarm.common.utils import get_multi_tenant_user_workspace_dir
+
+        monkeypatch.setattr(
+            "jiuwenswarm.common.utils.get_user_workspace_dir",
+            lambda: tmp_path,
+        )
+        monkeypatch.setattr(
+            "jiuwenswarm.common.utils.is_enterprise",
+            lambda: False,
+        )
+        assert get_multi_tenant_user_workspace_dir("anything") == (
+            tmp_path / "service_default" / "agent_default"
+        )
+
+        monkeypatch.setattr(
+            "jiuwenswarm.common.utils.is_enterprise",
+            lambda: True,
+        )
+        assert get_multi_tenant_user_workspace_dir("abc") == (
+            tmp_path / "workspace_abc"
+        )
+
+    @staticmethod
     def test_rail_manager_path_structure():
         """Test rail_manager uses multi-tenant workspace for extensions path."""
         from jiuwenswarm.agents.harness.common.plugins.rail_manager import get_rail_manager
@@ -507,11 +535,11 @@ class TestAdditionalHardcodedPaths:
         from jiuwenswarm.server.runtime.runtime_scope import RuntimeScopeKey
 
         scope = RuntimeScopeKey.from_ids()
-        workspace = get_multi_tenant_user_workspace_dir(scope.workspace_key)
-        expected_path = workspace / "agent" / "workspace" / "extensions"
         import os
         os.environ["JIUWENSWARM_EDITION"] = "enterprise"
         try:
+            workspace = get_multi_tenant_user_workspace_dir(scope.workspace_key)
+            expected_path = workspace / "agent" / "workspace" / "extensions"
             rail_manager = get_rail_manager(scope)
 
             extensions_dir = rail_manager.extensions_dir
@@ -548,7 +576,8 @@ class TestAdditionalHardcodedPaths:
         workspace = get_user_workspace_dir()
         expected_path = (
             workspace
-            / "workspace_default"
+            / "service_default"
+            / "agent_default"
             / "agent"
             / "workspace"
             / "interactions"

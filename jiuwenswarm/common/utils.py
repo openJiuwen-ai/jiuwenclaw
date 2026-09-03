@@ -1607,7 +1607,7 @@ def _resolve_paths(force=False) -> None:
     # 优先使用已初始化的用户工作区 (~/.jiuwenswarm)，
     # 保证源码运行与安装包运行后的读写路径完全一致。
     user_config_dir = workspace_dir / "config"
-    # 多租户路径：workspace_default/agent/workspace
+    # 租户默认工作区：个人版 service_default/agent_default；企业版 workspace_default
     multi_tenant_workspace = get_multi_tenant_user_workspace_dir("default")
     user_workspace_dir = multi_tenant_workspace / "agent" / "workspace"
     if user_config_dir.exists():
@@ -1738,8 +1738,10 @@ def get_service_root_dir(service_id: str = "default") -> Path:
 def get_agent_root_dir() -> Path:
     """Get the agent root directory path (multi-tenant default).
 
-    Path: ``~/.jiuwenswarm/workspace_default/agent/``
-    (or the request-bound agent root when ContextVar is set).
+    Path:
+    - 个人版: ``~/.jiuwenswarm/service_default/agent_default/agent/``
+    - 企业版: ``~/.jiuwenswarm/workspace_default/agent/``
+    （或请求绑定的 agent root ContextVar）。
     """
     try:
         from jiuwenswarm.server.runtime.tenant_context import get_bound_agent_root
@@ -1830,24 +1832,24 @@ def _effective_workspace_key(workspace_key: str | None = None) -> str:
 
 
 def get_multi_tenant_user_workspace_dir(workspace_key: str) -> Path:
-    """Get multi-tenant user workspace directory path.
+    """租户工作区根目录（企业版 / 个人版隔离策略不同）。
 
-    仅按 ``workspace_key`` 生成目录（与旧版 agentserver 一致）::
-
-        ~/.jiuwenswarm/workspace_{workspace_key}
+    - 企业版: ``~/.jiuwenswarm/workspace_{workspace_key}``
+    - 个人版: ``~/.jiuwenswarm/service_default/agent_default``（固定，不按 key 分桶）
     """
+    if not is_enterprise():
+        return get_user_workspace_dir() / "service_default" / "agent_default"
     wk = _require_workspace_key(workspace_key)
     return get_user_workspace_dir() / f"workspace_{wk}"
 
 
 def get_tenant_agent_workspace_dir(workspace_key: str | None = None) -> Path:
-    """多租户 DeepAgent 工作区：``workspace_{key}/agent/workspace``."""
+    """DeepAgent 工作区：``<tenant_root>/agent/workspace``.
+
+    企业版 tenant_root 为 ``workspace_{key}``；个人版为 ``service_default/agent_default``。
+    """
     wk = _effective_workspace_key(workspace_key)
     return get_multi_tenant_user_workspace_dir(wk) / get_agent_workspace_relative_dir()
-
-
-# 兼容旧命名（上游 jiuwenclaw_workspace）
-get_tenant_agent_jiuwenclaw_workspace_dir = get_tenant_agent_workspace_dir
 
 
 def get_tenant_agent_skills_dirs(workspace_key: str | None = None) -> list[Path]:
@@ -1858,8 +1860,9 @@ def get_tenant_agent_skills_dirs(workspace_key: str | None = None) -> list[Path]
 def get_multi_tenant_skill_dirs(workspace_key: str | None = None) -> list[Path]:
     """Resolve the skills directory list for multi-tenant / single-tenant mode.
 
-    - Multi-tenant（提供 ``workspace_key``）: ``[workspace_{key}/agent/workspace/skills]``.
-    - Single-tenant（未提供）: ``[get_agent_skills_dir()]``（不读 bound key，避免误进多租户树）.
+    - 显式提供 ``workspace_key``: ``[<tenant_root>/agent/workspace/skills]``
+      （企业版 tenant_root=``workspace_{key}``，个人版固定 ``service_default/agent_default``）。
+    - 未提供: ``[get_agent_skills_dir()]``（不读 bound key，避免误进多租户树）.
     """
     if workspace_key is not None:
         return get_tenant_agent_skills_dirs(workspace_key)
@@ -2031,7 +2034,10 @@ def resolve_gateway_cron_jobs_path(
 
 
 def resolve_tenant_agent_root_dir(workspace_key: str | None = None) -> Path:
-    """Resolve ``workspace_{key}/agent``.
+    """Resolve ``<tenant_root>/agent``.
+
+    企业版 ``tenant_root`` 为 ``workspace_{key}``；个人版为固定
+    ``service_default/agent_default``。
 
     When ``workspace_key`` is omitted: bound agent root (request context) >
     bound ``workspace_key`` > ``default``.
@@ -2049,12 +2055,12 @@ def resolve_tenant_agent_root_dir(workspace_key: str | None = None) -> Path:
 
 
 def resolve_tenant_agent_workspace_dir(workspace_key: str | None = None) -> Path:
-    """Resolve ``workspace_{key}/agent/workspace``."""
+    """Resolve ``<tenant_root>/agent/workspace``."""
     return resolve_tenant_agent_root_dir(workspace_key) / "workspace"
 
 
 def resolve_tenant_sessions_dir(workspace_key: str | None = None) -> Path:
-    """Resolve ``workspace_{key}/agent/sessions`` for a tenant workspace key."""
+    """Resolve ``<tenant_root>/agent/sessions``."""
     return resolve_tenant_agent_root_dir(workspace_key) / "sessions"
 
 
@@ -2233,7 +2239,9 @@ def resolve_git_branch(project_dir: str | None) -> str:
 def get_checkpoint_dir() -> Path:
     """Get the default checkpoint directory.
 
-    Path: ``~/.jiuwenswarm/workspace_default/.checkpoint``
+    Path:
+    - 个人版: ``~/.jiuwenswarm/service_default/agent_default/.checkpoint``
+    - 企业版: ``~/.jiuwenswarm/workspace_default/.checkpoint``
 
     Per-agent isolation uses ``set_checkpoint`` / ``get_multi_tenant_user_workspace_dir``.
     """
