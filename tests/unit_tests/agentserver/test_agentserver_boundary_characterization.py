@@ -59,6 +59,24 @@ class EmptyConnectionWebSocket(RecordingWebSocket):
         self.sent.append(frame)
 
 
+class OneMessageConnectionWebSocket(EmptyConnectionWebSocket):
+    def __init__(
+        self,
+        trace: list[str],
+        handler_started: asyncio.Event,
+    ) -> None:
+        super().__init__(trace)
+        self.handler_started = handler_started
+        self.input_sent = False
+
+    async def __anext__(self) -> str:
+        if not self.input_sent:
+            self.input_sent = True
+            return "{}"
+        await self.handler_started.wait()
+        raise StopAsyncIteration
+
+
 class RecordingTaskMap(dict[str, Any]):
     def __init__(self, trace: list[str]) -> None:
         super().__init__({"stale-session": {}})
@@ -103,9 +121,11 @@ class RecordingAgent:
         trace: list[str],
         *,
         interaction_error: str | None = None,
+        cancel_error: str | None = None,
     ) -> None:
         self.trace = trace
         self.interaction_error = interaction_error
+        self.cancel_error = cancel_error
 
     async def process_message(self, request: AgentRequest) -> AgentResponse:
         if request.req_method == ReqMethod.CHAT_ANSWER:
@@ -115,6 +135,8 @@ class RecordingAgent:
             payload = {"accepted": True, "resolved": False}
         elif request.req_method == ReqMethod.CHAT_CANCEL:
             self.trace.append("cancel.execute")
+            if self.cancel_error is not None:
+                raise RuntimeError(self.cancel_error)
             payload = {
                 "event_type": "chat.interrupt_result",
                 "success": True,
@@ -228,6 +250,19 @@ class PortableRuntime:
             )
         ]
 
+    async def answer_interaction(
+        self,
+        request: AgentRequest,
+        *,
+        trigger_hook: bool = True,
+        on_control_event: Any = None,
+    ) -> list[SimpleNamespace]:
+        return await self.invoke(
+            request,
+            trigger_hook=trigger_hook,
+            on_control_event=on_control_event,
+        )
+
     async def cancel_request(
         self,
         request: AgentRequest,
@@ -237,6 +272,34 @@ class PortableRuntime:
         del allow_create
         assert self.agent_manager.agent is not None
         return await self.agent_manager.agent.process_message(request)
+
+    async def cancel_all_inflight_work(
+        self,
+        reason: str,
+        *,
+        exclude_session_ids: set[str] | tuple[str, ...] | None = None,
+    ) -> None:
+        await self.agent_manager.cancel_all_inflight_work(
+            reason,
+            exclude_session_ids=exclude_session_ids,
+        )
+
+    async def cancel_all_team_stream_tasks(
+        self,
+        reason: str,
+        *,
+        exclude_session_ids: set[str] | tuple[str, ...] | None = None,
+    ) -> None:
+        from jiuwenswarm.agents.harness.team import (
+            cancel_all_team_stream_tasks_across_managers,
+        )
+
+        await cancel_all_team_stream_tasks_across_managers(
+            reason=reason,
+            exclude_session_ids=(
+                None if exclude_session_ids is None else set(exclude_session_ids)
+            ),
+        )
 
     async def cleanup_session(self, *, channel_id: str, session_id: str) -> bool:
         return await self.agent_manager.cleanup_session_runtime(
@@ -751,6 +814,64 @@ async def test_disconnect_cancel_cleans_before_reply_and_preserves_failure_proto
 
 
 @pytest.mark.asyncio
+async def test_disconnect_cancel_failure_still_cleans_before_single_legacy_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    trace: list[str] = []
+    agent = RecordingAgent(trace, cancel_error="cancel failed")
+    server, manager, _ = make_server(trace, agent=agent)
+    configure_message_path(monkeypatch, server, trace, agent)
+    ws = RecordingWebSocket(trace)
+    stream_task = await install_blocking_stream_task(
+        server,
+        trace,
+        "disconnect-cancel-error-session",
+    )
+    envelope = e2a_from_agent_fields(
+        request_id="disconnect-cancel-error",
+        channel_id="tui",
+        session_id="disconnect-cancel-error-session",
+        req_method=ReqMethod.CHAT_CANCEL,
+        params={
+            "intent": "cancel",
+            "session_id": "disconnect-cancel-error-session",
+        },
+        is_stream=False,
+        timestamp=0.0,
+        metadata={"trace_id": "disconnect-cancel-error-trace"},
+    )
+    envelope.channel_context["_jiuwenswarm_cancel_source"] = "client_disconnect"
+
+    await server.handle_message_for_test(
+        ws,
+        json.dumps(envelope.to_dict(), ensure_ascii=False),
+        asyncio.Lock(),
+    )
+
+    assert trace == [
+        "cancel.execute",
+        "stream.settle",
+        "session.cleanup",
+        "response.send",
+    ]
+    assert stream_task.done() is True
+    assert manager.cleanup_calls == [("tui", "disconnect-cancel-error-session")]
+    assert len(ws.sent) == 1
+    assert ws.sent[0]["response_kind"] == "e2a.error"
+    assert ws.sent[0]["status"] == "failed"
+    assert ws.sent[0]["is_final"] is True
+    response = parse_agent_server_wire_unary(ws.sent[0])
+    assert response.request_id == "disconnect-cancel-error"
+    assert response.channel_id == "tui"
+    assert response.ok is False
+    assert response.payload == {"error": "cancel failed"}
+    assert response.metadata == {
+        "trace_id": "disconnect-cancel-error-trace",
+        "_jiuwenswarm_cancel_source": "client_disconnect",
+    }
+
+
+@pytest.mark.asyncio
 async def test_physical_disconnect_keeps_ack_only_and_cleanup_order(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -773,8 +894,8 @@ async def test_physical_disconnect_keeps_ack_only_and_cleanup_order(
         trace.append("capabilities.clear")
 
     async def cancel_all_inflight_work(
-        *,
         reason: str,
+        *,
         exclude_session_ids: tuple[str, ...],
     ) -> None:
         assert "gateway ws closed" in reason
@@ -787,10 +908,10 @@ async def test_physical_disconnect_keeps_ack_only_and_cleanup_order(
     async def cancel_team_streams(
         *,
         reason: str,
-        exclude_session_ids: tuple[str, ...],
+        exclude_session_ids: set[str],
     ) -> None:
         assert "gateway ws closed" in reason
-        assert exclude_session_ids == ("heartbeat-session",)
+        assert exclude_session_ids == {"heartbeat-session"}
         trace.append("team_streams.cancel_all")
 
     monkeypatch.setattr(
@@ -819,6 +940,107 @@ async def test_physical_disconnect_keeps_ack_only_and_cleanup_order(
         "manager.cancel_all",
         "scheduler.stop",
         "team_streams.cancel_all",
+        "session_tasks.clear",
+    ]
+    assert ws.sent == [
+        {
+            "type": "event",
+            "event": "connection.ack",
+            "payload": {
+                "status": "ready",
+                "heartbeat_job_owner": "agentserver",
+                "heartbeat_job_protocol": "heartbeat-test-v1",
+                "heartbeat_job_ready": True,
+            },
+        }
+    ]
+    assert server._current_ws is None
+    assert server._current_send_lock is None
+    assert server._session_stream_tasks == {}
+
+
+@pytest.mark.asyncio
+async def test_physical_disconnect_runtime_cancel_failure_keeps_cleaning_up(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from jiuwenswarm.agents.harness import team as team_module
+
+    trace: list[str] = []
+    handler_started = asyncio.Event()
+    never_finish = asyncio.Event()
+    server, _, runtime = make_server(trace, agent=None)
+    ws = OneMessageConnectionWebSocket(trace, handler_started)
+    server._session_stream_tasks = RecordingTaskMap(trace)
+    server._heartbeat_runtime = SimpleNamespace(
+        protocol_version="heartbeat-test-v1",
+        is_available=True,
+        execution=SimpleNamespace(
+            active_session_ids=lambda: ("heartbeat-session",),
+        ),
+    )
+
+    async def blocking_handler(*_args: Any) -> None:
+        trace.append("connection_task.start")
+        handler_started.set()
+        try:
+            await never_finish.wait()
+        finally:
+            trace.append("connection_task.settle")
+
+    def clear_capabilities(actual_ws: Any) -> None:
+        assert actual_ws is ws
+        trace.append("capabilities.clear")
+
+    async def failing_runtime_cancel_all(
+        reason: str,
+        *,
+        exclude_session_ids: tuple[str, ...],
+    ) -> None:
+        assert "gateway ws closed" in reason
+        assert exclude_session_ids == ("heartbeat-session",)
+        trace.append("runtime.cancel_all")
+        raise RuntimeError("runtime cancel all failed")
+
+    async def stop_scheduler() -> None:
+        trace.append("scheduler.stop")
+
+    async def cancel_team_streams(
+        *,
+        reason: str,
+        exclude_session_ids: set[str],
+    ) -> None:
+        assert "gateway ws closed" in reason
+        assert exclude_session_ids == {"heartbeat-session"}
+        trace.append("team_streams.cancel_all")
+
+    monkeypatch.setattr(server, "_handle_message", blocking_handler)
+    monkeypatch.setattr(
+        server,
+        "_clear_ws_acp_client_capabilities",
+        clear_capabilities,
+    )
+    monkeypatch.setattr(
+        runtime,
+        "cancel_all_inflight_work",
+        failing_runtime_cancel_all,
+    )
+    monkeypatch.setattr(server, "_stop_scheduler", stop_scheduler)
+    monkeypatch.setattr(
+        team_module,
+        "cancel_all_team_stream_tasks_across_managers",
+        cancel_team_streams,
+    )
+
+    await server._connection_handler(ws)
+
+    assert trace == [
+        "connection.ack",
+        "connection_task.start",
+        "capabilities.clear",
+        "runtime.cancel_all",
+        "scheduler.stop",
+        "team_streams.cancel_all",
+        "connection_task.settle",
         "session_tasks.clear",
     ]
     assert ws.sent == [

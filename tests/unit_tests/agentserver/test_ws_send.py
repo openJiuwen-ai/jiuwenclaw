@@ -549,6 +549,62 @@ async def test_server_unary_disables_duplicate_runtime_hook() -> None:
 
 
 @pytest.mark.asyncio
+async def test_server_chat_answer_uses_runtime_interaction_api() -> None:
+    manager = object()
+
+    class RecordingRuntime:
+        agent_manager = manager
+
+        def __init__(self) -> None:
+            self.call: tuple[object, bool, object] | None = None
+
+        async def answer_interaction(
+            self,
+            request,
+            *,
+            trigger_hook=True,
+            on_control_event=None,
+        ):
+            self.call = (request, trigger_hook, on_control_event)
+            return [
+                RuntimeEvent(
+                    request_id=request.request_id,
+                    channel_id=request.channel_id,
+                    session_id=request.session_id,
+                    payload={"event_type": "chat.final", "content": "answered"},
+                    is_complete=True,
+                )
+            ]
+
+        async def invoke(self, *_args, **_kwargs):
+            raise AssertionError("CHAT_ANSWER must use answer_interaction")
+
+    runtime = RecordingRuntime()
+    server = agent_ws_server.AgentWebSocketServer.__new__(
+        agent_ws_server.AgentWebSocketServer
+    )
+    server._agent_manager = manager
+    server._runtime = runtime
+    request = AgentRequest(
+        request_id="interaction-runtime-api",
+        channel_id="tui",
+        session_id="session-1",
+        req_method=ReqMethod.CHAT_ANSWER,
+        params={"answer": "approve"},
+    )
+    ws = FakeWebSocket()
+
+    await server._handle_unary_impl(ws, request, asyncio.Lock())
+
+    assert runtime.call is not None
+    actual_request, trigger_hook, control_handler = runtime.call
+    assert actual_request is request
+    assert trigger_hook is False
+    assert callable(control_handler)
+    assert len(ws.sent) == 1
+
+
+@pytest.mark.asyncio
 async def test_stream_control_event_does_not_consume_chunk_sequence() -> None:
     manager = object()
     runtime_call: dict[str, object] = {}

@@ -1191,8 +1191,8 @@ async def test_runtime_prompt_describes_external_cwd_without_project(tmp_path, m
     await runtime_rail.before_model_call(ctx)
 
     prompt = builder.build()
-    assert "The project directory is your current workspace" in prompt
-    assert f"the current project directory is: `{task_dir}`" in prompt
+    assert "## Current Project Directory" in prompt
+    assert f"current runtime workspace: `{task_dir}`" in prompt
     assert "Other accessible directories" not in prompt
     assert "fallen back to the Agent internal data directory" not in prompt
 
@@ -1226,7 +1226,7 @@ async def test_runtime_prompt_describes_agent_data_cwd_fallback(tmp_path, monkey
 
     prompt = builder.build()
     assert "# 目录与文件操作边界" in prompt
-    assert f"当前项目目录是：`{agent_data_dir}`" in prompt
+    assert f"当前运行时工作空间：`{agent_data_dir}`" in prompt
     assert "其他可访问目录" not in prompt
 
 
@@ -1290,7 +1290,7 @@ async def test_runtime_prompt_reports_powershell_and_removes_generic_shell_rules
     prompt = builder.build()
     assert "- Shell：PowerShell" in prompt
     assert "Shell 规则：" not in prompt
-    assert "### 项目目录规则" in prompt
+    assert "## 当前项目目录" in prompt
     assert "### 项目录规则" not in prompt
 
 

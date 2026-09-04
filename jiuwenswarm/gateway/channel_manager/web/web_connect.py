@@ -46,6 +46,7 @@ logger = logging.getLogger(__name__)
 _WEB_CONNECTION_USER_ID_ATTR = "_web_connection_user_id"
 
 _HANDLER_BEFORE_CALLBACK_METHODS = frozenset({ReqMethod.CHAT_SEND.value})
+_LOCAL_ONLY_METHODS: frozenset[str] = frozenset()
 
 _STREAM_COALESCE_EVENT_TYPES = frozenset({"chat.delta", "chat.reasoning"})
 _STREAM_COALESCE_MAX_FRAMES = 32
@@ -145,6 +146,7 @@ class WebChannel(BaseWsChannel):
         self._uvicorn_server: Any = None
         self._on_message_cb: Callable[[Message], Any] | None = None
         self._method_handlers: dict[str, MethodHandler] = {}
+        self._local_only_methods: set[str] = set(_LOCAL_ONLY_METHODS)
         self._connect_hooks: list[ConnectHook] = []
         self._disconnect_hooks: list[ConnectHook] = []
         # ws -> set[session_id]: 追踪每个连接上活跃的 session
@@ -260,13 +262,26 @@ class WebChannel(BaseWsChannel):
 
     # ── 扩展注册 API ──────────────────────────────────────
 
-    def register_method(self, method: str, handler: MethodHandler) -> None:
+    def register_method(
+        self,
+        method: str,
+        handler: MethodHandler,
+        *,
+        local_only: bool = False,
+    ) -> None:
         """注册 req method 处理器.
 
         handler 签名: ``async def handler(ws, req_id, params, session_id) -> None``
         handler 应通过 `send_response` / `send_event` 向客户端回复。
         """
         self._method_handlers[method] = handler
+        if local_only:
+            self._local_only_methods.add(method)
+
+    def unregister_method(self, method: str) -> None:
+        """Remove a dynamically registered method and its routing metadata."""
+        self._method_handlers.pop(method, None)
+        self._local_only_methods.discard(method)
 
     def on_message(self, callback: Callable[[Message], None]) -> None:
         """注册消息接收回调（替代默认的 router.publish_user_messages）。"""
@@ -1548,6 +1563,21 @@ class WebChannel(BaseWsChannel):
 
         # 发布到 route 或回调
         handler = self._method_handlers.get(method)
+        if method in self._local_only_methods:
+            if handler is None:
+                await self.send_response(
+                    ws,
+                    req_id,
+                    ok=False,
+                    error=f"unknown method: {method}",
+                    code="METHOD_NOT_FOUND",
+                )
+                return
+            invocation = _MethodHandlerInvocation(
+                ws, method, req_id, params, session_id, handler,
+            )
+            await self._invoke_method_handler(invocation)
+            return
         handler_already_called = False
         if method in _HANDLER_BEFORE_CALLBACK_METHODS and handler is not None:
             handler_already_called = await self._invoke_method_handler(

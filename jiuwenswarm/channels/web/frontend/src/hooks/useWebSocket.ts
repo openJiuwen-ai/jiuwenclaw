@@ -3895,6 +3895,9 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
             );
             useChatStore.getState().setProcessing(sessionId, false);
             useChatStore.getState().setThinking(sessionId, false);
+            // 暂停时生成已被掐断，思考段收不到后续 delta/final 兜底：这里显式收尾，
+            // 让「思考中」冻结为已完成；恢复后新到的 reasoning 会另起一段。
+            useChatStore.getState().closeReasoning(sessionId);
             const sessionPatch: Partial<Session> = {
               is_processing: false,
               updated_at: new Date().toISOString(),
@@ -3936,6 +3939,9 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           useChatStore.getState().setPaused(sessionId, false);
           useChatStore.getState().setProcessing(sessionId, false);
           useChatStore.getState().setThinking(sessionId, false);
+          // 取消后本轮已死，收不到任何收尾事件：显式冻结思考段，
+          // 否则它会一直挂着「思考中」，且在下一条用户消息入列时被整段丢弃。
+          useChatStore.getState().closeReasoning(sessionId);
           // chat.interrupt_result 是一元响应，跟流式分片的 goal_intermediate 判断走的是完全
           // 独立的通道——不依赖后端把"目标已清除/暂停后这一轮该不该被当成中间态"判断对，
           // 用户主动点了停止/删除就该让当前气泡收尾，不再等一个可能被误判、永远不会来的

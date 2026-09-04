@@ -102,9 +102,9 @@ from jiuwenswarm.server.runtime.agent_adapter.code_agent_rail import CodeAgentRa
 from jiuwenswarm.common.task_loop_config import (
     resolve_task_loop_completion_timeout,
 )
+from jiuwenswarm.common.runtime_workspace import resolve_runtime_workspace_paths
 from jiuwenswarm.common.utils import (
     get_agent_workspace_dir,
-    get_default_project_session_workspace_dir,
 )
 
 logger = logging.getLogger(__name__)
@@ -687,7 +687,7 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
             live_workspace = build_context.workspace
             workspace_root = (
                 getattr(live_workspace, "root_path", None)
-                or self._workspace_dir
+                or self._agent_workspace_dir
                 or "./"
             )
             updates["workspace"] = WorkspaceSpec(
@@ -753,7 +753,7 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
             model=model,
             card=agent_card,
             system_prompt=build_code_system_prompt(),
-            workspace_root=self._workspace_dir or "./",
+            workspace_root=self._agent_workspace_dir,
             project_dir=self._project_dir,
             sys_operation=self._sys_operation,
             language=self._resolve_runtime_language(),
@@ -849,6 +849,7 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
         # _agent_workspace_dir: agent 数据存储路径，始终指向系统 workspace，
         # 用于 coding_memory、todo文件等不应写入用户项目目录的数据。
         self._agent_workspace_dir = str(get_agent_workspace_dir())
+        self._runtime_workspace_dir = self._project_dir
 
         self._dreaming_mode = "code"
 
@@ -946,9 +947,7 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
             for tool in getattr(rail, 'tools', []) or []:
                 if hasattr(tool, '_workspace_path'):
                     setattr(tool, '_workspace_path', self._agent_workspace_dir)
-        initial_workspace = self._project_dir or str(
-            get_default_project_session_workspace_dir()
-        )
+        initial_workspace = self._project_dir or self._agent_workspace_dir
         self._seed_runtime_cwd(initial_workspace, workspace=initial_workspace)
 
         setattr(self._instance, "_jiuwenswarm_adapter_mode", "code")
@@ -2079,13 +2078,25 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
         if self._instance is None:
             raise RuntimeError("JiuwenSwarmCodeAdapter 未初始化，请先调用 create_instance()")
 
-        project_workspace = (
-            runtime_config.workspace
-            or runtime_config.project_dir
-            or self._project_dir
-            or str(get_default_project_session_workspace_dir(runtime_config.session_id))
+        runtime_paths = resolve_runtime_workspace_paths(
+            internal_workspace_dir=self._agent_workspace_dir,
+            project_dir=runtime_config.project_dir or self._project_dir,
+            workspace_dir=runtime_config.workspace,
+            cwd=runtime_config.cwd,
+            session_id=runtime_config.session_id,
+            task_name=runtime_config.task_name,
+            bind_request=True,
         )
-        task_cwd = runtime_config.cwd or project_workspace
+        project_workspace = str(runtime_paths.runtime_workspace_root)
+        task_cwd = str(runtime_paths.cwd)
+        self._runtime_workspace_dir = project_workspace
+        deep_config = getattr(self._instance, "deep_config", None)
+        if deep_config is not None:
+            # Keep DeepAgentConfig.workspace on the Agent's internal data
+            # directory, while shell/file operations start in the request's
+            # project or automatically allocated projectless task workspace.
+            deep_config.cwd = task_cwd
+            deep_config.project_root = str(runtime_paths.project_root)
         self._seed_runtime_cwd(task_cwd, workspace=project_workspace)
         resolved_language = self._resolve_runtime_language()
         resolved_channel = str(runtime_config.channel_id or
@@ -2103,6 +2114,25 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
             self._runtime_prompt_rail.set_runtime_paths(
                 cwd=task_cwd,
                 project_dir=runtime_config.project_dir or self._project_dir,
+                workspace_dir=self._agent_workspace_dir,
+                task_workspace_root=(
+                    project_workspace if runtime_paths.is_projectless else None
+                ),
+                task_work_dir=(
+                    str(runtime_paths.work_dir)
+                    if runtime_paths.work_dir is not None
+                    else None
+                ),
+                task_outputs_dir=(
+                    str(runtime_paths.outputs_dir)
+                    if runtime_paths.outputs_dir is not None
+                    else None
+                ),
+            )
+            self._runtime_prompt_rail.set_execution_paths(
+                cwd=task_cwd,
+                project_root=str(runtime_paths.project_root),
+                workspace=project_workspace,
             )
             self._runtime_prompt_rail.set_session_id(runtime_config.session_id)
             # BrowserTaskPromptRail 已改为 load-aware（按 deep_config.subagents 里是否挂载
@@ -2140,13 +2170,14 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
             channel=resolved_channel,
             session_id=runtime_config.session_id,
             project_dir=runtime_config.project_dir
-            or task_cwd
+            or project_workspace
             or self._project_dir
             or self._workspace_dir,
         )
 
         # ProjectMemoryRail 语言同步 + trusted_dirs 注入
         if self._project_memory_rail is not None:
+            self._project_memory_rail.set_workspace_path(project_workspace)
             self._project_memory_rail.set_language(resolved_language)
             # trusted_dirs 来自 CLI 端的 trusted_dirs / workspace-dir，
             # 包含用户项目目录（即 /init 写 JIUWENSWARM.md 的目录）
@@ -2155,8 +2186,14 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
                     runtime_config.trusted_dirs,
                 )
 
+        code_agent_rail = getattr(self, "_code_agent_rail", None)
+        if code_agent_rail is not None:
+            code_agent_rail.set_workspace_dir(project_workspace)
+
         # code 模式始终走 _update_rails_for_mode 的 code 逻辑
         await self._update_rails_for_mode(runtime_config.mode)
+        if self._project_memory_rail is not None:
+            self._project_memory_rail.set_workspace_path(project_workspace)
         await self._set_user_interaction_enabled(runtime_config.supports_user_interaction)
         await self._update_tools_for_mode(runtime_config.mode, runtime_config.session_id, runtime_config.request_id)
         await self._update_session_tools(

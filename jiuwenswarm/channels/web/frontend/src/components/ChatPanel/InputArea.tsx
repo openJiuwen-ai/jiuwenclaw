@@ -74,6 +74,7 @@ import {
   type LocalFilePick,
 } from '../../features/workspace/localFilePicker';
 import { useDesktopLocalFilePickerReady } from '../../hooks';
+import { useAdaptiveTooltip } from '../../hooks/useAdaptiveTooltip';
 import { getInputProjectOptions, isDefaultInputProject } from './projectSelection';
 import AgentPickerIcon from '../../assets/agent-management/智能体选择.svg?react';
 import AttachmentIcon from '../../assets/agent-management/attachment.svg?react';
@@ -98,6 +99,7 @@ import { CodeBranchSelector } from '../../features/code-mode/CodeBranchSelector'
 import { generateUuidV4 } from '../../utils/uuid';
 import { createAgentManagementClient, getAgentAvatarUrl, type AgentCatalogItem } from '../../features/agentManagement';
 import { ContextUsageIndicator } from './ContextUsageIndicator';
+import { isImeCompositionKey } from './imeComposition';
 
 /** 输入栏下拉所需的最小技能数据结构（与 SkillPanel 中的 SkillItem 保持一致） */
 type InputAreaSkillItem = {
@@ -613,7 +615,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
   const [hoveredOptionDesc, setHoveredOptionDesc] = useState<string | null>(null);
   const [agentPickerOpen, setAgentPickerOpen] = useState(false);
   const [agentPickerQuery, setAgentPickerQuery] = useState('');
-  const [agentTooltip, setAgentTooltip] = useState<{ id: string; description: string; top: number; left: number } | null>(null);
+  const { tooltip: agentTooltipNode, handlers: agentTooltipHandlers } = useAdaptiveTooltip({ offsetX: -50 });
   const [agentOptions, setAgentOptions] = useState<AgentCatalogItem[]>([]);
   const [agentOptionsStatus, setAgentOptionsStatus] = useState<'idle' | 'loading' | 'success' | 'error'>('idle');
   const agentManagementClient = useMemo(() => createAgentManagementClient(), []);
@@ -721,7 +723,6 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
     if (attachMenuOpen) return;
     setAgentPickerOpen(false);
     setAgentPickerQuery('');
-    setAgentTooltip(null);
   }, [attachMenuOpen]);
   const isPaused = useChatStore((s) => s.runtimes[activeSessionId ?? '']?.isPaused ?? false);
   const queuePaused = useChatStore((s) => s.runtimes[activeSessionId ?? '']?.queuePaused ?? false);
@@ -764,7 +765,6 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
     if (!isTeamMode) return;
     setAgentPickerOpen(false);
     setAgentPickerQuery('');
-    setAgentTooltip(null);
   }, [isTeamMode]);
 
   const isWorkContextLocked = Boolean(activeSessionId && activeSessionId !== NEW_CONVERSATION_ID);
@@ -2106,7 +2106,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
         }
 
         if ((e.key === 'Enter' || e.key === 'Tab') && !e.shiftKey) {
-          if (isComposingRef.current || e.nativeEvent.isComposing) return;
+          if (isImeCompositionKey(e.nativeEvent, isComposingRef.current)) return;
           e.preventDefault();
           const item = composerSuggestionItems[composerSuggestionIndex];
           if (item) {
@@ -2123,7 +2123,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
       }
 
       if (e.key !== 'Enter' || e.shiftKey) return;
-      if (isComposingRef.current || e.nativeEvent.isComposing) return;
+      if (isImeCompositionKey(e.nativeEvent, isComposingRef.current)) return;
       e.preventDefault();
       handleSubmit();
     },
@@ -2993,33 +2993,8 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                             aria-checked={isSelected}
                             data-testid="chat-panel-agent-picker-item"
                             data-variant={item.id}
-                            aria-describedby={agentTooltip?.id === item.id ? 'chat-agent-picker-tooltip' : undefined}
-                            onMouseEnter={(event) => {
-                              if (!item.description) return;
-                              const rect = event.currentTarget.getBoundingClientRect();
-                              const tooltipWidth = 240;
-                              const left = rect.right + 8 + tooltipWidth <= window.innerWidth
-                                ? rect.right + 8
-                                : Math.max(8, rect.left - tooltipWidth - 8);
-                              setAgentTooltip({
-                                id: item.id,
-                                description: item.description,
-                                top: Math.min(rect.top, Math.max(8, window.innerHeight - 80)),
-                                left,
-                              });
-                            }}
-                            onMouseLeave={() => setAgentTooltip(null)}
-                            onFocus={(event) => {
-                              if (!item.description) return;
-                              const rect = event.currentTarget.getBoundingClientRect();
-                              setAgentTooltip({
-                                id: item.id,
-                                description: item.description,
-                                top: Math.min(rect.top, Math.max(8, window.innerHeight - 80)),
-                                left: Math.max(8, rect.left - 248),
-                              });
-                            }}
-                            onBlur={() => setAgentTooltip(null)}
+                            data-tooltip={item.description || undefined}
+                            {...agentTooltipHandlers}
                             onClick={() => {
                               if (!activeSessionId) return;
                               useSessionStore.getState().setMode(activeSessionId, 'agent');
@@ -3042,17 +3017,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                     )}
                   </PickerPanel>
                 )}
-                {agentTooltip ? (
-                  <div
-                    id="chat-agent-picker-tooltip"
-                    className="chat-agent-picker__tooltip"
-                    role="tooltip"
-                    data-testid="chat-panel-agent-picker-tooltip"
-                    style={{ top: agentTooltip.top, left: agentTooltip.left }}
-                  >
-                    {agentTooltip.description}
-                  </div>
-                ) : null}
+                {agentTooltipNode}
                 </div>
                 </>}
                 {/* 插件/MCP 装备目前后端在集群模式下不生效（JiuWenSwarmDeepAdapter
@@ -3533,7 +3498,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
             </button>
           )} */}
 
-          {isAgentMode && <ContextUsageIndicator />}
+          {(isAgentMode || isTeamMode) && <ContextUsageIndicator />}
 
           <ChatModelSelector
             disabled={isProcessing || composerDisabled || (!isAgentMode && activeSessionId !== NEW_CONVERSATION_ID)}

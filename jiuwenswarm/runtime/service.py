@@ -14,14 +14,19 @@ import inspect
 import logging
 from typing import TYPE_CHECKING, Any
 
+from jiuwenswarm.runtime.session_provisioner import (
+    RuntimeSessionProvisioner,
+    SessionDeleteResult,
+)
 from jiuwenswarm.server.runtime.agent_manager import AgentManager
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Awaitable, Callable
+    from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
 
     from jiuwenswarm.common.schema.agent import AgentRequest, AgentResponse
     from jiuwenswarm.runtime.events import RuntimeEvent
     from jiuwenswarm.runtime.plan import PlanModeController
+    from jiuwenswarm.runtime.session_provisioner import SessionDeleteLifecycle
 
 logger = logging.getLogger(__name__)
 
@@ -237,6 +242,7 @@ class AgentRuntime:
         initializer: Callable[[], Awaitable[None]] | None = None,
         plan_controller: PlanModeController | None = None,
         admission_controller: Any | None = None,
+        session_delete_lifecycle: SessionDeleteLifecycle | None = None,
         enable_kvc_tracking: bool = False,
     ) -> None:
         self._agent_manager = agent_manager or AgentManager()
@@ -253,6 +259,11 @@ class AgentRuntime:
             plan_controller = PlanModeController()
         self._plan_controller = plan_controller
         self._admission_controller = admission_controller
+        self._session_provisioner = RuntimeSessionProvisioner(
+            agent_manager=self._agent_manager,
+            plan_controller=self._plan_controller,
+            delete_lifecycle=session_delete_lifecycle,
+        )
         self._enable_kvc_tracking = bool(enable_kvc_tracking)
         self._stateless_agents: dict[str, Any] = {}
         self._lifecycle_lock = asyncio.Lock()
@@ -271,6 +282,13 @@ class AgentRuntime:
     def set_admission_controller(self, controller: Any | None) -> None:
         """Attach optional host-owned scheduling admission to chat execution."""
         self._admission_controller = controller
+
+    def set_session_delete_lifecycle(
+        self,
+        lifecycle: SessionDeleteLifecycle | None,
+    ) -> None:
+        """Attach an optional non-transport Session deletion participant."""
+        self._session_provisioner.set_delete_lifecycle(lifecycle)
 
     @property
     def started(self) -> bool:
@@ -378,6 +396,52 @@ class AgentRuntime:
             self._agent_manager,
             request,
             allow_create=allow_create,
+        )
+
+    async def cancel_all_inflight_work(
+        self,
+        reason: str = "[runtime cancel all] ",
+        *,
+        exclude_session_ids: Iterable[str] | None = None,
+    ) -> None:
+        """Cancel all existing Runtime work for a lost service host.
+
+        A Gateway-to-AgentServer WebSocket represents the remote service host,
+        not an individual end-user channel.  Preserve the established global
+        disconnect semantics while keeping AgentManager ownership behind the
+        Runtime public boundary.  This cleanup path intentionally does not
+        start Runtime dependencies.
+        """
+        if self._closed:
+            raise RuntimeStateError("runtime is already closed")
+        excluded = None if exclude_session_ids is None else set(exclude_session_ids)
+        await self._agent_manager.cancel_all_inflight_work(
+            reason=reason,
+            exclude_session_ids=excluded,
+        )
+
+    async def cancel_all_team_stream_tasks(
+        self,
+        reason: str = "[runtime cancel all team streams] ",
+        *,
+        exclude_session_ids: Iterable[str] | None = None,
+    ) -> None:
+        """Cancel process-wide Team streams without crossing a transport.
+
+        This is a separate public cleanup stage so AgentServer can retain the
+        established Agent cancellation, scheduler stop, then Team cancellation
+        order.  It intentionally does not start Runtime dependencies.
+        """
+        if self._closed:
+            raise RuntimeStateError("runtime is already closed")
+        excluded = None if exclude_session_ids is None else set(exclude_session_ids)
+        from jiuwenswarm.agents.harness.team import (
+            cancel_all_team_stream_tasks_across_managers,
+        )
+
+        await cancel_all_team_stream_tasks_across_managers(
+            reason=reason,
+            exclude_session_ids=excluded,
         )
 
     async def invoke(
@@ -568,13 +632,20 @@ class AgentRuntime:
     async def answer_interaction(
         self,
         request: AgentRequest,
+        *,
+        trigger_hook: bool = True,
+        on_control_event: Callable[[RuntimeEvent], Awaitable[None]] | None = None,
     ) -> list[RuntimeEvent]:
         """Answer a paused Runtime interaction through the existing Agent."""
         from jiuwenswarm.common.schema.message import ReqMethod
 
         if request.req_method != ReqMethod.CHAT_ANSWER:
             raise ValueError("interaction answer must use ReqMethod.CHAT_ANSWER")
-        return await self.invoke(request)
+        return await self.invoke(
+            request,
+            trigger_hook=trigger_hook,
+            on_control_event=on_control_event,
+        )
 
     async def stream(
         self,
@@ -807,13 +878,25 @@ class AgentRuntime:
                 metadata=request.metadata,
             )
 
-    async def cleanup_session(self, *, channel_id: str, session_id: str) -> bool:
+    async def cleanup_session(
+        self,
+        *,
+        channel_id: str,
+        session_id: str,
+        reset_plan_state: bool = True,
+    ) -> bool:
         """Release in-memory resources owned by one Runtime session.
 
         Session cleanup only touches the manager that already exists from
         ``__init__``.  Keep it available while the first ``start`` is still in
         progress so an AgentServer disconnect never has to bypass this public
         API or start new Runtime dependencies merely to release stale state.
+
+        ``reset_plan_state=False`` supports the existing transactional
+        ``session.delete`` flow: Runtime work is drained first, while plan
+        state remains available for rollback until all downstream deletion
+        steps have committed.  Ordinary disconnect and process-CLI cleanup use
+        the default and release both resources together.
         """
         if self._closed:
             raise RuntimeStateError("runtime is already closed")
@@ -821,8 +904,31 @@ class AgentRuntime:
             channel_id=channel_id,
             session_id=session_id,
         )
-        self._plan_controller.reset_session(session_id)
+        if reset_plan_state:
+            self._plan_controller.reset_session(session_id)
         return cleaned
+
+    async def delete_session(
+        self,
+        *,
+        channel_id: str,
+        session_id: str,
+    ) -> SessionDeleteResult:
+        """Delete one persisted Session through the shared Runtime boundary."""
+        if self._closed:
+            raise RuntimeStateError("runtime is already closed")
+        result = await self._session_provisioner.delete_session(
+            channel_id=channel_id,
+            session_id=session_id,
+            cleanup_session=self.cleanup_session,
+        )
+        if result.ok:
+            self.commit_session_delete(result)
+        return result
+
+    def commit_session_delete(self, result: SessionDeleteResult) -> None:
+        """Commit Runtime-owned state after persistent Session deletion."""
+        self._session_provisioner.commit_session_delete(result)
 
     async def close(self) -> None:
         """Cancel in-flight work and release all owned Runtime resources."""

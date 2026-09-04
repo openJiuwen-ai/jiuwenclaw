@@ -79,7 +79,7 @@ from jiuwenswarm.server.runtime.agent_adapter.sysop_builder import (
     validate_sandbox_files_runtime,
 )
 from jiuwenswarm.server.utils.utils import is_team_params
-from jiuwenswarm.common.mode_matrix import is_team_mode
+from jiuwenswarm.common.mode_matrix import is_plan_mode, is_team_mode
 from jiuwenswarm.agents.harness.common.rails.permissions.permissions_config_rpc import (
     get_permissions_config_req_methods,
 )
@@ -670,6 +670,39 @@ def _file_entry_matches_path(entry: Any, path: str) -> bool:
     )
 
 
+def _uses_projectless_task_workspace(
+    params: dict[str, Any],
+    channel_id: str,
+) -> bool:
+    """Return whether the request should use an isolated task workspace.
+
+    TUI sends its launch directory as ``project_dir``/``cwd``.  That is an
+    explicit project workspace even when the request mode resolves to
+    ``agent`` or ``code``; only requests without either directory should use
+    the Documents/JiuwenSwarm projectless task workspace.
+    """
+    for key in ("project_dir", "cwd"):
+        value = params.get(key)
+        if isinstance(value, (str, os.PathLike)) and str(value).strip():
+            return False
+
+    raw_work_mode = params.get("work_mode")
+    if not isinstance(raw_work_mode, str) or raw_work_mode.strip().lower() not in {
+        "code",
+        "work",
+    }:
+        from jiuwenswarm.server.runtime.session.work_mode import (
+            default_work_mode_for_channel,
+        )
+
+        raw_work_mode = default_work_mode_for_channel(channel_id)
+    manager_mode, _, _ = resolve_agent_request_mode(
+        params.get("mode", "agent"),
+        work_mode=raw_work_mode,
+    )
+    return manager_mode in {"agent", "code"}
+
+
 def _canonicalize_sandbox_files_path(path: str) -> str:
     """把 TUI 传来的 ``path`` 展开成 absolute resolved 形式 (绝对、去 ``..``、
     展开 ``~``、按需展开 symlink) 后作为 ``sandbox.files.{allow,deny}`` 的
@@ -774,6 +807,7 @@ class AgentWebSocketServer:
         self._previous_runtime_push_handler = None
         self._heartbeat_runtime = HeartbeatRailRuntime(self)
         self._runtime.set_admission_controller(self._heartbeat_runtime.admission)
+        self._runtime.set_session_delete_lifecycle(self._heartbeat_runtime)
         self._agent_manager.set_heartbeat_service(self._heartbeat_runtime)
         # Gateway user-business RPCs execute in the current AgentServer's
         # injected data directory. Register adapters once per server; request
@@ -1440,6 +1474,7 @@ class AgentWebSocketServer:
             self._agent_manager = self._runtime.agent_manager
             self._heartbeat_runtime = HeartbeatRailRuntime(self)
             self._runtime.set_admission_controller(self._heartbeat_runtime.admission)
+            self._runtime.set_session_delete_lifecycle(self._heartbeat_runtime)
             self._agent_manager.set_heartbeat_service(self._heartbeat_runtime)
             self._adapter_registry = AdapterRegistry()
             for adapter in (
@@ -1531,7 +1566,7 @@ class AgentWebSocketServer:
             # Gateway 进程退出/端口关闭时，必须先取消各 session 内流式生产者（SessionManager）
             # 并中止 DeepAgent 内层循环；否则仅等待 _handle_message 任务结束会一直阻塞到任务自然完成。
             try:
-                await self._agent_manager.cancel_all_inflight_work(
+                await self._execution_runtime().cancel_all_inflight_work(
                     reason=f"[gateway ws closed {remote}] ",
                     exclude_session_ids=(
                         self._heartbeat_runtime.execution.active_session_ids()
@@ -1545,9 +1580,7 @@ class AgentWebSocketServer:
             except Exception:
                 logger.exception("[AgentWebSocketServer] scheduler stop failed")
             try:
-                from jiuwenswarm.agents.harness.team import cancel_all_team_stream_tasks_across_managers
-
-                await cancel_all_team_stream_tasks_across_managers(
+                await self._execution_runtime().cancel_all_team_stream_tasks(
                     reason=f"[gateway ws closed {remote}] ",
                     exclude_session_ids=(
                         self._heartbeat_runtime.execution.active_session_ids()
@@ -1773,6 +1806,9 @@ class AgentWebSocketServer:
                 return
             if request.req_method == ReqMethod.SESSION_SWITCH:
                 await self._handle_session_switch(ws, request, send_lock)
+                return
+            if request.req_method == ReqMethod.SESSION_PLAN_STATUS:
+                await self._handle_session_plan_status(ws, request, send_lock)
                 return
             if request.req_method == ReqMethod.SESSION_KVC_PREPARE:
                 await self._handle_session_kvc_prepare(ws, request, send_lock)
@@ -2513,6 +2549,143 @@ class AgentWebSocketServer:
     def _session_may_hold_plan_state(request: AgentRequest, session_id: str) -> bool:
         return _SERVER_PLAN_CONTROLLER.may_hold_state(request, session_id)
 
+    async def _handle_session_plan_status(
+        self,
+        ws: Any,
+        request: AgentRequest,
+        send_lock: asyncio.Lock,
+    ) -> None:
+        """``session.plan_status``：只读查询当前会话是否处于计划模式。
+
+        不调用 ``switch_mode`` / ``ensure_live_session_instance``，也不改
+        ``_plan_active_sessions``。单 agent 有 live session 时以 ``plan_mode``
+        为准（能纠正 metadata 仍是 ``*.plan``、agent 已退出的情况）；否则回退
+        metadata.mode。集群的 plan 写在 metadata / team runtime，不走
+        DeepAgent ``plan_mode``——同 session 上常有为 Goal 等 RPC 拉起的
+        DeepAdapter，默认 ``plan_mode=normal``，若当成权威会把
+        ``team.work.plan`` 误判成未在计划里。
+        """
+        params = request.params if isinstance(request.params, dict) else {}
+        sid = str(params.get("session_id") or request.session_id or "").strip()
+        if not sid:
+            resp = AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=False,
+                payload={"error": "session_id is required", "code": "BAD_REQUEST"},
+                metadata=request.metadata,
+            )
+        else:
+            from jiuwenswarm.server.runtime.session.session_metadata import (
+                get_session_metadata,
+            )
+
+            meta = get_session_metadata(
+                sid,
+                cache_bust=True,
+                enable_writeback=False,
+            )
+            if not meta:
+                resp = AgentResponse(
+                    request_id=request.request_id,
+                    channel_id=request.channel_id,
+                    ok=False,
+                    payload={"error": "session not found", "code": "NOT_FOUND"},
+                    metadata=request.metadata,
+                )
+            else:
+                metadata_mode = meta.get("mode")
+                live_plan_mode = (
+                    None
+                    if is_team_mode(metadata_mode)
+                    else self._try_read_live_plan_mode(sid)
+                )
+                in_plan = self._combine_session_in_plan(
+                    live_plan_mode=live_plan_mode,
+                    session_id=sid,
+                    metadata_mode=metadata_mode,
+                )
+                resp = AgentResponse(
+                    request_id=request.request_id,
+                    channel_id=request.channel_id,
+                    ok=True,
+                    payload={"session_id": sid, "in_plan": in_plan},
+                    metadata=request.metadata,
+                )
+        if getattr(resp, "agent_ref", None) is None:
+            resp.agent_ref = request.agent_ref
+        wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
+        async with send_lock:
+            await send_wire_payload(ws, wire)
+
+    @staticmethod
+    def _combine_session_in_plan(
+        *,
+        live_plan_mode: str | None,
+        session_id: str,
+        metadata_mode: Any,
+    ) -> bool:
+        """Combine live agent plan_mode, in-process marker, and metadata.mode.
+
+        Team sessions ignore live DeepAgent ``plan_mode``: cluster plan is
+        persisted on ``metadata.mode`` (``team.*.plan``), while a live
+        DeepAdapter on the same session_id typically still has the default
+        ``normal`` plan_mode and would falsely report not-in-plan.
+        """
+        if is_team_mode(metadata_mode):
+            if session_id in _plan_active_sessions:
+                return True
+            return is_plan_mode(metadata_mode)
+        if isinstance(live_plan_mode, str) and live_plan_mode.strip():
+            return live_plan_mode.strip() == "plan"
+        if session_id in _plan_active_sessions:
+            return True
+        return is_plan_mode(metadata_mode)
+
+    def _try_read_live_plan_mode(self, session_id: str) -> str | None:
+        """Read ``plan_mode.mode`` from a live DeepAgent, if one is already running.
+
+        Does not start a session or build an adapter. Missing live state is
+        not an error: the caller falls back to metadata.
+        """
+        from jiuwenswarm.agents.harness.common.session_ops_service import (
+            resolve_live_agent_session,
+        )
+
+        agents_by_channel = getattr(self._agent_manager, "agents", None) or {}
+        if not isinstance(agents_by_channel, dict):
+            return None
+        for channel_agents in agents_by_channel.values():
+            if not isinstance(channel_agents, dict):
+                continue
+            for agent in channel_agents.values():
+                getter = getattr(agent, "get_live_session_instance", None)
+                if not callable(getter):
+                    continue
+                try:
+                    deep_agent = getter(session_id)
+                    if deep_agent is None:
+                        continue
+                    session = resolve_live_agent_session(deep_agent, session_id)
+                    if session is None:
+                        continue
+                    load_state = getattr(deep_agent, "load_state", None)
+                    if not callable(load_state):
+                        continue
+                    state = load_state(session)
+                    mode = getattr(getattr(state, "plan_mode", None), "mode", None)
+                except Exception as exc:
+                    logger.warning(
+                        "[session.plan_status] skip live agent while reading "
+                        "plan_mode: session=%s error=%s",
+                        session_id,
+                        exc,
+                    )
+                    continue
+                if isinstance(mode, str) and mode.strip():
+                    return mode.strip()
+        return None
+
     @staticmethod
     async def _open_plan_state_session(
         agent: Any,
@@ -2573,11 +2746,20 @@ class AgentWebSocketServer:
                 sequence=0,
             )
 
-        for event in await runtime.invoke(
-            request,
-            trigger_hook=False,
-            on_control_event=_send_control_event,
-        ):
+        if request.req_method == ReqMethod.CHAT_ANSWER:
+            events = await runtime.answer_interaction(
+                request,
+                trigger_hook=False,
+                on_control_event=_send_control_event,
+            )
+        else:
+            events = await runtime.invoke(
+                request,
+                trigger_hook=False,
+                on_control_event=_send_control_event,
+            )
+
+        for event in events:
             await self._send_runtime_event(
                 ws,
                 event,
@@ -2951,6 +3133,11 @@ class AgentWebSocketServer:
                 admission_controller=getattr(
                     getattr(self, "_heartbeat_runtime", None),
                     "admission",
+                    None,
+                ),
+                session_delete_lifecycle=getattr(
+                    self,
+                    "_heartbeat_runtime",
                     None,
                 ),
                 enable_kvc_tracking=True,
@@ -4216,236 +4403,31 @@ class AgentWebSocketServer:
 
     async def _handle_session_delete(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
         """Delete a single session and its recoverable runtime state."""
-        from openjiuwen.core.runner import Runner
-        from jiuwenswarm.server.runtime.session.session_metadata import get_session_metadata
-        from jiuwenswarm.agents.harness.team import get_team_manager
-
         params = request.params if isinstance(request.params, dict) else {}
         target = str(params.get("session_id") or "").strip()
-        if not target:
+        result = await self._execution_runtime().delete_session(
+            channel_id=request.channel_id or "",
+            session_id=target,
+        )
+        if result.ok:
+            resp = AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=True,
+                payload={"session_id": result.session_id},
+                metadata=request.metadata,
+            )
+        else:
             resp = AgentResponse(
                 request_id=request.request_id,
                 channel_id=request.channel_id,
                 ok=False,
-                payload={"error": "session_id is required", "code": "BAD_REQUEST"},
+                payload={
+                    "error": result.error_message,
+                    "code": result.error_code,
+                },
                 metadata=request.metadata,
             )
-        else:
-            from jiuwenswarm.server.runtime.session.session_history import resolve_session_dir
-
-            session_dir, invalid_reason = resolve_session_dir(
-                target, sessions_root=get_agent_sessions_dir()
-            )
-            if session_dir is None:
-                resp = AgentResponse(
-                    request_id=request.request_id,
-                    channel_id=request.channel_id,
-                    ok=False,
-                    payload={"error": invalid_reason or "invalid session_id", "code": "BAD_REQUEST"},
-                    metadata=request.metadata,
-                )
-            elif not session_dir.exists():
-                resp = AgentResponse(
-                    request_id=request.request_id,
-                    channel_id=request.channel_id,
-                    ok=False,
-                    payload={"error": "session not found", "code": "NOT_FOUND"},
-                    metadata=request.metadata,
-                )
-            elif not session_dir.is_dir():
-                resp = AgentResponse(
-                    request_id=request.request_id,
-                    channel_id=request.channel_id,
-                    ok=False,
-                    payload={"error": "session is not a directory", "code": "BAD_REQUEST"},
-                    metadata=request.metadata,
-                )
-            else:
-                checkpoint_resp = await self._ensure_persistent_checkpointer_response(request)
-                if checkpoint_resp is not None:
-                    resp = checkpoint_resp
-                else:
-                    metadata = get_session_metadata(target)
-                    is_team_session = self._is_team_metadata_mode(metadata)
-                    team_name = str(metadata.get("team_name") or "").strip()
-                    channel_id = str(metadata.get("channel_id") or request.channel_id or "").strip() or None
-                    heartbeat_delete_prepared = False
-                    trajectory_delete_prepared = False
-                    try:
-                        from jiuwenswarm.server.runtime.session.kv_cache.kv_cache_product_hooks import (
-                            mark_session_deleted,
-                        )
-
-                        mark_session_deleted(
-                            session_id=target,
-                            channel_id=channel_id or "default",
-                            is_team=is_team_session,
-                        )
-                    except Exception as exc:
-                        logger.warning(
-                            "[AgentWebSocketServer] KVC delete tombstone failed; "
-                            "preserving product delete: session_id=%s error=%s",
-                            target,
-                            exc,
-                        )
-                    try:
-                        if not is_team_session:
-                            from jiuwenswarm.observability.session_delete import (
-                                begin_trajectory_session_delete,
-                            )
-
-                            begin_trajectory_session_delete(target)
-                            trajectory_delete_prepared = True
-                        await self._heartbeat_runtime.begin_session_delete(target)
-                        heartbeat_delete_prepared = True
-                        if is_team_session:
-                            team_manager = get_team_manager(channel_id)
-                            deleted = await team_manager.delete_session_runtime(
-                                target,
-                                reason="session.delete: ",
-                            )
-                        else:
-                            agent = self._agent_manager.get_agent_nowait(channel_id=channel_id)
-                            if agent is not None:
-                                adapter = self._resolve_adapter(agent)
-                                release_runtime = getattr(
-                                    adapter,
-                                    "release_subagent_runtime_for_session",
-                                    None,
-                                )
-                                if callable(release_runtime):
-                                    await release_runtime(
-                                        target,
-                                        reason="session_deleted",
-                                    )
-                            await self._execution_runtime().cleanup_session(
-                                channel_id=channel_id or "",
-                                session_id=target,
-                            )
-
-                            from jiuwenswarm.server.runtime.session.kv_cache.kv_cache_product_hooks import (
-                                evict_plan_session,
-                            )
-
-                            await evict_plan_session(
-                                session_id=target,
-                                agent_manager=self._agent_manager,
-                                channel_id=channel_id,
-                            )
-                            await Runner.release(target)
-                            deleted = True
-                        if deleted:
-                            shutil.rmtree(session_dir)
-                    except Exception as exc:
-                        logger.warning(
-                            "[AgentWebSocketServer] session.delete runtime cleanup failed: session_id=%s error=%s",
-                            target,
-                            exc,
-                        )
-                        deleted = False
-
-                    if not deleted:
-                        if trajectory_delete_prepared:
-                            try:
-                                from jiuwenswarm.observability.session_delete import (
-                                    abort_trajectory_session_delete,
-                                )
-
-                                abort_trajectory_session_delete(target)
-                            except Exception as exc:  # noqa: BLE001
-                                logger.warning(
-                                    "[AgentWebSocketServer] trajectory delete rollback failed: "
-                                    "session_id=%s error=%s",
-                                    target,
-                                    exc,
-                                )
-                        if heartbeat_delete_prepared:
-                            try:
-                                await self._heartbeat_runtime.abort_session_delete(
-                                    target,
-                                    channel_id=channel_id or "",
-                                )
-                            except Exception as exc:  # noqa: BLE001
-                                logger.warning(
-                                    "[AgentWebSocketServer] heartbeat delete rollback failed: "
-                                    "session_id=%s error=%s",
-                                    target,
-                                    exc,
-                                )
-                        try:
-                            from jiuwenswarm.server.runtime.session.kv_cache.kv_cache_product_hooks import (
-                                restore_session_after_failed_delete,
-                            )
-
-                            restore_session_after_failed_delete(target)
-                        except Exception as exc:
-                            logger.warning(
-                                "[AgentWebSocketServer] KVC failed-delete rollback failed; "
-                                "preserving delete response: session_id=%s error=%s",
-                                target,
-                                exc,
-                            )
-                        resp = AgentResponse(
-                            request_id=request.request_id,
-                            channel_id=request.channel_id,
-                            ok=False,
-                            payload={"error": "session runtime cleanup failed", "code": "DELETE_FAILED"},
-                            metadata=request.metadata,
-                        )
-                    else:
-                        if trajectory_delete_prepared:
-                            try:
-                                from jiuwenswarm.observability.session_delete import (
-                                    commit_trajectory_session_delete,
-                                )
-
-                                commit_trajectory_session_delete(target)
-                            except Exception as exc:  # noqa: BLE001
-                                logger.warning(
-                                    "[AgentWebSocketServer] trajectory delete commit failed; "
-                                    "session_id=%s error=%s",
-                                    target,
-                                    exc,
-                                )
-                        try:
-                            await self._heartbeat_runtime.commit_session_delete(target)
-                        except Exception as exc:  # noqa: BLE001
-                            # The product Session is already gone. Resume the
-                            # scheduler so its missing-session path retries the
-                            # idempotent policy transition instead of leaving a
-                            # permanently suspended job.
-                            logger.warning(
-                                "[AgentWebSocketServer] heartbeat delete commit failed; "
-                                "session_id=%s error=%s",
-                                target,
-                                exc,
-                            )
-                        _plan_exited_sessions.discard(target)
-                        _plan_active_sessions.discard(target)
-                        remove_session_metadata_cache(target)
-                        if is_team_session:
-                            try:
-                                from jiuwenswarm.server.runtime.team_binding_store import get_team_binding_store
-
-                                get_team_binding_store().unbind_session(
-                                    team_name=team_name or None,
-                                    session_id=target,
-                                )
-                            except Exception as exc:  # noqa: BLE001
-                                logger.warning(
-                                    "[AgentWebSocketServer] failed to unbind deleted team session: "
-                                    "session_id=%s team_name=%s error=%s",
-                                    target,
-                                    team_name,
-                                    exc,
-                                )
-                        resp = AgentResponse(
-                            request_id=request.request_id,
-                            channel_id=request.channel_id,
-                            ok=True,
-                            payload={"session_id": target},
-                            metadata=request.metadata,
-                        )
 
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
         async with send_lock:
@@ -9609,18 +9591,23 @@ class AgentWebSocketServer:
                         find_or_create_code_project_for_tui_params,
                     )
 
-                    project = find_or_create_code_project_for_tui_params(params)
-                    if project is not None:
-                        params["project_id"] = project.project_id
-                        params["project_dir"] = project.project_dir
-                        params["work_mode"] = project.work_mode
+                    if not _uses_projectless_task_workspace(params, channel_id):
+                        project = find_or_create_code_project_for_tui_params(params)
+                        if project is not None:
+                            params["project_id"] = project.project_id
+                            params["project_dir"] = project.project_dir
+                            params["work_mode"] = project.work_mode
             # TUI 无显式 session_id（未带 --session）创建时：AgentServer 侧按
             # cwd/project_dir 解析真实的 code 项目并写回，避免落到默认 default_code
             # （AgentOS 迁移前由 TUI 本地解析，现收敛到 AgentServer 保证归属一致）。
             if (
                 not external_tui_session
                 and channel_id.strip().lower() == "tui"
+                and not _uses_projectless_task_workspace(params, channel_id)
             ):
+                # An explicit TUI cwd/project_dir is promoted to a registered
+                # code project. Requests without either directory keep the
+                # dated task workspace behavior.
                 from jiuwenswarm.server.runtime.session.project_store import (
                     find_or_create_code_project_for_tui_params,
                 )
@@ -9823,7 +9810,10 @@ class AgentWebSocketServer:
                 channel_metadata = None
                 if channel_id.strip().lower() == "tui":
                     workspace = str(params.get("cwd") or project_dir or "").strip()
-                    if workspace:
+                    if workspace and (
+                        not _uses_projectless_task_workspace(params, channel_id)
+                        or project_dir
+                    ):
                         channel_metadata = {
                             "cwd": workspace,
                             "project_dir": project_dir or workspace,

@@ -1718,16 +1718,17 @@ def test_sync_team_identity_metadata_persists_ready_team_for_any_activation(monk
     team_helpers.sync_team_identity_metadata(
         channel_id="web",
         session_id="sess-runtime",
-        mode="team",
         ready_team_name="ready-team",
         activation_kind="resume",
     )
 
+    # 只写 team_name，不碰 metadata.mode（sync_team_identity_metadata 曾写死
+    # mode="team" 会盖掉 chat 轮次落盘的 team.work.plan，制造 session.plan_status
+    # 误报 false 的空窗）。
     assert updates == [
         {
             "session_id": "sess-runtime",
             "channel_id": "web",
-            "mode": "team",
             "team_name": "ready-team",
         }
     ]
@@ -1746,7 +1747,6 @@ def test_sync_team_identity_metadata_keeps_existing_conflicting_team(monkeypatch
     team_helpers.sync_team_identity_metadata(
         channel_id="web",
         session_id="sess-runtime",
-        mode="team",
         ready_team_name="ready-team",
         activation_kind="resume",
     )

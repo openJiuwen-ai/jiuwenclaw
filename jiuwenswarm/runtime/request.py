@@ -39,7 +39,11 @@ CHAT_TURN_METHODS = frozenset(
 )
 
 
-def resolve_request_project_dir(request: AgentRequest) -> str | None:
+def resolve_request_project_dir(
+    request: AgentRequest,
+    *,
+    include_legacy_fallbacks: bool = True,
+) -> str | None:
     """Resolve the stable project identity used to construct an agent."""
     params = request.params or {}
     project_dir = params.get("project_dir")
@@ -52,6 +56,13 @@ def resolve_request_project_dir(request: AgentRequest) -> str | None:
     )
     if isinstance(metadata_project_dir, str) and metadata_project_dir.strip():
         return metadata_project_dir.strip()
+
+    # Agent/Code projectless turns deliberately keep cwd dynamic so the
+    # adapter can allocate the session's task workspace. Legacy callers and
+    # Team requests may still opt into deriving the project identity from cwd
+    # or trusted_dirs.
+    if not include_legacy_fallbacks:
+        return None
 
     cwd = params.get("cwd")
     if isinstance(cwd, str) and cwd.strip():
@@ -382,7 +393,10 @@ async def prepare_chat_turn(
         work_mode=runtime_work_mode,
     )
     agent_mode = "agent" if mode == "auto_harness" else mode
-    requested_project_dir = resolve_request_project_dir(request)
+    requested_project_dir = resolve_request_project_dir(
+        request,
+        include_legacy_fallbacks=mode not in {"agent", "code"},
+    )
     canonical_mode = (
         request.params.get("mode") if isinstance(request.params, dict) else None
     )

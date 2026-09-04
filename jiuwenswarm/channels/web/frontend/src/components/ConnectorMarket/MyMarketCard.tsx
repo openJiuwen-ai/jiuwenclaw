@@ -77,7 +77,7 @@ export function MyMarketCard({
               }
             : undefined
         }
-        className={`flex h-full w-full flex-col gap-2 rounded-xl border border-border bg-card p-4 text-left transition-shadow ${
+        className={`page-card flex h-full w-full flex-col gap-2 rounded-xl border border-border bg-card p-4 text-left transition-shadow ${
           canOpenDetail ? 'cursor-pointer hover:shadow-[0_4px_16px_rgba(0,0,0,0.08)]' : ''
         }`}
       >
