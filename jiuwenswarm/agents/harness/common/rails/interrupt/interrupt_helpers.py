@@ -7,9 +7,10 @@ and building permission rails.
 """
 from __future__ import annotations
 
+import copy
 import json
 import re
-from typing import Any
+from typing import Any, Mapping
 
 from jiuwenswarm.agents.harness.code.prompt.plan_approval import (
     build_plan_approval_actions,
@@ -19,6 +20,12 @@ from jiuwenswarm.agents.harness.code.rails.code_plan_approval_interrupt_rail imp
     extract_plan_approval_content,
     is_plan_approval_message,
     strip_inline_plan_approval_choices,
+)
+from jiuwenswarm.agents.harness.common.rails.interrupt.permission_options import (
+    ALLOW_ONCE,
+    ALWAYS_ALLOW,
+    REJECT,
+    SESSION_ALLOW,
 )
 from jiuwenswarm.common.utils import logger
 
@@ -579,7 +586,9 @@ def convert_interactions_to_ask_user_question(state_outputs: list) -> dict | Non
         if questions_raw is None:
             continue
 
-        questions = _build_multi_questions(questions_raw)
+        questions = _build_multi_questions(
+            questions_raw, _extract_ask_user_query(value_obj)
+        )
         return {
             "event_type": "chat.ask_user_question",
             "request_id": request_id,
@@ -706,11 +715,72 @@ def _extract_questions_from_value(value_obj: Any) -> list | None:
     return None
 
 
-def _build_multi_questions(questions_data: list) -> list:
+def _extract_ask_user_query(value_obj: Any) -> str:
+    """The call's top-level ``query``, or ``""`` when there is none.
+
+    Read from the same place ``_extract_questions_from_value`` reads the
+    questions: ``ToolCallInterruptRequest.tool_args`` preserves the original
+    ``ask_user`` arguments. It is the last source of prompt text for a question
+    that arrived without any of its own, and the only one still available once
+    the tool call itself has been consumed.
+    """
+    query = getattr(value_obj, "query", None)
+    if isinstance(query, str) and query.strip():
+        return query
+    if isinstance(value_obj, dict):
+        query = value_obj.get("query")
+        if isinstance(query, str) and query.strip():
+            return query
+
+    tool_args = getattr(value_obj, "tool_args", None)
+    if isinstance(tool_args, str):
+        try:
+            tool_args = json.loads(tool_args)
+        except (ValueError, TypeError):
+            tool_args = None
+    if isinstance(tool_args, dict):
+        query = tool_args.get("query")
+        if isinstance(query, str) and query.strip():
+            return query
+    return ""
+
+
+def _resolve_question_text(question: Mapping[str, Any], fallback_query: str) -> str:
+    """The prompt to show for one question.
+
+    Three sources in order: the question's own ``question``, its ``header``,
+    then the call's top-level ``query``. A call that satisfied the ask_user rail
+    never reaches past the first, because that rail rejects a question carrying
+    no text. The fallbacks are for questions that did not come through it -- the
+    same class of input the non-array ``options`` guard in
+    ``_build_multi_questions`` already accounts for. There a malformed value
+    built a question out of single characters; here a missing one raised
+    ``KeyError``, losing the whole conversion and every question in the call
+    with it.
+    """
+    for candidate in (
+        question.get("question"),
+        question.get("header"),
+        fallback_query,
+    ):
+        if isinstance(candidate, str) and candidate.strip():
+            return candidate
+    return ""
+
+
+def _build_multi_questions(questions_data: list, fallback_query: str = "") -> list:
     """Build frontend PendingQuestionItem list from questions data.
 
     有选项的问题: 保留原始选项 + 追加 __other__ (自定义输入)
     无选项的问题: 不追加 __other__, 前端应直接进入自由输入模式
+
+    问题若声明了 ``inputs``，该键原样带出，本函数不解释其内容。
+
+    A question's ``inputs`` declaration is carried through as opaque data. This
+    is the one normalisation point every channel's question passes through, so
+    it must not learn what any single channel's renderer makes of the
+    declaration: it neither reads nor validates nor reshapes it. A channel with
+    no renderer for it never looks the key up and behaves exactly as before.
     """
     questions = []
     for q in questions_data:
@@ -724,11 +794,17 @@ def _build_multi_questions(questions_data: list) -> list:
         else:
             options = []
         question_payload = {
-            "question": q["question"],
+            "question": _resolve_question_text(q, fallback_query),
             "header": q.get("header") or "Question",
             "options": options,
             "multi_select": q.get("multi_select", False),
         }
+        # A non-empty array only, so a question declaring nothing keeps the
+        # payload it had; copied, not referenced, because one question can reach
+        # several channels and none may edit what the next one receives.
+        declared_inputs = q.get("inputs")
+        if isinstance(declared_inputs, list) and declared_inputs:
+            question_payload["inputs"] = copy.deepcopy(declared_inputs)
         questions.append(question_payload)
     return questions
 
@@ -769,12 +845,15 @@ def _normalize_question_option(option: dict[str, Any]) -> dict[str, Any]:
     return normalized
 
 
+# 权限审批的兜底选项。``value`` 取自 ``permission_options``，与解析回答用的是同一份
+# 词表：web / CLI 回传 ``value``，TUI 回传 ``label``，两条路都要能被 ``build_inputs``
+# 解出同一个动作。label / description 保持原样，渲染出的文案不变。
 def _default_interrupt_options() -> list[dict[str, str]]:
     return [
-        {"label": "本次允许", "description": "仅本次授权执行"},
-        {"label": "会话内记住", "description": "本次会话内自动放行同类操作"},
-        {"label": "永久记住", "description": "写回磁盘，所有会话均自动放行"},
-        {"label": "拒绝", "description": "拒绝执行此工具"},
+        {"value": ALLOW_ONCE, "label": "本次允许", "description": "仅本次授权执行"},
+        {"value": SESSION_ALLOW, "label": "会话内记住", "description": "本次会话内自动放行同类操作"},
+        {"value": ALWAYS_ALLOW, "label": "永久记住", "description": "写回磁盘，所有会话均自动放行"},
+        {"value": REJECT, "label": "拒绝", "description": "拒绝执行此工具"},
     ]
 
 

@@ -933,16 +933,12 @@ function formatFileSize(bytes: number | undefined): string {
   return `${size.toFixed(i === 0 ? 0 : 1)} ${units[i]}`;
 }
 
-/** 识别可保存的 Skill 包：`.skill` / `.zip` / `.skill.zip` */
+/** 识别可保存的 Skill 包：`.skill` / `.skill.zip` */
 function isSkillPackageFile(file: FileDownloadItem): boolean {
   const candidates = [file.name, file.path].filter(Boolean) as string[];
   for (const candidate of candidates) {
     const base = candidate.replace(/\\/g, '/').split('/').pop()?.toLowerCase() || '';
-    if (
-      base.endsWith('.skill.zip') ||
-      base.endsWith('.skill') ||
-      base.endsWith('.zip')
-    ) {
+    if (base.endsWith('.skill.zip') || base.endsWith('.skill')) {
       return true;
     }
   }
@@ -1124,13 +1120,10 @@ function FileDownloadList({
             data-testid="chat-panel-file-download-item"
             data-variant={file.name}
             className={clsx(
-              'flex items-center gap-3 rounded-lg border px-3 py-2.5  ',
+              'chat-panel-file-download-item group',
               expired
-                ? 'border-border/50 bg-card/50 cursor-not-allowed opacity-60'
-                : clsx(
-                  'border-border bg-card',
-                  onPreview && 'cursor-pointer group hover:border-border-hover hover:shadow-md'
-                )
+                ? 'chat-panel-file-download-item--expired'
+                : !onPreview && 'chat-panel-file-download-item--no-preview',
             )}
             onClick={() => {
               if (!expired) onPreview?.(index);
@@ -1149,13 +1142,13 @@ function FileDownloadList({
               aria-label={onPreview ? t('artifacts.openPreview', { name: displayName }) : undefined}
             >
               {isSkill ? (
-                <div className="flex-shrink-0 w-10 h-10 rounded-lg bg-accent-subtle flex items-center justify-center">
+                <div className="flex-shrink-0 w-6 h-6 rounded-lg bg-accent-subtle flex items-center justify-center">
                   <svg className="w-5 h-5 text-accent" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.8}>
                     <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 13.5l10.5-11.25L12 10.5h8.25L9.75 21.75 12 13.5H3.75z" />
                   </svg>
                 </div>
               ) : (
-                <FileIcon fileName={file.name} size={40} className="flex-shrink-0 select-none" />
+                <FileIcon fileName={file.name} size={24} className="flex-shrink-0 select-none" />
               )}
               <div className="flex-1 min-w-0" data-testid="chat-panel-file-download-info">
                 <div className="text-sm font-medium text-text leading-snug truncate" data-testid="chat-panel-file-download-name">{displayName}</div>

@@ -2295,6 +2295,8 @@
       "tagLabel": "Domain tags (optional)",
       "tagPlaceholder": "Choose strength tags",
       "toggleTags": "Expand or collapse domain tags",
+      "tagScrollPrev": "View domain tags to the left",
+      "tagScrollNext": "View domain tags to the right",
       "removeTag": "Remove domain tag {{name}}",
       "customTagPlaceholder": "Enter a custom domain tag",
       "addCustomTag": "Add",

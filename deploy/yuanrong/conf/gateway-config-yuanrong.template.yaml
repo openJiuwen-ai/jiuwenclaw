@@ -472,6 +472,10 @@ gateway:
     agent_key_fields:
       - user_id
       - agent_type
+    # Web/TUI 连接建立后后台预热内置 jiuwenswarm 沙箱并打通 instance WS，
+    # 避免首条 chat 卡在 create + 冷启动 502 重试。失败不影响连接。
+    # agent_key_fields 含 session_id 时无法在握手阶段确定 key，自动跳过。
+    connect_warmup_enabled: true
     # 空闲沙箱回收：agent 无持有任务（chat/SSH 均已结束）且空闲超过该时长后，
     # 自动 DELETE /api/agent 释放 YuanRong 实例；<= 0 表示不回收。
     # 存活的 SSH 连接（即使不发消息）全程持有任务计数，不会被回收。

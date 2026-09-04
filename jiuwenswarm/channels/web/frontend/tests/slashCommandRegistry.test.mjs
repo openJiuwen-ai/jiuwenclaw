@@ -3,6 +3,7 @@ import test from 'node:test';
 
 import {
   findSlashCommand,
+  togglePlanFromSlash,
 } from '../node_modules/.cache/slash-command-registry/slashCommands/registry.js';
 
 const NEW_CONVERSATION_ID = 'new';
@@ -55,4 +56,50 @@ test('/persist does not mutate an existing session', async () => {
 
   assert.deepEqual(state.submissions, []);
   assert.match(state.messages[0].commandOutput, /只能在创建新会话时开启/);
+});
+
+function createPlanAndGoalStores({ planActive = false, goal = null, goalArmed = false } = {}) {
+  const calls = [];
+  return {
+    calls,
+    planStore: {
+      ensureRuntime: (sessionId) => calls.push(['ensurePlanRuntime', sessionId]),
+      isActive: () => planActive,
+      setActive: (sessionId, active, options) => calls.push(['setPlanActive', sessionId, active, options]),
+    },
+    goalStore: {
+      getRuntime: () => ({ goal, armed: goalArmed }),
+      setArmed: (sessionId, armed) => calls.push(['setGoalArmed', sessionId, armed]),
+    },
+  };
+}
+
+test('/plan closes an armed but uncommitted goal before entering plan mode', () => {
+  const stores = createPlanAndGoalStores({ goalArmed: true });
+
+  const result = togglePlanFromSlash('session-1', stores.planStore, stores.goalStore);
+
+  assert.equal(result, 'activated');
+  assert.deepEqual(stores.calls, [
+    ['ensurePlanRuntime', 'session-1'],
+    ['setGoalArmed', 'session-1', false],
+    [
+      'setPlanActive',
+      'session-1',
+      true,
+      { explicitEntry: true, entrySource: 'slash_command' },
+    ],
+  ]);
+});
+
+test('/plan cannot enter plan mode while a goal is unfinished', () => {
+  const stores = createPlanAndGoalStores({
+    goal: { status: 'paused' },
+    goalArmed: true,
+  });
+
+  const result = togglePlanFromSlash('session-1', stores.planStore, stores.goalStore);
+
+  assert.equal(result, 'blocked_by_goal');
+  assert.deepEqual(stores.calls, [['ensurePlanRuntime', 'session-1']]);
 });
