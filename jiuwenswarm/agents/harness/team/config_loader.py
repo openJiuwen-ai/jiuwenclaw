@@ -205,6 +205,27 @@ def resolve_team_sqlite_db_path(config_base: dict[str, Any] | None = None) -> Pa
     return get_agent_teams_home() / conn_str
 
 
+def _collect_agentos_model_entries(models_raw: dict[str, Any]) -> list[dict[str, Any]]:
+    """Collect usable ``models.agentos`` backup model entries.
+
+    Mirrors ``get_agentos_models`` validation: only list blocks whose
+    ``model_client_config.model_name`` is non-empty are usable. A missing or
+    non-list ``agentos`` field yields an empty list (the config template does
+    not preset the field, so absent means skip).
+    """
+    agentos_raw = models_raw.get("agentos")
+    if not isinstance(agentos_raw, list):
+        return []
+    entries: list[dict[str, Any]] = []
+    for block in agentos_raw:
+        if not isinstance(block, dict):
+            continue
+        mcc = block.get("model_client_config")
+        if isinstance(mcc, dict) and mcc.get("model_name"):
+            entries.append(block)
+    return entries
+
+
 def _resolve_default_model_config(
     config_base: dict[str, Any],
     *,
@@ -214,28 +235,55 @@ def _resolve_default_model_config(
     if not isinstance(models_raw, dict):
         return {}
 
+    # Merge defaults (or legacy default) with agentos backup entries into one
+    # candidate list, keeping ``get_default_models`` ordering (defaults first,
+    # agentos appended) so chat page model keys resolve positionally and
+    # agentos models become selectable for team members, same as single-agent
+    # mode.
+    candidates: list[dict[str, Any]] = []
     defaults_raw = models_raw.get("defaults")
     if isinstance(defaults_raw, list):
-        # When the caller (chat page) provides a requested model name, prefer
-        # the entry whose ``model_client_config.model_name`` matches it so
-        # team members without an explicit ``modes.team.agents.*.model`` fall
-        # back to the page-selected model instead of the first list item.
-        requested = (requested_model_name or "").strip()
-        if requested:
-            for item in defaults_raw:
-                if not isinstance(item, dict):
-                    continue
-                mcc = item.get("model_client_config") or {}
-                if isinstance(mcc, dict) and mcc.get("model_name") == requested:
-                    return item
+        candidates.extend(item for item in defaults_raw if isinstance(item, dict))
 
-        for item in defaults_raw:
-            if isinstance(item, dict):
+    if not candidates:
+        legacy_default = models_raw.get("default")
+        if isinstance(legacy_default, dict):
+            candidates.append(legacy_default)
+
+    candidates.extend(_collect_agentos_model_entries(models_raw))
+
+    # When the caller (chat page) provides a requested model name, prefer the
+    # matching entry so team members without an explicit
+    # ``modes.team.agents.*.model`` fall back to the page-selected model
+    # instead of the first list item.
+    requested = (requested_model_name or "").strip()
+    if requested:
+        # ``{model_name}#{origin_index}``: the chat page model selector sends
+        # the entry's position in the merged defaults+agentos list (the same
+        # numbering ``models.list`` exposes as origin_index).
+        if "#" in requested:
+            bare_name, _, index_part = requested.rpartition("#")
+            if bare_name and index_part.isdigit():
+                origin_index = int(index_part)
+                if 0 <= origin_index < len(candidates):
+                    entry = candidates[origin_index]
+                    mcc = entry.get("model_client_config") or {}
+                    if isinstance(mcc, dict) and mcc.get("model_name") == bare_name:
+                        return entry
+        # Pure model_name / alias: first match wins. Defaults entries come
+        # first, so a same-name agentos entry never shadows the defaults one.
+        for item in candidates:
+            mcc = item.get("model_client_config") or {}
+            if not isinstance(mcc, dict):
+                continue
+            if mcc.get("model_name") == requested or item.get("alias") == requested:
                 return item
 
-    legacy_default = models_raw.get("default")
-    if isinstance(legacy_default, dict):
-        return legacy_default
+    # No requested model (or no match): first entry. Defaults entries come
+    # first, so agentos only wins when nothing else is configured — an
+    # agentos-only setup still yields a usable team model.
+    if candidates:
+        return candidates[0]
 
     return {}
 
@@ -507,8 +555,8 @@ def load_team_spec_dict(
 
     When ``requested_model_name`` is provided (e.g. from the chat page model
     selector), team members without an explicit ``modes.team.agents.*.model``
-    fall back to the matching entry in ``models.defaults`` instead of the
-    first list item.
+    fall back to the matching entry in the merged ``models.defaults`` +
+    ``models.agentos`` candidate list instead of the first list item.
     """
     if config_base is None:
         config_base = get_config()
