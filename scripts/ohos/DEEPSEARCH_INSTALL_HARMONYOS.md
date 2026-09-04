@@ -169,3 +169,18 @@ sh scripts/start-ohos-agentserver.sh 18092
   不受影响；如需要，可用同样的转换流程处理 musl wheel。
 - Milvus 向量检索不可用（pymilvus 桩）：deepsearch 的 browsecompplus 索引/检索
   功能受限，其余功能正常。
+
+## 已知环境限制：系统终端无法加载 hmdfs .so（2026-09-04 排查记录）
+
+**现象**：在系统终端（Terminal App）里运行安装脚本，所有原生包（连基础环境的
+`pydantic_core` 也是）`dlopen` 一律 `Permission denied`；而 App(AgentServer) 内
+DeepResearch 一切正常，AgentServer 会话（hishell 链）里 import 也正常。
+
+**结论**：这是 hmdfs 任务级执行限制（挂载项 `hmmac=use_task`）——**哪些进程上下文
+允许 mmap-exec 文件系统上的 .so 与文件本身无关**（签名、权限位、文件内容均已排除）。
+终端里"功能测试失败 ≠ 安装失败"：pip 写入完全正常，装好的包在 App 里可用。
+
+**脚本对策**：预检阶段用"金丝雀"探测（尝试 dlopen site-packages 里已有的 .so）；
+全部被拒则进入受限模式——安装照常、以 pip 元数据判定是否已装、跳过功能验证，
+最后提示在 App 内调用一次 DeepResearch 完成验证。脚本在两种终端里都能正确收敛，
+无需区分使用场景。
