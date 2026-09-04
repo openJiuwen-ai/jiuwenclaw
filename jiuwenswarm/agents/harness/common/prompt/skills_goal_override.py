@@ -33,6 +33,11 @@ import os
 from html import escape
 from typing import Any, Dict, List, Sequence
 
+import openjiuwen.harness.prompts.sections.skills as _skills
+import openjiuwen.harness.rails.skills.skill_use_rail as _sur
+from openjiuwen.harness.prompts.builder import PromptSection
+from openjiuwen.harness.prompts.sections import SectionName
+
 from jiuwenswarm.common.utils import logger
 
 # ---------------------------------------------------------------------------
@@ -453,43 +458,34 @@ def apply_patch() -> None:
 
     # 1. Auto-list has no dynamic entries, so a module-level builder patch is
     # sufficient. All-mode is patched below at the structured Skill boundary.
-    try:
-        import openjiuwen.harness.prompts.sections.skills as _skills
-        _skills.build_auto_list_mode_skill_prompt = _build_auto_list_mode_skill_prompt
-    except Exception:
-        logger.warning("[skills_goal_override] patch skills module failed", exc_info=True)
+    # Fail fast like safety_override: an agent-core API mismatch must be visible
+    # during startup rather than silently changing prompt behavior.
+    _skills.build_auto_list_mode_skill_prompt = _build_auto_list_mode_skill_prompt
 
     # 2. Preserve Skill objects until their XML rendering boundary. The upstream
     # rail first renders Markdown; parsing it again is ambiguous for multi-line
     # descriptions that contain numbered examples.
-    try:
-        import openjiuwen.harness.rails.skills.skill_use_rail as _sur
-        from openjiuwen.harness.prompts.sections import SectionName
-        from openjiuwen.harness.prompts.builder import PromptSection
+    original_build = _sur.SkillUseRail._build_skills_section
+    if not getattr(original_build, "__skills_goal_override_wrapped__", False):
 
-        original_build = _sur.SkillUseRail._build_skills_section
-        if not getattr(original_build, "__skills_goal_override_wrapped__", False):
+        def _patched_build_skills_section(self, skills=None):  # type: ignore[no-untyped-def]
+            if self.skill_mode != self.SKILL_MODE_ALL:
+                return original_build(self, skills)
+            current_skills = self.skills if skills is None else skills
+            builder = getattr(self, "system_prompt_builder", None)
+            language = getattr(builder, "language", "en") or "en"
+            return PromptSection(
+                name=SectionName.SKILLS,
+                content={
+                    language: _build_all_mode_skill_prompt_from_skills(
+                        current_skills, language
+                    )
+                },
+                priority=40,
+            )
 
-            def _patched_build_skills_section(self, skills=None):  # type: ignore[no-untyped-def]
-                if self.skill_mode != self.SKILL_MODE_ALL:
-                    return original_build(self, skills)
-                current_skills = self.skills if skills is None else skills
-                builder = getattr(self, "system_prompt_builder", None)
-                language = getattr(builder, "language", "en") or "en"
-                return PromptSection(
-                    name=SectionName.SKILLS,
-                    content={
-                        language: _build_all_mode_skill_prompt_from_skills(
-                            current_skills, language
-                        )
-                    },
-                    priority=40,
-                )
-
-            _patched_build_skills_section.__skills_goal_override_wrapped__ = True  # type: ignore[attr-defined]
-            _sur.SkillUseRail._build_skills_section = _patched_build_skills_section
-    except Exception:
-        logger.warning("[skills_goal_override] patch SkillUseRail failed", exc_info=True)
+        _patched_build_skills_section.__skills_goal_override_wrapped__ = True  # type: ignore[attr-defined]
+        _sur.SkillUseRail._build_skills_section = _patched_build_skills_section
 
     # 3. Goal section removal.
     _apply_goal_patch()
