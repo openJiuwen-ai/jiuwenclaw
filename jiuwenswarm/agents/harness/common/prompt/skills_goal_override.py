@@ -46,23 +46,37 @@ from jiuwenswarm.common.utils import logger
 
 _STATIC_SKILL_NAMES = frozenset(
     {
-        "xiaoyi-web-search",
+        "xiaoyi-web-search-win",
         "find-skills",
         "xiaoyi-doc-convert",
-        "xiaoyi-ppt",
+        "xiaoyi-ppt-win",
         "aigc_marker",
         "execution-validator-skill",
         "secret-guardian",
-        "skill-creator",
+        "skill-creator-win",
         "skill-scope",
         "swarmskill-creator",
-        "xiaoyi-pdf",
+        "xiaoyi-pdf-win",
         "seedream-image-gen",
         "seedance-video-gen",
         "music-generation",
+        "xiaoyi-image-understanding-win",
+    }
+)
+
+# The desktop bundle installs these canonical skills with a ``-win`` suffix.
+# Hide their former names too when scanning dynamically so upgrades and older
+# user skill roots cannot surface duplicate catalogue entries.
+_LEGACY_DEDUP_ALIASES = frozenset(
+    {
+        "xiaoyi-web-search",
+        "xiaoyi-ppt",
+        "skill-creator",
+        "xiaoyi-pdf",
         "xiaoyi-image-understanding",
     }
 )
+_DEDUP_NAMES = _STATIC_SKILL_NAMES | _LEGACY_DEDUP_ALIASES
 
 # Final system-prompt budget for the Skills section. This lives in the product
 # override rather than agent-core so packaged/runtime dependency refreshes do
@@ -82,7 +96,7 @@ The following skills provide specialized instructions for specific tasks. Use `s
 
 <available_skills>
   <skill>
-    <name>xiaoyi-web-search</name>
+    <name>xiaoyi-web-search-win</name>
     <description>Default for real-time web retrieval and web-information queries. Use another search interface only when the user explicitly requests it.</description>
   </skill>
   <skill>
@@ -94,7 +108,7 @@ The following skills provide specialized instructions for specific tasks. Use `s
     <description>Convert among DOCX, PDF, XLSX, PPTX, Markdown, and other mainstream document formats. Use it before manual conversion scripts.</description>
   </skill>
   <skill>
-    <name>xiaoyi-ppt</name>
+    <name>xiaoyi-ppt-win</name>
     <description>Create, edit, generate, or beautify template-based presentations. Prefer it to manual python-pptx-style generation unless the user requests otherwise or it cannot meet the requirement.</description>
   </skill>
   <skill>
@@ -110,7 +124,7 @@ The following skills provide specialized instructions for specific tasks. Use `s
     <description>Privacy and secret protection for configurations, logs, prompts, reports, environment variables, and workspace content containing sensitive identifiers or keys.</description>
   </skill>
   <skill>
-    <name>skill-creator</name>
+    <name>skill-creator-win</name>
     <description>Create, optimize, debug, and evaluate independent single-agent skills.</description>
   </skill>
   <skill>
@@ -119,10 +133,10 @@ The following skills provide specialized instructions for specific tasks. Use `s
   </skill>
   <skill>
     <name>swarmskill-creator</name>
-    <description>Create, convert, or refactor multi-agent team skills and orchestration workflows. Use skill-creator for ordinary single-skill work.</description>
+    <description>Create, convert, or refactor multi-agent team skills and orchestration workflows. Use skill-creator-win for ordinary single-skill work.</description>
   </skill>
   <skill>
-    <name>xiaoyi-pdf</name>
+    <name>xiaoyi-pdf-win</name>
     <description>Create, edit, lay out, convert, merge, split, extract, watermark, fill, protect, decrypt, or parse PDFs. Use it whenever the request involves PDF processing.</description>
   </skill>
   <skill>
@@ -138,7 +152,7 @@ The following skills provide specialized instructions for specific tasks. Use `s
     <description>Generate music or audio and deliver the audio file.</description>
   </skill>
   <skill>
-    <name>xiaoyi-image-understanding</name>
+    <name>xiaoyi-image-understanding-win</name>
     <description>Analyze and understand images.</description>
   </skill>
 </available_skills>
@@ -150,7 +164,7 @@ _STATIC_BLOCK_CN = """## 技能
 
 <available_skills>
   <skill>
-    <name>xiaoyi-web-search</name>
+    <name>xiaoyi-web-search-win</name>
     <description>实时网页检索和网络信息查询的默认技能；仅当用户明确指定其他搜索接口时才切换。</description>
   </skill>
   <skill>
@@ -162,7 +176,7 @@ _STATIC_BLOCK_CN = """## 技能
     <description>在 DOCX、PDF、XLSX、PPTX、Markdown 等主流文档格式间转换；应优先于手工转换脚本。</description>
   </skill>
   <skill>
-    <name>xiaoyi-ppt</name>
+    <name>xiaoyi-ppt-win</name>
     <description>创建、编辑、生成和美化基于模板的演示文稿；除非用户另有要求或技能无法满足需求，应优先于 python-pptx 等手工生成方式。</description>
   </skill>
   <skill>
@@ -178,7 +192,7 @@ _STATIC_BLOCK_CN = """## 技能
     <description>保护配置、日志、提示词、报告、环境变量及含密钥或敏感标识的工作区内容中的隐私和秘密。</description>
   </skill>
   <skill>
-    <name>skill-creator</name>
+    <name>skill-creator-win</name>
     <description>创建、优化、调试和评估独立的单智能体技能。</description>
   </skill>
   <skill>
@@ -187,10 +201,10 @@ _STATIC_BLOCK_CN = """## 技能
   </skill>
   <skill>
     <name>swarmskill-creator</name>
-    <description>创建、转换和重构多智能体团队技能与编排工作流；普通单技能工作使用 skill-creator。</description>
+    <description>创建、转换和重构多智能体团队技能与编排工作流；普通单技能工作使用 skill-creator-win。</description>
   </skill>
   <skill>
-    <name>xiaoyi-pdf</name>
+    <name>xiaoyi-pdf-win</name>
     <description>创建、编辑、排版、转换、合并、拆分、提取、加水印、填写表单、加密、解密或解析 PDF；凡涉及 PDF 处理时使用。</description>
   </skill>
   <skill>
@@ -206,7 +220,7 @@ _STATIC_BLOCK_CN = """## 技能
     <description>生成音乐或音频并交付音频文件。</description>
   </skill>
   <skill>
-    <name>xiaoyi-image-understanding</name>
+    <name>xiaoyi-image-understanding-win</name>
     <description>分析和理解图像。</description>
   </skill>
 </available_skills>
@@ -250,7 +264,7 @@ def _skills_prompt_max_chars() -> int:
 def _visible_dynamic_skills(skills: Sequence[Any]) -> List[Any]:
     """Return de-duplicated non-static skills in their existing stable order."""
     visible: List[Any] = []
-    seen_names = set(_STATIC_SKILL_NAMES)
+    seen_names = set(_DEDUP_NAMES)
     for skill in skills:
         name = str(getattr(skill, "name", "") or "").strip()
         if not name or name in seen_names:

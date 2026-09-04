@@ -1358,7 +1358,11 @@ def test_skills_goal_override_uses_real_skill_slugs():
     assert "seedream-image-gen" in _STATIC_SKILL_NAMES
     assert "seedance-video-gen" in _STATIC_SKILL_NAMES
     assert "music-generation" in _STATIC_SKILL_NAMES
-    assert "xiaoyi-image-understanding" in _STATIC_SKILL_NAMES
+    assert "xiaoyi-web-search-win" in _STATIC_SKILL_NAMES
+    assert "xiaoyi-ppt-win" in _STATIC_SKILL_NAMES
+    assert "skill-creator-win" in _STATIC_SKILL_NAMES
+    assert "xiaoyi-pdf-win" in _STATIC_SKILL_NAMES
+    assert "xiaoyi-image-understanding-win" in _STATIC_SKILL_NAMES
     assert "image-generation" not in _STATIC_SKILL_NAMES
     for text in _STATIC_BLOCK.values():
         assert "seedream-image-gen" in text
@@ -1524,7 +1528,7 @@ def test_skills_goal_override_uses_available_skills_catalog_for_english():
     assert "<available_skills>" in _STATIC_BLOCK_EN
     assert "</available_skills>" in _STATIC_BLOCK_EN
     assert _STATIC_BLOCK_EN.count("<skill>") == 15
-    assert "<name>xiaoyi-web-search</name>" in _STATIC_BLOCK_EN
+    assert "<name>xiaoyi-web-search-win</name>" in _STATIC_BLOCK_EN
     assert "<name>execution-validator-skill</name>" in _STATIC_BLOCK_EN
     assert "<name>skill-scope</name>" in _STATIC_BLOCK_EN
     assert "Use `skill_tool` to load a skill's full `SKILL.md`" in _STATIC_BLOCK_EN
@@ -1538,7 +1542,7 @@ def test_skills_goal_override_uses_available_skills_catalog_for_chinese():
     assert "<available_skills>" in _STATIC_BLOCK_CN
     assert "</available_skills>" in _STATIC_BLOCK_CN
     assert _STATIC_BLOCK_CN.count("<skill>") == 15
-    assert "<name>xiaoyi-web-search</name>" in _STATIC_BLOCK_CN
+    assert "<name>xiaoyi-web-search-win</name>" in _STATIC_BLOCK_CN
     assert "<name>skill-scope</name>" in _STATIC_BLOCK_CN
     assert "使用 `skill_tool` 加载其完整 `SKILL.md`" in _STATIC_BLOCK_CN
 
@@ -1640,4 +1644,20 @@ def test_skills_goal_override_keeps_multiline_description_as_one_skill(monkeypat
     assert "<name>collect-data</name>" not in text
     assert "<name>write-summary</name>" not in text
     assert "1. `collect-data`" in text
+
+
+def test_skills_goal_override_hides_legacy_skill_aliases():
+    from jiuwenswarm.agents.harness.common.prompt.skills_goal_override import (
+        _visible_dynamic_skills,
+    )
+
+    visible = _visible_dynamic_skills(
+        [
+            SimpleNamespace(name="xiaoyi-web-search", description="legacy"),
+            SimpleNamespace(name="xiaoyi-web-search-win", description="canonical"),
+            SimpleNamespace(name="custom-skill", description="visible"),
+        ]
+    )
+
+    assert [skill.name for skill in visible] == ["custom-skill"]
 
