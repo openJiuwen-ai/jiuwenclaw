@@ -19,6 +19,10 @@ from jiuwenswarm.server.runtime.session.session_metadata import (
 
 def test_resolve_tenant_sessions_dir_layout(tmp_path, monkeypatch):
     monkeypatch.setattr(
+        "jiuwenswarm.common.utils.is_enterprise",
+        lambda: True,
+    )
+    monkeypatch.setattr(
         "jiuwenswarm.common.utils.get_user_workspace_dir",
         lambda: tmp_path,
     )
@@ -62,6 +66,10 @@ def test_sync_writes_under_tenant_sessions_root(tmp_path, monkeypatch):
 
 
 def test_cache_isolated_by_sessions_root(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "jiuwenswarm.common.utils.is_enterprise",
+        lambda: True,
+    )
     monkeypatch.setattr(
         "jiuwenswarm.common.utils.get_user_workspace_dir",
         lambda: tmp_path,

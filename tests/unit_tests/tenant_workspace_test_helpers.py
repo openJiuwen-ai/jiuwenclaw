@@ -47,15 +47,18 @@ def tenant_workspace_root(
 
 
 def patch_multi_tenant_workspace_dirs(monkeypatch, tmp_path: Path) -> None:
-    def _mock(workspace_key: str) -> Path:
-        wk = str(workspace_key or "default").strip() or "default"
-        return tmp_path / f"workspace_{wk}"
+    """让多租户工作区按 key 分桶并落在 ``tmp_path`` 下（企业版行为）。
 
+    直接 patch ``get_multi_tenant_user_workspace_dir`` 会因被测模块的
+    ``from ... import get_multi_tenant_user_workspace_dir`` 引用而失效；
+    改为 patch ``is_enterprise``（走企业版按 key 分桶分支）与
+    ``get_user_workspace_dir``（落在 tmp_path），对任意调用方都生效。
+    """
     monkeypatch.setattr(
-        "jiuwenswarm.common.utils.get_multi_tenant_user_workspace_dir",
-        _mock,
+        "jiuwenswarm.common.utils.is_enterprise",
+        lambda: True,
     )
     monkeypatch.setattr(
-        "jiuwenswarm.gateway.tenant_paths.get_multi_tenant_user_workspace_dir",
-        _mock,
+        "jiuwenswarm.common.utils.get_user_workspace_dir",
+        lambda: tmp_path,
     )
