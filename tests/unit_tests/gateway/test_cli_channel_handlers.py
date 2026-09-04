@@ -1473,12 +1473,13 @@ async def test_session_delete_falls_back_to_shared_dir_when_agent_offline(
         lambda *args, **kwargs: (session_dir, None),
     )
 
-    async def fake_evict(**kwargs):
-        return None
+    class _Session:
+        async def release_kvc(self):
+            return True
 
     monkeypatch.setattr(
-        "jiuwenswarm.server.runtime.session.kv_cache.kv_cache_lifecycle.evict_session_kv_cache",
-        fake_evict,
+        "openjiuwen.core.session.agent.create_agent_session",
+        lambda **_kwargs: _Session(),
     )
 
     await server.local_handlers["/tui"]["session.delete"](

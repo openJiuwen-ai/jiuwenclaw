@@ -23,8 +23,8 @@ export default function HeartbeatScheduleEditor({ value, onChange, minIntervalSe
     value.kind === 'cron' && value.cronExpr.trim() ? validateHeartbeatCronExpr(value.cronExpr).error : undefined;
 
   return (
-    <div className="space-y-3">
-      <div className="flex gap-2">
+    <div className="space-y-3" data-testid="heartbeat-panel-schedule-editor">
+      <div className="flex gap-2" data-testid="heartbeat-panel-schedule-tab-group">
         {KIND_TABS.map((kind) => (
           <button
             key={kind}
@@ -33,6 +33,8 @@ export default function HeartbeatScheduleEditor({ value, onChange, minIntervalSe
             className={`rounded-full px-3 py-1 text-sm ${
               value.kind === kind ? 'bg-cron-action font-bold text-cron-action-foreground' : 'border border-border text-text'
             }`}
+            data-testid="heartbeat-panel-schedule-tab"
+            data-variant={kind}
           >
             {t(`heartbeat.schedule.tab.${kind}`)}
           </button>
@@ -40,8 +42,8 @@ export default function HeartbeatScheduleEditor({ value, onChange, minIntervalSe
       </div>
 
       {value.kind === 'interval' && (
-        <div className="flex items-center gap-2">
-          <span className="text-sm text-text">{t('heartbeat.schedule.interval.label')}</span>
+        <div className="flex items-center gap-2" data-testid="heartbeat-panel-interval-row">
+          <span className="text-sm text-text" data-testid="heartbeat-panel-interval-label">{t('heartbeat.schedule.interval.label')}</span>
           <input
             type="number"
             min={minIntervalMinutes}
@@ -51,13 +53,14 @@ export default function HeartbeatScheduleEditor({ value, onChange, minIntervalSe
               onChange({ ...value, intervalSeconds: minutes * 60 });
             }}
             className="w-24 rounded-md border border-border bg-card px-2 py-1 text-sm"
+            data-testid="heartbeat-panel-interval-input"
           />
-          <span className="text-sm text-text-muted">{t('heartbeat.schedule.interval.unit')}</span>
+          <span className="text-sm text-text-muted" data-testid="heartbeat-panel-interval-unit">{t('heartbeat.schedule.interval.unit')}</span>
         </div>
       )}
 
       {value.kind === 'cron' && (
-        <div className="space-y-2">
+        <div className="space-y-2" data-testid="heartbeat-panel-cron-row">
           <input
             type="text"
             placeholder="0 9 * * 1-5"
@@ -65,8 +68,9 @@ export default function HeartbeatScheduleEditor({ value, onChange, minIntervalSe
             onChange={(e) => onChange({ ...value, cronExpr: e.target.value })}
             title={t('heartbeat.schedule.cron.hint') ?? undefined}
             className="w-full rounded-md border border-border bg-card px-2 py-1 text-sm font-mono"
+            data-testid="heartbeat-panel-cron-input"
           />
-          {cronError && <p className="text-xs text-red-500">{t(cronError)}</p>}
+          {cronError && <p className="text-xs text-red-500" data-testid="heartbeat-panel-cron-error">{t(cronError)}</p>}
           <SimpleSelect
             value={value.timezone}
             onChange={(v) => onChange({ ...value, timezone: v })}
@@ -77,18 +81,20 @@ export default function HeartbeatScheduleEditor({ value, onChange, minIntervalSe
       )}
 
       {value.kind === 'once' && (
-        <div className="flex items-center gap-2" title={t('heartbeat.schedule.once.hint') ?? undefined}>
+        <div className="flex items-center gap-2" title={t('heartbeat.schedule.once.hint') ?? undefined} data-testid="heartbeat-panel-once-row">
           <input
             type="date"
             value={value.onceDate}
             onChange={(e) => onChange({ ...value, onceDate: e.target.value })}
             className="rounded-md border border-border bg-card px-2 py-1 text-sm"
+            data-testid="heartbeat-panel-once-date-input"
           />
           <input
             type="time"
             value={value.onceTime}
             onChange={(e) => onChange({ ...value, onceTime: e.target.value })}
             className="rounded-md border border-border bg-card px-2 py-1 text-sm"
+            data-testid="heartbeat-panel-once-time-input"
           />
         </div>
       )}

@@ -35,13 +35,20 @@ export function canHeartbeatRunNow(enabled: boolean, status: HeartbeatJobStatus)
 }
 
 /**
- * pause/resume 切换按钮在"恢复"方向是否可点：任务处于终态（completed / expired）时，
- * 仅靠 toggle 无法重新激活（Once 到期要改未来时间、max_runs 满要提高上限），后端也会拒绝，
- * 因此按钮直接置灰，引导用户走"编辑"。scheduled / running / disabled 一律允许（见后端交接文档 §2.3）。
- * 只判断终态；actingJobId 命中等局部 UI 状态由调用方再 && 一层。
+ * pause/resume 切换按钮在"恢复"方向是否可点：
+ * - completed 只有在 max_runs 已调大到高于 run_count 时可恢复；
+ * - expired 仍需先编辑未来的调度时间；
+ * - scheduled / running / disabled 一律允许。
+ * actingJobId 命中等局部 UI 状态由调用方再 && 一层。
  */
-export function canHeartbeatToggleEnable(status: HeartbeatJobStatus): boolean {
-  return status !== 'completed' && status !== 'expired';
+export function canHeartbeatToggleEnable(
+  status: HeartbeatJobStatus,
+  maxRuns: number | null,
+  runCount: number,
+): boolean {
+  if (status === 'expired') return false;
+  if (status !== 'completed') return true;
+  return maxRuns !== null && runCount < maxRuns;
 }
 
 const KNOWN_RUN_NOW_REJECT_REASONS = [

@@ -614,6 +614,9 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
         next_tools: list[Any] = []
         changed = False
         for tool in tools:
+            if getattr(tool, "name", None) == "skill_index":
+                next_tools.append(tool)
+                continue
             params = getattr(tool, "parameters", None)
             if not isinstance(params, dict):
                 next_tools.append(tool)
@@ -725,11 +728,6 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
             self._inflight_tool_calls.pop(tc_id, None)
 
         await self._emit_tool_result(session, tc, ctx.inputs.tool_result)
-        self._symphony_stream_handler.request_force_finish(
-            ctx,
-            tc,
-            ctx.inputs.tool_result,
-        )
         await self._emit_ask_user_question_if_interrupted(
             session,
             tc,

@@ -1184,6 +1184,82 @@ def cleanup_team_files(workspace_dir: Path) -> None:
                 logger.warning(f"[Cleanup] Failed to remove legacy team database file: {e}")
 
 
+def _is_windows_frozen_bundle() -> bool:
+    """Return whether this process is a packaged Windows application."""
+    return sys.platform == "win32" and bool(getattr(sys, "frozen", False))
+
+
+def cleanup_stale_openjiuwen_descs() -> None:
+    """Remove flat OpenJiuwen descriptions left by a layout migration.
+
+    New OpenJiuwen releases store tool descriptions below domain directories,
+    while an in-place upgrade can leave the former flat files beside them. The
+    recursive description index treats both files as the same key and refuses
+    to start. A flat file is removed only when a non-fragment nested file with
+    the same stem exists, so flat-only layouts and fragment files remain intact.
+
+    Windows frozen bundles skip runtime cleanup because their installer repairs
+    the installed package data before offering to launch the application.
+
+    Raises:
+        RuntimeError: If a confirmed stale file cannot be removed.
+    """
+    if _is_windows_frozen_bundle():
+        logger.info(
+            "[Cleanup] Skipping OpenJiuwen description cleanup in frozen Windows "
+            "bundle; the installer performs upgrade cleanup."
+        )
+        return
+
+    try:
+        import openjiuwen
+    except ModuleNotFoundError as exc:
+        if exc.name == "openjiuwen":
+            return
+        raise
+
+    package_file = getattr(openjiuwen, "__file__", None)
+    if not package_file:
+        return
+
+    descs_dir = (
+        Path(package_file).parent
+        / "agent_teams"
+        / "tools"
+        / "locales"
+        / "descs"
+    )
+    if not descs_dir.is_dir():
+        return
+
+    for lang_dir in sorted(path for path in descs_dir.iterdir() if path.is_dir()):
+        nested_stems = set()
+        for desc_path in lang_dir.rglob("*.md"):
+            if desc_path.parent == lang_dir:
+                continue
+            if "fragments" in desc_path.relative_to(lang_dir).parts:
+                continue
+            nested_stems.add(desc_path.stem)
+
+        for flat_md in sorted(lang_dir.glob("*.md")):
+            if flat_md.stem not in nested_stems:
+                continue
+            try:
+                flat_md.unlink()
+                logger.info(
+                    f"[Cleanup] Removed stale flat OpenJiuwen description: {flat_md}"
+                )
+            except FileNotFoundError:
+                # Another process may have completed the same idempotent cleanup.
+                continue
+            except OSError as exc:
+                raise RuntimeError(
+                    "Failed to remove stale OpenJiuwen description "
+                    f"'{flat_md}'. Ensure the Python environment is writable "
+                    "or reinstall OpenJiuwen in a clean environment."
+                ) from exc
+
+
 def prepare_workspace(
     overwrite: bool = True,
     preferred_language: Optional[str] = None,
@@ -1478,6 +1554,15 @@ def _read_zip_index_version(zip_path: Path) -> str | None:
         return None
 
 
+def _print_console_progress(message: str) -> None:
+    """Print progress without letting a legacy console encoding abort startup."""
+    try:
+        print(message)
+    except UnicodeEncodeError:
+        escaped = message.encode("ascii", errors="backslashreplace").decode("ascii")
+        print(escaped)
+
+
 def _ensure_mcp_builtins(
     template_agent_workspace: Path,
     mcp_builtins_dir: Path,
@@ -1523,7 +1608,7 @@ def _ensure_mcp_builtins(
         "[mcp_builtins] %s: seed=%s local=%s -> extract %s",
         action, seed_version, local_version, seed_zip.name,
     )
-    print(
+    _print_console_progress(
         f"[jiuwenswarm-init] MCP 预置包 {action} (v{seed_version or '?'}) "
         f"<- {seed_zip.name}"
     )
@@ -1595,6 +1680,38 @@ def _ensure_mcp_builtins(
         overwrite=overwrite,
     ):
         pass  # 仅登记到 diff 摘要，文件已解压就位
+
+
+def prepare_runtime_workspace(*, cleanup_stale_descs: bool = True) -> None:
+    """Perform the idempotent workspace work required before runtime children start.
+
+    Desktop and the ``jiuwenswarm.app`` supervisor call this once before they
+    launch AgentServer and Gateway.  The children can then skip the same disk
+    work via ``JIUWENSWARM_RUNTIME_WORKSPACE_READY=1``.  Standalone child
+    entrypoints intentionally retain this function as their fallback.
+    """
+    if cleanup_stale_descs:
+        cleanup_stale_openjiuwen_descs()
+
+    workspace_dir = get_user_workspace_dir()
+    config_file = workspace_dir / "config" / "config.yaml"
+    new_workspace = workspace_dir / "agent" / "workspace"
+    old_workspace = workspace_dir / "agent" / "jiuwenclaw_workspace"
+    mcp_builtins_dir = new_workspace / "mcp" / "mcp_builtins"
+
+    cleanup_team_files(workspace_dir)
+
+    config_missing = not config_file.exists()
+    workspace_migration_needed = old_workspace.exists() and not new_workspace.exists()
+    mcp_builtins_missing = not mcp_builtins_dir.is_dir()
+    workspace_preparation_needed = any(
+        (config_missing, workspace_migration_needed, mcp_builtins_missing)
+    )
+    if workspace_preparation_needed:
+        prepare_workspace(overwrite=False, workspace_dir=workspace_dir)
+
+    ensure_config_migrated_from_template(workspace_dir)
+    ensure_default_builtin_skills()
 
 
 def _close_log_handlers() -> None:
@@ -2294,8 +2411,26 @@ def get_interactions_dir() -> Path:
 
 
 def get_cron_jobs_path() -> Path:
-    """Canonical path for cron_jobs.json shared by gateway and agentserver."""
-    return get_user_workspace_dir() / "agent" / "home" / "cron_jobs.json"
+    """Path to cron_jobs.json, following wherever this workspace keeps it.
+
+    ``_migrate_legacy_workspace`` relocates the file to ``gateway/`` while this
+    getter pointed at ``agent/home/``, so after a migration the scheduler read a
+    missing path and silently loaded zero jobs. Resolution order:
+
+    1. ``gateway/`` if present -- the migration ran.
+    2. ``agent/home/`` if present -- it has not; repointing unconditionally
+       would empty the schedules of every deployment that never migrated.
+    3. ``gateway/`` otherwise, so a fresh workspace never creates
+       ``agent/home``, whose existence alone marks a workspace legacy.
+    """
+    workspace = get_user_workspace_dir()
+    gateway_path = workspace / "gateway" / "cron_jobs.json"
+    legacy_path = workspace / "agent" / "home" / "cron_jobs.json"
+    if gateway_path.exists():
+        return gateway_path
+    if legacy_path.exists():
+        return legacy_path
+    return gateway_path
 
 
 def get_heartbeat_jobs_path() -> Path:
