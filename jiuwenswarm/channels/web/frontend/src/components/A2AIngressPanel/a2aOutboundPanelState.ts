@@ -7,6 +7,7 @@ export interface A2AOutboundInterface {
 }
 
 export interface A2AOutboundDiscovery {
+  agent_card: Record<string, unknown>;
   discovery_id: string;
   expires_at: string;
   source_url: string;
@@ -43,8 +44,8 @@ export interface A2AOutboundSettings {
   allow_loopback_http: boolean;
 }
 
-const asString = (value: unknown): string => typeof value === 'string' ? value : '';
-const asNumber = (value: unknown): number => typeof value === 'number' && Number.isFinite(value) ? value : 0;
+const asString = (value: unknown): string => (typeof value === 'string' ? value : '');
+const asNumber = (value: unknown): number => (typeof value === 'number' && Number.isFinite(value) ? value : 0);
 
 function normalizeInterface(value: unknown): A2AOutboundInterface | null {
   if (!value || typeof value !== 'object') return null;
@@ -68,16 +69,19 @@ export function normalizeA2AOutboundDiscovery(value: unknown): A2AOutboundDiscov
   if (!discoveryId || !asString(agent.name) || interfaces.length === 0) return null;
   return {
     discovery_id: discoveryId,
+    agent_card: payload.agent_card && typeof payload.agent_card === 'object' ? (payload.agent_card as Record<string, unknown>) : {},
     expires_at: asString(payload.expires_at),
     source_url: asString(payload.source_url),
     card_path: asString(payload.card_path),
     card_fingerprint: asString(payload.card_fingerprint),
     agent: {
-      name: asString(agent.name), description: asString(agent.description), version: asString(agent.version),
-      skills: Array.isArray(agent.skills) ? agent.skills.filter(item => !!item && typeof item === 'object') as Array<Record<string, unknown>> : [],
+      name: asString(agent.name),
+      description: asString(agent.description),
+      version: asString(agent.version),
+      skills: Array.isArray(agent.skills) ? (agent.skills.filter(item => !!item && typeof item === 'object') as Array<Record<string, unknown>>) : [],
       compatible_interfaces: interfaces,
     },
-    security_requirements: Array.isArray(payload.security_requirements) ? payload.security_requirements as Array<Record<string, unknown>> : [],
+    security_requirements: Array.isArray(payload.security_requirements) ? (payload.security_requirements as Array<Record<string, unknown>>) : [],
     warnings: Array.isArray(payload.warnings) ? payload.warnings.map(asString).filter(Boolean) : [],
   };
 }
@@ -89,13 +93,19 @@ export function normalizeA2AOutboundAgent(value: unknown): A2AOutboundAgent | nu
   const selectedInterface = normalizeInterface(item.selected_interface);
   if (!asString(item.agent_id) || !selectedInterface || !['available', 'unreachable', 'incompatible', 'review_required'].includes(availability)) return null;
   return {
-    agent_id: asString(item.agent_id), display_name: asString(item.display_name), card_revision: asNumber(item.card_revision),
-    agent_card: item.agent_card && typeof item.agent_card === 'object' ? item.agent_card as Record<string, unknown> : {},
-    selected_interface: selectedInterface, enabled: item.enabled === true, availability,
-    has_credential: item.has_credential === true, connect_timeout_seconds: asNumber(item.connect_timeout_seconds),
-    sync_wait_seconds: asNumber(item.sync_wait_seconds), last_checked_at: typeof item.last_checked_at === 'string' ? item.last_checked_at : null,
+    agent_id: asString(item.agent_id),
+    display_name: asString(item.display_name),
+    card_revision: asNumber(item.card_revision),
+    agent_card: item.agent_card && typeof item.agent_card === 'object' ? (item.agent_card as Record<string, unknown>) : {},
+    selected_interface: selectedInterface,
+    enabled: item.enabled === true,
+    availability,
+    has_credential: item.has_credential === true,
+    connect_timeout_seconds: asNumber(item.connect_timeout_seconds),
+    sync_wait_seconds: asNumber(item.sync_wait_seconds),
+    last_checked_at: typeof item.last_checked_at === 'string' ? item.last_checked_at : null,
     last_error_summary: typeof item.last_error_summary === 'string' ? item.last_error_summary : null,
-    pending_revision: item.pending_revision && typeof item.pending_revision === 'object' ? item.pending_revision as Record<string, unknown> : null,
+    pending_revision: item.pending_revision && typeof item.pending_revision === 'object' ? (item.pending_revision as Record<string, unknown>) : null,
   };
 }
 
@@ -117,3 +127,45 @@ export function normalizeA2AOutboundSettings(value: unknown): A2AOutboundSetting
 }
 
 export const shouldAcceptA2AOutboundResponse = (generation: number, current: number): boolean => generation === current;
+
+export function createA2AOutboundRequestScope() {
+  let generation = 0;
+  return {
+    next: () => ++generation,
+    accepts: (responseGeneration: number) => responseGeneration === generation,
+  };
+}
+
+const asRecord = (value: unknown): Record<string, unknown> =>
+  value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
+
+export function describeA2AOutboundAuthentication(card: Record<string, unknown>, t: (key: string) => string): string {
+  const requirements = Array.isArray(card.securityRequirements) ? card.securityRequirements : [];
+  const schemes = asRecord(card.securitySchemes);
+  const alternatives = requirements.map(requirement => {
+    const raw = asRecord(requirement);
+    if (!('schemes' in raw) && Object.keys(raw).length) return t('a2aIngress.outbound.credentialHelp.unknown');
+    const names = Object.keys(asRecord(raw.schemes));
+    if (!names.length) return t('a2aIngress.security.types.none');
+    return names
+      .map(name => {
+        const scheme = asRecord(schemes[name]);
+        const apiKey = asRecord(scheme.apiKeySecurityScheme);
+        const httpAuth = asRecord(scheme.httpAuthSecurityScheme);
+        if (typeof apiKey.name === 'string') {
+          const location = typeof apiKey.location === 'string' ? apiKey.location : '';
+          const label = ['header', 'query', 'cookie'].includes(location)
+            ? t(`a2aIngress.outbound.credentialHelp.${location}`)
+            : t('a2aIngress.outbound.credentialHelp.unknown');
+          return `API Key (${label}: ${apiKey.name})`;
+        }
+        if (httpAuth.scheme === 'bearer') return 'Bearer Token';
+        if (typeof httpAuth.scheme === 'string') return `HTTP ${httpAuth.scheme}`;
+        if (scheme.oauth2SecurityScheme) return 'OAuth 2.0 (Bearer Token)';
+        if (scheme.openIdConnectSecurityScheme) return 'OpenID Connect (Bearer Token)';
+        return t('a2aIngress.outbound.credentialHelp.unknown');
+      })
+      .join(' + ');
+  });
+  return alternatives.length ? alternatives.join(t('a2aIngress.outbound.credentialHelp.or')) : t('a2aIngress.outbound.credentialHelp.undeclared');
+}

@@ -2646,7 +2646,7 @@ class JiuWenSwarmDeepAdapter:
                 config["request"] = request
             create_started_at = time.monotonic()
             await adapter.create_instance(
-                config,
+                config if config else None,
                 mode=self._session_instance_mode,
                 sub_mode=self._session_instance_sub_mode,
                 config_base=self._config_base_cache,
@@ -5501,6 +5501,18 @@ class JiuWenSwarmDeepAdapter:
         self._build_model_cache_from_defaults(config)
         if not self._model_cache:
             self._build_model_cache_legacy(config)
+
+        if not self._model_cache:
+            # config.yaml 占位条目无效时,回退到进程环境变量(API_BASE/API_KEY/MODEL_NAME)
+            env_fallback_counter: dict[str, int] = {}
+            for entry in get_default_models({"models": {}}):
+                try:
+                    self._register_model_cache_entry(entry, env_fallback_counter)
+                except Exception as exc:
+                    logger.warning(
+                        "[JiuWenSwarmDeepAdapter] 跳过无效环境变量模型条目: %s",
+                        exc,
+                    )
 
         if not self._model_cache:
             raise ValueError(
@@ -16655,15 +16667,20 @@ class JiuWenSwarmDeepAdapter:
                 and not goal_stream_request
             )
             async for chunk in interaction_stream:
+                # After ask_user, skip trailing metadata until a real resume
+                # chunk arrives (in-place HITL). Unknown types default to clear
+                # so new SDK frames cannot re-hang the stream.
                 if suppress_stream_after_hitl:
-                    continue
-                # [DIAG] HITL resume 调试：对照 forwarder([DeepAgent][fwd]) 转发的 chunk，
-                # 确认主循环实际从 interaction_stream 消费到什么类型。
-                _stream_ct = getattr(chunk, "type", None) or type(chunk).__name__
-                logger.debug(
-                    "[JiuWenSwarmDeepAdapter][stream] consumer chunk type=%s request_id=%s",
-                    _stream_ct, rid,
-                )
+                    if self._is_hitl_suppress_noise_chunk(chunk):
+                        continue
+                    suppress_stream_after_hitl = False
+                    hitl_pending_stream = False
+                    logger.info(
+                        "[JiuWenSwarmDeepAdapter] HITL suppress cleared on "
+                        "runner resume: request_id=%s chunk_type=%s",
+                        rid,
+                        getattr(chunk, "type", None) or type(chunk).__name__,
+                    )
                 # First chunk handed back by the runner: records the time to
                 # first token for this round.
                 if not first_chunk_seen:
@@ -17370,6 +17387,15 @@ class JiuWenSwarmDeepAdapter:
     def _is_ask_user_payload(payload: Any) -> bool:
         """HITL 暂停判定：payload 是否为 ask_user 卡片事件。"""
         return isinstance(payload, dict) and payload.get("event_type") == "chat.ask_user_question"
+
+    @staticmethod
+    def _is_hitl_suppress_noise_chunk(chunk: Any) -> bool:
+        """Metadata that may follow ask_user before the stream truly pauses.
+
+        These must not clear suppress / hitl_pending; any other chunk means the
+        runner resumed in-place and outbound must resume.
+        """
+        return getattr(chunk, "type", None) in ("llm_usage", "context.usage")
 
     @staticmethod
     def _run_failure(chunk) -> tuple[str, str] | None:

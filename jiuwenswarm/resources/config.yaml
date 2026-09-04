@@ -1131,7 +1131,7 @@ permissions:
     cron_toggle_job: allow
     cron_preview_job: allow
     acp_chat: ask
-    skill_acceleration_exec: allow
+    skill_acceleration_exec: ask
 
   rules:
     - id: shell_allow_dir

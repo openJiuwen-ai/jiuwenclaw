@@ -173,6 +173,48 @@ def test_same_round_streamed_answer_still_empty_final() -> None:
     assert parsed == {"event_type": "chat.final", "content": ""}
 
 
+def test_hitl_suppress_noise_keeps_flags() -> None:
+    """llm_usage / context.usage after ask_user must not clear suppress."""
+    assert JiuWenSwarmDeepAdapter._is_hitl_suppress_noise_chunk(
+        SimpleNamespace(type="llm_usage", payload={"usage_metadata": {}})
+    )
+    assert JiuWenSwarmDeepAdapter._is_hitl_suppress_noise_chunk(
+        SimpleNamespace(type="context.usage", payload={"rate": 0})
+    )
+
+
+def test_hitl_suppress_cleared_on_resume_or_unknown_chunk() -> None:
+    """Content and unknown SDK frames clear suppress (default = resumed)."""
+    for chunk_type in (
+        "llm_output",
+        "answer",
+        "chat.file",
+        "task.start",
+        "tool_call",
+    ):
+        assert not JiuWenSwarmDeepAdapter._is_hitl_suppress_noise_chunk(
+            SimpleNamespace(type=chunk_type, payload={})
+        )
+    assert not JiuWenSwarmDeepAdapter._is_hitl_suppress_noise_chunk(
+        SimpleNamespace(payload={})
+    )
+
+
+
+def test_is_ask_user_payload_detects_ask_user() -> None:
+    assert JiuWenSwarmDeepAdapter._is_ask_user_payload(
+        {"event_type": "chat.ask_user_question", "questions": []}
+    )
+
+
+def test_is_ask_user_payload_rejects_non_ask_user() -> None:
+    assert not JiuWenSwarmDeepAdapter._is_ask_user_payload(
+        {"event_type": "chat.delta", "content": "hi"}
+    )
+    assert not JiuWenSwarmDeepAdapter._is_ask_user_payload(None)
+
+
+
 def test_streamed_flag_without_visible_text_keeps_final_for_drain() -> None:
     answer = "以下是完成情况概要"
     parsed = JiuWenSwarmDeepAdapter._parse_stream_chunk(

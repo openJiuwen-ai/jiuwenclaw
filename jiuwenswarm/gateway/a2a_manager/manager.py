@@ -167,6 +167,13 @@ class A2AManager:
     async def outbound_get(self, agent_id: str) -> dict[str, Any]:
         return await self._require_outbound().get_agent(agent_id)
 
+    async def outbound_edit(self, agent_id: str) -> dict[str, Any]:
+        return await self._require_outbound().edit_agent(agent_id)
+
+    async def edit_config(self) -> dict[str, Any]:
+        async with self._lock:
+            return {**self.snapshot().to_dict(), "credential": self._config.credential}
+
     async def outbound_update(
         self, agent_id: str, params: dict[str, Any]
     ) -> dict[str, Any]:
@@ -234,6 +241,18 @@ class A2AManager:
         effective_base_url = (
             f"http://{effective.host}:{effective.port}" if effective else None
         )
+        security_fields = (
+            "auth_type",
+            "api_key_header",
+            "card_auth_required",
+            "credential_hash",
+        )
+        security_pending_apply = False
+        if effective is not None:
+            for name in security_fields:
+                if getattr(config, name) != getattr(effective, name):
+                    security_pending_apply = True
+                    break
         return A2AIngressSnapshot(
             enabled=config.enabled,
             state=self._state,
@@ -278,6 +297,15 @@ class A2AManager:
             started_at=self._started_at,
             last_error=self._last_error,
             config_revision=self._config_revision,
+            desired_auth_type=config.auth_type,
+            desired_api_key_header=config.api_key_header,
+            desired_card_auth_required=config.card_auth_required,
+            credential_configured=bool(config.credential_hash),
+            effective_auth_type=effective.auth_type if effective else None,
+            effective_card_auth_required=effective.card_auth_required
+            if effective
+            else None,
+            security_pending_apply=security_pending_apply,
         )
 
     def history(self, limit: int = 100) -> dict[str, Any]:

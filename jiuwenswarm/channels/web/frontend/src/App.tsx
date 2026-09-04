@@ -41,8 +41,14 @@ import {
   normalizeToolCallPayload,
   normalizeToolResultPayload,
 } from './features/tool-events/toolEventNormalizer';
-import { useWebSocket, mergePersistedGoalCompletionMessages, stampGoalObjectiveMessages } from './hooks';
+import {
+  useWebSocket,
+  mergePersistedGoalCompletionMessages,
+  stampGoalObjectiveMessages,
+  useCronJobSync,
+} from './hooks';
 import { webRequest } from './services/webClient';
+import { getWebTransport } from './utils/env';
 import { useTeamPanelState } from './features/teamPanelState';
 import { AgentMode, MediaItem, UserAnswer, ModelEntry, type Session, type UserAnswerStatus } from './types';
 import {
@@ -275,6 +281,8 @@ function AppContent() {
   });
 
   const enterpriseMode = isEnterprise();
+  const cronJobPullSyncEnabled = enterpriseMode && getWebTransport() === 'http';
+  useCronJobSync(cronJobPullSyncEnabled);
   const enterpriseBlockedNav = new Set<MainNavKey>(ENTERPRISE_HIDDEN_NAV_ITEMS);
   const [activeNav, setActiveNav] = useState<MainNavKey>('chat');
   const [serverConfig, setServerConfig] = useState<Record<string, unknown> | null>(null);

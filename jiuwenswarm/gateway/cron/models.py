@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime, timezone as dt_timezone
 from enum import Enum
 from typing import Any
 
@@ -252,6 +253,9 @@ class CronJob:
     session_id: str | None = None
     created_at: float | None = None
     updated_at: float | None = None
+    # 企业库调度权威：下一趟 push 时刻（epoch 秒，UTC 语义由 timezone 解释）
+    next_run_at: float | None = None
+    last_run_at: float | None = None
     # 记录定时任务是在群聊("group")还是私聊("p2p")中创建的，用于推送时决定是否走 IMOutboundPipeline
     chat_type: str | None = None
     # 定时任务执行时使用的 Agent 模式；未指定时默认 agent（plan/fast 已合并）
@@ -294,6 +298,8 @@ class CronJob:
             "targets": self.targets,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
+            "next_run_at": self.next_run_at,
+            "last_run_at": self.last_run_at,
             "service_id": self.service_id,
             "agent_id": self.agent_id,
         }
@@ -369,6 +375,23 @@ class CronJob:
         updated_at = data.get("updated_at", None)
         created_at_f = float(created_at) if isinstance(created_at, (int, float)) else None
         updated_at_f = float(updated_at) if isinstance(updated_at, (int, float)) else None
+
+        def _epoch_field(key: str) -> float | None:
+            val = data.get(key, None)
+            if isinstance(val, (int, float)):
+                return float(val)
+            if isinstance(val, str) and val.strip():
+                try:
+                    parsed = datetime.fromisoformat(val.replace("Z", "+00:00"))
+                    if parsed.tzinfo is None:
+                        parsed = parsed.replace(tzinfo=dt_timezone.utc)
+                    return float(parsed.timestamp())
+                except ValueError:
+                    return None
+            return None
+
+        next_run_at_f = _epoch_field("next_run_at")
+        last_run_at_f = _epoch_field("last_run_at")
 
         if not job_id:
             raise ValueError("id is required")
@@ -448,6 +471,8 @@ class CronJob:
             session_id=job_session_id,
             created_at=created_at_f,
             updated_at=updated_at_f,
+            next_run_at=next_run_at_f,
+            last_run_at=last_run_at_f,
             chat_type=job_chat_type,
             mode=job_mode,
             delete_after_run=delete_after_run,
@@ -487,3 +512,6 @@ class CronRunState:
     timezone: str | None = None
     exec_channel_id: str | None = None
     exec_session_id: str | None = None
+    # ``cron.job.run_now`` 预分配 run 时使用当前时刻，与库表 ``next_run_at`` 不一致，
+    # 不能走条件 UPDATE 认领（否则会静默跳过 wake）。
+    manual_trigger: bool = False

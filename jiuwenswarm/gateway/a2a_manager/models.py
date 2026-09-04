@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, field, replace
 from enum import Enum
 from typing import Any
+
+from jiuwenswarm.gateway.channel_manager.protocol.a2a.security import (
+    hash_credential,
+    validate_security,
+)
 
 
 class A2AIngressState(str, Enum):
@@ -25,7 +30,7 @@ class A2AIngressError(RuntimeError):
 
 @dataclass(frozen=True)
 class A2AIngressConfig:
-    """Configuration retained from the existing ``A2A_SERVER_*`` contract."""
+    """Configuration for the ``A2A_SERVER_*`` settings."""
 
     enabled: bool = False
     host: str = "127.0.0.1"
@@ -38,8 +43,20 @@ class A2AIngressConfig:
     app_description: str = "A2A ingress for JiuwenSwarm Gateway"
     app_version: str = "0.1.0"
     expose_reasoning: bool = True
+    auth_type: str = "none"
+    api_key_header: str = "X-API-Key"
+    card_auth_required: bool = False
+    credential: str = field(default="", repr=False)
+
+    @property
+    def credential_hash(self) -> str:
+        return hash_credential(self.credential) if self.credential else ""
 
     def validate(self) -> "A2AIngressConfig":
+        try:
+            validate_security(self)
+        except ValueError as exc:
+            raise A2AIngressError("A2A_CONFIG_INVALID", str(exc)) from exc
         if not self.host.strip():
             raise A2AIngressError(
                 "A2A_CONFIG_INVALID", "A2A_SERVER_HOST cannot be empty"
@@ -63,7 +80,7 @@ class A2AIngressConfig:
         return self
 
     def with_patch(self, patch: dict[str, Any]) -> "A2AIngressConfig":
-        allowed = set(asdict(self))
+        allowed = set(asdict(self)) | {"clear_credential"}
         unknown = set(patch) - allowed
         if unknown:
             raise A2AIngressError(
@@ -71,7 +88,25 @@ class A2AIngressConfig:
                 f"Unsupported fields: {', '.join(sorted(unknown))}",
             )
         values = asdict(self)
+        clear = patch.get("clear_credential", False)
+        if not isinstance(clear, bool):
+            raise A2AIngressError(
+                "A2A_CONFIG_INVALID", "clear_credential must be a boolean"
+            )
+        credential = patch.get("credential", "")
+        if not isinstance(credential, str):
+            raise A2AIngressError("A2A_CONFIG_INVALID", "credential must be a string")
+        if clear and credential:
+            raise A2AIngressError(
+                "A2A_CONFIG_INVALID", "Cannot replace and clear a credential together"
+            )
+        if clear:
+            values["credential"] = ""
+        elif credential:
+            values["credential"] = credential
         for name, value in patch.items():
+            if name in {"credential", "clear_credential"}:
+                continue
             if name == "port":
                 try:
                     values[name] = int(value)
@@ -79,7 +114,7 @@ class A2AIngressConfig:
                     raise A2AIngressError(
                         "A2A_CONFIG_INVALID", "port must be an integer"
                     ) from exc
-            elif name in {"enabled", "expose_reasoning"}:
+            elif name in {"enabled", "expose_reasoning", "card_auth_required"}:
                 if not isinstance(value, bool):
                     raise A2AIngressError(
                         "A2A_CONFIG_INVALID", f"{name} must be a boolean"
@@ -92,7 +127,7 @@ class A2AIngressConfig:
         return replace(self, **values).validate()
 
     def to_channel_config(self):
-        """Create the unchanged protocol-adapter configuration."""
+        """Create the protocol-adapter configuration."""
         from jiuwenswarm.gateway.channel_manager.protocol.a2a.a2a_connect import (
             A2AChannelConfig,
         )
@@ -109,6 +144,10 @@ class A2AIngressConfig:
             app_description=self.app_description,
             app_version=self.app_version,
             expose_reasoning=self.expose_reasoning,
+            auth_type=self.auth_type,
+            api_key_header=self.api_key_header,
+            card_auth_required=self.card_auth_required,
+            credential_hash=self.credential_hash,
         )
 
 
@@ -141,6 +180,13 @@ class A2AIngressSnapshot:
     started_at: float | None
     last_error: str | None
     config_revision: int
+    desired_auth_type: str = "none"
+    desired_api_key_header: str = "X-API-Key"
+    desired_card_auth_required: bool = False
+    credential_configured: bool = False
+    effective_auth_type: str | None = None
+    effective_card_auth_required: bool | None = None
+    security_pending_apply: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         result = asdict(self)

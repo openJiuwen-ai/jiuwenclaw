@@ -747,3 +747,166 @@ async def test_enable_surfaces_stable_startup_error_codes(start_error, code):
 
     assert exc_info.value.code == code
     assert manager.snapshot().state.value == "error"
+
+
+@pytest.mark.parametrize(
+    "patch",
+    [
+        {"auth_type": "unknown"},
+        {"auth_type": "bearer"},
+        {"credential": "short"},
+        {"credential": "bad\r\ncredential-value"},
+        {"credential": 123},
+        {"credential_hash": "a" * 64},
+        {"api_key_header": "Authorization"},
+        {"api_key_header": "bad header"},
+        {"card_auth_required": True},
+        {"clear_credential": "true"},
+        {"clear_credential": True, "credential": "test-secret-with-enough-length"},
+    ],
+)
+def test_ingress_rejects_invalid_security_without_echoing_credentials(patch):
+    with pytest.raises(A2AIngressError) as error:
+        A2AIngressConfig().with_patch(patch)
+    if isinstance(patch.get("credential"), str):
+        assert patch["credential"] not in str(error.value)
+
+
+@pytest.mark.parametrize("encrypted", [False, True])
+def test_ingress_credentials_use_model_key_storage_and_reload(
+    tmp_path, monkeypatch, encrypted
+):
+    from cryptography.fernet import Fernet
+    from types import SimpleNamespace
+    from dotenv import dotenv_values
+    from jiuwenswarm.extensions.registry import ExtensionRegistry
+
+    cipher = Fernet(Fernet.generate_key())
+    provider = (
+        SimpleNamespace(
+            encrypt=lambda value: cipher.encrypt(value.encode()).decode(),
+            decrypt=lambda value: cipher.decrypt(value.encode()).decode(),
+        )
+        if encrypted
+        else None
+    )
+    monkeypatch.setattr(
+        ExtensionRegistry,
+        "get_instance",
+        lambda: SimpleNamespace(get_crypto_provider=lambda: provider),
+    )
+    monkeypatch.setattr(a2a_config_module.os, "environ", {})
+    secret = "test-secret-with-enough-length"
+    config = A2AIngressConfig().with_patch(
+        {"auth_type": "bearer", "credential": secret}
+    )
+    repo = A2AIngressConfigRepository(tmp_path / ".env")
+    repo.save(config)
+    values = dotenv_values(tmp_path / ".env")
+    assert (values["A2A_SERVER_API_KEY"] != secret) == encrypted
+    assert config.credential_hash not in (tmp_path / ".env").read_text(encoding="utf-8")
+    assert load_a2a_ingress_config(values) == config
+    assert config.credential == secret
+    assert not hasattr(config.to_channel_config(), "credential")
+    assert secret not in repr(config)
+    assert config.credential_hash not in repr(config)
+    assert load_a2a_ingress_config(a2a_config_module.os.environ) == config
+    assert (
+        config.with_patch({"credential": "", "app_name": "Renamed"}).credential_hash
+        == config.credential_hash
+    )
+    with pytest.raises(A2AIngressError):
+        config.with_patch({"clear_credential": True})
+    cleared = config.with_patch({"auth_type": "none", "clear_credential": True})
+    repo.save(cleared)
+    assert not load_a2a_ingress_config(a2a_config_module.os.environ).credential_hash
+    assert not load_a2a_ingress_config(dotenv_values(tmp_path / ".env")).credential
+
+
+@pytest.mark.asyncio
+async def test_ingress_rotation_only_takes_effect_after_apply():
+    manager = A2AManager(
+        _ChannelManagerProbe(),
+        object(),
+        A2AIngressConfig(),
+        repository=_ConfigRepositoryProbe(),
+        channel_factory=_ChannelProbe,
+    )
+    first = "test-first-secret-with-enough-length"
+    second = "test-second-secret-with-enough-length"
+    await manager.update({"auth_type": "bearer", "credential": first})
+    await manager.enable()
+    old_channel = manager._channel
+    snapshot = await manager.update({"credential": second})
+    assert snapshot.security_pending_apply
+    assert snapshot.credential_configured
+    assert first not in str(snapshot.to_dict())
+    assert second not in str(snapshot.to_dict())
+    assert (await manager.edit_config())["credential"] == second
+    assert second not in repr(snapshot)
+    assert manager._config.credential_hash not in str(snapshot.to_dict())
+    assert old_channel.config.credential_hash != manager._config.credential_hash
+    snapshot = await manager.update({}, apply=True)
+    assert not snapshot.security_pending_apply
+    assert snapshot.effective_auth_type == "bearer"
+    assert old_channel.stop_calls == 1
+    assert manager._channel.config.credential_hash == manager._config.credential_hash
+    await manager.disable()
+
+
+def test_ingress_rotation_removes_duplicate_env_values(tmp_path, monkeypatch):
+    from dotenv import dotenv_values
+
+    monkeypatch.setattr(a2a_config_module.os, "environ", {})
+    env_path = tmp_path / ".env"
+    env_path.write_text(
+        "A2A_SERVER_AUTH_TYPE=none\nA2A_SERVER_AUTH_TYPE=none\nMODEL_NAME=keep",
+        encoding="utf-8",
+    )
+    config = A2AIngressConfig().with_patch(
+        {"auth_type": "bearer", "credential": "test-rotation-secret-long"}
+    )
+    A2AIngressConfigRepository(env_path).save(config)
+    values = dotenv_values(env_path)
+    assert values["MODEL_NAME"] == "keep"
+    assert load_a2a_ingress_config(values) == config
+    assert env_path.read_text(encoding="utf-8").count("A2A_SERVER_AUTH_TYPE=") == 1
+
+
+@pytest.mark.parametrize(
+    "env",
+    [
+        {"A2A_SERVER_AUTH_TYPE": "bearer"},
+        {"A2A_SERVER_AUTH_TYPE": "invalid"},
+        {"A2A_SERVER_CARD_AUTH_REQUIRED": "invalid"},
+        {"A2A_SERVER_API_KEY": "short"},
+    ],
+)
+def test_invalid_security_configuration_never_starts_anonymous_ingress(env):
+    config, error = load_a2a_ingress_config_safely(
+        {"A2A_SERVER_ENABLED": "true", **env}
+    )
+    assert error is not None
+    assert not config.enabled
+
+
+@pytest.mark.asyncio
+async def test_failed_credential_persistence_keeps_saved_and_effective_values():
+    class FailingRepository:
+        def save(self, config):
+            raise A2AIngressError("A2A_CONFIG_INVALID", "Storage unavailable")
+
+    original = A2AIngressConfig().with_patch(
+        {"auth_type": "bearer", "credential": "test-original-credential"}
+    )
+    manager = A2AManager(
+        _ChannelManagerProbe(),
+        object(),
+        original,
+        repository=FailingRepository(),
+        channel_factory=_ChannelProbe,
+    )
+    with pytest.raises(A2AIngressError):
+        await manager.update({"credential": "test-replacement-credential"}, apply=True)
+    assert manager._config == original
+    assert manager.snapshot().config_revision == 0
