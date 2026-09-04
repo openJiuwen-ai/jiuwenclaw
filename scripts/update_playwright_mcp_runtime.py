@@ -33,6 +33,15 @@ CLI_RELATIVE_PATH = "node_modules/@playwright/mcp/cli.js"
 ARCHIVE_NAME = f"playwright-mcp-{PACKAGE_VERSION}.zip"
 MANIFEST_NAME = "manifest.json"
 ZIP_TIMESTAMP = (1980, 1, 1, 0, 0, 0)
+NPM_INSTALL_ARGUMENTS = (
+    "ci",
+    "--omit=dev",
+    "--omit=optional",
+    "--ignore-scripts",
+    "--no-audit",
+    "--no-fund",
+    "--bin-links=false",
+)
 
 
 def _sha256(path: Path) -> str:
@@ -146,12 +155,42 @@ def _production_provenance(lock: dict[str, Any]) -> list[dict[str, str]]:
     return provenance
 
 
+def _is_generated_npm_path(relative: Path) -> bool:
+    """Return whether *relative* is platform-dependent npm install metadata."""
+    if relative.as_posix() == ".package-lock.json":
+        return True
+
+    parts = relative.parts
+    return any(
+        part == ".bin" and (index == 0 or parts[index - 1] == "node_modules")
+        for index, part in enumerate(parts)
+    )
+
+
+def _archive_files(node_modules: Path) -> list[Path]:
+    files: list[Path] = []
+    for path in sorted(
+        node_modules.rglob("*"),
+        key=lambda candidate: candidate.relative_to(node_modules).as_posix(),
+    ):
+        relative = path.relative_to(node_modules)
+        if _is_generated_npm_path(relative):
+            continue
+        # pathlib follows symlinks for is_file(). Check first so a package
+        # cannot silently make the archive depend on the host link layout.
+        if path.is_symlink():
+            raise RuntimeError(
+                "Symbolic links outside npm-generated .bin directories must not be "
+                f"bundled: {path.relative_to(SOURCE_DIR).as_posix()}"
+            )
+        if path.is_file():
+            files.append(path)
+    return files
+
+
 def _write_deterministic_zip(output: Path) -> None:
     node_modules = SOURCE_DIR / "node_modules"
-    files = sorted(
-        (path for path in node_modules.rglob("*") if path.is_file()),
-        key=lambda path: path.relative_to(SOURCE_DIR).as_posix(),
-    )
+    files = _archive_files(node_modules)
     output.parent.mkdir(parents=True, exist_ok=True)
     temp_output = output.with_suffix(output.suffix + ".tmp")
     temp_output.unlink(missing_ok=True)
@@ -171,7 +210,12 @@ def _write_deterministic_zip(output: Path) -> None:
             # macOS, and Linux.
             info.external_attr = (stat.S_IFREG | 0o644) << 16
             with path.open("rb") as source:
-                archive.writestr(info, source.read(), compress_type=zipfile.ZIP_DEFLATED, compresslevel=9)
+                archive.writestr(
+                    info,
+                    source.read(),
+                    compress_type=zipfile.ZIP_DEFLATED,
+                    compresslevel=9,
+                )
     os.replace(temp_output, output)
 
 
@@ -193,19 +237,7 @@ def build(*, npm_executable: str | None = None, node_executable: str | None = No
             "npm_config_fund": "false",
         }
     )
-    _run(
-        [
-            npm,
-            "ci",
-            "--omit=dev",
-            "--omit=optional",
-            "--ignore-scripts",
-            "--no-audit",
-            "--no-fund",
-        ],
-        cwd=SOURCE_DIR,
-        env=build_env,
-    )
+    _run([npm, *NPM_INSTALL_ARGUMENTS], cwd=SOURCE_DIR, env=build_env)
     _validate_runtime(node)
 
     lock = json.loads(lock_path.read_text(encoding="utf-8"))
@@ -224,9 +256,7 @@ def build(*, npm_executable: str | None = None, node_executable: str | None = No
             "source_manifest": "third_party/playwright-mcp/package.json",
             "source_lockfile": "third_party/playwright-mcp/package-lock.json",
             "source_lockfile_sha256": _sha256(lock_path),
-            "install_command": (
-                "npm ci --omit=dev --omit=optional --ignore-scripts --no-audit --no-fund"
-            ),
+            "install_command": f"npm {' '.join(NPM_INSTALL_ARGUMENTS)}",
             "browser_downloads_disabled": True,
             "dependencies": _production_provenance(lock),
         },

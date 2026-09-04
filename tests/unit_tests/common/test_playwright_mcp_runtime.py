@@ -302,8 +302,14 @@ def test_committed_artifact_matches_manifest_and_contains_no_browser_binary() ->
     manifest = json.loads((resources / "manifest.json").read_text(encoding="utf-8"))
     archive = resources / manifest["archive"]
     assert hashlib.sha256(archive.read_bytes()).hexdigest() == manifest["archive_sha256"]
+    assert "--bin-links=false" in manifest["provenance"]["install_command"]
     with zipfile.ZipFile(archive) as bundle:
         names = bundle.namelist()
     assert manifest["cli_relative_path"] in names
+    assert "node_modules/.package-lock.json" not in names
+    assert all("/node_modules/.bin/" not in f"/{name}" for name in names)
+    # PowerShell sources used by the runtime are portable archive inputs; only
+    # npm-generated .bin shims are excluded.
+    assert "node_modules/playwright-core/bin/install_media_pack.ps1" in names
     assert all(".local-browsers" not in name.lower() for name in names)
     assert all(not name.lower().endswith(("/chrome.exe", "/headless_shell", "/firefox.exe")) for name in names)

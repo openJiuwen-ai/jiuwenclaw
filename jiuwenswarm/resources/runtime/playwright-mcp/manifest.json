@@ -1,6 +1,6 @@
 {
   "archive": "playwright-mcp-0.0.78.zip",
-  "archive_sha256": "863c10e1c388e34aa15730b3d9466e3aecb0f591d0a920d8e3c210bf9bb8d0d8",
+  "archive_sha256": "f0cffc29bd1356cdbddb90e6f688c50af2e7db08b0cc4ec233da06a0e5fded9e",
   "cli_relative_path": "node_modules/@playwright/mcp/cli.js",
   "minimum_node_version": 20,
   "package": "@playwright/mcp",
@@ -36,7 +36,7 @@
         "version": "1.62.0-alpha-1783623505000"
       }
     ],
-    "install_command": "npm ci --omit=dev --omit=optional --ignore-scripts --no-audit --no-fund",
+    "install_command": "npm ci --omit=dev --omit=optional --ignore-scripts --no-audit --no-fund --bin-links=false",
     "source_lockfile": "third_party/playwright-mcp/package-lock.json",
     "source_lockfile_sha256": "b146bf8ae844e04537b96cf34bf2b342b0a09c316559b3c52f3c04f1af2e8df1",
     "source_manifest": "third_party/playwright-mcp/package.json"
