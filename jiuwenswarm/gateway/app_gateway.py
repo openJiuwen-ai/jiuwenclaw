@@ -396,6 +396,8 @@ async def _connect_with_retry(
     local_agent = host in {"127.0.0.1", "localhost", "::1"}
     backoff = 0.05 if local_agent else 0.2
     max_backoff = min(interval, 0.25) if local_agent else interval
+    if local_agent:
+        max_retries = max(max_retries, 120)
     for attempt in range(1, max_retries + 1):
         # 先 TCP 探测: 端口未通则不浪费一次 WS 握手, 直接进入退避等待.
         if not _tcp_ready(timeout=0.05 if local_agent else 0.5):
