@@ -71,6 +71,12 @@ import {
 } from '../../features/workspace/localFilePicker';
 import { useDesktopLocalFilePickerReady } from '../../hooks';
 import { getInputProjectOptions, isDefaultInputProject } from './projectSelection';
+import {
+  getClipboardImageFiles,
+  IMAGE_INPUT_DISABLED_ALERT_KEY,
+  isImageInputDisabled,
+  shouldAlertImagePasteDisabled,
+} from './clipboardImagePaste';
 import AgentPickerIcon from '../../assets/agent-management/智能体选择.svg?react';
 import AttachmentIcon from '../../assets/agent-management/attachment.svg?react';
 import GoalIcon from '../../assets/agent-management/goal.svg?react';
@@ -455,35 +461,6 @@ function pickNumber(...values: unknown[]): number | undefined {
 function isImageFile(file: File): boolean {
   if (ACCEPTED_IMAGE_TYPES.has(file.type)) return true;
   return IMAGE_EXTENSIONS.has(getFileExtension(file.name || ''));
-}
-
-function ensureClipboardImageFilename(file: File): File {
-  if (file.name && getFileExtension(file.name)) return file;
-  const ext =
-    file.type === 'image/jpeg' ? '.jpg'
-    : file.type === 'image/webp' ? '.webp'
-    : file.type === 'image/gif' ? '.gif'
-    : '.png';
-  const type = ACCEPTED_IMAGE_TYPES.has(file.type) ? file.type : 'image/png';
-  return new File([file], `clipboard-image${ext}`, { type, lastModified: file.lastModified });
-}
-
-/** Prefer clipboardData.items only — Chromium often mirrors the same screenshot in files. */
-function getClipboardImageFiles(clipboardData: DataTransfer | null | undefined): File[] {
-  if (!clipboardData) return [];
-  const files: File[] = [];
-  const seen = new Set<string>();
-  for (const item of Array.from(clipboardData.items || [])) {
-    if (item.kind !== 'file') continue;
-    const file = item.getAsFile();
-    if (!file || !isImageFile(file)) continue;
-    const keyed = ensureClipboardImageFilename(file);
-    const key = `${keyed.name}:${keyed.size}:${keyed.type}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    files.push(keyed);
-  }
-  return files;
 }
 
 function isForbiddenDocumentFile(file: File): boolean {
@@ -959,7 +936,13 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
     },
   });
 
-  const imageInputDisabled = isListening || isCompactRunning || (isInterruptible && !isTeamMode);
+  const imageInputDisabled = isImageInputDisabled({
+    isListening,
+    isCompactRunning,
+    isInterruptible,
+    isTeamMode,
+    isAgentMode,
+  });
   const isDesktopBridgeReady = useDesktopLocalFilePickerReady();
   // "+" 触发按钮本身不跟图片/目标的可用性挂钩：菜单以后可能挂其他跟图片/目标无关的功能，
   // 触发按钮只要不在录音就该能点开；具体某一项能不能选，交给菜单里每一项各自的禁用态处理。
@@ -2218,7 +2201,12 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
 
       if (hasBrowserFiles) {
         event.preventDefault();
-        if (imageInputDisabled) return true;
+        if (imageInputDisabled) {
+          if (shouldAlertImagePasteDisabled(true, imageFiles.length > 0)) {
+            pushAttachmentAlert(t(IMAGE_INPUT_DISABLED_ALERT_KEY));
+          }
+          return true;
+        }
         void (async () => {
           const clipboardPicks = await getClipboardFilePicks();
           if (clipboardPicks.length) {
@@ -2244,7 +2232,14 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
       }
       return false;
     },
-    [appendAttachmentFiles, appendLocalFilePicks, imageInputDisabled, isDesktopBridgeReady],
+    [
+      appendAttachmentFiles,
+      appendLocalFilePicks,
+      imageInputDisabled,
+      isDesktopBridgeReady,
+      pushAttachmentAlert,
+      t,
+    ],
   );
 
   const handlePaste = useCallback(
@@ -2258,8 +2253,8 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
       const imageFiles = getClipboardImageFiles(event.clipboardData);
       if (imageFiles.length && !hasText) {
         event.preventDefault();
-        if (imageInputDisabled) {
-          pushAttachmentAlert(t('chat.addFileDisabled'));
+        if (shouldAlertImagePasteDisabled(imageInputDisabled, true)) {
+          pushAttachmentAlert(t(IMAGE_INPUT_DISABLED_ALERT_KEY));
           return;
         }
         appendAttachmentFiles(imageFiles);
