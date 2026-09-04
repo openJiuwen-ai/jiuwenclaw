@@ -42,16 +42,20 @@ fi
 log()  { printf '[deepsearch-install] %s\n' "$*"; }
 warn() { printf '[deepsearch-install][警告] %s\n' "$*"; }
 fail() { printf '[deepsearch-install][失败] %s\n' "$*"; exit 1; }
-py_ok() { "$VENV_PY" -c "$1" >/dev/null 2>&1; }
-# pip 刚解包的 .so 在鸿蒙 hmdfs 上偶发"延迟可见"：立即 import 可能短暂失败，
-# 1~2 秒后自愈（本机实测 git/head 同样有此现象）。安装后的功能测试必须重试，
-# 否则会把瞬时 I/O 错误误判为安装失败（已在新机器 numpy 重签路径上实际踩坑）。
+# 探测统一空 LD_LIBRARY_PATH：与 AgentServer sidecar 生产环境一致（wheel 自带
+# RPATH 自包含），且免疫用户 shell 里可能污染的库路径
+py_ok() { LD_LIBRARY_PATH= "$VENV_PY" -c "$1" >/dev/null 2>&1; }
+# pip 刚解包的 .so 在鸿蒙 hmdfs 上存在"沉降窗口"：冷启动/冷缓存时大文件
+# （如 numpy 的 4.3MB .so）需数十秒才完全可见，期间 dlopen 报 Permission
+# denied（内核读到不完整字节→签名校验失败）。实测 6 秒窗口不够，误判为
+# 安装失败（安装其实已成功，稍后 import 即通过）。故用 2/5/10/20 退避共
+# ~37 秒；成功路径第一次就返回，零额外开销。
 py_ok_retry() {
     _i=0
-    while [ "$_i" -lt 3 ]; do
+    while [ "$_i" -lt 5 ]; do
         py_ok "$1" && return 0
         _i=$((_i + 1))
-        [ "$_i" -lt 3 ] && sleep 2
+        [ "$_i" -lt 5 ] && sleep "$(echo "2 5 10 20" | cut -d' ' -f$_i)"
     done
     return 1
 }
@@ -229,8 +233,9 @@ install_native() {
             fi
         fi
     fi
-    warn "  $_label 所有安装路径均失败（功能测试已各重试 3 次）；真实错误："
+    warn "  $_label 所有安装路径均失败（功能测试已各重试 5 次）；真实错误："
     "$VENV_PY" -c "$_test" 2>&1 | tail -5 | sed 's/^/    /'
+    warn "  若错误是 Permission denied 加载 .so：多为 hmdfs 冷启动沉降，等待 1 分钟后直接重跑本脚本即可（安装其实已成功）"
     return 1
 }
 
