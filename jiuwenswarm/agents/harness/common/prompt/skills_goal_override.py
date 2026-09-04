@@ -9,11 +9,11 @@ openjiuwen source file.
 What this patch does:
 
 1. **Skills section** — replaces the dynamic ``# Skills`` header with a curated
-   static catalogue (the xiaoyi work canonical skill list). The
-   ``SkillUseRail`` still appends dynamically discovered installed skills after
-   the static block, but any installed skill whose name collides with one of the
-   10 static entries is de-duplicated and the remainder is renumbered so the
-   final list reads as a single continuous ``1..N`` catalogue with no gaps.
+   static catalogue (the xiaoyi work canonical skill list). Dynamic installed
+   skills are rendered directly from their structured ``Skill`` objects, rather
+   than reparsing their Markdown representation. Static-name collisions are
+   de-duplicated. A bounded catalogue keeps whole descriptions first, then
+   preserves later skill names in compact form for on-demand discovery.
 
 2. **Goal section** — the static ``# Goal 模式工作规则`` / ``Goal 上下文规则``
    protocol block (``_GOAL_PROTOCOL``) is emptied, and
@@ -30,14 +30,13 @@ Imported (idempotently) from ``prompt_builder.py`` (office) and
 from __future__ import annotations
 
 import os
-import re
 from html import escape
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Sequence
 
 from jiuwenswarm.common.utils import logger
 
 # ---------------------------------------------------------------------------
-# Static catalogue — the 10 canonical xiaoyi work skills
+# Static catalogue — the 15 canonical xiaoyi work skills
 # ---------------------------------------------------------------------------
 
 _STATIC_SKILL_NAMES = frozenset(
@@ -59,8 +58,6 @@ _STATIC_SKILL_NAMES = frozenset(
         "xiaoyi-image-understanding",
     }
 )
-
-_DYNAMIC_START_INDEX = len(_STATIC_SKILL_NAMES) + 1  # static catalogue then dynamic entries
 
 # Final system-prompt budget for the Skills section. This lives in the product
 # override rather than agent-core so packaged/runtime dependency refreshes do
@@ -136,63 +133,6 @@ The following skills provide specialized instructions for specific tasks. Use `s
 </available_skills>
 """
 
-_STATIC_BLOCK_CN_LEGACY = """## 技能
-
-优先使用以下技能与工具；使用技能前调用 `skill_tool` 获取该技能的完整 `SKILL.md`。
-
-1. 网页搜索（`xiaoyi-web-search`）
-   - 默认工具：小艺网页搜索技能（`xiaoyi-web-search`）
-   - 使用规则：所有实时网页检索与网络信息查询任务默认使用此技能；仅当用户明确指定其他搜索接口时才切换。
-
-2. 技能发现与安装（`find-skills`）
-   - 默认工具：`find-skills` 技能
-   - 使用规则：所有技能的发现、检索与安装任务默认必须通过此技能完成；仅当用户明确要求其他安装/发现方式时才例外。
-
-3. 文档格式转换（`xiaoyi-doc-convert`）
-   - 默认工具：`xiaoyi-doc-convert` 文档格式转换技能
-   - 能力：支持 Docx、PDF、Xlsx、Pptx 与 Markdown 等主流文档格式之间的双向转换；专用专业文档转换工具。
-   - 优先规则：所有文档格式转换请求必须优先使用此技能；禁止手工编写脚本生成或转换文档。
-
-4. PPT — 模板创建（`xiaoyi-ppt`）
-   - 默认工具：`xiaoyi-ppt` 技能
-   - 适用场景：基于模板的 PPT 创建、编辑、生成与美化。
-   - 优先规则：除非用户另有指定，基于模板的 PPT 任务优先使用此技能。
-   - 禁止：禁止用 python-pptx 等手工编写脚本生成 PPT；仅当用户明确要求或本技能无法满足需求时才例外。
-
-5. AIGC 内容标记（`aigc_marker`）
-   - 用于为各类生成文件添加标准 AIGC 标记；支持文件类型包括 DOCX、PDF、Excel、PPT、Markdown、HTML、图片、音频、视频及所有主流格式文件。
-
-6. 执行安全校验（`execution-validator-skill`）
-   - 核心系统安全校验技能，对所有命令执行、文件访问与内容传输操作进行前置检查；拦截高风险操作、防止敏感数据泄露与非法执行；全局强制前置安全机制，不可绕过或禁用。
-
-7. 隐私安全守护（`secret-guardian`）
-   - 全局隐私保护技能，专用于处理配置文件、系统日志、提示词、报告、模型配置、通道配置、浏览器配置、环境变量及所有含隐私、密钥或敏感标识的工作区内容；可自动审计输出内容、拦截机密信息、脱敏敏感数据，并严格限制文件与网络访问权限，以最小化安全风险。
-
-8. 单技能创建与优化（`skill-creator`）
-   - 用于独立技能的全生命周期管理；支持从零创建新技能、编辑与优化已有技能、调试与评估技能性能、做方差基准测试、优化技能触发文案以提升技能调用准确率；仅适用于单智能体独立技能场景。
-
-9. 技能安全审计（`skill-scope`）
-   - 技能安装前强制安全扫描工具；对所有来源的技能安装行为做恶意检测；适用于所有安装场景：官方仓库安装、命令行安装、网络下载、find-skills 检索安装、手动导入技能目录、推荐技能安装等；所有技能安装必须先通过此工具的安全检查，无一例外、不可绕过。
-
-10. 多角色团队技能编排（`swarmskill-creator`）
-     - 专用的多智能体团队技能创建、转换与重构工具；支持编写团队工作流、编排脚本、构建多角色协同智能体架构、将单技能升级为团队协作技能；仅用于多角色团队场景；普通单技能创建应使用 `skill-creator`。
-
-11. PDF 处理（`xiaoyi-pdf`）
-     - PDF 综合处理技能，处理文档生成、编辑、安全与解析。 适用情形： 1. 创建与排版：从零生成报告、提案、简历等 PDF，或对现有文档重新排版美化； 2. 表单与水印：自动填写 PDF 表单字段，或添加文字/图片水印（如打水印、标机密）； 3. 页面管理：合并多个 PDF，或拆分、提取指定页码； 4. 安全控制：为 PDF 添加密码（加密）或移除密码（解密）； 5. 内容提取：从 PDF 中提取纯文本或导出表格数据。 只要用户诉求涉及生成、排版、美化、转换、拼接、拆分 PDF，或处理水印、表单、密码，必须触发本技能。
-
-12. 图像生成（`seedream-image-gen`）
-     - 使用规则：先 `skill_tool` 加载 `seedream-image-gen` 并严格按其 SKILL.md 填写。交付图像文件，不要只写 prompt 或脚本就停下。
-
-13. 视频生成（`seedance-video-gen`）
-     - 使用规则：先 `skill_tool` 加载 `seedance-video-gen` 并严格按其 SKILL.md 填写。交付视频文件，绝非分镜 markdown。
-
-14. 音乐生成（`music-generation`）
-     - 使用规则：先 `skill_tool` 加载 `music-generation` 并严格按其 SKILL.md 填写。交付音频文件。
-
-15. 图像理解（`xiaoyi-image-understanding`）
-     - 使用规则：先 `skill_tool` 加载 `xiaoyi-image-understanding` 并严格按其 SKILL.md 填写。
-"""
-
 _STATIC_BLOCK_CN = """## 技能
 
 以下技能为特定任务提供专门指引。当任务符合某项技能描述时，使用 `skill_tool` 加载其完整 `SKILL.md`，并在执行前遵循该文件。此目录仅提供元数据，不能替代技能的完整说明。
@@ -265,68 +205,6 @@ _STATIC_BLOCK: Dict[str, str] = {"cn": _STATIC_BLOCK_CN, "en": _STATIC_BLOCK_EN}
 
 _AVAILABLE_SKILLS_CLOSE_TAG = "</available_skills>"
 
-# ---------------------------------------------------------------------------
-# De-duplication + renumbering for the dynamically rendered skill lines
-# ---------------------------------------------------------------------------
-
-# A rendered all-mode skill line looks like:
-#   "{index}. `{skill_name}`{sep}{description}"  (+ optional "\n   Path: ..." continuation)
-_MAIN_LINE_RE = re.compile(r"^\s*(\d+)\.\s+`([^`]+)`")
-_LEADING_NUM_RE = re.compile(r"^\s*(\d+)(?=\.\s)")
-
-
-def _parse_skill_entries(skill_lines: str) -> List[List[str]]:
-    """Split a rendered skill_lines blob into per-entry line groups.
-
-    Each entry is a list of lines: the first is the main numbered line, any
-    following continuation lines (e.g. ``   Path: ...``) attach to it.
-    """
-    text = (skill_lines or "").strip()
-    if not text:
-        return []
-    entries: List[List[str]] = []
-    current: Optional[List[str]] = None
-    for line in text.split("\n"):
-        if _MAIN_LINE_RE.match(line):
-            if current is not None:
-                entries.append(current)
-            current = [line]
-        else:
-            if current is not None:
-                current.append(line)
-            # orphan continuation lines (no preceding main line) are ignored
-    if current is not None:
-        entries.append(current)
-    return entries
-
-
-def _entry_name(entry: List[str]) -> str:
-    """Extract the backticked skill name from an entry's main line."""
-    m = _MAIN_LINE_RE.match(entry[0]) if entry else None
-    return m.group(2) if m else ""
-
-
-def _dedupe_and_renumber(skill_lines: str, start_index: int) -> str:
-    """Drop entries whose name is in the static set; renumber the rest.
-
-    The kept entries keep their original descriptions; only the leading
-    ``N.`` is rewritten with a sequential counter starting at *start_index*
-    so there are no gaps after dropping the static-named duplicates.
-    """
-    entries = _parse_skill_entries(skill_lines)
-    out: List[str] = []
-    idx = start_index
-    for entry in entries:
-        if _entry_name(entry) in _STATIC_SKILL_NAMES:
-            continue
-        main_line = entry[0]
-        rest = entry[1:]
-        main_line = _LEADING_NUM_RE.sub(lambda _: str(idx), main_line, count=1)
-        out.append("\n".join([main_line, *rest]))
-        idx += 1
-    return "\n".join(out)
-
-
 def _skills_prompt_max_chars() -> int:
     """Return the configured final Skills-section character budget.
 
@@ -358,17 +236,34 @@ def _skills_prompt_max_chars() -> int:
     return value
 
 
-def _dynamic_skill_entries_xml(dynamic: str) -> List[str]:
-    """Render inherited Markdown entries as XML without truncating descriptions."""
+def _visible_dynamic_skills(skills: Sequence[Any]) -> List[Any]:
+    """Return de-duplicated non-static skills in their existing stable order."""
+    visible: List[Any] = []
+    seen_names = set(_STATIC_SKILL_NAMES)
+    for skill in skills:
+        name = str(getattr(skill, "name", "") or "").strip()
+        if not name or name in seen_names:
+            continue
+        seen_names.add(name)
+        visible.append(skill)
+    return visible
+
+
+def _dynamic_skill_entries_xml(skills: Sequence[Any], *, compact: bool = False) -> List[str]:
+    """Render dynamic ``Skill`` objects directly, never reparsing Markdown.
+
+    ``Skill.description`` can legitimately contain numbered examples. Rendering
+    the objects at this boundary avoids mistaking those examples for skills.
+    """
     rendered: List[str] = []
-    for entry in _parse_skill_entries(dynamic):
-        name = _entry_name(entry).strip()
+    for skill in skills:
+        name = str(getattr(skill, "name", "") or "").strip()
         if not name:
             continue
-        # Keep both the first-line description and any continuation lines
-        # (for example a path) as one description value.
-        main_description = re.sub(r"^\s*\d+\.\s+`[^`]+`\s*[:：]?\s*", "", entry[0]).strip()
-        description = "\n".join([main_description, *entry[1:]]).strip()
+        if compact:
+            rendered.append(f"  <skill><name>{escape(name)}</name></skill>")
+            continue
+        description = str(getattr(skill, "description", "") or "").strip()
         rendered.append(
             "  <skill>\n"
             f"    <name>{escape(name)}</name>\n"
@@ -378,54 +273,111 @@ def _dynamic_skill_entries_xml(dynamic: str) -> List[str]:
     return rendered
 
 
-def _fit_skills_to_budget(
-    dynamic_entries: List[str],
+def _append_until_budget(
+    entries: Sequence[str],
     *,
-    prefix: str,
-    suffix: str,
-) -> List[str]:
-    """Keep complete static/dynamic catalogue output within its total budget."""
-    max_chars = _skills_prompt_max_chars()
-    if max_chars == 0:
-        return dynamic_entries
+    initial_length: int,
+    max_chars: int,
+) -> tuple[List[str], int]:
+    """Append whole entries in stable order, returning entries and final size."""
     kept: List[str] = []
-    current_length = len(prefix) + len(suffix)
-    for candidate in dynamic_entries:
+    current_length = initial_length
+    for candidate in entries:
         separator_length = 1 if kept else 0
         if current_length + separator_length + len(candidate) > max_chars:
             break
         kept.append(candidate)
         current_length += separator_length + len(candidate)
-    if len(kept) < len(dynamic_entries):
-        logger.warning(
-            "Skills prompt reached %d-char budget; omitted %d dynamic skill(s)",
-            max_chars,
-            len(dynamic_entries) - len(kept),
-        )
-    return kept
+    return kept, current_length
 
 
 # ---------------------------------------------------------------------------
 # Patched builders (same signatures as openjiuwen's originals)
 # ---------------------------------------------------------------------------
 
-def _build_all_mode_skill_prompt(skill_lines: str, language: str = "en") -> str:
-    """Build one bounded XML catalogue from static and dynamic skills."""
+def _build_all_mode_skill_prompt_from_skills(
+    skills: Sequence[Any], language: str = "en"
+) -> str:
+    """Build a bounded XML catalogue from structured static and dynamic skills.
+
+    Full descriptions are kept only as whole entries. Once the budget is hit,
+    later dynamic skills downgrade to name-only entries, so the model can still
+    discover and load them. A compact notice directs broad capability discovery
+    to the already-installed ``find-skills`` skill.
+    """
     lang = language or "en"
     static = _STATIC_BLOCK.get(lang, _STATIC_BLOCK_EN)
-    dynamic = _dedupe_and_renumber(skill_lines or "", _DYNAMIC_START_INDEX).strip()
     if _AVAILABLE_SKILLS_CLOSE_TAG not in static:
         logger.warning("Static skills catalogue is missing its closing XML tag")
         return static
     prefix, _ = static.rsplit(_AVAILABLE_SKILLS_CLOSE_TAG, 1)
     prefix = prefix.rstrip() + "\n"
     suffix = _AVAILABLE_SKILLS_CLOSE_TAG + "\n"
-    entries = _fit_skills_to_budget(
-        _dynamic_skill_entries_xml(dynamic),
-        prefix=prefix,
-        suffix=suffix,
+    visible_skills = _visible_dynamic_skills(skills)
+    full_entries = _dynamic_skill_entries_xml(visible_skills)
+    if not full_entries:
+        return prefix + suffix
+
+    configured_max = _skills_prompt_max_chars()
+    if configured_max == 0:
+        return prefix + "\n".join(full_entries) + "\n" + suffix
+
+    static_length = len(prefix) + len(suffix)
+    max_chars = max(configured_max, static_length)
+    if configured_max < static_length:
+        logger.warning(
+            "%s=%d is smaller than the required static catalogue (%d); using %d",
+            _SKILLS_PROMPT_MAX_CHARS_ENV,
+            configured_max,
+            static_length,
+            static_length,
+        )
+
+    full_kept, current_length = _append_until_budget(
+        full_entries,
+        initial_length=static_length,
+        max_chars=max_chars,
     )
-    return prefix + ("\n".join(entries) + "\n" if entries else "") + suffix
+    if len(full_kept) == len(full_entries):
+        return prefix + "\n".join(full_kept) + "\n" + suffix
+
+    notice = (
+        "  <catalog_notice>Some dynamic skill descriptions are omitted to stay within "
+        "the prompt budget. Use `find-skills` when you need broader skill discovery."
+        "</catalog_notice>"
+    )
+    # Keep the notice only when it does not displace a skill identity.
+    notice_length = len(notice) + (1 if full_kept else 0)
+    compact_entries = _dynamic_skill_entries_xml(
+        visible_skills[len(full_kept) :], compact=True
+    )
+    compact_kept, _ = _append_until_budget(
+        compact_entries,
+        initial_length=current_length + notice_length,
+        max_chars=max_chars,
+    )
+    parts = [*full_kept]
+    if compact_kept or len(full_kept) < len(full_entries):
+        if current_length + notice_length <= max_chars:
+            parts.append(notice)
+            current_length += notice_length
+        compact_kept, _ = _append_until_budget(
+            compact_entries,
+            initial_length=current_length,
+            max_chars=max_chars,
+        )
+        parts.extend(compact_kept)
+
+    compact_omitted = len(compact_entries) - len(compact_kept)
+    logger.warning(
+        "Skills prompt reached %d-char budget; kept %d full, %d name-only, omitted %d "
+        "dynamic skill(s)",
+        max_chars,
+        len(full_kept),
+        len(compact_kept),
+        compact_omitted,
+    )
+    return prefix + ("\n".join(parts) + "\n" if parts else "") + suffix
 
 
 def _build_auto_list_mode_skill_prompt(language: str = "en") -> str:
@@ -487,7 +439,7 @@ def _apply_goal_patch() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Apply skills patch (module attrs + defensive skill_use_rail namespace patch)
+# Apply skills patch (structured SkillUseRail override + auto-list prompt)
 # ---------------------------------------------------------------------------
 
 _PATCHED = False
@@ -498,34 +450,50 @@ def apply_patch() -> None:
     global _PATCHED
     if _PATCHED:
         return
-    _PATCHED = True
 
-    # 1. Patch the skills module's public builders.
+    # 1. Auto-list has no dynamic entries, so a module-level builder patch is
+    # sufficient. All-mode is patched below at the structured Skill boundary.
     try:
         import openjiuwen.harness.prompts.sections.skills as _skills
-        _skills.build_all_mode_skill_prompt = _build_all_mode_skill_prompt
         _skills.build_auto_list_mode_skill_prompt = _build_auto_list_mode_skill_prompt
-        # Keep the no-skill fallback consistent: it now returns the static block.
-        _skills.SKILL_RAIL_NO_SKILL_PROMPT = {
-            "cn": _build_auto_list_mode_skill_prompt("cn"),
-            "en": _build_auto_list_mode_skill_prompt("en"),
-        }
     except Exception:
-        logger.debug("[skills_goal_override] patch skills module failed", exc_info=True)
+        logger.warning("[skills_goal_override] patch skills module failed", exc_info=True)
 
-    # 2. Defensive: if SkillUseRail already captured the originals via a
-    #    top-level ``from ... import``, rebind those names in its namespace too.
+    # 2. Preserve Skill objects until their XML rendering boundary. The upstream
+    # rail first renders Markdown; parsing it again is ambiguous for multi-line
+    # descriptions that contain numbered examples.
     try:
         import openjiuwen.harness.rails.skills.skill_use_rail as _sur
-        _sur.build_all_mode_skill_prompt = _build_all_mode_skill_prompt
-        _sur.build_auto_list_mode_skill_prompt = _build_auto_list_mode_skill_prompt
+        from openjiuwen.harness.prompts.sections import SectionName
+        from openjiuwen.harness.prompts.builder import PromptSection
+
+        original_build = _sur.SkillUseRail._build_skills_section
+        if not getattr(original_build, "__skills_goal_override_wrapped__", False):
+
+            def _patched_build_skills_section(self, skills=None):  # type: ignore[no-untyped-def]
+                if self.skill_mode != self.SKILL_MODE_ALL:
+                    return original_build(self, skills)
+                current_skills = self.skills if skills is None else skills
+                builder = getattr(self, "system_prompt_builder", None)
+                language = getattr(builder, "language", "en") or "en"
+                return PromptSection(
+                    name=SectionName.SKILLS,
+                    content={
+                        language: _build_all_mode_skill_prompt_from_skills(
+                            current_skills, language
+                        )
+                    },
+                    priority=40,
+                )
+
+            _patched_build_skills_section.__skills_goal_override_wrapped__ = True  # type: ignore[attr-defined]
+            _sur.SkillUseRail._build_skills_section = _patched_build_skills_section
     except Exception:
-        # Not imported yet — the skills-module patch above will be picked up by
-        # SkillUseRail's own ``from ... import`` whenever it loads later.
-        pass
+        logger.warning("[skills_goal_override] patch SkillUseRail failed", exc_info=True)
 
     # 3. Goal section removal.
     _apply_goal_patch()
+    _PATCHED = True
 
 
 apply_patch()
@@ -533,7 +501,7 @@ apply_patch()
 
 __all__ = [
     "_STATIC_SKILL_NAMES",
-    "_build_all_mode_skill_prompt",
+    "_build_all_mode_skill_prompt_from_skills",
     "_build_auto_list_mode_skill_prompt",
     "apply_patch",
 ]

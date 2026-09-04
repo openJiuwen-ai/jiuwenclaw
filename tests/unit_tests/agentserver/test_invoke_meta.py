@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
@@ -1296,18 +1297,29 @@ def test_skills_goal_override_caps_dynamic_catalog_with_configurable_budget(monk
     from jiuwenswarm.agents.harness.common.prompt.skills_goal_override import (
         _SKILLS_PROMPT_MAX_CHARS_ENV,
         _STATIC_BLOCK_EN,
-        _build_all_mode_skill_prompt,
         _dynamic_skill_entries_xml,
+        _build_all_mode_skill_prompt_from_skills,
     )
 
-    dynamic = "1. `custom-one`: first dynamic skill\n2. `custom-two`: second dynamic skill"
-    first = _dynamic_skill_entries_xml("16. `custom-one`: first dynamic skill")[0]
-    budget = len(_STATIC_BLOCK_EN) + len(first) + 1
+    skills = [
+        SimpleNamespace(name="custom-one", description="first dynamic skill"),
+        SimpleNamespace(name="custom-two", description="second dynamic skill " * 30),
+    ]
+    first_full, _ = _dynamic_skill_entries_xml(skills)
+    second_compact = _dynamic_skill_entries_xml([skills[1]], compact=True)[0]
+    notice = (
+        "  <catalog_notice>Some dynamic skill descriptions are omitted to stay within "
+        "the prompt budget. Use `find-skills` when you need broader skill discovery."
+        "</catalog_notice>"
+    )
+    budget = len(_STATIC_BLOCK_EN) + len(first_full) + len(second_compact) + len(notice) + 3
     monkeypatch.setenv(_SKILLS_PROMPT_MAX_CHARS_ENV, str(budget))
 
-    text = _build_all_mode_skill_prompt(dynamic)
+    text = _build_all_mode_skill_prompt_from_skills(skills)
     assert "<name>custom-one</name>" in text
-    assert "custom-two" not in text
+    assert "<name>custom-two</name>" in text
+    assert "<description>second dynamic skill " not in text
+    assert "<catalog_notice>" in text
     assert text.count("<available_skills>") == 1
     assert text.count("</available_skills>") == 1
     assert len(text) <= budget
@@ -1318,8 +1330,36 @@ def test_skills_goal_override_escapes_dynamic_skill_xml():
         _dynamic_skill_entries_xml,
     )
 
-    text = _dynamic_skill_entries_xml("1. `custom<&`: uses <input> & \"quoted\" values")[0]
+    text = _dynamic_skill_entries_xml(
+        [SimpleNamespace(name="custom<&", description='uses <input> & "quoted" values')]
+    )[0]
 
     assert "<name>custom&lt;&amp;</name>" in text
     assert "uses &lt;input&gt; &amp; &quot;quoted&quot; values" in text
+
+
+def test_skills_goal_override_keeps_multiline_description_as_one_skill(monkeypatch):
+    from jiuwenswarm.agents.harness.common.prompt.skills_goal_override import (
+        _SKILLS_PROMPT_MAX_CHARS_ENV,
+        _build_all_mode_skill_prompt_from_skills,
+    )
+
+    monkeypatch.setenv(_SKILLS_PROMPT_MAX_CHARS_ENV, "0")
+    skills = [
+        SimpleNamespace(
+            name="reporting",
+            description=(
+                "Generates reports.\nExample workflow:\n"
+                "1. `collect-data` — query the source\n"
+                "2. `write-summary` — compose the answer"
+            ),
+        )
+    ]
+
+    text = _build_all_mode_skill_prompt_from_skills(skills)
+
+    assert "<name>reporting</name>" in text
+    assert "<name>collect-data</name>" not in text
+    assert "<name>write-summary</name>" not in text
+    assert "1. `collect-data`" in text
 
