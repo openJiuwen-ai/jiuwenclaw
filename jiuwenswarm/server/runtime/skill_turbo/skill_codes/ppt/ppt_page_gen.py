@@ -1025,8 +1025,7 @@ def _validate_content_template_fill_output(seed_html: str, filled_html: str) -> 
         return False, "invalid_dom"
     if not _validate_chart_height_chain(filled_html):
         return False, "invalid_chart_height_chain"
-    if not _validate_chart_mount_references(filled_html):
-        return False, "chart_mount_id_mismatch"
+    # mount 错配不在此硬拒：对齐 pptx-craft（落盘后由 check-layout 等软修），禁止进 missing
     return True, ""
 
 
@@ -1051,8 +1050,7 @@ def _validate_custom_content_template_fill_output(
         return False, "invalid_dom"
     if not _validate_chart_height_chain(filled_html):
         return False, "invalid_chart_height_chain"
-    if not _validate_chart_mount_references(filled_html):
-        return False, "chart_mount_id_mismatch"
+    # mount 错配不在此硬拒：对齐 pptx-craft，禁止因图表 id 进 missing
     return True, ""
 
 
@@ -2242,10 +2240,11 @@ _SCRIPT_BODY_RE = re.compile(
 
 
 def _validate_chart_mount_references(html: str) -> bool:
-    """P8.1 写盘前校验：含 echarts.init 的活跃脚本中 getElementById 须在页内存在对应 id。
+    """诊断用：活跃 echarts 脚本中 getElementById 是否在页内有对应 id。
 
-    仅扫描去掉 HTML 注释后的 script 块，避免 dormant CHART_SCAFFOLD 误报；
-    与 designer.md「容器 id 须与 getElementById 一致」及方案 A 互补。
+    仅扫描去掉 HTML 注释后的 script 块，避免 dormant CHART_SCAFFOLD 误报。
+    对齐 pptx-craft designer checklist；**不得**作为写盘/missing 硬门禁
+    （错配最多软警告，由后续 check-layout 等处理，禁止因缺图丢页）。
     """
     if not html or "echarts.init" not in html.lower():
         return True
@@ -2259,6 +2258,21 @@ def _validate_chart_mount_references(html: str) -> bool:
             if element_id and not _html_has_element_id(html, element_id):
                 return False
     return True
+
+
+def _warn_chart_mount_mismatch_soft(html: str, *, page_num: int | None = None) -> None:
+    """mount 错配仅记软警告，不阻断写盘、不进 missing_pages。"""
+    if _validate_chart_mount_references(html):
+        return
+    if page_num is not None:
+        logger.warning(
+            "[P8.1] 图表容器 id 与 getElementById 不一致（软警告，不阻断写盘） page=%d",
+            page_num,
+        )
+    else:
+        logger.warning(
+            "[P8.1] 图表容器 id 与 getElementById 不一致（软警告，不阻断写盘）"
+        )
 
 
 def _chart_scaffold_option_populated(script_body: str) -> bool:
@@ -4460,12 +4474,7 @@ def _postprocess_generated_html(raw_html: str, ctx: PageGenContext) -> tuple[str
     if not _validate_chart_height_chain(html):
         logger.warning("[P8.1] 页面 %d 图表容器高度链校验失败", ctx.page_num)
         return "", html, "invalid_chart_height_chain"
-    if not _validate_chart_mount_references(html):
-        logger.warning(
-            "[P8.1] 页面 %d 图表容器 id 与 getElementById 不一致",
-            ctx.page_num,
-        )
-        return "", html, "chart_mount_id_mismatch"
+    _warn_chart_mount_mismatch_soft(html, page_num=ctx.page_num)
     return html, "", ""
 
 
@@ -4535,6 +4544,7 @@ def _postprocess_content_template_fill(
             reason,
         )
         return "", html, reason
+    _warn_chart_mount_mismatch_soft(html, page_num=ctx.page_num)
     logger.info(
         "[P8.1] 内容页官方模板填槽完成 page=%d style=%s",
         ctx.page_num,
