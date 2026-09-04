@@ -203,78 +203,71 @@ class TestRegistrationTracking:
         mock_runner.resource_mgr.remove_mcp_server.assert_called_once()
         assert mock_agent.ability_manager.remove.call_count == 2
 
-    def test_shared_mcp_cfg_copied_not_mutated(self, tool_manager, mock_agent):
-        """shared 分支拷贝 mcp_cfg 后改 server_id 不污染原对象（防御未来缓存）"""
-        from jiuwenclaw.agentserver.tools.mcp_toolkits import create_mcp_tool
+    def test_connector_failure_isolated(self, tool_manager, mock_agent):
+        """单个连接器失败（remote 发现失败 / stdio 校验失败）只 skip 该连接器
+        并记入 failed，不中断同请求内其它连接器的注册（dev-stable 83280b88b 语义）。"""
+        async def fake_discover_stdio(params, *, server_name=""):
+            return [
+                {"name": "send", "description": "send email", "input_params": {}},
+            ]
 
-        shared_cfg_str = json.dumps({
-            "name": "test-sse",
-            "type": "sse",
-            "url": "https://mcp.example.com/sse",
-        })
-        shared_mcp_cfg = create_mcp_tool(shared_cfg_str)
-        original_server_id = shared_mcp_cfg.server_id
+        captured_add_tool: list = []
 
-        captured_cfgs: list = []
+        def fake_add_tool(tool, *, tag):
+            captured_add_tool.append((tool, tag))
+            return None
 
-        async def fake_add(agent, cfg, *, tag):
-            captured_cfgs.append(cfg)
-
-        with patch("jiuwenclaw.agentserver.tool_manager.create_mcp_tool", return_value=shared_mcp_cfg), \
-             patch("jiuwenclaw.agentserver.tool_manager._add_mcp_server_and_ability", new=fake_add):
-            asyncio.run(tool_manager.register_request_scoped_mcp(
-                {"mcpServers": {"test-sse": {"type": "sse", "url": "https://mcp.example.com/sse"}}},
+        with patch(
+            "jiuwenclaw.agentserver.tool_manager.discover_stdio_mcp_tools",
+            new=fake_discover_stdio,
+        ), patch(
+            "jiuwenclaw.agentserver.tool_manager.discover_remote_mcp_tools",
+            new=AsyncMock(return_value=[]),
+        ), patch("jiuwenclaw.agentserver.tool_manager.Runner") as mock_runner:
+            mock_runner.resource_mgr.add_tool = fake_add_tool
+            result = asyncio.run(tool_manager.register_request_scoped_mcp(
+                {
+                    "mcpServers": {
+                        # 发现必失败的 sse 连接器（fake 返回空）
+                        "bad-sse": {"type": "sse", "url": "https://mcp.example.invalid/sse"},
+                        # 正常的 stdio 连接器
+                        "orders-3": {"command": "npx", "args": ["-y", "supabase"]},
+                    }
+                },
                 request_id="req_A",
             ))
-            asyncio.run(tool_manager.register_request_scoped_mcp(
-                {"mcpServers": {"test-sse": {"type": "sse", "url": "https://mcp.example.com/sse"}}},
-                request_id="req_B",
-            ))
 
-        assert shared_mcp_cfg.server_id == original_server_id
-        assert captured_cfgs[0].server_id == "test-sse::req_A"
-        assert captured_cfgs[1].server_id == "test-sse::req_B"
-        assert captured_cfgs[0] is not shared_mcp_cfg
-        assert captured_cfgs[1] is not shared_mcp_cfg
-        assert captured_cfgs[0] is not captured_cfgs[1]
+        # bad-sse 进 failed，orders-3 正常注册
+        assert result["registered"] is True
+        failed_names = [f["name"] for f in result["failed"]]
+        assert "bad-sse" in failed_names
+        assert "orders-3" not in failed_names
+        reg_names = [t["name"] for t in result["tools"]]
+        assert "orders-3" in reg_names
+        assert any(tag == "orders-3" for _t, tag in captured_add_tool)
 
     def test_two_stdio_servers_same_tool_name_get_qualified_names(
         self, tool_manager, mock_agent
     ):
         """两个 stdio MCP 暴露同名工具时，agent.ability_manager.add 收到带 server 前缀的
-        qualified card，resource_mgr.add_tool 收到带 raw_tool_name 的 EphemeralStdioMcpTool。
+        qualified card，resource_mgr.add_tool 收到带 raw_tool_name 的 PooledRequestMcpTool
+        （长生命周期 session 池化，替代旧 EphemeralStdioMcpTool）。
         """
-        from openjiuwen.core.foundation.tool import ToolCard
-
-        from jiuwenclaw.agentserver.tools.ephemeral_stdio_mcp_tool import (
-            EphemeralStdioMcpTool,
-        )
-
         captured_cards: list = []
-        captured_ephemeral: list = []
+        captured_pooled: list = []
 
         def fake_add_tool(tool, *, tag):
-            captured_ephemeral.append((tool, tag))
+            captured_pooled.append((tool, tag))
             return None  # 视为成功
 
-        async def fake_list_stdio(params):
+        async def fake_discover_stdio(params, *, server_name=""):
             return [
                 {"name": "execute_sql", "description": "Run SQL", "input_params": {}},
                 {"name": "list_tables", "description": "List tables", "input_params": {}},
             ]
 
-        def fake_eph_class(card, getter, *, raw_tool_name=None):
-            # 断言构造时确实收到了 raw_tool_name
-            assert raw_tool_name is not None, "raw_tool_name must be passed"
-            inst = MagicMock(spec=EphemeralStdioMcpTool)
-            inst._card = card
-            inst._raw_tool_name = raw_tool_name
-            return inst
-
-        with patch("jiuwenclaw.agentserver.tool_manager.list_stdio_mcp_tool_defs",
-                   new=fake_list_stdio), \
-             patch("jiuwenclaw.agentserver.tool_manager.EphemeralStdioMcpTool",
-                   new=fake_eph_class), \
+        with patch("jiuwenclaw.agentserver.tool_manager.discover_stdio_mcp_tools",
+                   new=fake_discover_stdio), \
              patch("jiuwenclaw.agentserver.tool_manager.Runner") as mock_runner:
             mock_runner.resource_mgr.add_tool = fake_add_tool
 
@@ -296,7 +289,7 @@ class TestRegistrationTracking:
         # 验证：每个 server 都成功注册（不抛错），且工具数 = 2 server * 2 tool
         assert len(result["tools"]) == 2
         assert len(captured_cards) == 4
-        assert len(captured_ephemeral) == 4
+        assert len(captured_pooled) == 4
 
         names_added_to_ability = [c.name for c in captured_cards]
         ids_added_to_ability = [c.id for c in captured_cards]
@@ -312,8 +305,12 @@ class TestRegistrationTracking:
         assert "orders-3::req_X.orders-3.execute_sql" in ids_added_to_ability
         assert "members::req_X.members.execute_sql" in ids_added_to_ability
 
-        # 关键断言 3：EphemeralStdioMcpTool 收到的是 raw name（去前缀后）
-        for tool, _tag in captured_ephemeral:
+        # 关键断言 3：PooledRequestMcpTool 收到的是 raw name（去前缀后）
+        from jiuwenclaw.agentserver.tools.request_scoped_mcp_sessions import (
+            PooledRequestMcpTool,
+        )
+        for tool, _tag in captured_pooled:
+            assert isinstance(tool, PooledRequestMcpTool)
             assert tool._raw_tool_name in {"execute_sql", "list_tables"}
             # card.name 是 qualified 形式
             assert tool._card.name.startswith(("orders-3__", "members__"))

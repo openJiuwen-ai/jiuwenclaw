@@ -4,11 +4,19 @@
 
 from __future__ import annotations
 
+import logging
 import re
 import threading
 
 _BODY_SCAN_MAX_LINE_LEN = 8192
 BODY_SCAN_MAX_LINE_LEN = _BODY_SCAN_MAX_LINE_LEN
+# 产物路径正则扫描的文本长度上限：超过直接跳过 findall，避免超大正文
+# （如浏览器自动化 evaluate_script ~800K HTML）爆炸匹配 + 逐条 stat()
+# 阻塞事件循环（dev-stable 实测 633s → WS 1006）。
+# 64K 覆盖正常 code/bash stdout 的产物路径声明。
+# 纵深防御：主防线是 artifact_emitter 的 READONLY_INNER_TOOLS 短路，
+# 这里兜底非 invoke_tool 通道直接走正文扫描的超大输出。
+_ARTIFACT_SCAN_MAX_TEXT_BYTES = 64 * 1024
 _PATH_TRAILING_CHARS = "'\"`\\]\\}\\),.;:，。；、："
 
 # 文件路径检测的正则表达式模式（仅用于正文回退扫描）
@@ -49,6 +57,15 @@ def scan_body_text_for_paths(
     total_regex_matches = 0
     lines_scanned = 0
     lines_skipped = 0
+
+    if len(result_text) > _ARTIFACT_SCAN_MAX_TEXT_BYTES:
+        logging.getLogger(__name__).warning(
+            "[ArtifactBodyScan] artifact scan skipped: result text too "
+            "large len=%d max=%d (super-large tool output would block "
+            "event loop on stat() storm)",
+            len(result_text), _ARTIFACT_SCAN_MAX_TEXT_BYTES,
+        )
+        return candidates, total_regex_matches, lines_scanned, lines_skipped
 
     for line in result_text.splitlines():
         if cancel_event is not None and cancel_event.is_set():

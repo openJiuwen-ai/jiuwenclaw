@@ -147,6 +147,14 @@ async def _run(host: str, port: int) -> None:
         ping_timeout=300.0,
     )
     await server.start()
+    # 池化 MCP worker 的周期回收：懒触发 sweep（acquire 顺带）覆盖不了
+    # "HITL 暂停后用户不再回来、无后续 MCP 活动"的泄漏窗口。
+    from jiuwenclaw.agentserver.tools.request_scoped_mcp_sessions import (
+        start_session_mcp_sweep_loop,
+        stop_session_mcp_sweep_loop,
+    )
+
+    start_session_mcp_sweep_loop()
     # jiuwenbox-server 子进程的自动拉起已迁至 AgentWebSocketServer.start 的
     # _bootstrap_internal_jiuwenbox (按 config.yaml::sandbox.startup_mode 判断)。
     # 关停 box-server 子进程仍在下方 finally 段。
@@ -174,6 +182,10 @@ async def _run(host: str, port: int) -> None:
     finally:
         logger.info("[AgentServer] stopping…")
         await server.stop()
+        try:
+            stop_session_mcp_sweep_loop()
+        except Exception:  # noqa: BLE001
+            pass
         from jiuwenclaw.perf.writer import flush_request_summary_writer
         from jiuwenclaw.perf.guard import run_perf_safe
 

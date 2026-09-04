@@ -385,6 +385,9 @@ class AgentManager:
             "agent_name",
             f"agent_{self.agent_id}_{self.service_id}_{agent_key}_{session_id}",
         )
+        # channel_id 供 JiuWenClaw 组池化 MCP worker 的 session 键
+        # （channel::mode::session_id）；AgentManager 的 agent_key 即 channel。
+        merged_config.setdefault("channel_id", agent_key)
         # create_instance bootstraps from config.yaml (skill_envs: {}). Carry catalog
         # credentials on the override so the injection rail is not born empty.
         if isinstance(self._latest_config_base, dict):
