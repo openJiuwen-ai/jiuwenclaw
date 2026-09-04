@@ -22,17 +22,20 @@ generate_video = vg.generate_video._func
 check_video_status = vg.check_video_status._func
 
 
+_TEST_API_BASE = "https://video-model.example/api/v1"
+_TEST_MODEL = "example/video-gen-model"
+
+
 def _clear_video_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    for name in (
-        "OPENROUTER_API_KEY",
-        "VIDEO_GEN_API_KEY",
-        "VIDEO_GEN_API_BASE",
-        "VIDEO_GEN_MODEL_NAME",
-        "VIDEO_API_KEY",
-        "VIDEO_API_BASE",
-        "VIDEO_MODEL_NAME",
-    ):
+    for name in ("VIDEO_API_KEY", "VIDEO_API_BASE", "VIDEO_MODEL_NAME"):
         monkeypatch.delenv(name, raising=False)
+
+
+def _set_video_model_config(monkeypatch: pytest.MonkeyPatch, *, api_key: str = "sk-test") -> None:
+    """Configure the Video Model panel slot the tools now read exclusively."""
+    monkeypatch.setenv("VIDEO_API_KEY", api_key)
+    monkeypatch.setenv("VIDEO_API_BASE", _TEST_API_BASE)
+    monkeypatch.setenv("VIDEO_MODEL_NAME", _TEST_MODEL)
 
 
 @pytest.fixture(autouse=True)
@@ -75,56 +78,30 @@ def _speed_up_polling(monkeypatch: pytest.MonkeyPatch) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_credentials_default_to_openrouter_seedance_when_unset(monkeypatch: pytest.MonkeyPatch):
+def test_credentials_empty_when_video_model_config_unset():
     api_key, api_base, model = vg._get_video_gen_api_credentials()
-    assert api_key == ""
-    assert api_base == vg._OPENROUTER_BASE
-    assert model == vg._DEFAULT_VIDEO_MODEL
+    assert (api_key, api_base, model) == ("", "", "")
 
 
-def test_credentials_prefer_openrouter_api_key(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-primary")
-    monkeypatch.setenv("VIDEO_GEN_API_KEY", "sk-secondary")
-    monkeypatch.setenv("VIDEO_API_KEY", "sk-tertiary")
-    api_key, _, _ = vg._get_video_gen_api_credentials()
-    assert api_key == "sk-primary"
+def test_credentials_read_only_from_video_model_config_panel(monkeypatch: pytest.MonkeyPatch):
+    _set_video_model_config(monkeypatch, api_key="sk-from-video-model-panel")
 
-
-def test_credentials_fall_back_to_video_gen_api_key(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setenv("VIDEO_GEN_API_KEY", "sk-secondary")
-    monkeypatch.setenv("VIDEO_API_KEY", "sk-tertiary")
-    api_key, _, _ = vg._get_video_gen_api_credentials()
-    assert api_key == "sk-secondary"
-
-
-def test_credentials_fall_back_to_video_api_key(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setenv("VIDEO_API_KEY", "sk-tertiary")
-    api_key, _, _ = vg._get_video_gen_api_credentials()
-    assert api_key == "sk-tertiary"
-
-
-def test_credentials_base_and_model_prefer_video_gen_over_video(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setenv("VIDEO_GEN_API_BASE", "https://gen.example/api")
-    monkeypatch.setenv("VIDEO_API_BASE", "https://understanding.example/api")
-    monkeypatch.setenv("VIDEO_GEN_MODEL_NAME", "gen-model")
-    monkeypatch.setenv("VIDEO_MODEL_NAME", "understanding-model")
-    _, api_base, model = vg._get_video_gen_api_credentials()
-    assert api_base == "https://gen.example/api"
-    assert model == "gen-model"
-
-
-def test_credentials_video_model_slot_drives_generation_when_gen_specific_unset(
-    monkeypatch: pytest.MonkeyPatch,
-):
-    """Repurposing the existing 'Video Model' settings slot (VIDEO_API_KEY/
-    VIDEO_API_BASE/VIDEO_MODEL_NAME) should drive generate_video too."""
-    monkeypatch.setenv("VIDEO_API_KEY", "sk-from-video-model-panel")
-    monkeypatch.setenv("VIDEO_API_BASE", "https://openrouter.ai/api/v1")
-    monkeypatch.setenv("VIDEO_MODEL_NAME", "bytedance/seedance-2.0-fast")
     api_key, api_base, model = vg._get_video_gen_api_credentials()
+
     assert api_key == "sk-from-video-model-panel"
-    assert api_base == "https://openrouter.ai/api/v1"
-    assert model == "bytedance/seedance-2.0-fast"
+    assert api_base == _TEST_API_BASE
+    assert model == _TEST_MODEL
+
+
+def test_credentials_partial_config_leaves_missing_fields_empty(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("VIDEO_API_KEY", "sk-only-key-set")
+    # VIDEO_API_BASE / VIDEO_MODEL_NAME intentionally left unset.
+
+    api_key, api_base, model = vg._get_video_gen_api_credentials()
+
+    assert api_key == "sk-only-key-set"
+    assert api_base == ""
+    assert model == ""
 
 
 # ---------------------------------------------------------------------------
@@ -222,12 +199,51 @@ async def test_generate_video_without_api_key_returns_error(monkeypatch: pytest.
 
     result = await generate_video(prompt="a golden retriever puppy running")
 
-    assert result == "[ERROR]: OPENROUTER_API_KEY is not configured for video generation."
+    assert result == (
+        "[ERROR]: video generation is not configured - set the Video Model "
+        "API key, API URL, and model name in configuration settings."
+    )
+
+
+@pytest.mark.asyncio
+async def test_generate_video_with_partial_config_returns_error(monkeypatch: pytest.MonkeyPatch):
+    """Key set but API URL/model missing - no built-in default to fall back
+    to, so this must be treated the same as fully unconfigured."""
+    monkeypatch.setenv("VIDEO_API_KEY", "sk-test")
+
+    def _unexpected_request(request: httpx.Request) -> httpx.Response:
+        raise AssertionError(f"no HTTP call should be made with partial config, got {request.url}")
+
+    _patch_async_client(monkeypatch, _unexpected_request)
+
+    result = await generate_video(prompt="a golden retriever puppy running")
+
+    assert result == (
+        "[ERROR]: video generation is not configured - set the Video Model "
+        "API key, API URL, and model name in configuration settings."
+    )
+
+
+@pytest.mark.asyncio
+async def test_check_video_status_with_partial_config_returns_error(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("VIDEO_API_KEY", "sk-test")
+
+    def _unexpected_request(request: httpx.Request) -> httpx.Response:
+        raise AssertionError(f"no HTTP call should be made with partial config, got {request.url}")
+
+    _patch_async_client(monkeypatch, _unexpected_request)
+
+    result = await check_video_status(job_id="job-123")
+
+    assert result == (
+        "[ERROR]: video generation is not configured - set the Video Model "
+        "API key, API URL, and model name in configuration settings."
+    )
 
 
 @pytest.mark.asyncio
 async def test_generate_video_with_blank_prompt_returns_error(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-test")
+    _set_video_model_config(monkeypatch)
 
     def _unexpected_request(request: httpx.Request) -> httpx.Response:
         raise AssertionError(f"no HTTP call should be made with a blank prompt, got {request.url}")
@@ -243,7 +259,7 @@ async def test_generate_video_with_blank_prompt_returns_error(monkeypatch: pytes
 async def test_generate_video_with_missing_first_frame_file_returns_error(
     monkeypatch: pytest.MonkeyPatch,
 ):
-    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-test")
+    _set_video_model_config(monkeypatch)
 
     def _unexpected_request(request: httpx.Request) -> httpx.Response:
         raise AssertionError(f"no HTTP call should be made for an invalid frame path, got {request.url}")
@@ -266,7 +282,7 @@ async def test_generate_video_with_missing_first_frame_file_returns_error(
 async def test_generate_video_success_downloads_and_saves_video(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ):
-    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-test")
+    _set_video_model_config(monkeypatch)
     video_bytes = b"fake-mp4-bytes"
     requests_seen: list[httpx.Request] = []
 
@@ -297,7 +313,7 @@ async def test_generate_video_success_downloads_and_saves_video(
 
     submit_request = requests_seen[0]
     submitted_body = json.loads(submit_request.content)
-    assert submitted_body["model"] == vg._DEFAULT_VIDEO_MODEL
+    assert submitted_body["model"] == _TEST_MODEL
     assert submitted_body["prompt"] == "a golden retriever puppy running through a meadow"
     assert submitted_body["aspect_ratio"] == "16:9"
     assert submitted_body["resolution"] == "480p"
@@ -309,7 +325,7 @@ async def test_generate_video_success_downloads_and_saves_video(
 async def test_generate_video_includes_frame_images_for_image_to_video(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ):
-    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-test")
+    _set_video_model_config(monkeypatch)
     frame_path = tmp_path / "first_frame.png"
     frame_path.write_bytes(b"\x89PNG\r\n\x1a\nfakepngbytes")
     requests_seen: list[httpx.Request] = []
@@ -346,7 +362,7 @@ async def test_generate_video_includes_frame_images_for_image_to_video(
 
 @pytest.mark.asyncio
 async def test_generate_video_submit_failure_returns_error(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-test")
+    _set_video_model_config(monkeypatch)
 
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(400, text="bad request: invalid model")
@@ -360,7 +376,7 @@ async def test_generate_video_submit_failure_returns_error(monkeypatch: pytest.M
 
 @pytest.mark.asyncio
 async def test_generate_video_submit_without_job_id_returns_error(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-test")
+    _set_video_model_config(monkeypatch)
 
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json={"status": "queued"})
@@ -374,7 +390,7 @@ async def test_generate_video_submit_without_job_id_returns_error(monkeypatch: p
 
 @pytest.mark.asyncio
 async def test_generate_video_terminal_failed_status_returns_error(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-test")
+    _set_video_model_config(monkeypatch)
 
     def handler(request: httpx.Request) -> httpx.Response:
         if request.method == "POST":
@@ -396,7 +412,7 @@ async def test_generate_video_terminal_failed_status_returns_error(monkeypatch: 
 async def test_generate_video_still_running_after_poll_window_reports_job_id(
     monkeypatch: pytest.MonkeyPatch,
 ):
-    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-test")
+    _set_video_model_config(monkeypatch)
     _speed_up_polling(monkeypatch)
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -417,7 +433,7 @@ async def test_generate_video_still_running_after_poll_window_reports_job_id(
 
 @pytest.mark.asyncio
 async def test_generate_video_http_error_during_submit_is_caught(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-test")
+    _set_video_model_config(monkeypatch)
 
     def handler(request: httpx.Request) -> httpx.Response:
         raise httpx.ConnectError("connection refused", request=request)
@@ -437,12 +453,15 @@ async def test_generate_video_http_error_during_submit_is_caught(monkeypatch: py
 @pytest.mark.asyncio
 async def test_check_video_status_without_api_key_returns_error(monkeypatch: pytest.MonkeyPatch):
     result = await check_video_status(job_id="job-123")
-    assert result == "[ERROR]: OPENROUTER_API_KEY is not configured for video generation."
+    assert result == (
+        "[ERROR]: video generation is not configured - set the Video Model "
+        "API key, API URL, and model name in configuration settings."
+    )
 
 
 @pytest.mark.asyncio
 async def test_check_video_status_with_blank_job_id_returns_error(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-test")
+    _set_video_model_config(monkeypatch)
     result = await check_video_status(job_id="   ")
     assert result == "[ERROR]: job_id is required."
 
@@ -451,7 +470,7 @@ async def test_check_video_status_with_blank_job_id_returns_error(monkeypatch: p
 async def test_check_video_status_completed_downloads_video(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ):
-    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-test")
+    _set_video_model_config(monkeypatch)
     video_bytes = b"fake-mp4-bytes"
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -471,7 +490,7 @@ async def test_check_video_status_completed_downloads_video(
 
 @pytest.mark.asyncio
 async def test_check_video_status_still_running(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-test")
+    _set_video_model_config(monkeypatch)
 
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json={"id": "job-789", "status": "processing"})
@@ -485,7 +504,7 @@ async def test_check_video_status_still_running(monkeypatch: pytest.MonkeyPatch)
 
 @pytest.mark.asyncio
 async def test_check_video_status_terminal_failure(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-test")
+    _set_video_model_config(monkeypatch)
 
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(
@@ -503,7 +522,7 @@ async def test_check_video_status_terminal_failure(monkeypatch: pytest.MonkeyPat
 
 @pytest.mark.asyncio
 async def test_check_video_status_non_200_returns_error(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-test")
+    _set_video_model_config(monkeypatch)
 
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(404, text="job not found")
@@ -517,7 +536,7 @@ async def test_check_video_status_non_200_returns_error(monkeypatch: pytest.Monk
 
 @pytest.mark.asyncio
 async def test_check_video_status_http_error_is_caught(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-test")
+    _set_video_model_config(monkeypatch)
 
     def handler(request: httpx.Request) -> httpx.Response:
         raise httpx.ConnectError("connection refused", request=request)
@@ -542,7 +561,7 @@ async def test_download_video_non_200_returns_error(monkeypatch: pytest.MonkeyPa
     _patch_async_client(monkeypatch, handler)
 
     async with httpx.AsyncClient() as client:
-        result = await vg._download_video(client, {}, vg._OPENROUTER_BASE, "job-x", None)
+        result = await vg._download_video(client, {}, _TEST_API_BASE, "job-x", None)
 
     assert result == "[ERROR]: video job job-x completed but downloading content failed: 500"
 
@@ -558,4 +577,4 @@ async def test_poll_job_raises_on_non_200_poll_response(monkeypatch: pytest.Monk
 
     async with httpx.AsyncClient() as client:
         with pytest.raises(RuntimeError, match="polling video job job-y failed: 503"):
-            await vg._poll_job(client, {}, "job-y", f"{vg._OPENROUTER_BASE}/videos/job-y", "pending")
+            await vg._poll_job(client, {}, "job-y", f"{_TEST_API_BASE}/videos/job-y", "pending")

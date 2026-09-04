@@ -2,8 +2,7 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
 """
-Text-to-video / image-to-video generation via OpenRouter's Seedance 2.0
-gateway.
+Text-to-video / image-to-video generation tools.
 
 Video generation is a submit-then-poll job (can take minutes), not a single
 request/response call. generate_video submits the job and polls for up to
@@ -12,10 +11,15 @@ if the job is still running after that, it returns the job_id and tells the
 agent to call check_video_status instead of blocking indefinitely or
 pretending the video is ready when it isn't.
 
-Credential resolution mirrors this package's other *_tools.py files (env-var
-based): OPENROUTER_API_KEY is required; api_base/model default to
-OpenRouter's Seedance 2.0 Fast endpoint unless overridden via
-VIDEO_GEN_API_BASE/VIDEO_GEN_MODEL_NAME.
+Credentials come solely from the existing "Video Model" config panel slot
+(VIDEO_API_KEY/VIDEO_API_BASE/VIDEO_MODEL_NAME - see
+apply_video_model_config_from_yaml). There is no separate settings entry and
+no built-in default endpoint/model: whatever's configured there is what
+these tools use, and all three must be set. Note this is the SAME slot
+video_understanding reads; pointing it at a generation-only model (e.g.
+OpenRouter's bytedance/seedance-2.0-fast) will break video understanding,
+since that tool expects a chat-completions-style video-analysis model, not a
+/videos generation endpoint.
 """
 from __future__ import annotations
 
@@ -35,44 +39,20 @@ from jiuwenswarm.common.utils import get_agent_workspace_dir
 
 logger = logging.getLogger(__name__)
 
-_OPENROUTER_BASE = "https://openrouter.ai/api/v1"
-_DEFAULT_VIDEO_MODEL = "bytedance/seedance-2.0-fast"
 _POLL_INTERVAL_SECONDS = 10
 _MAX_POLL_SECONDS = 120
 _TERMINAL_STATUSES = {"completed", "failed", "cancelled", "expired"}
 
 
 def _get_video_gen_api_credentials() -> tuple[str, str, str]:
-    """Resolve OpenRouter credentials for video generation.
-
-    OPENROUTER_API_KEY is the primary source (matches the OpenRouter
-    Playground's own naming); VIDEO_GEN_API_KEY is accepted as an alias so
-    this can be wired through a dedicated config.yaml -> env-var pattern
-    later without a rename. Also falls back to VIDEO_API_KEY/VIDEO_API_BASE/
-    VIDEO_MODEL_NAME - the existing "Video Model" config panel slot (see
-    apply_video_model_config_from_yaml) - so pointing that field at an
-    OpenRouter/Seedance endpoint drives generation too, without requiring a
-    separate settings entry. Note this is the SAME slot video_understanding
-    reads; pointing it at a generation-only model like Seedance will break
-    video understanding, since that tool expects a chat-completions-style
-    video-analysis model, not a /videos generation endpoint.
+    """Resolve video-generation credentials from the "Video Model" config
+    panel slot only (VIDEO_API_KEY/VIDEO_API_BASE/VIDEO_MODEL_NAME - see
+    apply_video_model_config_from_yaml). No fallback env vars, no built-in
+    default endpoint or model - an empty string means unconfigured.
     """
-    api_key = (
-        os.environ.get("OPENROUTER_API_KEY")
-        or os.environ.get("VIDEO_GEN_API_KEY")
-        or os.environ.get("VIDEO_API_KEY")
-        or ""
-    ).strip()
-    api_base = (
-        os.environ.get("VIDEO_GEN_API_BASE")
-        or os.environ.get("VIDEO_API_BASE")
-        or _OPENROUTER_BASE
-    ).strip()
-    model = (
-        os.environ.get("VIDEO_GEN_MODEL_NAME")
-        or os.environ.get("VIDEO_MODEL_NAME")
-        or _DEFAULT_VIDEO_MODEL
-    ).strip()
+    api_key = os.environ.get("VIDEO_API_KEY", "").strip()
+    api_base = os.environ.get("VIDEO_API_BASE", "").strip()
+    model = os.environ.get("VIDEO_MODEL_NAME", "").strip()
     return api_key, api_base, model
 
 
@@ -190,8 +170,11 @@ async def generate_video(
         job is still running after the bounded poll window.
     """
     api_key, api_base, model = _get_video_gen_api_credentials()
-    if not api_key:
-        return "[ERROR]: OPENROUTER_API_KEY is not configured for video generation."
+    if not (api_key and api_base and model):
+        return (
+            "[ERROR]: video generation is not configured - set the Video Model "
+            "API key, API URL, and model name in configuration settings."
+        )
     prompt = (prompt or "").strip()
     if not prompt:
         return "[ERROR]: prompt is required."
@@ -272,8 +255,11 @@ async def check_video_status(job_id: str, save_dir: str | None = None) -> str:
         Path to the generated video file, or a status message if still running.
     """
     api_key, api_base, _ = _get_video_gen_api_credentials()
-    if not api_key:
-        return "[ERROR]: OPENROUTER_API_KEY is not configured for video generation."
+    if not (api_key and api_base):
+        return (
+            "[ERROR]: video generation is not configured - set the Video Model "
+            "API key, API URL, and model name in configuration settings."
+        )
     job_id = (job_id or "").strip()
     if not job_id:
         return "[ERROR]: job_id is required."

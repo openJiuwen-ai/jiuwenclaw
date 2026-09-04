@@ -11,7 +11,7 @@ elements, each self-gated by the config source and filtered against the swarm
 * ``swarm.user_todos`` — the personal todo tool.
 * ``swarm.video`` — the video-understanding tool (``models.video`` gated).
 * ``swarm.image_gen`` — the image-generation tool (``IMAGE_GEN_API_KEY`` gated).
-* ``swarm.video_gen`` — the video-generation tools (``OPENROUTER_API_KEY`` gated).
+* ``swarm.video_gen`` — the video-generation tools (``models.video`` gated).
 * ``swarm.xiaoyi_phone`` — the xiaoyi phone tools (channel-switch gated).
 * ``swarm.code_extra_tools`` — code-mode-exclusive ``acp_chat``.
 
@@ -431,10 +431,10 @@ def _build_image_gen_tools(ctx: SwarmBuildContext) -> list[Any]:
 
 
 def _build_video_gen_tools(ctx: SwarmBuildContext) -> list[Any]:
-    """Build the video-generation tools when OPENROUTER_API_KEY is configured."""
+    """Build the video-generation tools when the Video Model config is complete."""
     _ = ctx
-    api_key, _, _ = _get_video_gen_api_credentials()
-    if not api_key:
+    api_key, api_base, model = _get_video_gen_api_credentials()
+    if not (api_key and api_base and model):
         return []
     return _mark_stateless([generate_video, check_video_status])
 
@@ -549,7 +549,7 @@ def build_image_gen_tools(params: dict[str, Any], ctx: SwarmBuildContext) -> lis
 @harness_element(
     kind=ElementKind.TOOL,
     name=VIDEO_GEN,
-    description="Video-generation tools (built only when OPENROUTER_API_KEY is set).",
+    description="Video-generation tools (built only when the Video Model config is complete).",
 )
 def build_video_gen_tools(params: dict[str, Any], ctx: SwarmBuildContext) -> list[Any]:
     """Build the whitelist-filtered video-generation tools."""

@@ -4488,9 +4488,9 @@ class JiuWenSwarmDeepAdapter:
     ) -> bool:
         """Build DeepAgent video generation config from service config/env mapping."""
         _ = config_base
-        api_key, _, _ = _get_video_gen_api_credentials()
-        if not api_key:
-            logger.info("[JiuWenSwarmDeepAdapter] video_gen tools skipped: no OPENROUTER_API_KEY configured")
+        api_key, api_base, model = _get_video_gen_api_credentials()
+        if not (api_key and api_base and model):
+            logger.info("[JiuWenSwarmDeepAdapter] video_gen tools skipped: Video Model config incomplete")
             return False
         return True
 
