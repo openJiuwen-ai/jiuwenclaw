@@ -1645,6 +1645,87 @@ async def test_gateway_server_emits_todo_update_then_waits_for_idle():
 
 
 @pytest.mark.asyncio
+async def test_gateway_server_emits_compression_state_as_session_update_not_chat_final():
+    """P2 fix: auto-compact now defaults on, so ACP must surface it.
+
+    A CHAT_FINAL rewrite would reuse this in-flight request's msg.id and
+    end the turn early; the gateway WS path must not fall back to a bare
+    ``{event: chat.final}`` frame either. The only correct shape is a
+    non-final ``session/update``.
+    """
+    server = build_server()
+    ws = FakeWebSocket()
+
+    async def on_message(msg):
+        await server.send(
+            Message(
+                id=msg.id,
+                type="event",
+                channel_id="acp",
+                session_id=msg.session_id,
+                params={},
+                timestamp=time.time(),
+                ok=True,
+                payload={
+                    "event_type": "context.compression_state",
+                    "status": "completed",
+                    "processor": "DialogueCompressor",
+                    "before": {"tokens": 100_000},
+                    "after": {"tokens": 25_000},
+                },
+                event_type=EventType.CONTEXT_COMPRESSION_STATE,
+            )
+        )
+        await server.send(
+            Message(
+                id=msg.id,
+                type="event",
+                channel_id="acp",
+                session_id=msg.session_id,
+                params={},
+                timestamp=time.time(),
+                ok=True,
+                payload={"is_processing": False},
+                event_type=EventType.CHAT_PROCESSING_STATUS,
+            )
+        )
+
+    server.on_message(on_message)
+
+    await server.handle_raw_message_public(
+        ws,
+        json.dumps(
+            {
+                "jsonrpc": "2.0",
+                "id": 403,
+                "method": "session/prompt",
+                "params": {
+                    "sessionId": "sess-compaction-gateway",
+                    "text": "hello",
+                },
+            },
+            ensure_ascii=False,
+        ),
+    )
+
+    assert ws.sent_frames[0]["jsonrpc"] == "2.0"
+    assert "method" not in ws.sent_frames[0] or ws.sent_frames[0]["method"] != "chat.final"
+    assert ws.sent_frames[0]["method"] == "session/update"
+    update = ws.sent_frames[0]["params"]["update"]
+    assert update["sessionUpdate"] == "agent_message_chunk"
+    assert "75%" in update["content"]["text"]
+
+    assert ws.sent_frames[1]["method"] == "session/update"
+    assert ws.sent_frames[1]["params"]["update"]["sessionUpdate"] == "session_info_update"
+
+    assert ws.sent_frames[2] == {
+        "jsonrpc": "2.0",
+        "id": 403,
+        "result": {"stopReason": "end_turn"},
+    }
+
+
+@pytest.mark.asyncio
 async def test_gateway_server_delta_only_does_not_trigger_idle_finalize(monkeypatch):
     import jiuwenswarm.gateway.app_gateway as gateway_module
 

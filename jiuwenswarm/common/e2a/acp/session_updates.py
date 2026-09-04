@@ -98,6 +98,37 @@ def _build_incremental_text_update(
     }
 
 
+def build_acp_compression_update(payload: dict[str, Any]) -> dict[str, Any] | None:
+    """Non-final ``session/update`` for ``context.compression_state``.
+
+    ACP cannot reuse the ``CHAT_FINAL`` rewrite the IM channels use to splice
+    a standalone notice into a turn: that rewrite keeps the original
+    ``msg.id``, and an ACP prompt result keyed on that id would end the turn
+    early (a fresh id, in turn, misses ``_request_ctx`` and gets dropped).
+    ``agent_message_chunk`` is the one ``sessionUpdate`` kind every ACP
+    client already renders as visible chat text, so compaction is surfaced
+    that way instead -- with its own message id, so it never touches the
+    turn's own ``assistant_message_id`` / incremental text accumulator.
+
+    Reuses the IM notice formatter (and its per-processor occupancy
+    threshold) so ACP does not spam a "compacting..." line the moment a low
+    occupancy ``started`` event fires, and so wording stays one source of
+    truth across every channel that has to synthesize this notice.
+    """
+    from jiuwenswarm.gateway.channel_manager.im_platforms.platform_adapter.compression_notice import (
+        format_compression_notice,
+    )
+
+    notice = format_compression_notice(payload)
+    if not notice:
+        return None
+    return {
+        "sessionUpdate": "agent_message_chunk",
+        "messageId": str(uuid.uuid4()),
+        "content": {"type": "text", "text": notice},
+    }
+
+
 def build_acp_session_update(
     msg: Message,
     payload: dict[str, Any],
@@ -106,6 +137,9 @@ def build_acp_session_update(
     event_type = msg.event_type
     if event_type == EventType.CHAT_SYMPHONY_STATUS:
         return None
+
+    if event_type == EventType.CONTEXT_COMPRESSION_STATE:
+        return build_acp_compression_update(payload)
 
     if event_type in (
         EventType.CHAT_DELTA,
