@@ -71,6 +71,11 @@ loguru>=0.7.3
 python-json-logger
 opentelemetry-api>=1.25.0
 opentelemetry-sdk>=1.25.0
+# Agent-core enterprise-dev imports these modules while loading team observability.
+# Keep them in the minimal OHOS dependency closure so a fresh venv is packable.
+opentelemetry-exporter-otlp-proto-common>=1.25.0
+opentelemetry-proto>=1.25.0
+protobuf>=5.0.0,<8
 
 # ============================================================
 # 文件锁和并发
