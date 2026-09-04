@@ -15,22 +15,19 @@ from jiuwenswarm.server.runtime.session.session_metadata import (
     init_session_metadata,
     sync_session_request_metadata,
 )
+from tests.unit_tests.tenant_workspace_test_helpers import (
+    patch_multi_tenant_workspace_dirs,
+)
 
 
 def test_resolve_tenant_sessions_dir_layout(tmp_path, monkeypatch):
-    monkeypatch.setattr(
-        "jiuwenswarm.common.utils.get_user_workspace_dir",
-        lambda: tmp_path,
-    )
+    patch_multi_tenant_workspace_dirs(monkeypatch, tmp_path)
     path = resolve_tenant_sessions_dir("office")
     assert path == tmp_path / "workspace_office" / "agent" / "sessions"
 
 
 def test_sync_writes_under_tenant_sessions_root(tmp_path, monkeypatch):
-    monkeypatch.setattr(
-        "jiuwenswarm.common.utils.get_user_workspace_dir",
-        lambda: tmp_path,
-    )
+    patch_multi_tenant_workspace_dirs(monkeypatch, tmp_path)
     global_sessions = tmp_path / "workspace_default" / "agent" / "sessions"
     global_sessions.mkdir(parents=True)
     monkeypatch.setattr(
@@ -62,10 +59,7 @@ def test_sync_writes_under_tenant_sessions_root(tmp_path, monkeypatch):
 
 
 def test_cache_isolated_by_sessions_root(tmp_path, monkeypatch):
-    monkeypatch.setattr(
-        "jiuwenswarm.common.utils.get_user_workspace_dir",
-        lambda: tmp_path,
-    )
+    patch_multi_tenant_workspace_dirs(monkeypatch, tmp_path)
     global_sessions = tmp_path / "workspace_default" / "agent" / "sessions"
     global_sessions.mkdir(parents=True)
     monkeypatch.setattr(
@@ -95,10 +89,7 @@ def test_cache_isolated_by_sessions_root(tmp_path, monkeypatch):
 
 
 def test_sync_then_get_resolved_under_tenant_root(tmp_path, monkeypatch):
-    monkeypatch.setattr(
-        "jiuwenswarm.common.utils.get_user_workspace_dir",
-        lambda: tmp_path,
-    )
+    patch_multi_tenant_workspace_dirs(monkeypatch, tmp_path)
     global_sessions = tmp_path / "workspace_default" / "agent" / "sessions"
     global_sessions.mkdir(parents=True)
     monkeypatch.setattr(
