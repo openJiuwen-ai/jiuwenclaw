@@ -1,7 +1,7 @@
 ﻿// RSI 纯展示函数：状态文案 / 节点状态色 / 分数格式化等。
 // 与数据层解耦，便于组件复用与单测。
 
-import type { RsiNodeType, RsiTaskStatus, RsiTreeNode } from './types';
+import type { RsiArtifactType, RsiNodeChange, RsiNodeType, RsiScenario, RsiTaskStatus, RsiTreeNode } from './types';
 
 // 节点类型 → 展示用状态色类名（对应 rsi.css 的 bar--* 与图例 dot）
 export type NodeStatusKind = 'best-path' | 'evaluated' | 'pending' | 'pruned';
@@ -10,14 +10,14 @@ export type NodeStatusKind = 'best-path' | 'evaluated' | 'pending' | 'pruned';
 // adopted/root → best-path；rejected → evaluated；provisional → pending；pruned → pruned
 export function nodeTypeToStatusKind(type: RsiNodeType): NodeStatusKind {
   switch (type) {
-    case 'root':
-    case 'adopted':
+    case 'ROOT':
+    case 'ADOPTED':
       return 'best-path';
-    case 'rejected':
+    case 'REJECTED':
       return 'evaluated';
-    case 'provisional':
+    case 'PROVISIONAL':
       return 'pending';
-    case 'pruned':
+    case 'PRUNED':
       return 'pruned';
   }
 }
@@ -30,15 +30,23 @@ export function legendDotClass(kind: NodeStatusKind): string {
   return `rsi-legend__dot rsi-node__bar--${kind}`;
 }
 
+export function nodeChangeGroup(change: RsiNodeChange): string {
+  return change.group ?? change.element ?? change.function ?? change.target ?? '';
+}
+
+export function nodeChangeSummary(change: RsiNodeChange): string {
+  return change.summary ?? change.reason ?? change.operation ?? '';
+}
+
 // 任务状态 → 中文标签 key（i18n key 后缀）
 const STATUS_LABEL_KEY: Record<RsiTaskStatus, string> = {
-  created: 'statusCreated',
-  queued: 'statusQueued',
-  running: 'statusRunning',
-  completed: 'statusCompleted',
-  failed: 'statusFailed',
-  paused: 'statusPaused',
-  terminated: 'statusTerminated',
+  CREATED: 'statusCreated',
+  QUEUED: 'statusQueued',
+  RUNNING: 'statusRunning',
+  COMPLETED: 'statusCompleted',
+  FAILED: 'statusFailed',
+  PAUSED: 'statusPaused',
+  TERMINATED: 'statusTerminated',
 };
 
 export function statusLabelKey(status: RsiTaskStatus): string {
@@ -46,33 +54,32 @@ export function statusLabelKey(status: RsiTaskStatus): string {
 }
 
 // 运行态操作按钮映射：根据当前状态返回可执行动作集
-export type RsiActionKind = 'start' | 'pause' | 'resume' | 'terminate' | 'install' | 'download' | 'config';
+export type RsiActionKind = 'config' | 'delete' | 'pause' | 'resume' | 'install' | 'download';
 
-export function actionsForStatus(status: RsiTaskStatus, scenario: 'harness' | 'artifact'): RsiActionKind[] {
-  const actions: RsiActionKind[] = ['config'];
+export function actionsForStatus(
+  status: RsiTaskStatus,
+  scenario: RsiScenario,
+  installed = false,
+): RsiActionKind[] {
+  const actions: RsiActionKind[] = ['config', 'delete'];
   switch (status) {
-    case 'running':
+    case 'QUEUED':
+    case 'CREATED':
+    case 'RUNNING':
       actions.push('pause');
       break;
-    case 'paused':
-      actions.push('resume', 'terminate');
+    case 'PAUSED':
+      actions.push('resume');
       break;
-    case 'completed':
-      actions.push('install', 'download');
+    case 'COMPLETED':
+      if (!installed) {
+        if (scenario === 'HARNESS') actions.push('install');
+        actions.push('download');
+      }
       break;
-    case 'failed':
-    case 'terminated':
+    case 'FAILED':
+    case 'TERMINATED':
       break;
-    case 'created':
-      actions.push('start');
-      break;
-    case 'queued':
-      break;
-  }
-  // 产物优化无"安装插件"（仅 harness 插件可安装）
-  if (scenario === 'artifact') {
-    const idx = actions.indexOf('install');
-    if (idx >= 0) actions.splice(idx, 1);
   }
   return actions;
 }
@@ -126,37 +133,42 @@ export function formatDateTime(iso: string | null | undefined): string {
 }
 
 // 场景显示名（带产物子类型分隔符）
-export function scenarioLabel(scenario: 'harness' | 'artifact'): string {
-  return scenario === 'harness' ? 'Harness优化' : '产物优化';
+export function scenarioLabel(scenario: 'HARNESS' | 'ARTIFACT'): string {
+  return scenario === 'HARNESS' ? 'Harness优化' : '产物优化';
 }
-export function artifactTypeLabel(type: 'paper' | 'program'): string {
-  return type === 'paper' ? '论文' : '程序';
+export function artifactTypeLabel(type: 'PAPER' | 'PROGRAM'): string {
+  return type === 'PAPER' ? '论文' : '程序';
 }
 // 完整类型标签：Harness优化 / 产物优化|程序 / 产物优化|论文
-export function typeDisplayLabel(scenario: 'harness' | 'artifact', artifactType: 'paper' | 'program' | null): string {
-  if (scenario === 'harness') return 'Harness优化';
-  return '产物优化|' + artifactTypeLabel(artifactType ?? 'paper');
+export function typeDisplayLabel(scenario: 'HARNESS' | 'ARTIFACT', artifactType: 'PAPER' | 'PROGRAM' | null): string {
+  if (scenario === 'HARNESS') return 'Harness优化';
+  return '产物优化|' + artifactTypeLabel(artifactType ?? 'PAPER');
 }
 
-// 状态徽章信息：标签 + 图标类型 + 背景色
-export type StatusBadgeKind = 'queued' | 'running' | 'completed' | 'failed';
+// 状态徽章信息：i18n 标签 key + 图标类型
+export type StatusBadgeKind = 'queued' | 'running' | 'paused' | 'completed' | 'installed' | 'failed';
 
-export function statusBadgeInfo(status: RsiTaskStatus): {
-  label: string;
+export interface StatusBadgeInfo {
+  labelKey: string;
   kind: StatusBadgeKind | null;
-} {
+}
+
+export function statusBadgeInfo(status: RsiTaskStatus, installed = false): StatusBadgeInfo {
   switch (status) {
-    case 'queued':
-    case 'created':
-      return { label: '排队中', kind: 'queued' };
-    case 'running':
-    case 'paused':
-      return { label: '优化中', kind: 'running' };
-    case 'completed':
-      return { label: '已完成', kind: 'completed' };
-    case 'failed':
-    case 'terminated':
-      return { label: '任务失败', kind: 'failed' };
+    case 'QUEUED':
+    case 'CREATED':
+      return { labelKey: 'statusQueued', kind: 'queued' };
+    case 'RUNNING':
+      return { labelKey: 'statusRunning', kind: 'running' };
+    case 'PAUSED':
+      return { labelKey: 'statusPaused', kind: 'paused' };
+    case 'COMPLETED':
+      return installed
+        ? { labelKey: 'statusInstalled', kind: 'installed' }
+        : { labelKey: 'statusCompleted', kind: 'completed' };
+    case 'FAILED':
+    case 'TERMINATED':
+      return { labelKey: statusLabelKey(status), kind: 'failed' };
   }
 }
 
@@ -164,15 +176,15 @@ export function statusBadgeInfo(status: RsiTaskStatus): {
 export function nodeDisplayName(
   type: RsiNodeType,
   nodeId: string,
-  scenario: 'harness' | 'artifact',
-  artifactType: 'paper' | 'program' | null,
+  scenario: RsiScenario,
+  artifactType: RsiArtifactType | null,
 ): string {
-  if (type === 'root') {
-    if (scenario === 'harness') return '基线Harness';
-    if (artifactType === 'paper') return '基线论文';
+  if (type === 'ROOT') {
+    if (scenario === 'HARNESS') return '基线Harness';
+    if (artifactType === 'PAPER') return '基线论文';
     return '基线程序';
   }
-  if (type === 'adopted') {
+  if (type === 'ADOPTED') {
     return '快照' + nodeId;
   }
   return nodeId;
@@ -181,15 +193,15 @@ export function nodeDisplayName(
 // 节点状态标签（上层右侧）：基线/当前最优/已评测/评测中/剪枝
 export function nodeStatusLabel(type: RsiNodeType): string {
   switch (type) {
-    case 'root':
+    case 'ROOT':
       return '基线';
-    case 'adopted':
+    case 'ADOPTED':
       return '当前最优';
-    case 'rejected':
+    case 'REJECTED':
       return '已评测';
-    case 'provisional':
+    case 'PROVISIONAL':
       return '评测中';
-    case 'pruned':
+    case 'PRUNED':
       return '剪枝';
   }
 }
@@ -204,14 +216,14 @@ export type NodeIconKind = 'crown' | 'check' | 'chevron-double' | 'clock' | 'min
 // 节点 type + 任务运行态 → 运行态 kind（决定图标与右侧标签）
 export function nodeRuntimeKind(type: RsiNodeType, taskRunning: boolean): NodeRuntimeKind {
   switch (type) {
-    case 'root':
-    case 'adopted':
+    case 'ROOT':
+    case 'ADOPTED':
       return 'best-path';
-    case 'rejected':
+    case 'REJECTED':
       return 'evaluated';
-    case 'provisional':
+    case 'PROVISIONAL':
       return taskRunning ? 'evaluating' : 'pending';
-    case 'pruned':
+    case 'PRUNED':
       return 'pruned';
   }
 }
@@ -286,6 +298,7 @@ export const RSI_NODE_BAR_H = 32;
 export const RSI_SCORE_LINE_H = 26; // 分数行行高
 export const RSI_EVAL_LINE_H = 24; // 评测中/文本行高
 export const RSI_BODY_PAD = 8; // 下层上下 padding 合计
+export const RSI_BODY_MIN_H = 42; // 下层最小高度（与节点高保真 32 + 42 对齐）
 export const RSI_NODE_MIN_W = 180;
 export const RSI_NODE_MAX_W = 280;
 export const RSI_SCORE_TOGGLE_H = 20; // 展开按钮(分隔符+行)高度
@@ -308,18 +321,18 @@ export function nodeMetrics(node: RsiTreeNode, kind: NodeRuntimeKind, scoreExpan
   let width = RSI_NODE_MIN_W;
   let bodyH = RSI_BODY_PAD;
   if (kind === 'evaluating') {
-    const text = node.summary ?? '正在分析实现';
+    const text = node.description ?? '正在分析实现';
     width = Math.min(RSI_NODE_MAX_W, Math.max(RSI_NODE_MIN_W, text.length * 14 + 32));
-    bodyH = RSI_BODY_PAD + evalTextRows(text, width) * RSI_EVAL_LINE_H;
+    bodyH = Math.max(RSI_BODY_MIN_H, RSI_BODY_PAD + evalTextRows(text, width) * RSI_EVAL_LINE_H);
   } else if (kind === 'best-path' || kind === 'evaluated') {
     const linesArr = nodeScoreLines(node);
     const shown = scoreExpanded ? Math.min(linesArr.length, 5) : Math.min(linesArr.length, 3);
-    bodyH = RSI_BODY_PAD + shown * RSI_SCORE_LINE_H;
+    bodyH = Math.max(RSI_BODY_MIN_H, RSI_BODY_PAD + shown * RSI_SCORE_LINE_H);
     if (linesArr.length > 3) bodyH += RSI_SCORE_TOGGLE_H;
   } else if (kind === 'pending') {
-    bodyH = RSI_BODY_PAD + RSI_SCORE_LINE_H;
+    bodyH = Math.max(RSI_BODY_MIN_H, RSI_BODY_PAD + RSI_SCORE_LINE_H);
   } else if (kind === 'pruned') {
-    bodyH = node.score == null ? RSI_BODY_PAD + RSI_EVAL_LINE_H : RSI_BODY_PAD + RSI_SCORE_LINE_H;
+    bodyH = Math.max(RSI_BODY_MIN_H, RSI_BODY_PAD + (node.score == null ? RSI_EVAL_LINE_H : RSI_SCORE_LINE_H));
   }
   return { width, barH, bodyH };
 }

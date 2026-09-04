@@ -4,6 +4,11 @@
 import { useCallback, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { executeDesktopSave, type DesktopSaveApiResult } from '../../../utils/desktopSave';
+import completeIcon from '../../../assets/rsi/rsi-complete.svg';
+import deleteIcon from '../../../assets/rsi/rsi-delete.svg';
+import pauseIcon from '../../../assets/rsi/rsi-pause.svg';
+import runningIcon from '../../../assets/rsi/rsi-runing.svg';
+import waitingIcon from '../../../assets/rsi/rsi-waiting2.svg';
 import type { RsiTaskGetResult, RsiReportGetResult } from '../types';
 import {
   actionsForStatus,
@@ -16,12 +21,12 @@ import {
 } from '../rsiPresentation';
 import { useRsiStore } from '../rsiStore';
 import {
+  rsiTaskDelete,
   rsiTrainingPause,
   rsiTrainingResume,
-  rsiTrainingStart,
-  rsiTrainingTerminate,
   rsiArtifactDownload,
   rsiArtifactDownloadUrl,
+  rsiHarnessInstall,
 } from '../rsiApi';
 
 type DownloadCapableWindow = Window & {
@@ -43,9 +48,14 @@ interface RsiDetailHeaderProps {
 export function RsiDetailHeader({ task, report, liveCost, createdAt, onOpenConfig }: RsiDetailHeaderProps) {
   const { t } = useTranslation();
   const patchTaskStatus = useRsiStore((s) => s.patchTaskStatus);
+  const removeListItem = useRsiStore((s) => s.removeListItem);
+  const markTaskInstalled = useRsiStore((s) => s.markTaskInstalled);
+  const installedTask = useRsiStore((s) => Boolean(s.installedTaskIds[task.task_id]));
+  const installed = task.status === 'COMPLETED' && installedTask;
   const [busy, setBusy] = useState(false);
+  const [confirmAction, setConfirmAction] = useState<'delete' | 'pause' | null>(null);
 
-  const handleAction = useCallback(
+  const runAction = useCallback(
     async (action: RsiActionKind) => {
       if (action === 'config') {
         onOpenConfig();
@@ -53,18 +63,16 @@ export function RsiDetailHeader({ task, report, liveCost, createdAt, onOpenConfi
       }
       setBusy(true);
       try {
-        if (action === 'start') {
-          const res = await rsiTrainingStart(task.task_id);
-          patchTaskStatus(task.task_id, res.status);
-        } else if (action === 'pause') {
+        if (action === 'pause') {
           const res = await rsiTrainingPause(task.task_id);
           patchTaskStatus(task.task_id, res.status);
         } else if (action === 'resume') {
           const res = await rsiTrainingResume(task.task_id);
           patchTaskStatus(task.task_id, res.status);
-        } else if (action === 'terminate') {
-          const res = await rsiTrainingTerminate(task.task_id);
-          patchTaskStatus(task.task_id, res.status);
+        } else if (action === 'delete') {
+          const result = await rsiTaskDelete(task.task_id);
+          if (!result.ok) throw new Error('task delete failed');
+          removeListItem(task.task_id);
         } else if (action === 'download') {
           const artifactId = report?.metrics.best_artifact_id ?? undefined;
           const artifact = await rsiArtifactDownload(task.task_id, artifactId);
@@ -78,9 +86,9 @@ export function RsiDetailHeader({ task, report, liveCost, createdAt, onOpenConfi
             window.open(downloadUrl, '_blank', 'noopener,noreferrer');
           }
         } else if (action === 'install') {
-          // 复用 harness.packages.*（§12）：安装插件由既有插件面板承接，
-          // 这里触发跳转到插件管理，避免在 RSI 内重复实现安装流程。
-          window.dispatchEvent(new CustomEvent('jiuwen:nav', { detail: 'connectorMarket' }));
+          const artifactId = report?.metrics.best_artifact_id ?? task.best_artifact?.artifact_id ?? undefined;
+          await rsiHarnessInstall(task.task_id, artifactId);
+          markTaskInstalled(task.task_id);
         }
       } catch (e) {
         console.error('[rsi] action failed', action, e);
@@ -88,24 +96,55 @@ export function RsiDetailHeader({ task, report, liveCost, createdAt, onOpenConfi
         setBusy(false);
       }
     },
-    [task.task_id, report, patchTaskStatus, onOpenConfig, t],
+    [
+      task.task_id,
+      task.best_artifact,
+      report,
+      patchTaskStatus,
+      removeListItem,
+      markTaskInstalled,
+      onOpenConfig,
+    ],
   );
 
-  const actions = actionsForStatus(task.status, task.scenario);
+  const handleAction = useCallback(
+    (action: RsiActionKind) => {
+      if (action === 'delete' || action === 'pause') {
+        setConfirmAction(action);
+        return;
+      }
+      void runAction(action);
+    },
+    [runAction],
+  );
+
+  const handleConfirm = useCallback(async () => {
+    if (!confirmAction) return;
+    const action = confirmAction;
+    setConfirmAction(null);
+    await runAction(action);
+  }, [confirmAction, runAction]);
+
+  const actions = actionsForStatus(task.status, task.scenario, installed);
+  const orderedActions = [...actions];
+  const deleteIndex = orderedActions.indexOf('delete');
+  if (deleteIndex > 0) {
+    orderedActions.splice(deleteIndex, 1);
+    orderedActions.unshift('delete');
+  }
 
   const actionLabel: Record<RsiActionKind, string> = {
     config: t('rsi.detail.actionConfig'),
-    start: t('rsi.detail.actionStart'),
+    delete: t('rsi.detail.actionDelete'),
     pause: t('rsi.detail.actionPause'),
     resume: t('rsi.detail.actionResume'),
-    terminate: t('rsi.detail.actionTerminate'),
     install: t('rsi.detail.actionInstall'),
     download: t('rsi.detail.actionDownload'),
   };
 
   // 类型标签 + 状态徽章 + 数值标签
   const typeLabel = typeDisplayLabel(task.scenario, task.artifact_type);
-  const badge = statusBadgeInfo(task.status);
+  const badge = statusBadgeInfo(task.status, installed);
   const maxIter = t('rsi.detail.tagMaxIterations') + '：' + task.config.max_iterations;
   const maxWidth = t('rsi.detail.tagMaxSearchWidth') + '：' + task.config.search_width;
   const createdLabel = t('rsi.detail.tagCreatedAt', { defaultValue: '创建时间' }) + '：' + formatDateTime(createdAt);
@@ -118,10 +157,12 @@ export function RsiDetailHeader({ task, report, liveCost, createdAt, onOpenConfi
           {badge.kind ? (
             <span className="rsi-detail__tag rsi-detail__tag--status">
               <StatusIcon kind={badge.kind} />
-              {badge.label}
+              {t('rsi.detail.' + badge.labelKey)}
             </span>
           ) : (
-            <span className="rsi-detail__tag rsi-detail__tag--status">{badge.label}</span>
+            <span className="rsi-detail__tag rsi-detail__tag--status">
+              {t('rsi.detail.' + badge.labelKey)}
+            </span>
           )}
           <span className="rsi-detail__divider" />
           <span className="rsi-detail__tag rsi-detail__tag--meta">
@@ -154,63 +195,75 @@ export function RsiDetailHeader({ task, report, liveCost, createdAt, onOpenConfi
             {t('rsi.detail.estimatedCost', { cost: formatCost(liveCost) })}
           </span>
         )}
-        {actions.map((action) => {
-          const primary = action === 'config';
+        {orderedActions.map((action) => {
+          const className =
+            action === 'delete'
+              ? 'rsi-btn rsi-detail__action--delete'
+              : `rsi-btn ${action === 'config' ? 'rsi-btn--ghost' : 'rsi-btn--primary'}`;
           return (
             <button
               key={action}
               type="button"
-              className={`rsi-btn ${primary ? 'rsi-btn--ghost' : 'rsi-btn--primary'}`}
+              className={className}
               onClick={() => handleAction(action)}
               disabled={busy}
+              aria-label={action === 'delete' ? actionLabel.delete : undefined}
               data-testid={`rsi-action-${action}`}
             >
-              {actionLabel[action]}
+              {action === 'delete' && (
+                <img className="rsi-detail__action-icon" src={deleteIcon} alt={actionLabel.delete} />
+              )}
+              {action !== 'delete' && actionLabel[action]}
             </button>
           );
         })}
       </div>
+      {confirmAction && (
+        <div className="rsi-confirm-overlay" role="presentation">
+          <div className="rsi-confirm" role="dialog" aria-modal="true" aria-labelledby="rsi-confirm-title">
+            <div className="rsi-confirm__title" id="rsi-confirm-title">
+              {t(confirmAction === 'delete' ? 'rsi.detail.deleteTitle' : 'rsi.detail.pauseTitle')}
+            </div>
+            <div className="rsi-confirm__body">
+              {t(confirmAction === 'delete' ? 'rsi.detail.deleteBody' : 'rsi.detail.pauseBody')}
+            </div>
+            <div className="rsi-confirm__actions">
+              <button
+                type="button"
+                className="rsi-btn rsi-btn--ghost rsi-confirm__btn"
+                onClick={() => setConfirmAction(null)}
+              >
+                {t('rsi.detail.actionCancel')}
+              </button>
+              <button
+                type="button"
+                className="rsi-btn rsi-btn--primary rsi-confirm__btn"
+                onClick={() => void handleConfirm()}
+                disabled={busy}
+              >
+                {t('rsi.detail.actionConfirm')}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
 
+const STATUS_ICON_SRCS: Partial<Record<StatusBadgeKind, string>> = {
+  queued: waitingIcon,
+  running: runningIcon,
+  paused: pauseIcon,
+  completed: completeIcon,
+  installed: completeIcon,
+};
+
 function StatusIcon({ kind }: { kind: StatusBadgeKind }) {
-  if (kind === 'running') {
-    return (
-      <svg viewBox="0 0 16 16" width="14" height="14" fill="none" aria-hidden="true">
-        <path
-          d="M11 11L5 11L5 9.03003L3 9.03003L3 11C3 12.1 3.9 13 5 13L11 13C12.1 13 13 12.1 13 11L13 9.03003L11 9.03003L11 11Z"
-          fill="rgb(11,184,178)"
-          fillRule="nonzero"
-        />
-        <path
-          d="M11 3L5 3C3.9 3 3 3.9 3 5L3 7.03L5 7.03L5 5L11 5L11 7.03L13 7.03L13 5C13 3.9 12.1 3 11 3Z"
-          fill="rgb(11,184,178)"
-          fillRule="nonzero"
-        />
-      </svg>
-    );
+  const iconSrc = STATUS_ICON_SRCS[kind];
+  if (iconSrc) {
+    return <img className="rsi-detail__status-icon" src={iconSrc} alt="" aria-hidden />;
   }
-  if (kind === 'queued') {
-    return (
-      <svg viewBox="0 0 16 16" width="14" height="14" fill="none" aria-hidden="true">
-        <path
-          d="M8 3C5.24 3 3 5.24 3 8C3 10.76 5.24 13 8 13C10.76 13 13 10.76 13 8C13 5.24 10.76 3 8 3ZM8 11C6.34 11 5 9.66 5 8C5 6.34 6.34 5 8 5C9.66 5 11 6.34 11 8C11 9.66 9.66 11 8 11Z"
-          fill="rgb(194,194,194)"
-          fillRule="nonzero"
-        />
-      </svg>
-    );
-  }
-  if (kind === 'completed') {
-    return (
-      <svg viewBox="0 0 16 16" width="14" height="14" fill="none" aria-hidden="true">
-        <circle cx="8" cy="8" r="7" fill="rgb(34,197,94)" />
-        <path d="M6.5 9.2L4.8 7.5L3.8 8.5L6.5 11.2L12 5.7L11 4.7L6.5 9.2Z" fill="white" fillRule="nonzero" />
-      </svg>
-    );
-  }
-  // failed
   return (
     <svg viewBox="0 0 16 16" width="14" height="14" fill="none" aria-hidden="true">
       <circle cx="8" cy="8" r="7" fill="rgb(239,68,68)" />

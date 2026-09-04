@@ -51,27 +51,6 @@ export function RsiRail({ tasks, loading, error, selectedTaskId, onSelect, onCre
             </button>
           </div>
         )}
-        {!loading && !error && tasks.length === 0 && (
-          <div className="rsi-rail__empty">
-            <svg
-              width="32"
-              height="32"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth={1.5}
-              aria-hidden="true"
-            >
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                d="M8 2v4M16 2v4M3 7h18M5 5h14a1 1 0 0 1 1 1v14a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1z"
-              />
-              <path strokeLinecap="round" strokeLinejoin="round" d="M9 14l2 2 4-4" opacity="0.5" />
-            </svg>
-            <span>暂无实验</span>
-          </div>
-        )}
         {!loading &&
           !error &&
           tasks.map((task) => {

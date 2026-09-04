@@ -1,14 +1,14 @@
 /**
  * RSI 创建实验弹窗（三分支：Harness 优化 / 产物优化·论文 / 产物优化·程序）。
  * 字段对齐契约 §6.1 task.create 入参。数据集走 rsi.dataset.validate，
- * 路径选择复用 path.select_files（localFilePicker），模型复用 models.list。
+ * 路径选择统一复用 path.select_directory（文件夹路径），模型复用 models.list。
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
 import clsx from 'clsx';
 import { useTranslation } from 'react-i18next';
 import { rsiDatasetValidate, rsiTaskCreate, rsiTaskList, rsiTrainingStart } from '../rsiApi';
-import type { RsiScenario, RsiArtifactType, RsiTaskListItem } from '../types';
-import { selectLocalFiles } from '../../../features/workspace/localFilePicker';
+import type { RsiArtifactType, RsiScenario, RsiTaskCreateParams, RsiTaskListItem, RsiTaskStatus } from '../types';
+import { selectProjectDirectory } from '../../../features/workspace/projectDirectoryPicker';
 import { useSessionStore } from '../../../stores/sessionStore';
 import { ModelProviderIcon } from '../../../components/ModelProviderIcon';
 import TipIcon from '../../../assets/tip.svg?react';
@@ -20,7 +20,7 @@ interface CreateExperimentDialogProps {
   onCreated: (item: RsiTaskListItem) => void;
 }
 
-type Branch = 'harness' | 'paper' | 'program';
+type Branch = 'HARNESS' | 'PAPER' | 'PROGRAM';
 
 interface FormState {
   name: string;
@@ -38,8 +38,8 @@ interface FormState {
 function defaultForm(): FormState {
   return {
     name: '',
-    scenario: 'harness',
-    artifactType: 'paper',
+    scenario: 'HARNESS',
+    artifactType: 'PAPER',
     optimizer: '',
     tester: '',
     datasetFile: '',
@@ -58,8 +58,8 @@ export function CreateExperimentDialog({ open, onClose, onCreated }: CreateExper
   const [datasetValid, setDatasetValid] = useState<null | { valid: boolean; count: number | null }>(null);
   const dialogRef = useRef<HTMLDialogElement>(null);
 
-  const branch: Branch = form.scenario === 'harness' ? 'harness' : form.artifactType;
-  const isArtifact = form.scenario === 'artifact';
+  const branch: Branch = form.scenario === 'HARNESS' ? 'HARNESS' : form.artifactType;
+  const isArtifact = form.scenario === 'ARTIFACT';
 
   // 选择数据集路径后自动校验
   useEffect(() => {
@@ -69,9 +69,9 @@ export function CreateExperimentDialog({ open, onClose, onCreated }: CreateExper
     }
     let cancelled = false;
     void rsiDatasetValidate({
-      dataset_file: form.datasetFile,
+      input_file: form.datasetFile,
       scenario: form.scenario,
-      artifact_type: form.scenario === 'artifact' ? form.artifactType : undefined,
+      artifact_type: form.scenario === 'ARTIFACT' ? form.artifactType : undefined,
     })
       .then((res) => {
         if (!cancelled) setDatasetValid({ valid: res.valid, count: res.sample_count });
@@ -93,31 +93,31 @@ export function CreateExperimentDialog({ open, onClose, onCreated }: CreateExper
   }, [open]);
 
   // 切换实验场景（Harness 优化 vs 产物优化）
-  const switchScenario = useCallback((s: 'harness' | 'artifact') => {
+  const switchScenario = useCallback((s: RsiScenario) => {
     setDatasetValid(null);
     setErrors({});
     setForm((f) => {
-      if (s === 'harness')
+      if (s === 'HARNESS')
         return {
           ...f,
-          scenario: 'harness',
-          artifactType: 'paper',
+          scenario: 'HARNESS',
+          artifactType: 'PAPER',
           artifactPath: '',
           optimizationInstruction: '',
         };
       // 产物优化默认选论文
-      return { ...f, scenario: 'artifact', artifactType: 'paper', tester: '' };
+      return { ...f, scenario: 'ARTIFACT', artifactType: 'PAPER', tester: '' };
     });
   }, []);
 
   // 切换产物子类型（论文 / 程序）
-  const switchArtifactType = useCallback((at: 'paper' | 'program') => {
+  const switchArtifactType = useCallback((at: RsiArtifactType) => {
     setErrors({});
     setForm((f) => {
-      if (at === 'paper') return { ...f, artifactType: 'paper' };
+      if (at === 'PAPER') return { ...f, artifactType: 'PAPER' };
       return {
         ...f,
-        artifactType: 'program',
+        artifactType: 'PROGRAM',
         optimizationInstruction: '',
         maxIterations: 3,
       };
@@ -130,9 +130,9 @@ export function CreateExperimentDialog({ open, onClose, onCreated }: CreateExper
 
   const pickPath = useCallback(
     async (target: 'dataset' | 'artifact') => {
-      const result = await selectLocalFiles(false);
-      if (!result.ok || !result.files[0]) return;
-      const path = result.files[0].path;
+      const result = await selectProjectDirectory();
+      if (!result.ok || !result.path) return;
+      const path = result.path;
       if (target === 'dataset') {
         update('datasetFile', path);
         setDatasetValid(null);
@@ -146,15 +146,15 @@ export function CreateExperimentDialog({ open, onClose, onCreated }: CreateExper
   const validate = useCallback((): boolean => {
     const e: Record<string, string> = {};
     if (!form.name.trim()) e.name = t('rsi.createDialog.validation.nameRequired');
-    if (branch === 'harness' && !form.datasetFile) e.dataset = t('rsi.createDialog.validation.datasetRequired');
+    if (branch === 'HARNESS' && !form.datasetFile) e.dataset = t('rsi.createDialog.validation.datasetRequired');
     if (!form.optimizer) e.optimizer = t('rsi.createDialog.validation.optimizerRequired');
-    if (branch === 'harness' && !form.tester) e.tester = t('rsi.createDialog.validation.testerRequired');
-    if (branch === 'paper') {
+    if (branch === 'HARNESS' && !form.tester) e.tester = t('rsi.createDialog.validation.testerRequired');
+    if (branch === 'PAPER') {
       if (!form.optimizationInstruction.trim() && !form.artifactPath) {
         e.paper = t('rsi.createDialog.validation.paperOrInstruction');
       }
     }
-    if (branch === 'program') {
+    if (branch === 'PROGRAM') {
       if (!form.artifactPath) e.program = t('rsi.createDialog.validation.programRequired');
     }
     setErrors(e);
@@ -165,29 +165,40 @@ export function CreateExperimentDialog({ open, onClose, onCreated }: CreateExper
     if (!validate()) return;
     setSubmitting(true);
     try {
-      const res = await rsiTaskCreate({
-        scenario: form.scenario,
-        artifact_type: form.scenario === 'artifact' ? form.artifactType : undefined,
-        name: form.name.trim(),
-        dataset_file: form.datasetFile,
-        model_refs: {
-          optimizer: form.optimizer,
-          ...(branch === 'harness' ? { tester: form.tester } : {}),
-        },
-        max_iterations: form.maxIterations,
-        search_width: form.searchWidth,
-        ...(form.optimizationInstruction ? { optimization_instruction: form.optimizationInstruction } : {}),
-        ...(form.artifactPath ? { artifact_path: form.artifactPath } : {}),
-      });
-      // 创建成功后立即启动训练（created → running）
-      let startStatus = res.status;
+      const createParams: RsiTaskCreateParams =
+        branch === 'HARNESS'
+          ? {
+              scenario: 'HARNESS',
+              input_file: form.datasetFile,
+              name: form.name.trim(),
+              model_refs: {
+                optimizer: form.optimizer,
+                tester: form.tester,
+              },
+              max_iterations: form.maxIterations,
+              search_width: form.searchWidth,
+            }
+          : {
+              scenario: 'ARTIFACT',
+              artifact_type: form.artifactType,
+              name: form.name.trim(),
+              model_refs: {
+                optimizer: form.optimizer,
+              },
+              max_iterations: form.maxIterations,
+              ...(branch === 'PAPER' && form.searchWidth ? { search_width: form.searchWidth } : {}),
+              ...(form.optimizationInstruction ? { optimization_instruction: form.optimizationInstruction } : {}),
+              ...(form.artifactPath ? { artifact_path: form.artifactPath } : {}),
+            };
+      const res = await rsiTaskCreate(createParams);
+      let nextStatus: RsiTaskStatus = res.status;
       try {
-        startStatus = (await rsiTrainingStart(res.task_id)).status;
+        const started = await rsiTrainingStart(res.task_id);
+        nextStatus = started.status;
       } catch {
-        /* 启动失败不阻断创建反馈 */
+        /* 启动失败保留 CREATED，不阻断创建反馈 */
       }
 
-      // 让后端列表成为创建后的权威快照；若 worker 已经很快完成，也能直接显示终态。
       let item: RsiTaskListItem | undefined;
       try {
         item = (await rsiTaskList()).find((candidate) => candidate.task_id === res.task_id);
@@ -196,21 +207,20 @@ export function CreateExperimentDialog({ open, onClose, onCreated }: CreateExper
         // snapshot is temporarily unavailable.
       }
       if (!item) {
-        const fallback: RsiTaskListItem = {
+        item = {
           task_id: res.task_id,
           name: form.name.trim(),
-          scenario: res.scenario,
-          artifact_type: res.artifact_type,
-          status: startStatus,
+          scenario: form.scenario,
+          artifact_type: form.scenario === 'ARTIFACT' ? form.artifactType : null,
+          status: nextStatus,
           iter: { current: 0, total: form.maxIterations },
           score: null,
           best: null,
           base: null,
           gain: null,
-          running: startStatus === 'running',
+          running: nextStatus === 'RUNNING',
           created_at: new Date().toISOString(),
         };
-        item = fallback;
       }
       onCreated(item);
       onClose();
@@ -225,7 +235,7 @@ export function CreateExperimentDialog({ open, onClose, onCreated }: CreateExper
   }, [form, branch, validate, onCreated, onClose]);
 
   // 程序优化无"最大迭代轮次"字段（样式概要明确）
-  const showMaxIterations = branch !== 'program';
+  const showMaxIterations = branch !== 'PROGRAM';
 
   return (
     <dialog
@@ -250,10 +260,10 @@ export function CreateExperimentDialog({ open, onClose, onCreated }: CreateExper
           </button>
         </div>
 
-        <div className="rsi-create-dialog__info-bar">
+        {form.artifactType === 'PROGRAM' && <div className="rsi-create-dialog__info-bar">
           <TipIcon className="w-3.5 h-3.5 shrink-0" />
           <span>{t('rsi.createDialog.infoBar')}</span>
-        </div>
+        </div>}
 
         {/* 基础字段 */}
         <Field label={t('rsi.createDialog.nameLabel')}>
@@ -269,13 +279,13 @@ export function CreateExperimentDialog({ open, onClose, onCreated }: CreateExper
         <Field label={t('rsi.createDialog.typeLabel')}>
           <div className="rsi-create-dialog__type-row">
             <BranchButton
-              active={form.scenario === 'harness'}
-              onClick={() => switchScenario('harness')}
+              active={form.scenario === 'HARNESS'}
+              onClick={() => switchScenario('HARNESS')}
               label={t('rsi.createDialog.typeHarness')}
             />
             <BranchButton
               active={isArtifact}
-              onClick={() => switchScenario('artifact')}
+              onClick={() => switchScenario('ARTIFACT')}
               label={t('rsi.createDialog.typeArtifact')}
             />
           </div>
@@ -285,13 +295,13 @@ export function CreateExperimentDialog({ open, onClose, onCreated }: CreateExper
           <Field label={t('rsi.createDialog.artifactSubtypeLabel')}>
             <div className="rsi-create-dialog__type-row">
               <BranchButton
-                active={form.artifactType === 'paper'}
-                onClick={() => switchArtifactType('paper')}
+                active={form.artifactType === 'PAPER'}
+                onClick={() => switchArtifactType('PAPER')}
                 label={t('rsi.createDialog.subtypePaper')}
               />
               <BranchButton
-                active={form.artifactType === 'program'}
-                onClick={() => switchArtifactType('program')}
+                active={form.artifactType === 'PROGRAM'}
+                onClick={() => switchArtifactType('PROGRAM')}
                 label={t('rsi.createDialog.subtypeProgram')}
               />
             </div>
@@ -303,14 +313,14 @@ export function CreateExperimentDialog({ open, onClose, onCreated }: CreateExper
           {errors.optimizer && <Err text={errors.optimizer} />}
         </Field>
 
-        {branch === 'harness' && (
+        {branch === 'HARNESS' && (
           <Field label={t('rsi.createDialog.testerModelLabel')}>
             <ModelSelect value={form.tester} onChange={(v) => update('tester', v)} />
             {errors.tester && <Err text={errors.tester} />}
           </Field>
         )}
 
-        {branch === 'harness' && (
+        {branch === 'HARNESS' && (
           <Field label={t('rsi.createDialog.datasetLabel')}>
             <PathInput
               value={form.datasetFile}
@@ -330,7 +340,7 @@ export function CreateExperimentDialog({ open, onClose, onCreated }: CreateExper
           </Field>
         )}
 
-        {branch === 'paper' && (
+        {branch === 'PAPER' && (
           <>
             <Field label={t('rsi.createDialog.optimizationInstructionLabel')}>
               <textarea
@@ -353,7 +363,7 @@ export function CreateExperimentDialog({ open, onClose, onCreated }: CreateExper
           </>
         )}
 
-        {branch === 'program' && (
+        {branch === 'PROGRAM' && (
           <>
             <Field label={t('rsi.createDialog.programLabel')}>
               <PathInput
@@ -372,7 +382,7 @@ export function CreateExperimentDialog({ open, onClose, onCreated }: CreateExper
           </Field>
         )}
 
-        {branch !== 'program' && (
+        {branch === 'HARNESS' && (
           <Field label={t('rsi.createDialog.searchWidthLabel')}>
             <SegmentedSlider value={form.searchWidth} min={1} max={5} onChange={(v) => update('searchWidth', v)} />
           </Field>

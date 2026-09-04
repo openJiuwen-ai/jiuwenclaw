@@ -9,7 +9,7 @@ import { useRsiEvents } from './useRsiEvents';
 import { RsiRail } from './components/RsiRail';
 import { RsiDetail } from './components/RsiDetail';
 import { CreateExperimentDialog } from './components/CreateExperimentDialog';
-import { RsiEmptyState } from './components/RsiEmptyState';
+import { RsiIntroduction } from './components/RsiIntroduction';
 import type { RsiTaskListItem } from './types';
 import './styles/rsi.css';
 
@@ -58,23 +58,21 @@ export function RsiPage() {
   const hasSelection = Boolean(selectedTaskId);
 
   return (
-    <div className="rsi-page" data-testid="rsi-page">
-      <RsiRail
-        tasks={list}
-        loading={listLoading}
-        error={listError}
-        selectedTaskId={selectedTaskId}
-        onSelect={handleSelect}
-        onCreate={() => setCreateOpen(true)}
-        onRetry={loadList}
-      />
+    <div className={hasSelection ? 'rsi-page' : 'rsi-page rsi-page--intro'} data-testid="rsi-page">
+      {hasSelection && (
+        <RsiRail
+          tasks={list}
+          loading={listLoading}
+          error={listError}
+          selectedTaskId={selectedTaskId}
+          onSelect={handleSelect}
+          onCreate={() => setCreateOpen(true)}
+          onRetry={loadList}
+        />
+      )}
 
-      <div className="rsi-detail" data-testid="rsi-detail">
-        {hasSelection ? (
-          <RsiDetail />
-        ) : (
-          <RsiEmptyState onCreate={() => setCreateOpen(true)} text={t('rsi.empty.title')} hint={t('rsi.empty.hint')} />
-        )}
+      <div className={hasSelection ? 'rsi-detail' : 'rsi-detail rsi-detail--intro'} data-testid="rsi-detail">
+        {hasSelection ? <RsiDetail /> : <RsiIntroduction onCreate={() => setCreateOpen(true)} />}
       </div>
 
       <CreateExperimentDialog open={createOpen} onClose={() => setCreateOpen(false)} onCreated={handleCreated} />

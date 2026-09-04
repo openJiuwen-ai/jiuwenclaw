@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from jiuwenswarm.agents.harness.common.rsi.artifact_service import RsiArtifactService
+from jiuwenswarm.agents.harness.common.rsi.artifact_files_service import RsiArtifactFilesService
 from jiuwenswarm.agents.harness.common.rsi.projector import RsiProjector
 from jiuwenswarm.agents.harness.common.rsi.services import (
     RsiArtifactDownloadService,
@@ -75,6 +76,7 @@ class RsiServiceContext:
             self.store,
             adapter_resolver=self.adapter_for,
         )
+        self.artifact_files_service = RsiArtifactFilesService(self.store)
 
     def bind_task_service(self, *, adapter: Any = None, harness_refs_provider: Callable[[], str | None] | None = None) -> None:
         self.task_service.adapter = adapter

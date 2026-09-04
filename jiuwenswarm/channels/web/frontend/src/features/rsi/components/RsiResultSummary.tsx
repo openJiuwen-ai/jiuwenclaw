@@ -8,6 +8,7 @@
  * 后端产物预览图接口 ready 后替换占位缩略图。
  */
 import { useTranslation } from 'react-i18next';
+import optimizeImage from '../../../assets/rsi/rsi-optimize.svg';
 import type { RsiTaskGetResult, RsiReportGetResult, RsiUsageGetResult } from '../types';
 import { formatScore, formatGain, formatTokensK } from '../rsiPresentation';
 import { useRsiStore } from '../rsiStore';
@@ -23,8 +24,8 @@ export function RsiResultSummary({ task, report, usage }: RsiResultSummaryProps)
   const liveProgress = useRsiStore((s) => (s.selectedTaskId ? s.detail[s.selectedTaskId]?.liveProgress : null));
 
   // 分数优先取运行时推送，回退 task.progress/report
-  const score = liveProgress?.score ?? task.progress.score ?? report?.best_score ?? null;
-  const baseline = liveProgress?.baseline ?? task.progress.baseline ?? report?.baseline ?? null;
+  const score = liveProgress?.score ?? task.progress?.score ?? report?.best_score ?? null;
+  const baseline = liveProgress?.baseline ?? task.progress?.baseline ?? report?.baseline ?? null;
   const gain = score != null && baseline != null && baseline > 0 ? (score - baseline) / baseline : null;
   const gainFmt = formatGain(gain);
   const bestName = task.best_artifact?.name
@@ -32,14 +33,14 @@ export function RsiResultSummary({ task, report, usage }: RsiResultSummaryProps)
     ?? task.best_artifact?.artifact_id
     ?? report?.best_artifact?.artifact_id
     ?? null;
-  const queued = task.status === 'created' || task.status === 'queued';
+  const queued = task.status === 'CREATED' || task.status === 'QUEUED';
 
-  const evalPassed = report?.metrics.eval_passed ?? null;
-  const evalTotal = report?.metrics.eval_total ?? null;
-  const prunedCount = report?.metrics.pruned_count ?? null;
+  const evalPassed = queued ? null : (report?.metrics.eval_passed ?? null);
+  const evalTotal = queued ? null : (report?.metrics.eval_total ?? null);
+  const prunedCount = queued ? null : (report?.metrics.pruned_count ?? null);
   const iterations = queued
     ? null
-    : (liveProgress?.iteration ?? report?.metrics.iterations ?? task.progress.iteration ?? null);
+    : (liveProgress?.iteration ?? report?.metrics.iterations ?? task.progress?.iteration ?? null);
   const tokenUsage = usage?.usage ?? task.usage ?? null;
 
   // 指标列顺序：基线分数 → 用量 → 迭代次数 → 组合评测 →（剪枝，仅 harness）
@@ -55,15 +56,19 @@ export function RsiResultSummary({ task, report, usage }: RsiResultSummaryProps)
   ];
   // 剪枝仅 harness 优化展示（产物优化 pruned_count 为 null，§14）
   if (prunedCount != null) {
-    metrics.push({ key: 'pruned', value: String(prunedCount), label: t('rsi.detail.pruned') });
+    metrics.push({
+      key: 'pruned',
+      value: prunedCount != null ? String(prunedCount) : '--',
+      label: t('rsi.detail.pruned'),
+    });
   }
 
   return (
     <div className="rsi-result">
       <div className="rsi-result__header">{t('rsi.detail.optimizationResult')}</div>
       <div className="rsi-result__body">
-        {/* 产物预览缩略图占位（64x64），接口 ready 后替换 */}
-        <div className="rsi-result__thumb" aria-label="artifact thumbnail" />
+        {/* 产物预览缩略图（64x64） */}
+        <img className="rsi-result__thumb" src={optimizeImage} alt="" aria-hidden />
         {/* 优化分数 + 当前最优产物（沿用 rsi-score / rsi-best 组合） */}
         <div className="rsi-result__score-best">
           <div className="rsi-score" data-testid="rsi-score">

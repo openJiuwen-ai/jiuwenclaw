@@ -9,6 +9,8 @@
 import { webRequest } from '../../services/webClient';
 import type {
   RsiArtifactDownloadResult,
+  RsiArtifactFileGetResult,
+  RsiArtifactFilesListResult,
   RsiArtifactType,
   RsiDatasetValidateParams,
   RsiDatasetValidateResult,
@@ -31,6 +33,7 @@ import type {
   RsiUsage,
   RsiUsageGetResult,
 } from './types';
+import { rsiMock } from './mockData';
 
 export const RSI_EVENTS = {
   statusChanged: 'rsi.training.status.changed',
@@ -51,8 +54,22 @@ const METHOD = {
   reportGet: 'rsi.report.get',
   usageGet: 'rsi.usage.get',
   artifactDownload: 'rsi.artifact.download',
+  artifactFilesList: 'rsi.artifact.files.list',
+  artifactFilesGet: 'rsi.artifact.files.get',
+  harnessImport: 'harness.import',
+  harnessActivate: 'harness.activate',
   treeGet: 'rsi.tree.get',
 } as const;
+
+const RSI_MOCK_STORAGE_KEY = 'rsi_use_mock';
+
+function isMockEnabled(): boolean {
+  try {
+    return typeof window !== 'undefined' && window.localStorage.getItem(RSI_MOCK_STORAGE_KEY) === 'true';
+  } catch {
+    return false;
+  }
+}
 
 const RSI_SESSION_STORAGE_KEY = 'jiuwenswarm.rsi.session_id';
 let inMemoryRsiSessionId: string | null = null;
@@ -121,26 +138,27 @@ function asBoolean(value: unknown, fallback = false): boolean {
   return typeof value === 'boolean' ? value : fallback;
 }
 
-export function normalizeRsiScenario(value: unknown, fallback: RsiScenario = 'harness'): RsiScenario {
-  return String(value ?? '').trim().toLowerCase() === 'artifact' ? 'artifact' :
-    String(value ?? '').trim().toLowerCase() === 'harness' ? 'harness' : fallback;
+export function normalizeRsiScenario(value: unknown, fallback: RsiScenario = 'HARNESS'): RsiScenario {
+  const normalized = String(value ?? '').trim().toUpperCase();
+  return normalized === 'ARTIFACT' ? 'ARTIFACT' :
+    normalized === 'HARNESS' ? 'HARNESS' : fallback;
 }
 
 export function normalizeRsiArtifactType(value: unknown): RsiArtifactType | null {
-  const normalized = String(value ?? '').trim().toLowerCase();
-  return normalized === 'paper' || normalized === 'program' ? normalized : null;
+  const normalized = String(value ?? '').trim().toUpperCase();
+  return normalized === 'PAPER' || normalized === 'PROGRAM' ? normalized : null;
 }
 
-export function normalizeRsiStatus(value: unknown, fallback: RsiTaskStatus = 'created'): RsiTaskStatus {
-  const normalized = String(value ?? '').trim().toLowerCase();
+export function normalizeRsiStatus(value: unknown, fallback: RsiTaskStatus = 'CREATED'): RsiTaskStatus {
+  const normalized = String(value ?? '').trim().toUpperCase();
   const statuses: RsiTaskStatus[] = [
-    'created',
-    'queued',
-    'running',
-    'completed',
-    'failed',
-    'paused',
-    'terminated',
+    'CREATED',
+    'QUEUED',
+    'RUNNING',
+    'COMPLETED',
+    'FAILED',
+    'PAUSED',
+    'TERMINATED',
   ];
   return statuses.includes(normalized as RsiTaskStatus) ? (normalized as RsiTaskStatus) : fallback;
 }
@@ -185,22 +203,31 @@ function normalizeProgress(value: unknown, defaults?: { total?: number }): RsiTa
 function normalizeChange(value: unknown): RsiNodeChange | null {
   const raw = asRecord(value);
   if (!raw) return null;
+  const group = asNullableString(raw.group);
+  const element = asNullableString(raw.element ?? raw.domain);
+  const operation = asString(raw.operation).toUpperCase();
+  const func = asNullableString(raw.function ?? raw.function_name);
+  const target = asNullableString(raw.target);
+  const summary = asNullableString(raw.summary);
+  const reason = asNullableString(raw.reason ?? raw.description);
   return {
-    group: asString(raw.group ?? raw.element ?? raw.domain).toLowerCase(),
-    operation: asString(raw.operation).toLowerCase(),
-    function: asString(raw.function ?? raw.function_name),
-    target: asString(raw.target),
-    summary: asString(raw.summary ?? raw.reason ?? raw.description, '未提供变更说明'),
+    ...(group ? { group } : {}),
+    ...(element ? { element } : {}),
+    operation,
+    ...(func ? { function: func } : {}),
+    ...(target ? { target } : {}),
+    ...(summary ? { summary } : {}),
+    ...(reason ? { reason } : {}),
   };
 }
 
 function normalizeNodeType(value: unknown): RsiNodeType {
-  const normalized = String(value ?? '').trim().toLowerCase();
-  if (normalized === 'root' || normalized === 'adopted' || normalized === 'rejected' || normalized === 'provisional' || normalized === 'pruned') {
+  const normalized = String(value ?? '').trim().toUpperCase();
+  if (normalized === 'ROOT' || normalized === 'ADOPTED' || normalized === 'REJECTED' || normalized === 'PROVISIONAL' || normalized === 'PRUNED') {
     return normalized;
   }
-  if (normalized === 'candidate' || normalized === 'reporting' || normalized === 'success') return 'adopted';
-  return 'rejected';
+  if (normalized === 'CANDIDATE' || normalized === 'REPORTING' || normalized === 'SUCCESS') return 'ADOPTED';
+  return 'REJECTED';
 }
 
 function normalizeTreeNode(value: unknown): RsiTreeNode | null {
@@ -219,9 +246,9 @@ function normalizeTreeNode(value: unknown): RsiTreeNode | null {
     type: normalizeNodeType(raw.type),
     adopted: asBoolean(raw.adopted),
     score: asNullableNumber(raw.score),
-    summary: asNullableString(raw.summary ?? raw.description),
+    description: asNullableString(raw.summary ?? raw.description),
     snapshot_artifact_id: asNullableString(raw.snapshot_artifact_id),
-    reason: asNullableString(raw.reason ?? raw.failure_reason),
+    failure_reason: asNullableString(raw.reason ?? raw.failure_reason),
     failure_class: asNullableString(raw.failure_class),
     changes,
     extra,
@@ -248,7 +275,7 @@ function normalizeTaskListItem(value: unknown): RsiTaskListItem | null {
     best: asNullableString(raw.best) ?? bestArtifact?.name ?? bestArtifact?.artifact_id ?? null,
     base: asNullableNumber(raw.base ?? raw.baseline),
     gain: asNullableNumber(raw.gain),
-    running: asBoolean(raw.running, status === 'running'),
+    running: asBoolean(raw.running, status === 'RUNNING'),
     created_at: asString(raw.created_at),
   };
 }
@@ -347,7 +374,8 @@ export function normalizeRsiStatusChangedPayload(value: unknown): RsiTrainingSta
   return {
     task_id: taskId,
     status: normalizeRsiStatus(raw?.status ?? raw?.new_status),
-    ...(from != null ? { from: normalizeRsiStatus(from) } : {}),
+    old_status: from != null ? normalizeRsiStatus(from) : undefined,
+    new_status: normalizeRsiStatus(raw?.status ?? raw?.new_status),
   };
 }
 
@@ -359,7 +387,7 @@ export function normalizeRsiProgressPayload(value: unknown): RsiTrainingProgress
   return {
     task_id: taskId,
     iteration: asNumber(raw?.iteration ?? nested.iteration),
-    total: asNumber(raw?.total ?? raw?.total_iterations ?? nested.total ?? nested.total_iterations),
+    total_iterations: asNumber(raw?.total ?? raw?.total_iterations ?? nested.total ?? nested.total_iterations),
     score: asNullableNumber(raw?.score ?? nested.score),
     baseline: asNullableNumber(raw?.baseline ?? nested.baseline),
     usage: normalizeUsage(raw?.usage ?? nested.usage),
@@ -378,7 +406,7 @@ export function normalizeRsiTreeDeltaPayload(value: unknown): RsiTrainingTreeDel
 }
 
 function toWireScenario(value: RsiScenario | undefined): string {
-  return String(value ?? 'harness').toUpperCase();
+  return String(value ?? 'HARNESS').toUpperCase();
 }
 
 function toWireArtifactType(value: RsiArtifactType | undefined): string | undefined {
@@ -393,6 +421,9 @@ export interface RsiModelOption {
 }
 
 export async function rsiListModels(): Promise<RsiModelOption[]> {
+  if (isMockEnabled()) {
+    return rsiMock.delay(rsiMock.modelList);
+  }
   try {
     const response = await webRequest<unknown>('models.list');
     const raw = asRecord(response);
@@ -414,11 +445,14 @@ export async function rsiListModels(): Promise<RsiModelOption[]> {
 }
 
 export function rsiDatasetValidate(params: RsiDatasetValidateParams): Promise<RsiDatasetValidateResult> {
+  if (isMockEnabled()) {
+    return rsiMock.delay({ valid: true, sample_count: 2288, errors: [] });
+  }
   const wire: Record<string, unknown> = {
-    input_file: params.dataset_file,
+    input_file: params.input_file,
     scenario: toWireScenario(params.scenario),
   };
-  const artifactType = toWireArtifactType(params.artifact_type);
+  const artifactType = toWireArtifactType(params.scenario === 'ARTIFACT' ? params.artifact_type : undefined);
   if (artifactType) wire.artifact_type = artifactType;
   return webRequest<unknown>(METHOD.datasetValidate, withRsiSession(wire)).then((value) => {
     const raw = asRecord(value) ?? {};
@@ -439,16 +473,22 @@ export function rsiDatasetValidate(params: RsiDatasetValidateParams): Promise<Rs
 }
 
 export function rsiTaskCreate(params: RsiTaskCreateParams): Promise<RsiTaskCreateResult> {
+  if (isMockEnabled()) {
+    return rsiMock.delay({
+      task_id: 'rsi-task-001',
+      status: 'CREATED',
+    });
+  }
   const wire: Record<string, unknown> = {
     scenario: toWireScenario(params.scenario),
     name: params.name,
     model_refs: params.model_refs,
   };
-  const artifactType = toWireArtifactType(params.artifact_type);
+  const artifactType = toWireArtifactType(params.scenario === 'ARTIFACT' ? params.artifact_type : undefined);
   if (artifactType) wire.artifact_type = artifactType;
-  if (params.dataset_file?.trim()) {
+  if (params.input_file?.trim()) {
     // Harness 的公共契约字段是 input_file；Paper 也允许把数据集作为 input_file。
-    wire.input_file = params.dataset_file;
+    wire.input_file = params.input_file;
   }
   if (params.artifact_path?.trim()) wire.artifact_path = params.artifact_path;
   if (params.max_iterations != null) wire.max_iterations = params.max_iterations;
@@ -459,13 +499,17 @@ export function rsiTaskCreate(params: RsiTaskCreateParams): Promise<RsiTaskCreat
     return {
       task_id: asString(raw.task_id),
       status: normalizeRsiStatus(raw.status),
-      scenario: normalizeRsiScenario(raw.scenario, params.scenario),
-      artifact_type: normalizeRsiArtifactType(raw.artifact_type) ?? params.artifact_type ?? null,
     };
   });
 }
 
 export function rsiTaskList(params: RsiTaskListParams = {}): Promise<RsiTaskListItem[]> {
+  if (isMockEnabled()) {
+    let list = [...rsiMock.tasks];
+    if (params.scenario) list = list.filter((item) => item.scenario === params.scenario);
+    if (params.artifact_type) list = list.filter((item) => item.artifact_type === params.artifact_type);
+    return rsiMock.delay(list);
+  }
   const wire: Record<string, unknown> = {};
   if (params.scenario) wire.scenario = toWireScenario(params.scenario);
   if (params.artifact_type) wire.artifact_type = toWireArtifactType(params.artifact_type);
@@ -478,14 +522,29 @@ export function rsiTaskList(params: RsiTaskListParams = {}): Promise<RsiTaskList
 }
 
 export function rsiTaskGet(taskId: string): Promise<RsiTaskGetResult> {
+  if (isMockEnabled()) {
+    return rsiMock.delay(rsiMock.taskGet(taskId) ?? rsiMock.taskGet('rsi-task-001'));
+  }
   return webRequest<unknown>(METHOD.taskGet, withRsiSession({ task_id: taskId })).then(normalizeTask);
 }
 
 export function rsiTaskDelete(taskId: string): Promise<{ ok: boolean }> {
+  if (isMockEnabled()) {
+    return rsiMock.delay({ ok: true });
+  }
   return webRequest<unknown>(METHOD.taskDelete, withRsiSession({ task_id: taskId })).then((value) => ({ ok: asRecord(value)?.ok === true }));
 }
 
 function trainingControl(method: string, taskId: string): Promise<RsiTrainingControlResult> {
+  if (isMockEnabled()) {
+    const statuses: Record<string, RsiTaskStatus> = {
+      [METHOD.trainingStart]: 'RUNNING',
+      [METHOD.trainingPause]: 'PAUSED',
+      [METHOD.trainingResume]: 'QUEUED',
+      [METHOD.trainingTerminate]: 'TERMINATED',
+    };
+    return rsiMock.delay({ status: statuses[method] ?? 'RUNNING' });
+  }
   return webRequest<unknown>(method, withRsiSession({ task_id: taskId })).then((value) => ({
     status: normalizeRsiStatus(asRecord(value)?.status),
   }));
@@ -508,10 +567,16 @@ export function rsiTrainingTerminate(taskId: string): Promise<RsiTrainingControl
 }
 
 export function rsiReportGet(taskId: string): Promise<RsiReportGetResult | null> {
+  if (isMockEnabled()) {
+    return rsiMock.delay(rsiMock.report(taskId) ?? null);
+  }
   return webRequest<unknown>(METHOD.reportGet, withRsiSession({ task_id: taskId })).then(normalizeReport);
 }
 
 export function rsiUsageGet(taskId: string): Promise<RsiUsageGetResult | null> {
+  if (isMockEnabled()) {
+    return rsiMock.delay(rsiMock.usage(taskId) ?? null);
+  }
   return webRequest<unknown>(METHOD.usageGet, withRsiSession({ task_id: taskId }))
     .then(normalizeUsageResult)
     .catch((error: unknown) => {
@@ -529,7 +594,7 @@ export function rsiArtifactDownload(taskId: string, artifactId?: string): Promis
     const raw = asRecord(value) ?? {};
     return {
       path: asString(raw.path),
-      kind: asString(raw.kind),
+      kind: asString(raw.kind) === 'artifact_package' ? 'artifact_package' : 'harness_plugin',
       is_best: raw.is_best === true,
       filename: asString(raw.filename, asString(raw.path).split(/[\\/]/).pop() || 'download'),
       download_url: asNullableString(raw.download_url) ?? undefined,
@@ -542,6 +607,65 @@ export function rsiArtifactDownloadUrl(result: RsiArtifactDownloadResult): strin
   return result.download_url ?? null;
 }
 
+function arrayBufferToBase64(buffer: ArrayBuffer): string {
+  const bytes = new Uint8Array(buffer);
+  let binary = '';
+  const chunkSize = 0x8000;
+  for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(offset, offset + chunkSize));
+  }
+  return btoa(binary);
+}
+
+function normalizeHarnessPackageId(value: unknown): string {
+  const raw = asRecord(value) ?? {};
+  const importedPackage = asRecord(raw.package);
+  const packageId = asNullableString(raw.id ?? raw.package_id ?? importedPackage?.id);
+  if (!packageId) throw new Error('Harness 插件导入结果缺少 package id');
+  return packageId;
+}
+
+export async function rsiHarnessInstall(taskId: string, artifactId?: string): Promise<void> {
+  const artifact = await rsiArtifactDownload(taskId, artifactId);
+  if (artifact.kind !== 'harness_plugin') {
+    throw new Error('当前产物不是 Harness 插件');
+  }
+  if (!artifact.download_url) {
+    throw new Error('Harness 插件下载链接不可用');
+  }
+
+  const response = await fetch(artifact.download_url);
+  if (!response.ok) {
+    throw new Error(`Harness 插件下载失败: HTTP ${response.status}`);
+  }
+  const archive = await response.arrayBuffer();
+  const imported = await webRequest<unknown>(METHOD.harnessImport, {
+    file_content: arrayBufferToBase64(archive),
+  });
+  const packageId = normalizeHarnessPackageId(imported);
+  await webRequest<unknown>(METHOD.harnessActivate, {
+    package_id: packageId,
+    session_id: getRsiSessionId(),
+  });
+}
+
+export function rsiArtifactFilesList(taskId: string, path: string): Promise<RsiArtifactFilesListResult> {
+  return webRequest<RsiArtifactFilesListResult>(METHOD.artifactFilesList, withRsiSession({
+    task_id: taskId,
+    path,
+  }));
+}
+
+export function rsiArtifactFilesGet(taskId: string, path: string): Promise<RsiArtifactFileGetResult> {
+  return webRequest<RsiArtifactFileGetResult>(METHOD.artifactFilesGet, withRsiSession({
+    task_id: taskId,
+    path,
+  }));
+}
+
 export function rsiTreeGet(taskId: string): Promise<RsiTreeGetResult> {
+  if (isMockEnabled()) {
+    return rsiMock.delay(rsiMock.tree(taskId));
+  }
   return webRequest<unknown>(METHOD.treeGet, withRsiSession({ task_id: taskId })).then(normalizeTree);
 }

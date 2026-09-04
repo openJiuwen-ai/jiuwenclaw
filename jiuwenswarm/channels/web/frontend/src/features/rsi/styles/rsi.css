@@ -8,6 +8,9 @@
   background: var(--color-rsi-page-bg);
   overflow: hidden;
 }
+.rsi-page--intro {
+  background: #ffffff;
+}
 
 /* ── 左侧：实验管理栏 ── */
 .rsi-rail {
@@ -62,18 +65,6 @@
   color: #777777;
   padding: 8px 4px 12px;
 }
-.rsi-rail__empty {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 8px;
-  padding: 40px 0;
-  color: #929496;
-  font-size: 14px;
-}
-.rsi-rail__empty svg {
-  color: #929496;
-}
 .rsi-rail__item {
   display: flex;
   align-items: center;
@@ -123,6 +114,10 @@
   min-height: 0;
   padding: 24px 48px 24px 48px;
 }
+.rsi-detail--intro {
+  padding: 0;
+  overflow: hidden;
+}
 .rsi-detail__header {
   display: flex;
   align-items: flex-start;
@@ -161,6 +156,11 @@
 .rsi-detail__tag svg {
   flex-shrink: 0;
 }
+.rsi-detail__status-icon {
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+}
 .rsi-detail__divider {
   width: 1px;
   height: 12px;
@@ -173,7 +173,29 @@
   flex-shrink: 0;
 }
 .rsi-detail__actions .rsi-btn {
+  width: 96px;
+  height: 32px;
+  padding: 0;
   border-radius: 9999px;
+}
+.rsi-detail__actions .rsi-btn--ghost {
+  background: #ffffff;
+}
+.rsi-detail__actions .rsi-btn--primary {
+  background: #191919;
+  color: #ffffff;
+}
+.rsi-detail__actions .rsi-detail__action--delete {
+  width: 52px;
+  background: transparent;
+  border-color: transparent;
+  color: #191919;
+}
+.rsi-detail__action-icon {
+  width: 52px;
+  height: 22px;
+  flex-shrink: 0;
+  object-fit: contain;
 }
 
 /* ── 主展示框 ── */
@@ -213,8 +235,8 @@
   width: 64px;
   height: 64px;
   border-radius: 8px;
-  margin: 0px 24px;
-  background: var(--color-rsi-result-thumb-bg);
+  margin: 0px 24px 0px 16px;
+  object-fit: contain;
 }
 .rsi-result__score-best {
   flex: 0 0 180px;
@@ -322,6 +344,11 @@
   font-size: 12px;
   cursor: pointer;
 }
+.rsi-canvas-area__expand-icon {
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+}
 .rsi-canvas-area__expand:hover {
   background: var(--color-rsi-rail-selected);
 }
@@ -339,6 +366,7 @@
 }
 
 .rsi-canvas-wrap {
+  --rsi-canvas-statusbar-h: 56px;
   flex: 1;
   position: relative;
   display: flex;
@@ -358,7 +386,7 @@
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  height: 56px;
+  height: var(--rsi-canvas-statusbar-h);
   padding: 0 20px;
   background: var(--color-rsi-page-bg);
   border-bottom: 1px solid var(--color-rsi-canvas-border);
@@ -384,20 +412,16 @@
   gap: 6px;
   white-space: nowrap;
 }
-.rsi-canvas-statusbar__running {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 24px;
-  height: 24px;
-  border-radius: 12px;
-  background: var(--color-rsi-running-bg);
+.rsi-canvas-statusbar__icon {
+  width: 16px;
+  height: 16px;
   flex-shrink: 0;
 }
-.rsi-canvas-statusbar__running line {
-  stroke: var(--color-rsi-delta-up);
-  stroke-width: 1.6;
-  stroke-linecap: round;
+.rsi-canvas-statusbar__running {
+  display: block;
+  width: 24px;
+  height: 24px;
+  flex-shrink: 0;
 }
 .rsi-canvas-statusbar__strong {
   font-weight: 600;
@@ -429,7 +453,7 @@
   background: var(--color-rsi-delta-up);
 }
 .rsi-canvas-statusbar--fullscreen {
-  height: 72px;
+  height: var(--rsi-canvas-statusbar-h);
   padding: 0 24px;
 }
 .rsi-canvas-statusbar__back {
@@ -478,8 +502,9 @@
   color: var(--color-rsi-text-muted);
   text-align: center;
 }
-.rsi-canvas-queued svg {
-  color: var(--color-rsi-text-muted);
+.rsi-canvas-queued__icon {
+  width: 80px;
+  height: 80px;
   margin-bottom: 4px;
 }
 .rsi-canvas-queued__text {
@@ -520,7 +545,7 @@
 .rsi-node__toggle {
   position: absolute;
   right: -30px;
-  top: 32px;
+  top: 36px;
   transform: translateY(-50%);
   width: 20px;
   height: 20px;
@@ -624,6 +649,7 @@
 
 /* 下层：文字内容（分数/摘要） */
 .rsi-node__body {
+  min-height: 42px;
   padding: 4px 8px;
   box-sizing: border-box;
   background: #ffffff26;
@@ -789,12 +815,14 @@
 /* 节点选中信息浮层：覆盖画布右侧（默认不显示，点击节点才出现） */
 .rsi-selected-info {
   position: absolute;
-  top: 56px;
+  top: var(--rsi-canvas-statusbar-h);
   right: 0px;
-  width: 320px;
-  height: 560px;
-  max-height: calc(100% - 68px);
+  bottom: 0px;
+  width: clamp(280px, 25%, 320px);
+  height: auto;
+  max-height: none;
   padding: 24px;
+  box-sizing: border-box;
   background: linear-gradient(135deg, #ffffff, #e7e7e7);
 
   display: flex;
@@ -806,11 +834,17 @@
 .rsi-selected-info__header {
   display: flex;
   align-items: center;
-  justify-content: space-between;
   gap: 8px;
   flex-shrink: 0;
 }
+.rsi-selected-info__icon {
+  width: 32px;
+  height: 32px;
+  flex-shrink: 0;
+}
 .rsi-selected-info__title {
+  flex: 1 1 auto;
+  min-width: 0;
   font-size: 16px;
   font-weight: 600;
   line-height: 24px;
@@ -846,21 +880,16 @@
 .rsi-selected-info__chip {
   display: inline-flex;
   align-items: center;
-  height: 22px;
+  height: 18px;
   padding: 0 8px;
-  border: 1px solid var(--color-rsi-divider);
+  border: 1px solid var(--color-rsi-canvas-border);
   border-radius: 2px;
-  background: var(--color-rsi-page-bg);
-  font-size: 12px;
-  line-height: 20px;
-  font-weight: 400;
-  color: var(--color-text-primary);
-  white-space: nowrap;
-}
-.rsi-selected-info__chip--inherited {
   background: var(--color-rsi-tag-bg);
-  border-color: var(--color-rsi-canvas-border);
+  font-size: 12px;
+  line-height: 18px;
+  font-weight: 400;
   color: var(--color-rsi-text-muted);
+  white-space: nowrap;
 }
 .rsi-selected-info__desc {
   font-size: 14px;
@@ -885,222 +914,372 @@
   font-weight: 400;
   cursor: pointer;
 }
-/* 节点详情与中间产物下载 */
-.rsi-selected-info__meta-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 8px;
-}
-.rsi-selected-info__meta-grid > div {
-  min-width: 0;
-  padding: 8px;
-  border: 1px solid var(--color-rsi-divider);
-  border-radius: 6px;
-  background: rgba(255, 255, 255, 0.55);
-}
-.rsi-selected-info__meta-grid span,
-.rsi-selected-info__meta-grid strong {
-  display: block;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.rsi-selected-info__meta-grid span {
-  margin-bottom: 2px;
-  color: var(--color-rsi-text-muted);
-  font-size: 11px;
-}
-.rsi-selected-info__meta-grid strong {
-  font-size: 12px;
-  font-weight: 500;
-}
-.rsi-selected-info__artifact-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-}
-.rsi-selected-info__artifact-row code {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: 11px;
-}
-.rsi-selected-info__download-btn {
-  flex-shrink: 0;
-  height: 26px;
-  padding: 0 10px;
-  border: 0;
-  border-radius: 999px;
-  background: var(--color-rsi-primary, #1677ff);
-  color: #fff;
-  font-size: 12px;
-  cursor: pointer;
-}
-.rsi-selected-info__download-btn:disabled {
-  cursor: wait;
-  opacity: 0.55;
-}
-.rsi-selected-info__download-error {
-  margin-top: 6px;
-  color: #d4380d;
-  font-size: 12px;
-  line-height: 18px;
-  word-break: break-word;
-}
-.rsi-selected-info__detail-overlay {
+/* 「查看详情」中间产物预览弹窗 */
+.rsi-artifact-dialog {
   position: fixed;
   inset: 0;
-  z-index: 1000;
+  z-index: 1200;
   display: flex;
   align-items: center;
   justify-content: center;
-  background: rgba(0, 0, 0, 0.3);
+  background: rgba(0, 0, 0, 0.32);
 }
-.rsi-selected-info__detail-panel {
-  position: relative;
-  width: min(680px, 92vw);
-  max-height: min(78vh, 760px);
+.rsi-artifact-dialog__panel {
+  width: min(1100px, 92vw);
+  height: min(800px, 92vh);
   padding: 24px;
-  border-radius: 16px;
-  background: var(--color-rsi-page-bg);
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
-  color: var(--color-text-primary);
-  overflow: hidden;
-}
-.rsi-selected-info__detail-close {
-  position: absolute;
-  top: 12px;
-  right: 12px;
-  border: none;
-  background: transparent;
-  font-size: 20px;
-  line-height: 1;
-  cursor: pointer;
-  color: var(--color-text-primary);
-}
-.rsi-selected-info__detail-title {
-  font-size: 16px;
-  font-weight: 600;
-  margin-bottom: 12px;
-}
-.rsi-selected-info__detail-subtitle {
-  margin-top: -6px;
-  margin-bottom: 14px;
-  color: var(--color-rsi-text-muted);
-  font-size: 12px;
-  line-height: 18px;
-  word-break: break-all;
-}
-.rsi-selected-info__detail-scroll {
-  max-height: calc(min(78vh, 760px) - 92px);
-  overflow-y: auto;
-  padding-right: 4px;
-}
-.rsi-selected-info__meta-grid--detail {
-  margin-bottom: 14px;
-}
-.rsi-selected-info__detail-block {
-  margin-top: 14px;
-}
-.rsi-selected-info__changes {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-.rsi-selected-info__change {
-  padding: 10px;
-  border: 1px solid var(--color-rsi-divider);
-  border-radius: 8px;
-  background: rgba(255, 255, 255, 0.55);
-  font-size: 13px;
-  line-height: 20px;
-  word-break: break-word;
-}
-.rsi-selected-info__change-head {
-  display: flex;
-  justify-content: space-between;
-  gap: 8px;
-  margin-bottom: 2px;
-}
-.rsi-selected-info__change-head span,
-.rsi-selected-info__change small {
-  color: var(--color-rsi-text-muted);
-}
-.rsi-selected-info__change small {
-  display: block;
-  margin-top: 3px;
-  font-size: 11px;
-  line-height: 17px;
-  word-break: break-all;
-}
-.rsi-selected-info__json {
-  max-height: 260px;
-  margin: 0;
-  padding: 12px;
-  overflow: auto;
-  border-radius: 8px;
-  background: #1f2430;
-  color: #e6edf3;
-  font: 11px/17px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-  white-space: pre-wrap;
-  word-break: break-word;
-}
-.rsi-selected-info__json--content {
-  max-height: 120px;
-  margin-top: 8px;
-}
-.rsi-selected-info__detail-placeholder {
-  font-size: 14px;
-  line-height: 22px;
-  color: var(--color-rsi-text-muted);
-}
-
-/* 空状态 */
-.rsi-empty {
-  flex: 1;
-  display: flex;
-  align-items: stretch;
-  justify-content: center;
-  width: 100%;
   box-sizing: border-box;
-}
-.rsi-empty__card {
-  flex: 1;
-  width: 100%;
   display: flex;
   flex-direction: column;
+  border-radius: 16px;
+  background: #ffffff;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.16);
+  color: #191919;
+}
+.rsi-artifact-dialog__header {
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-shrink: 0;
+}
+.rsi-artifact-dialog__title {
+  font-size: 18px;
+  line-height: 28px;
+  font-weight: 600;
+  color: #191919;
+}
+.rsi-artifact-dialog__close {
+  width: 28px;
+  height: 28px;
+  display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: 16px;
-  background: #ffffff;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: #595959;
+  cursor: pointer;
+}
+.rsi-artifact-dialog__close:hover {
+  background: #f5f5f5;
+  color: #191919;
+}
+.rsi-artifact-dialog__body {
+  height: calc(100% - 44px);
+  margin-top: 16px;
+  display: flex;
+  min-height: 0;
   border: 1px solid #c9c9c9;
   border-radius: 16px;
-  padding: 48px 64px;
+  background: #ffffff;
+  overflow: hidden;
+}
+.rsi-artifact-dialog__tree {
+  width: 264px;
+  min-width: 264px;
+  height: 100%;
+  padding: 16px;
+  box-sizing: border-box;
+  overflow: auto;
+  border-right: 1px solid #e8e8e8;
+}
+.rsi-artifact-dialog__folder,
+.rsi-artifact-dialog__file {
+  width: 100%;
+  min-height: 32px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  border: none;
+  background: transparent;
+  color: #191919;
+  cursor: pointer;
+  text-align: left;
+}
+.rsi-artifact-dialog__folder {
+  font-size: 16px;
+  line-height: 24px;
+  font-weight: 400;
+}
+.rsi-artifact-dialog__file {
+  height: 40px;
+  border-radius: 8px;
+  font-size: 14px;
+  line-height: 20px;
+}
+.rsi-artifact-dialog__file:hover {
+  background: #fafafa;
+}
+.rsi-artifact-dialog__file--selected {
+  background: #f5f5f5;
+}
+.rsi-artifact-dialog__chevron--expanded {
+  transform: rotate(90deg);
+}
+.rsi-artifact-dialog__preview {
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  padding: 16px;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+}
+.rsi-artifact-dialog__preview-header {
+  height: 40px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex-shrink: 0;
+}
+.rsi-artifact-dialog__filename {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 16px;
+  line-height: 24px;
+  font-weight: 500;
+  color: #191919;
+}
+.rsi-artifact-dialog__actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.rsi-artifact-dialog__action {
+  width: 28px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: #595959;
+  cursor: pointer;
+}
+.rsi-artifact-dialog__action:hover {
+  background: #f5f5f5;
+  color: #191919;
+}
+.rsi-artifact-dialog__divider {
+  height: 1px;
+  margin: 16px 0;
+  background: #e8e8e8;
+  flex-shrink: 0;
+}
+.rsi-artifact-dialog__preview-content {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+.rsi-latex-preview {
+  height: 100%;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.rsi-latex-preview__toolbar {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding-bottom: 12px;
+  flex-shrink: 0;
+}
+.rsi-latex-preview__tab {
+  height: 26px;
+  padding: 0 12px;
+  border: 1px solid #e8e8e8;
+  border-radius: 999px;
+  background: #ffffff;
+  color: #595959;
+  font-size: 12px;
+  line-height: 24px;
+  cursor: pointer;
+}
+.rsi-latex-preview__tab--active {
+  border-color: #191919;
+  color: #191919;
+  font-weight: 600;
+}
+.rsi-latex-preview__markdown,
+.rsi-latex-preview__source {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  border-radius: 8px;
+}
+.rsi-latex-preview__markdown {
+  padding: 24px 32px;
+  background: #ffffff;
+}
+.rsi-latex-preview__source {
+  margin: 0;
+  padding: 16px;
+  background: #ffffff;
+  color: #191919;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 12px;
+  line-height: 20px;
+  white-space: pre;
+}
+.rsi-latex-preview__status {
+  height: 100%;
+  min-height: 160px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  color: #808080;
+  font-size: 14px;
+  line-height: 22px;
+}
+.rsi-artifact-dialog__loading,
+.rsi-artifact-dialog__preview-empty {
+  height: 100%;
+  min-height: 160px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  color: #808080;
+  font-size: 14px;
+  line-height: 22px;
+}
+.rsi-artifact-dialog__error {
+  color: #d92d20;
+  font-size: 14px;
+  line-height: 22px;
+  word-break: break-word;
+}
+.rsi-artifact-dialog__copy-state {
+  margin-top: 8px;
+  color: #595959;
+  font-size: 12px;
+  line-height: 18px;
+}
+
+/* 无实验时的 RSI 介绍页 */
+.rsi-intro-scaler {
+  width: 100%;
+  overflow: hidden;
+}
+.rsi-intro {
+  width: 1592px;
+  min-height: 844px;
+  margin: 0;
+  padding: 120px 96px 96px 96px;
+  background: #ffffff;
+  box-sizing: border-box;
+  color: #191919;
+  transform-origin: 0 0;
+}
+.rsi-intro__header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 24px;
+}
+.rsi-intro__title {
+  margin: 0;
+  font-size: 24px;
+  line-height: 36px;
+  font-weight: 600;
+  color: #191919;
+}
+.rsi-intro__lead {
+  margin: 0;
+  font-size: 14px;
+  line-height: 22px;
+  font-weight: 400;
+  color: #191919;
+}
+.rsi-intro__create {
+  width: 96px;
+  height: 32px;
+  border: none;
+  border-radius: 8px;
+  background: #000000;
+  color: #ffffff;
+  font-size: 14px;
+  line-height: 22px;
+  font-weight: 400;
+  cursor: pointer;
+}
+.rsi-intro__create:hover {
+  opacity: 0.85;
+}
+.rsi-intro__section {
+  width: 1400px;
+  margin-top: 48px;
+}
+.rsi-intro__section-label {
+  margin: 0;
+  font-size: 16px;
+  line-height: 24px;
+  font-weight: 600;
+  color: #191919;
+}
+.rsi-intro__steps {
+  display: grid;
+  grid-template-columns: repeat(3, 456px);
+  gap: 16px;
+  margin-top: 16px;
+}
+.rsi-intro__step {
+  width: 456px;
+  height: 382px;
+  background-repeat: no-repeat;
+  background-size: 456px 382px;
+}
+.rsi-intro__step-text {
+  width: 408px;
+  min-height: 76px;
+  margin: 24px 0 0 24px;
+}
+.rsi-intro__step-text h3,
+.rsi-intro__feature-text h3 {
+  margin: 0;
+  font-size: 18px;
+  line-height: 28px;
+  font-weight: 600;
+  color: #191919;
+}
+.rsi-intro__step-text p,
+.rsi-intro__feature-text p {
+  margin: 0;
+  font-size: 14px;
+  line-height: 22px;
+  font-weight: 400;
+  color: #808080;
+}
+.rsi-intro__features {
+  display: grid;
+  grid-template-columns: repeat(2, 692px);
+  gap: 16px;
+  margin-top: 16px;
+}
+.rsi-intro__feature {
+  width: 692px;
+  min-height: 220px;
+  border: 1px solid #dbdbdb;
+  border-radius: 16px;
+  background: #ffffff;
   box-sizing: border-box;
 }
-.rsi-empty__icon {
-  color: #929496;
+.rsi-intro__feature-icon {
+  display: block;
+  width: 80px;
+  height: 80px;
+  margin: 24px 0 0 24px;
 }
-.rsi-empty__title {
-  font-size: 14px;
-  font-weight: 600;
-  color: var(--color-text-primary);
-  text-align: center;
-}
-.rsi-empty__hint {
-  font-size: 12px;
-  font-weight: 400;
-  color: #595959;
-  text-align: center;
-  line-height: 1.5;
-}
-.rsi-empty .rsi-empty__btn {
-  margin-top: 4px;
-  border-radius: 999px;
-  padding: 0 24px;
-  height: 36px;
+.rsi-intro__feature-text {
+  width: 644px;
+  min-height: 76px;
+  margin: 16px 0 0 24px;
 }
 
 /* 通用按钮 */
@@ -1127,7 +1306,7 @@
 .rsi-btn--ghost {
   background: transparent;
   color: var(--color-text-primary);
-  border-color: var(--color-rsi-border);
+  border-color: #595959;
 }
 .rsi-btn--ghost:hover {
   background: var(--color-rsi-rail-selected);
@@ -1333,6 +1512,7 @@ dialog.rsi-config-dialog.rsi-create-drawer::backdrop {
   background: var(--color-backdrop);
 }
 .rsi-fullscreen-canvas__inner {
+  --rsi-canvas-statusbar-h: 72px;
   position: relative;
   width: 100%;
   height: 100%;
@@ -1356,7 +1536,8 @@ dialog.rsi-config-dialog.rsi-create-drawer::backdrop {
   position: relative;
   top: auto;
   right: auto;
-  width: 400px;
+  bottom: auto;
+  width: clamp(320px, 30%, 400px);
   height: 100%;
   max-height: none;
   flex-shrink: 0;
@@ -1568,4 +1749,44 @@ dialog.rsi-config-dialog.rsi-create-drawer::backdrop {
   min-width: 220px;
   max-height: 240px;
   overflow-y: auto;
+}
+
+/* RSI 任务删除 / 暂停二次确认 */
+.rsi-confirm-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1200;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.28);
+}
+.rsi-confirm {
+  width: 360px;
+  padding: 24px;
+  border-radius: 16px;
+  background: #ffffff;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.16);
+}
+.rsi-confirm__title {
+  font-size: 16px;
+  font-weight: 600;
+  line-height: 24px;
+  color: #191919;
+}
+.rsi-confirm__body {
+  margin-top: 8px;
+  font-size: 14px;
+  line-height: 22px;
+  color: #595959;
+}
+.rsi-confirm__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 24px;
+}
+.rsi-confirm__btn {
+  min-width: 84px;
+  border-radius: 999px;
 }
