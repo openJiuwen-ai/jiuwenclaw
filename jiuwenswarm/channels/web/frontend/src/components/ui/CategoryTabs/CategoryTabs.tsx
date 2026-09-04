@@ -1,6 +1,8 @@
 import type { ReactNode } from 'react';
-import { useCallback, useLayoutEffect, useRef, useState } from 'react';
+import { useLayoutEffect } from 'react';
 import { ChevronLeft, ChevronRight } from 'lucide-react';
+
+import { useHorizontalScrollEdges } from '../../../hooks';
 
 import './CategoryTabs.css';
 
@@ -16,26 +18,7 @@ export interface CategoryTabsProps<T extends string = string> {
 }
 
 export function CategoryTabs<T extends string = string>({ items, value, onChange }: CategoryTabsProps<T>) {
-  const scrollRef = useRef<HTMLDivElement>(null);
-  const [canScrollLeft, setCanScrollLeft] = useState(false);
-  const [canScrollRight, setCanScrollRight] = useState(false);
-
-  const updateScrollState = useCallback(() => {
-    const el = scrollRef.current;
-    if (!el) return;
-    setCanScrollLeft(el.scrollLeft > 1);
-    setCanScrollRight(el.scrollLeft < el.scrollWidth - el.clientWidth - 1);
-  }, []);
-
-  useLayoutEffect(() => {
-    const el = scrollRef.current;
-    if (!el) return;
-    updateScrollState();
-    if (typeof ResizeObserver === 'undefined') return;
-    const observer = new ResizeObserver(updateScrollState);
-    observer.observe(el);
-    return () => observer.disconnect();
-  }, [updateScrollState]);
+  const { ref: scrollRef, canScrollLeft, canScrollRight, update: updateScrollState } = useHorizontalScrollEdges<HTMLDivElement>();
 
   useLayoutEffect(() => {
     updateScrollState();
