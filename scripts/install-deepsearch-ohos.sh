@@ -42,11 +42,40 @@ fi
 log()  { printf '[deepsearch-install] %s\n' "$*"; }
 warn() { printf '[deepsearch-install][警告] %s\n' "$*"; }
 fail() { printf '[deepsearch-install][失败] %s\n' "$*"; exit 1; }
-py_ok() { "$VENV_PY" -c "$1" >/dev/null 2>&1; }
+# 探测统一空 LD_LIBRARY_PATH：与 AgentServer sidecar 生产环境一致（wheel 自带
+# RPATH 自包含），且免疫用户 shell 里可能污染的库路径
+py_ok() { LD_LIBRARY_PATH= "$VENV_PY" -c "$1" >/dev/null 2>&1; }
+# pip 刚解包的 .so 在鸿蒙 hmdfs 上存在"沉降窗口"：冷启动/冷缓存时大文件
+# （如 numpy 的 4.3MB .so）需数十秒才完全可见，期间 dlopen 报 Permission
+# denied（内核读到不完整字节→签名校验失败）。实测 6 秒窗口不够，误判为
+# 安装失败（安装其实已成功，稍后 import 即通过）。故用 2/5/10/20 退避共
+# ~37 秒；成功路径第一次就返回，零额外开销。
+py_ok_retry() {
+    _i=0
+    while [ "$_i" -lt 5 ]; do
+        py_ok "$1" && return 0
+        _i=$((_i + 1))
+        [ "$_i" -lt 5 ] && sleep "$(echo "2 5 10 20" | cut -d' ' -f$_i)"
+    done
+    return 1
+}
 # 真实 wheel 以 zip 魔数 "PK" 开头。仓库里 >10MiB 的 wheel（两个 pandas）走
 # Git LFS（gitcode 单文件限 10 MiB）；未装 git-lfs 的机器克隆下来是 ~130 字节的
 # 指针文本文件，必须识别并跳过，让后续在线兜底路径接管。
 is_real_wheel() { [ -f "$1" ] && [ "$(head -c 2 "$1" 2>/dev/null)" = "PK" ]; }
+
+# hmdfs 沉降治理：pip 刚写入的 .so 存在分钟级"沉降窗口"（冷启动时更久），
+# 期间 dlopen 报 Permission denied。全量 cat 强制数据落盘/入缓存可缩短窗口。
+# 关键在于入口探测失败时先暖读+重试而不是立即重装 —— force-reinstall 会重写
+# .so、把沉降时钟归零，形成"越重跑越坏"的恶性循环（本机实测：连续重跑 2 次
+# 均失败，停止重跑等 2 分钟后 import 直接通过）。
+SP="$REPO_ROOT/.venv/lib/python3.12/site-packages"
+warm_sos() {
+    [ -d "$SP" ] || return 0
+    find "$SP" \( -name '*.so' -o -name '*.so.*' \) -type f -exec cat {} + \
+        >/dev/null 2>&1
+    return 0
+}
 
 mkdir -p "$TMP"
 
@@ -64,6 +93,34 @@ else
     warn "未找到 $SIGN_TOOL —— 若离线 wheel 需要重签将无法兜底"
 fi
 [ -f "$CONVERTER" ] || warn "未找到 scripts/ohos/ohos-musl-wheel-convert.py —— wheel 重签/转换兜底不可用"
+
+# ---------- 执行环境探测（hmdfs 任务级限制金丝雀）----------
+# 实测：系统终端等上下文无法 mmap-exec hmdfs 上的任何 .so（dlopen 一律
+# Permission denied，与签名/权限位/文件内容无关——pydantic_core 同样被拒）；
+# 而 App(AgentServer) 环境不受限（DeepResearch 在 App 内实测可用）。
+# 受限终端里：安装照常（pip 写文件没问题），import 功能验证必然失败且无意义
+# —— 跳过验证、用 pip 元数据判定，装完指引用 App 实测。
+CANARY_OK=1
+if [ -d "$SP" ]; then
+    if ! py_ok "
+import ctypes, glob, sys
+sos = glob.glob('$SP/**/*.so', recursive=True)[:5]
+if sos:
+    denied = 0
+    for s in sos:
+        try:
+            ctypes.CDLL(s)
+            sys.exit(0)
+        except OSError as e:
+            denied += ('Permission denied' in str(e))
+    sys.exit(1 if denied == len(sos) else 0)
+"; then
+        CANARY_OK=""
+        warn "  !! 当前终端无法加载 hmdfs 上的 .so（任务级执行限制）"
+        warn "     这不代表安装失败 —— App(AgentServer) 环境不受此限制"
+        warn "     本脚本将继续安装、跳过功能验证，完成后请在 App 内实测"
+    fi
+fi
 log "  预检通过 (repo=$REPO_ROOT)"
 
 # ============================================================================
@@ -136,9 +193,23 @@ log "步骤 3/6: 安装原生依赖（numpy / pypdfium2 / Pillow / pandas）"
 # install_native <显示名> <功能测试代码> <harmonyos wheel 通配> <musl 兜底: "pkg==ver cp312|py3|none">
 install_native() {
     _label=$1 _test=$2 _glob=$3 _musl=$4
-    if py_ok "$_test"; then
-        log "  $_label 已可用，跳过"
-        return 0
+    if [ -n "$CANARY_OK" ]; then
+        if py_ok "$_test"; then
+            log "  $_label 已可用，跳过"
+            return 0
+        fi
+        # 上次运行可能已装好、只是 .so 还在沉降窗口：暖读 + 重试探测，通过则
+        # 不重装（重装会重写文件、重置沉降时钟）
+        if warm_sos && py_ok_retry "$_test"; then
+            log "  $_label 已安装（文件沉降后通过），跳过"
+            return 0
+        fi
+    else
+        # 受限终端：import 必然 Permission denied，用 pip 元数据判定是否已装
+        if "$VENV_PY" -m pip show "$_label" >/dev/null 2>&1; then
+            log "  $_label 已安装（pip 元数据；终端受限跳过功能验证，请在 App 内实测）"
+            return 0
+        fi
     fi
     # --- 路径 1: 仓库内离线 harmonyos wheel ---
     for _w in "$WHEELS"/$_glob; do
@@ -148,12 +219,20 @@ install_native() {
             continue
         fi
         log "  $_label: 安装离线 wheel ($(basename "$_w"))"
-        "$VENV_PY" -m pip install --no-deps --force-reinstall "$_w" >/dev/null 2>&1
-        if py_ok "$_test"; then
-            log "  $_label 安装成功（离线 wheel）"
-            return 0
+        if "$VENV_PY" -m pip install --no-deps --force-reinstall "$_w" >/dev/null 2>&1; then
+            if [ -z "$CANARY_OK" ]; then
+                log "  $_label 安装完成（离线 wheel；终端受限，功能验证请在 App 内进行）"
+                return 0
+            fi
+            warm_sos
+            if py_ok_retry "$_test"; then
+                log "  $_label 安装成功（离线 wheel）"
+                return 0
+            fi
+            warn "  $_label 离线 wheel 未通过功能测试（可能是本机代码签名不同）"
+        else
+            warn "  $_label 离线 wheel pip 安装失败"
         fi
-        warn "  $_label 离线 wheel 未通过功能测试（可能是本机代码签名不同）"
         break
     done
     # --- 路径 2: 用本机签名工具重签同一 wheel ---
@@ -163,14 +242,19 @@ install_native() {
             is_real_wheel "$_w" || continue
             log "  $_label: 尝试用本机签名工具重签..."
             _out="$TMP/$(basename "$_w")"
-            if "$VENV_PY" "$CONVERTER" "$_w" -o "$_out" >/dev/null 2>&1; then
-                "$VENV_PY" -m pip install --no-deps --force-reinstall "$_out" >/dev/null 2>&1
-                if py_ok "$_test"; then
+            if "$VENV_PY" "$CONVERTER" "$_w" -o "$_out" >/dev/null 2>&1 \
+               && "$VENV_PY" -m pip install --no-deps --force-reinstall "$_out" >/dev/null 2>&1; then
+                if [ -z "$CANARY_OK" ]; then
+                    log "  $_label 安装完成（本机重签；终端受限，功能验证请在 App 内进行）"
+                    return 0
+                fi
+                warm_sos
+                if py_ok_retry "$_test"; then
                     log "  $_label 安装成功（本机重签）"
                     return 0
                 fi
             fi
-            warn "  $_label 重签后仍未通过功能测试"
+            warn "  $_label 重签路径未成功"
             break
         done
         # --- 路径 3: 从 musl wheel 现场转换（本机签名） ---
@@ -206,10 +290,16 @@ install_native() {
                 if "$VENV_PY" "$CONVERTER" "$_conv_in" >/dev/null 2>&1; then
                     for _o in "$TMP"/$_mpkg-*harmonyos_aarch64.whl; do
                         [ -f "$_o" ] || continue
-                        "$VENV_PY" -m pip install --no-deps --force-reinstall "$_o" >/dev/null 2>&1
-                        if py_ok "$_test"; then
-                            log "  $_label 安装成功（musl 现场转换）"
-                            return 0
+                        if "$VENV_PY" -m pip install --no-deps --force-reinstall "$_o" >/dev/null 2>&1; then
+                            if [ -z "$CANARY_OK" ]; then
+                                log "  $_label 安装完成（musl 现场转换；终端受限，功能验证请在 App 内进行）"
+                                return 0
+                            fi
+                            warm_sos
+                            if py_ok_retry "$_test"; then
+                                log "  $_label 安装成功（musl 现场转换）"
+                                return 0
+                            fi
                         fi
                     done
                 fi
@@ -217,25 +307,32 @@ install_native() {
             fi
         fi
     fi
-    warn "  $_label 所有安装路径均失败"
+    if [ -z "$CANARY_OK" ]; then
+        warn "  $_label pip 安装失败（终端受限，无法给出功能层面的错误信息）"
+    else
+        warn "  $_label 所有安装路径均失败（功能测试已各重试 5 次）；真实错误："
+        LD_LIBRARY_PATH= "$VENV_PY" -c "$_test" 2>&1 | tail -5 | sed 's/^/    /'
+        warn "  若错误为 Permission denied：安装大概率已成功，只是 hmdfs 沉降窗口未过 —— 等待 2~5 分钟后重跑本脚本即可（入口探测通过即跳过，不会重装重写文件）"
+    fi
     return 1
 }
 
+DEGRADED=""
 install_native "numpy"      "import numpy; numpy.array([1,2]).sum()" \
     "numpy-*harmonyos_aarch64.whl" "none" \
-    || fail "numpy 缺失且无法从 wheels/ 安装 —— 基础环境不完整，请先执行 scripts/install-ohos-agentserver.sh"
+    || DEGRADED="$DEGRADED numpy"
 
 install_native "pypdfium2"  "import pypdfium2 as p; d=p.PdfDocument.new(); d.new_page(10,10)" \
     "pypdfium2-*harmonyos_aarch64.whl" "pypdfium2==4.30.0 py3" \
-    || fail "pypdfium2 安装失败（DeepResearch 必需）"
+    || DEGRADED="$DEGRADED pypdfium2"
 
 install_native "Pillow"     "from PIL import Image; Image.new('RGB',(8,8))" \
     "Pillow-*harmonyos_aarch64.whl" "none" \
-    || warn "Pillow 安装失败 —— 请从旧机器复制 wheels/Pillow-12.2.0-*.whl 后重跑"
+    || DEGRADED="$DEGRADED Pillow"
 
 install_native "pandas"     "import pandas as pd; assert pd.Series(range(10)).rolling(3).sum().iloc[2]==3.0" \
     "pandas-*harmonyos_aarch64.whl" "pandas==2.3.1 cp312" \
-    || fail "pandas 安装失败（DeepResearch 必需）"
+    || DEGRADED="$DEGRADED pandas"
 
 # ============================================================================
 log "步骤 4/6: 配置 pymilvus 平台桩"
@@ -389,7 +486,11 @@ fi
 # ============================================================================
 log "步骤 5/6: 配置 deepresearch skill 目录兜底链接"
 # ============================================================================
-if py_ok "from jiuwenclaw.agentserver.tools.deepresearch.tools import _resolve_skill_root as r; import sys; sys.exit(0 if r() else 1)"; then
+_skill_probe_ok() {
+    [ -n "$CANARY_OK" ] || return 1   # 受限终端 import 必然失败，直接走目录检查
+    py_ok "from jiuwenclaw.agentserver.tools.deepresearch.tools import _resolve_skill_root as r; import sys; sys.exit(0 if r() else 1)"
+}
+if _skill_probe_ok; then
     log "  skill 目录已可解析，跳过"
 else
     _skills="$REPO_ROOT/../relay-claw/office-claw-skills"
@@ -404,7 +505,10 @@ fi
 # ============================================================================
 log "步骤 6/6: 自动补齐缺失模块"
 # ============================================================================
-cat > "$TMP/probe_mod.py" <<'PYPROBE'
+if [ -z "$CANARY_OK" ]; then
+    warn "  跳过自动补齐（终端受限，import 探测必然失败）—— 缺失模块会在 App 内调用时报明确错误"
+else
+    cat > "$TMP/probe_mod.py" <<'PYPROBE'
 try:
     import openjiuwen_deepsearch.framework.openjiuwen.agent.workflow  # noqa
     print("OK")
@@ -414,19 +518,22 @@ except Exception:
     print("NONMOD")
 PYPROBE
 
-_i=0
-while [ "$_i" -lt 12 ]; do
-    _missing=$("$VENV_PY" "$TMP/probe_mod.py" 2>/dev/null | tail -1)
-    [ "$_missing" = "OK" ] && break
-    [ -n "$_missing" ] || break
-    [ "$_missing" = "NONMOD" ] && break
-    log "  补装缺失模块: $_missing"
-    "$VENV_PY" -m pip install --no-deps -i "$MIRROR" "$_missing" >/dev/null 2>&1 \
-        || warn "  无法安装 $_missing（无网络或无兼容 wheel）"
-    _i=$((_i + 1))
-done
-if [ "$_i" -ge 12 ]; then
-    warn "自动补齐循环达到上限，可能仍有缺失模块"
+    _i=0
+    warm_sos
+    while [ "$_i" -lt 12 ]; do
+        _missing=$(LD_LIBRARY_PATH= "$VENV_PY" "$TMP/probe_mod.py" 2>/dev/null | tail -1)
+        [ "$_missing" = "OK" ] && break
+        [ -n "$_missing" ] || break
+        [ "$_missing" = "NONMOD" ] && break
+        log "  补装缺失模块: $_missing"
+        "$VENV_PY" -m pip install --no-deps -i "$MIRROR" "$_missing" >/dev/null 2>&1 \
+            || warn "  无法安装 $_missing（无网络或无兼容 wheel）"
+        sleep 2   # hmdfs 延迟可见：给刚解包的文件稳定时间，避免复测误判导致重复安装
+        _i=$((_i + 1))
+    done
+    if [ "$_i" -ge 12 ]; then
+        warn "自动补齐循环达到上限，可能仍有缺失模块"
+    fi
 fi
 
 # ============================================================================
@@ -505,20 +612,50 @@ if FAIL:
 print("全部验证通过")
 PYVERIFY
 
-if LD_LIBRARY_PATH= "$VENV_PY" "$TMP/verify_final.py" > "$TMP/verify.log" 2>&1; then
-    grep -v ohos_build_env "$TMP/verify.log"
+if [ -z "$CANARY_OK" ]; then
+    # 受限终端：import 验证必然 Permission denied，无意义 —— 以 pip 完成情况定论
+    if [ -n "$DEGRADED" ]; then
+        fail "以下包 pip 安装失败:$DEGRADED —— 请检查离线 wheel 完整性与网络"
+    fi
+    log "最终验证跳过：当前终端无法加载 hmdfs .so（任务级限制，非安装问题）"
+    log "安装内容已全部就位 —— 请完全退出并重开 OfficeClaw App，在 App 内调用一次"
+    log "DeepResearch 工具完成验证（App 环境不受此终端限制，已实测可用）"
 else
-    grep -v ohos_build_env "$TMP/verify.log"
-    fail "验证未通过 —— 请把以上输出连同日志 $TMP/verify.log 发给我"
+    _vc=0
+    while :; do
+        warm_sos
+        if LD_LIBRARY_PATH= "$VENV_PY" "$TMP/verify_final.py" > "$TMP/verify.log" 2>&1; then
+            grep -v ohos_build_env "$TMP/verify.log"
+            [ -n "$DEGRADED" ] && warn "以下包安装时未通过即时验证，但最终验证已通过（hmdfs 沉降误报）:$DEGRADED"
+            break
+        fi
+        _vc=$((_vc + 1))
+        case "$_vc" in
+            1) warn "最终验证未通过，5 秒后重试（等待文件沉降）..." ; sleep 5 ;;
+            2) warn "仍未通过，20 秒后重试..." ; sleep 20 ;;
+            3) warn "仍未通过，60 秒后最后重试..." ; sleep 60 ;;
+                *)
+                grep -v ohos_build_env "$TMP/verify.log"
+                fail "验证未通过 —— 若错误为 Permission denied：等 5 分钟后重跑本脚本（已装内容会跳过重装）；若仍失败请在你的终端执行下面两条命令并把输出发我：
+    .venv/bin/python -c 'import numpy'
+    grep -m1 ' /storage' /proc/self/mountinfo"
+                ;;
+        esac
+    done
 fi
 
 # ============================================================================
 log "==================================================================="
 log "DeepResearch 安装完成！"
 log "==================================================================="
-log "产出: 4 个 DeepResearch 工具已注册（deepresearch_stream /"
-log "      deepresearch_prepare_rewrite / deepresearch_commit_rewrite /"
-log "      deepresearch_generate_rewrite_html）"
+if [ -n "$CANARY_OK" ]; then
+    log "产出: 4 个 DeepResearch 工具已注册（deepresearch_stream /"
+    log "      deepresearch_prepare_rewrite / deepresearch_commit_rewrite /"
+    log "      deepresearch_generate_rewrite_html）"
+else
+    log "产出: DeepResearch 依赖已安装（本终端无法执行 .so，未做功能验证）"
+    log "验证: 在 App 内调用一次 DeepResearch 工具即完成验证"
+fi
 log ""
 log "最后一步: 重启 AgentServer 使其加载新依赖 ——"
 log "  · 命令行启动的: 先结束进程再执行  sh scripts/start-ohos-agentserver.sh 18092"
