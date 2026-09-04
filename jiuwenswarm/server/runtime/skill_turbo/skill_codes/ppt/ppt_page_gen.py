@@ -4520,6 +4520,7 @@ def _postprocess_content_template_fill(
                 repaired,
             )
             if ok_repaired:
+                _warn_chart_mount_mismatch_soft(repaired, page_num=ctx.page_num)
                 logger.info(
                     "[P8.1] repaired=content_template_chrome page=%d style=%s "
                     "from_reason=%s",
