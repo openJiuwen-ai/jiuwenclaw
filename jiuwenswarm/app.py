@@ -60,7 +60,7 @@ mcp_builtins_missing = not _mcp_builtins_dir.is_dir()
 if config_missing or workspace_migration_needed or mcp_builtins_missing:
     prepare_workspace(overwrite=False)
 
-# 每次启动合并模板新增配置项（保留用户已有值）
+# 每次启动增量合并模板新增配置项：只补齐新增项，不删除用户已有配置项
 ensure_config_migrated_from_template()
 
 # 幂等地补齐默认内置技能（对已有工作区也生效，新增默认技能时自动安装）
