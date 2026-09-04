@@ -2683,6 +2683,100 @@ async def _pre_persist_large_media(
     return params
 
 
+def _persist_document_locally(
+    data: bytes, safe_session_id: str, filename: str
+) -> tuple[bool, dict[str, Any]]:
+    """Write large document bytes directly to the shared user directory.
+
+    与 ``_persist_media_locally`` 同理：legacy 单用户模式下 AgentServer 无 HTTP
+    upload listener，Gateway 侧解码后直接写入共享目录，路径与
+    ``document_attachments._resolve_document_item`` 的 base64 落盘一致。
+    """
+    from jiuwenswarm.common.utils import get_agent_sessions_dir
+    from jiuwenswarm.server.runtime.attachments.upload_storage import atomic_write_unique
+
+    try:
+        upload_dir = get_agent_sessions_dir() / safe_session_id / "uploads"
+        path = atomic_write_unique(upload_dir / filename, data)
+        return True, {"path": str(path)}
+    except Exception as exc:  # noqa: BLE001
+        return False, {"error": str(exc), "code": "UPLOAD_FAILED"}
+
+
+async def _pre_persist_large_documents(
+    params: dict[str, Any], *, session_id: str | None
+) -> dict[str, Any]:
+    """转发 document.persist 前，把超 E2A 帧预算的 base64 文档落盘到会话 uploads 目录。
+
+    与 ``_pre_persist_large_media`` 同理：小文档保留 base64 走 E2A（AgentServer
+    注入目录落盘）；超帧预算的大文档在 Gateway 侧解码后写入共享用户目录并标记
+    ``_persisted``，AgentServer 侧直接透传落盘记录，不重复解码。返回处理后的
+    params（原对象就地修改 documents）。
+    """
+    documents = params.get("documents")
+    if not isinstance(documents, list):
+        return params
+    import json as _json
+
+    from jiuwenswarm.gateway.routing.agent_http_bridge import E2A_PAYLOAD_MAX_BYTES
+    from jiuwenswarm.server.runtime.attachments.upload_storage import (
+        safe_session_dirname,
+        safe_upload_filename,
+    )
+
+    try:
+        base_payload = {k: v for k, v in params.items() if k != "documents"}
+        overhead = len(_json.dumps(base_payload, ensure_ascii=False, default=str))
+    except Exception:  # noqa: BLE001
+        overhead = 4096
+    remaining = E2A_PAYLOAD_MAX_BYTES - overhead
+    safe_session_id = safe_session_dirname(session_id)
+    new_documents: list[Any] = []
+    for index, item in enumerate(documents):
+        if not isinstance(item, dict):
+            new_documents.append(item)
+            continue
+        raw = item.get("base64Data") or item.get("base64_data")
+        if not isinstance(raw, str) or not raw.strip():
+            new_documents.append(item)
+            continue
+        try:
+            data = base64.b64decode(raw, validate=True)
+        except Exception:  # noqa: BLE001
+            new_documents.append(item)
+            continue
+        if not data:
+            new_documents.append(item)
+            continue
+        if len(data) <= remaining:
+            remaining -= len(data)
+            new_documents.append(item)
+            continue
+        filename = safe_upload_filename(
+            str(item.get("filename") or f"document-{index + 1}"),
+            fallback=f"document-{index + 1}",
+        )
+        ok, payload = _persist_document_locally(data, safe_session_id, filename)
+        if ok:
+            new_documents.append(
+                {
+                    "type": "document",
+                    "filename": filename,
+                    "mime_type": str(item.get("mimeType") or item.get("mime_type") or "").lower().strip()
+                    or "application/octet-stream",
+                    "path": str(payload.get("path") or ""),
+                    "size_bytes": len(data),
+                    "_persisted": True,
+                }
+            )
+            continue
+        # 落盘失败：保留原 base64（若仍超帧限制，由下游链路返回可重试错误）
+        logger.warning("[document.persist] 大文档落盘失败: %s", payload.get("error"))
+        new_documents.append(item)
+    params["documents"] = new_documents
+    return params
+
+
 def _register_web_handlers(bind: WebHandlersBindParams) -> None:
     """注册 Web 前端需要的 method 与 on_connect。
     on_config_saved: 可选，config.set 写回后调用的回调；
@@ -5245,9 +5339,19 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         )
 
     async def _document_persist(ws, req_id, params, session_id, user_id=None):
-        """文档附件路径黑名单校验（E2A 转发，路径判定由 AgentServer 注入目录执行）。"""
+        """文档附件校验与落盘（E2A 转发，路径判定由 AgentServer 注入目录执行）。
+
+        浏览器 base64 大文档在 Gateway 侧解码落盘（超 E2A 帧预算），小文档保留
+        base64 走 E2A，由 AgentServer 侧注入目录落盘。
+        """
         from jiuwenswarm.common.schema.message import ReqMethod
         from jiuwenswarm.gateway.routing.e2a_proxy import proxy_unary_request
+
+        if isinstance(params, dict):
+            params = await _pre_persist_large_documents(
+                params,
+                session_id=session_id,
+            )
 
         await proxy_unary_request(
             channel=channel,
