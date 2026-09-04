@@ -59,3 +59,8 @@ def patch_multi_tenant_workspace_dirs(monkeypatch, tmp_path: Path) -> None:
         "jiuwenswarm.gateway.tenant_paths.get_multi_tenant_user_workspace_dir",
         _mock,
     )
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.harness.common.tools.cron.cron_tools."
+        "get_multi_tenant_user_workspace_dir",
+        _mock,
+    )
