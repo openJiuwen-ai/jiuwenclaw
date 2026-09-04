@@ -8,9 +8,19 @@
 from __future__ import annotations
 
 import copy
+import logging
 from typing import Any
 
 from .schemas import EffectiveEnterpriseConfig
+
+logger = logging.getLogger(__name__)
+
+
+def _template_id_label(entity: Any) -> str:
+    if not isinstance(entity, dict):
+        return "<unknown>"
+    tid = str(entity.get("template_id") or "").strip()
+    return tid or "<unknown>"
 
 
 def clear_local_mcp_servers(config_base: dict[str, Any]) -> dict[str, Any]:
@@ -29,16 +39,34 @@ def mcp_entity_to_server_entry(entity: dict[str, Any]) -> dict[str, Any] | None:
 
     只认模板行 ``enabled``；``mcp_entry.enabled`` 忽略。写入 servers 时固定
     ``enabled=True``，供运行时 ``extract_enabled_mcp_server_entries`` 使用。
+
+    模板行 ``enabled=False`` 为正常跳过，不打告警。entity 非 dict、``mcp_entry``
+    缺失/非 dict、``name`` 为空视为数据损坏，打 ``warning`` 便于运维排查。
     """
     if not isinstance(entity, dict):
+        logger.warning(
+            "[enterprise_mcp] skip MCP template: entity is not a dict, got %s",
+            type(entity).__name__,
+        )
         return None
+    template_id = _template_id_label(entity)
     if not bool(entity.get("enabled", True)):
         return None
     entry = entity.get("mcp_entry")
     if not isinstance(entry, dict):
+        logger.warning(
+            "[enterprise_mcp] skip MCP template template_id=%s: "
+            "mcp_entry missing or not a dict, got %s",
+            template_id,
+            type(entry).__name__,
+        )
         return None
     name = str(entry.get("name", "")).strip()
     if not name:
+        logger.warning(
+            "[enterprise_mcp] skip MCP template template_id=%s: mcp_entry.name is empty",
+            template_id,
+        )
         return None
     normalized = copy.deepcopy(entry)
     normalized.pop("enabled", None)
@@ -65,8 +93,6 @@ def apply_enterprise_mcp_to_config(
 
     enterprise_entries: list[dict[str, Any]] = []
     for entity in mcp_entities:
-        if not isinstance(entity, dict):
-            continue
         entry = mcp_entity_to_server_entry(entity)
         if entry is not None:
             enterprise_entries.append(entry)

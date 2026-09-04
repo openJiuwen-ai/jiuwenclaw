@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+from unittest.mock import patch
+
 from jiuwenswarm.server.runtime.enterprise_config.apply_mcp import (
     apply_enterprise_mcp_to_config,
     mcp_entity_to_server_entry,
@@ -156,3 +158,89 @@ def test_mcp_entity_ignores_entry_enabled_and_forces_true() -> None:
     assert entry["name"] == "x"
     assert entry["enabled"] is True
     assert "enabled" in entry
+
+
+_WARN = "jiuwenswarm.server.runtime.enterprise_config.apply_mcp.logger.warning"
+
+
+def test_mcp_entity_warns_when_entity_not_dict() -> None:
+    with patch(_WARN) as warn:
+        assert mcp_entity_to_server_entry("not-a-dict") is None  # type: ignore[arg-type]
+    warn.assert_called_once()
+    message = warn.call_args[0][0] % warn.call_args[0][1:]
+    assert "not a dict" in message
+    assert "str" in message
+
+
+def test_mcp_entity_warns_when_mcp_entry_missing() -> None:
+    with patch(_WARN) as warn:
+        assert mcp_entity_to_server_entry({"template_id": "t-missing", "enabled": True}) is None
+    warn.assert_called_once()
+    message = warn.call_args[0][0] % warn.call_args[0][1:]
+    assert "template_id=t-missing" in message
+    assert "mcp_entry" in message
+
+
+def test_mcp_entity_warns_when_mcp_entry_not_dict() -> None:
+    with patch(_WARN) as warn:
+        assert (
+            mcp_entity_to_server_entry(
+                {"template_id": "t-list", "enabled": True, "mcp_entry": ["bad"]}
+            )
+            is None
+        )
+    warn.assert_called_once()
+    message = warn.call_args[0][0] % warn.call_args[0][1:]
+    assert "template_id=t-list" in message
+    assert "list" in message
+
+
+def test_mcp_entity_warns_when_name_empty() -> None:
+    with patch(_WARN) as warn:
+        assert (
+            mcp_entity_to_server_entry(
+                {
+                    "template_id": "t-empty",
+                    "enabled": True,
+                    "mcp_entry": {"name": "  ", "transport": "http", "url": "http://x"},
+                }
+            )
+            is None
+        )
+    warn.assert_called_once()
+    message = warn.call_args[0][0] % warn.call_args[0][1:]
+    assert "template_id=t-empty" in message
+    assert "mcp_entry.name is empty" in message
+
+
+def test_mcp_entity_disabled_template_does_not_warn() -> None:
+    with patch(_WARN) as warn:
+        assert (
+            mcp_entity_to_server_entry(
+                {
+                    "template_id": "t-off",
+                    "enabled": False,
+                    "mcp_entry": {
+                        "name": "disabled-server",
+                        "transport": "http",
+                        "url": "http://x",
+                    },
+                }
+            )
+            is None
+        )
+    warn.assert_not_called()
+
+
+def test_apply_enterprise_mcp_warns_for_non_dict_entity() -> None:
+    enterprise = EffectiveEnterpriseConfig(
+        routing=RoutingContext(group_id="g", bot_id="b", user_id="u"),
+        mcp=["broken"],  # type: ignore[list-item]
+    )
+    with patch(_WARN) as warn:
+        merged, applied = apply_enterprise_mcp_to_config({"mcp": {"servers": []}}, enterprise)
+    assert applied is True
+    assert merged["mcp"]["servers"] == []
+    warn.assert_called_once()
+    message = warn.call_args[0][0] % warn.call_args[0][1:]
+    assert "not a dict" in message
