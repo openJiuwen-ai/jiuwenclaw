@@ -70,6 +70,12 @@ _STATIC_SKILL_NAMES = frozenset(
 _SKILLS_PROMPT_MAX_CHARS_ENV = "JIUWENSWARM_SKILLS_PROMPT_MAX_CHARS"
 _DEFAULT_SKILLS_PROMPT_MAX_CHARS = 30_000
 
+# Keep Skills after every static Code/Design prompt section (the highest is
+# Code's session guidance at 55), but before per-request runtime context (60+).
+# This applies to both all-mode and auto-list mode; upstream assigns 40 to the
+# latter unless the rail result is normalized below.
+_SKILLS_SECTION_PRIORITY = 56
+
 _STATIC_BLOCK_EN = """## Skills
 
 The following skills provide specialized instructions for specific tasks. Use `skill_tool` to load a skill's full `SKILL.md` when the task matches its description; follow that file before executing the skill. The catalogue is metadata, not a replacement for the skill instructions.
@@ -470,7 +476,14 @@ def apply_patch() -> None:
 
         def _patched_build_skills_section(self, skills=None):  # type: ignore[no-untyped-def]
             if self.skill_mode != self.SKILL_MODE_ALL:
-                return original_build(self, skills)
+                section = original_build(self, skills)
+                if section is None:
+                    return None
+                return PromptSection(
+                    name=section.name,
+                    content=section.content,
+                    priority=_SKILLS_SECTION_PRIORITY,
+                )
             current_skills = self.skills if skills is None else skills
             builder = getattr(self, "system_prompt_builder", None)
             language = getattr(builder, "language", "en") or "en"
@@ -481,7 +494,7 @@ def apply_patch() -> None:
                         current_skills, language
                     )
                 },
-                priority=40,
+                priority=_SKILLS_SECTION_PRIORITY,
             )
 
         _patched_build_skills_section.__skills_goal_override_wrapped__ = True  # type: ignore[attr-defined]

@@ -1293,6 +1293,34 @@ def test_skills_goal_override_uses_available_skills_catalog_for_chinese():
     assert "使用 `skill_tool` 加载其完整 `SKILL.md`" in _STATIC_BLOCK_CN
 
 
+@pytest.mark.parametrize("mode", ["all", "auto_list"])
+def test_skills_goal_override_places_skills_after_static_sections(mode):
+    """Both native skill modes belong after static prompt content, before runtime."""
+    from openjiuwen.harness.prompts import PromptSection, SystemPromptBuilder
+    from openjiuwen.harness.rails import SkillUseRail
+
+    from jiuwenswarm.agents.harness.common.prompt.skills_goal_override import (
+        _SKILLS_SECTION_PRIORITY,
+    )
+
+    builder = SystemPromptBuilder(language="en")
+    builder.add_section(
+        PromptSection(name="static_tail", content={"en": "STATIC TAIL"}, priority=55)
+    )
+    rail = SkillUseRail("unused", skill_mode=mode, include_tools=False)
+    rail.system_prompt_builder = builder
+    if mode == "all":
+        rail.skills = [SimpleNamespace(name="dynamic-skill", description="test skill")]
+
+    section = rail._build_skills_section()
+
+    assert section is not None
+    assert section.priority == _SKILLS_SECTION_PRIORITY == 56
+    builder.add_section(section)
+    prompt = builder.build()
+    assert prompt.index("STATIC TAIL") < prompt.index("<available_skills>")
+
+
 def test_skills_goal_override_caps_dynamic_catalog_with_configurable_budget(monkeypatch):
     from jiuwenswarm.agents.harness.common.prompt.skills_goal_override import (
         _SKILLS_PROMPT_MAX_CHARS_ENV,

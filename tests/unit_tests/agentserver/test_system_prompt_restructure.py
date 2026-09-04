@@ -1040,6 +1040,7 @@ async def test_skill_retrieval_prompt_hides_legacy_list_skill(monkeypatch):
     prompt = builder.build()
     assert "旧 list_skill 提示" not in prompt
     assert "Agentic 技能检索" in prompt
+    assert builder.get_section(rail.SECTION_NAME).priority == 56
 
     await rail.after_model_call(ctx)
 
