@@ -4,7 +4,7 @@
 
 覆盖范围:
   - 状态机: update/toggle 重新激活 completed/expired/disabled → scheduled + 重算 next_run_at。
-  - 停止条件: delete_after_run=true 执行后 completed 保留记录。
+  - 停止条件: terminal=true 执行后 completed 保留记录。
   - store reload: heartbeat_jobs.json 外部修改后 reload 生效。
 """
 
@@ -259,12 +259,11 @@ async def test_finish_run_terminal_state_preserves_record(
     assert await store.get_job(job.id) is not None
 
 
-async def test_delete_after_run_marks_completed(store: HeartbeatJobStore) -> None:
-    # once schedule + delete_after_run → completed
+async def test_terminal_run_marks_completed(store: HeartbeatJobStore) -> None:
     sched = HeartbeatSchedule.from_dict({"type": "once", "run_at": 9999.0})
     job = await store.create_job(
         name="once", channel_id="web", session_id="s1", prompt="p",
-        schedule=sched, source="agent_tool", delete_after_run=True,
+        schedule=sched, source="agent_tool",
         now=1.0,
     )
     await store.claim_run(
@@ -464,8 +463,6 @@ async def test_invalid_entries_ignored_in_list(store: HeartbeatJobStore, tmp_pat
     [
         ("enabled", "false"),
         ("enabled", 0),
-        ("delete_after_run", "false"),
-        ("delete_after_run", 0),
     ],
 )
 async def test_invalid_persisted_boolean_job_is_not_loaded(
@@ -575,6 +572,7 @@ async def test_persisted_file_is_valid_json(store: HeartbeatJobStore, tmp_path: 
     assert data["version"] == 1
     assert isinstance(data["jobs"], list)
     assert data["jobs"][0]["id"] == job.id
+    assert "delete_after_run" not in data["jobs"][0]
 
 
 async def test_concurrent_create_enforces_limit_atomically(store: HeartbeatJobStore) -> None:
