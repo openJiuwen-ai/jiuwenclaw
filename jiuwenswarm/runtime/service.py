@@ -1037,7 +1037,6 @@ class AgentRuntime:
                 ).strip(),
                 params=params,
                 channel_id=str(request.channel_id or "default"),
-                agent_manager=self._agent_manager,
             )
         except Exception as exc:  # noqa: BLE001 - optional product hook
             logger.warning(
@@ -1047,8 +1046,8 @@ class AgentRuntime:
                 exc,
             )
 
+    @staticmethod
     def _record_kvc_chat_finished(
-        self,
         request: AgentRequest,
         *,
         succeeded: bool,
@@ -1065,7 +1064,6 @@ class AgentRuntime:
                     request.session_id or params.get("session_id") or ""
                 ).strip(),
                 succeeded=succeeded,
-                agent_manager=self._agent_manager,
             )
         except Exception as exc:  # noqa: BLE001 - optional product hook
             logger.warning(

@@ -22,7 +22,7 @@ import time
 from collections import Counter
 from collections.abc import Mapping
 from contextvars import ContextVar, Token
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from shutil import which
 from typing import TYPE_CHECKING, Any, AsyncIterator, Callable, List, Optional, Tuple
@@ -39,7 +39,7 @@ from openjiuwen.core.context_engine.schema.config import (
 )
 from openjiuwen.core.context_engine.token.tokenizer_registry import TokenizerRegistry
 from openjiuwen.core.context_engine.token.tokenizer_spec import TokenizerSpec
-from openjiuwen.core.foundation.kv_cache import KVCacheAffinityConfig
+from openjiuwen.core.kv_cache import KVCacheAffinityConfig
 from openjiuwen.core.foundation.llm import ModelRequestConfig, ModelClientConfig, Model
 from openjiuwen.core.foundation.llm.utils.provider_utils import is_openai_account_provider
 from openjiuwen.core.foundation.store.base_embedding import EmbeddingConfig
@@ -102,7 +102,6 @@ from openjiuwen.harness.subagent_runtime import (
 )
 from openjiuwen.harness.tools import (
     WebFetchWebpageTool,
-    WebFreeSearchTool,
     WebPaidSearchTool,
     create_audio_tools,
     create_vision_tools,
@@ -112,6 +111,12 @@ from openjiuwen.harness.schema.interaction import (
     InteractionEventType,
     InputDispatchMode,
     SendInputRequest,
+)
+from openjiuwen.harness.schema.task import TodoStatus
+from openjiuwen.harness.workspace.workspace import Workspace, WorkspaceNode
+
+from jiuwenswarm.server.runtime.agent_adapter.trusted_web_search import (
+    TrustedWebFreeSearchTool,
 )
 
 GOAL_UPDATED_EVENT_TYPE = InteractionEventType.GOAL_UPDATED.value
@@ -165,9 +170,6 @@ except ImportError:  # Compatibility with older agent-core versions.
                     return True
             return False
 
-
-from openjiuwen.harness.schema.task import TodoStatus
-from openjiuwen.harness.workspace.workspace import Workspace, WorkspaceNode
 
 from jiuwenswarm.server.runtime.tokenizer_service import (
     configured_tokenizer_profiles,
@@ -386,6 +388,10 @@ from jiuwenswarm.server.runtime.agent_adapter.sysop_builder import (
     build_filesystem_policy,
     create_local_sysop_card,
     create_sandbox_sysop_card,
+)
+from jiuwenswarm.server.runtime.agent_adapter.browser_runtime_security import (
+    BrowserRuntimeSecurityProfile,
+    apply_browser_runtime_security_profile,
 )
 from jiuwenswarm.server.runtime.agent_adapter.user_turn import TEAM_USER_TURN_KEY, UserTurn
 from jiuwenswarm.agents.harness.common.auto_harness.service import _HARNESS_PACKAGES_FILE
@@ -942,7 +948,7 @@ def _build_deep_agent_context_engine_config(
     """Build the agent-core Context Engine configuration.
 
     仅承接 ContextEngine 自身配置；KV cache affinity 由独立
-    ``react.kv_cache_affinity_config`` 管理。
+    Application 级 ``kv_cache_affinity_config`` 管理。
 
     context_window（模型支持的上下文总长度）由 ``_build_model_from_entry`` 放进
     core 的 ``ModelRequestConfig``，再由 ReActAgent 注入当前 ContextEngine 的模型级
@@ -1189,7 +1195,7 @@ def _deep_agent_context_engine_config_for_model(
 
 
 def _deep_agent_kv_cache_affinity_config(
-    react_cfg: dict[str, Any] | None,
+    application_config: dict[str, Any] | None,
     model: Model | None = None,
 ) -> KVCacheAffinityConfig:
     """Build the ReActAgent KV cache affinity config from jiuwenswarm config."""
@@ -1197,7 +1203,7 @@ def _deep_agent_kv_cache_affinity_config(
     # model_provider 兼容旧 AscendAffinity 别名。
     mcc = getattr(model, "model_client_config", None)
     return build_kv_cache_affinity_config(
-        react_cfg,
+        application_config,
         provider=model_provider(model),
         model_client_config=mcc,
     )
@@ -1588,6 +1594,10 @@ class JiuWenSwarmDeepAdapter:
         self._subagent_rail: SubagentRail | None = None
         self._ask_user_rail: StructuredAskUserRail | None = None
         self._permission_rail: Any = None
+        self._browser_runtime_settings: Any | None = None
+        self._browser_runtime_security_profile: BrowserRuntimeSecurityProfile | None = (
+            None
+        )
         self._avatar_rail: Any = None
         self._memory_forbidden_rail: Any = None
         self._tool_cards = None
@@ -3531,6 +3541,40 @@ class JiuWenSwarmDeepAdapter:
             chrome_path or "<auto>",
         )
 
+    def _prepare_browser_runtime_security(
+        self,
+        browser_spec: Any,
+    ) -> None:
+        """Guard the settings already owned by one browser subagent spec."""
+
+        self._browser_runtime_settings = None
+        self._browser_runtime_security_profile = None
+        try:
+            factory_kwargs = getattr(browser_spec, "factory_kwargs", None)
+            settings = (
+                factory_kwargs.get("settings")
+                if isinstance(factory_kwargs, dict)
+                else None
+            )
+            mcp_cfg = getattr(settings, "mcp_cfg", None)
+            if not isinstance(mcp_cfg, McpServerConfig):
+                raise TypeError("browser_runtime_settings_missing_mcp_config")
+            guarded_cfg, profile = apply_browser_runtime_security_profile(mcp_cfg)
+            self._browser_runtime_security_profile = profile
+            if profile.network_guard_enforced:
+                guarded_settings = replace(settings, mcp_cfg=guarded_cfg)
+                self._browser_runtime_settings = guarded_settings
+                factory_kwargs["settings"] = guarded_settings
+        except Exception:
+            logger.exception(
+                "[%s] browser runtime security preparation failed",
+                type(self).__name__,
+            )
+            self._browser_runtime_security_profile = BrowserRuntimeSecurityProfile(
+                failure_reason="browser_runtime_security_preparation_failed",
+                egress_guard_failure_reason="egress_guard_unverified",
+            )
+
     @staticmethod
     def _is_subagent_enabled(subagent_cfg: Any) -> bool:
         """Treat only explicit `enabled: true` as enabled."""
@@ -3613,6 +3657,8 @@ class JiuWenSwarmDeepAdapter:
 
         # Swarm members and the main browser subagent read these variables when
         # their browser runtimes are built.
+        self._browser_runtime_settings = None
+        self._browser_runtime_security_profile = None
         self._sync_browser_runtime_environment(config_base)
         # Skill-only MCPs' bundled scripts read tokens from os.environ (BashTool
         # inherits it). Sync now so a freshly built agent process has the
@@ -3627,22 +3673,22 @@ class JiuWenSwarmDeepAdapter:
                     "[JiuWenSwarmDeepAdapter] browser subagent enabled without BROWSER_DRIVER; "
                     "defaulting to managed mode"
                 )
-            subagents.append(
-                build_browser_agent_config(
-                    model,
-                    workspace=workspace,
-                    sys_operation=sys_operation,
-                    language=resolved_language,
-                    max_iterations=parse_int(
-                        (
-                            browser_agent_cfg.get("max_iterations")
-                            if isinstance(browser_agent_cfg, dict)
-                            else None
-                        ),
-                        DEFAULT_BROWSER_AGENT_MAX_ITERATIONS,
+            browser_spec = build_browser_agent_config(
+                model,
+                workspace=workspace,
+                sys_operation=sys_operation,
+                language=resolved_language,
+                max_iterations=parse_int(
+                    (
+                        browser_agent_cfg.get("max_iterations")
+                        if isinstance(browser_agent_cfg, dict)
+                        else None
                     ),
-                )
+                    DEFAULT_BROWSER_AGENT_MAX_ITERATIONS,
+                ),
             )
+            self._prepare_browser_runtime_security(browser_spec)
+            subagents.append(browser_spec)
         elif (
             isinstance(subagents_cfg, dict)
             and isinstance(browser_agent_cfg, dict)
@@ -7422,7 +7468,7 @@ class JiuWenSwarmDeepAdapter:
                 language=self._resolve_prompt_language(),
             ),
             context_engine_config=context_engine_config,
-            kv_cache_affinity_config=_deep_agent_kv_cache_affinity_config(config, model),
+            kv_cache_affinity_config=_deep_agent_kv_cache_affinity_config(config_base, model),
             enable_task_loop=self._resolve_enable_task_loop(config, config_base),
             enable_subagent_runtime=self._resolve_enable_subagent_runtime(config_base),
             max_iterations=config.get("max_iterations", 15),
@@ -7618,7 +7664,7 @@ class JiuWenSwarmDeepAdapter:
             tool_cards.append(self._paid_search_tool.card)
             self._paid_search_registered = True
 
-        for tool_cls in [WebFreeSearchTool, WebFetchWebpageTool]:
+        for tool_cls in [TrustedWebFreeSearchTool, WebFetchWebpageTool]:
             tool_instance = tool_cls(agent_id=agent_id)
             self._register_agent_owned_tool(tool_instance, agent_id)
             tool_cards.append(tool_instance.card)
@@ -8072,7 +8118,7 @@ class JiuWenSwarmDeepAdapter:
         self._instance = create_deep_agent(
             **common_kwargs,
             context_engine_config=context_engine_config,
-            kv_cache_affinity_config=_deep_agent_kv_cache_affinity_config(config, model),
+            kv_cache_affinity_config=_deep_agent_kv_cache_affinity_config(config_base, model),
             vision_model_config=self._vision_model_config,
             audio_model_config=self._audio_model_config,
             enable_read_image_multimodal=self._resolve_enable_read_image_multimodal(config),
@@ -9445,9 +9491,14 @@ class JiuWenSwarmDeepAdapter:
         if self._instance is None:
             raise RuntimeError("DeepAgent instance is not initialized")
 
+        from jiuwenswarm.server.runtime.session.kv_cache.kv_cache_application_runtime import (
+            get_kv_cache_runtime,
+        )
+
         session = create_agent_session(
             session_id=session_id,
             card=getattr(self._instance, "card", None),
+            kv_cache_runtime=get_kv_cache_runtime(),
         )
         await session.pre_run(inputs={})
         await self._instance.start(session=session)
@@ -12555,6 +12606,21 @@ class JiuWenSwarmDeepAdapter:
                 mode=_debug_trace_mode,
                 request_debug=bool(inputs.get("_request_debug")),
             )
+            # The SDK TaskTool patch is useful only when this request is
+            # writing a debug dump that includes subagent flow.  Deferring it
+            # keeps AgentServer's listener path free of this optional import;
+            # apply it before dispatch so the first qualifying request is
+            # captured too.
+            if (
+                _dbg_settings.enabled
+                and _dbg_settings.dump_enabled
+                and _dbg_settings.include_subagent_flow
+            ):
+                from jiuwenswarm.server.runtime.debug_trace.task_tool_patch import (
+                    apply_task_tool_debug_patch,
+                )
+
+                apply_task_tool_debug_patch()
             # Sync single-agent / coding-agent observability with current config
             # before running.
             sync_agent_observability(force=_dbg_settings.otel_enabled)

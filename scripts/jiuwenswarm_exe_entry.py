@@ -110,10 +110,6 @@ if getattr(sys, "frozen", False):
 
         subprocess.Popen.__init__ = _patched_popen_init
 
-    from jiuwenswarm.common.external_cli_runtime import activate_external_cli_runtime_paths
-
-    activate_external_cli_runtime_paths()
-
 _DESKTOP_RUN_AGENT = "--desktop-run-agent"
 _DESKTOP_RUN_GATEWAY = "--desktop-run-gateway"
 _DESKTOP_INSTALL_EXTERNAL_CLI = "--desktop-install-external-cli"
@@ -122,6 +118,25 @@ _DESKTOP_RESET_EXTERNAL_CLI_CONFIG = "--desktop-reset-external-cli-config"
 # 子进程 flag 集合，这些模式下需要将错误写入日志文件，
 # 因为 console=False 的 PyInstaller exe 在 Windows 上无法通过 stderr 捕获错误。
 _DESKTOP_INSTALL_UPDATE = "--desktop-install-update"
+
+
+def _activate_external_cli_runtime_paths() -> None:
+    """Expose optional CLI packages only in roles that can use them.
+
+    Importing ``external_cli_runtime`` also imports its installer stack
+    (HTTP client, certificate and locking dependencies).  The desktop shell
+    and static Web server never import Claude/Codex SDKs, so doing this for
+    every frozen child made their cold-start import path needlessly long.
+    AgentServer executes those SDKs, so it activates the paths immediately
+    before its business imports. Gateway only needs them while a user is
+    configuring or installing an external CLI, where the handler activates
+    them on demand.
+    """
+    if not getattr(sys, "frozen", False):
+        return
+    from jiuwenswarm.common.external_cli_runtime import activate_external_cli_runtime_paths
+
+    activate_external_cli_runtime_paths()
 
 _CHILD_FLAGS = {
     "--desktop-run-app",
@@ -560,6 +575,7 @@ def _dispatch() -> int | None:
         web_main()
         return None
     if _pop_flag(_DESKTOP_RUN_AGENT):
+        _activate_external_cli_runtime_paths()
         from jiuwenswarm.server.app_agentserver import main as agent_main
         agent_main()
         return None

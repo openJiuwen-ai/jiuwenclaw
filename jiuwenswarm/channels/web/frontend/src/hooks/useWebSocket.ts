@@ -2582,7 +2582,17 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         // cron 最终结果（非占位）广播到达：自动跳转到执行会话，加载完整历史
         // （含用户消息、agent 回复、session 标题），避免用户手动点击左侧 session。
         // handleRestoreSession 通过队列异步执行，不会干扰当前消息处理。
-        if (cronMeta && typeof cronMeta === 'object' && cronMeta.is_placeholder !== true) {
+        // A failed cron result is already rendered from this push.  Do not
+        // immediately restore its history here: if persistence is delayed or
+        // unavailable, that reload can replace the just-rendered error with
+        // an older history snapshot and make the failure appear to vanish.
+        const isFailedCronResult = cronMeta?.status === 'failed';
+        if (
+          cronMeta &&
+          typeof cronMeta === 'object' &&
+          cronMeta.is_placeholder !== true &&
+          !isFailedCronResult
+        ) {
           const cronJobIdForNav = typeof cronMeta.job_id === 'string' ? cronMeta.job_id.trim() : '';
           onCronResultArrivedRef.current?.(sessionId, cronJobIdForNav);
         }

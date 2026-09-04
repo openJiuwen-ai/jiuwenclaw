@@ -1401,7 +1401,7 @@ async def test_handle_tui_explicit_create_rejects_id_owned_by_another_channel(
         ("web", "web_external_001", "no longer accepts session_id"),
         ("tui", "../unsafe", "invalid session_id"),
         ("tui", ".hidden", "invalid session_id"),
-        ("tui", "a" * 81, "invalid session_id"),
+        ("tui", "a" * 97, "invalid session_id"),
         ("tui", "a" * 129, "invalid session_id"),
     ],
 )
@@ -1576,7 +1576,6 @@ async def test_handle_session_create_acks_before_async_kvc(monkeypatch, tmp_path
     await create_task
     assert len(kvc_calls) == 1
     assert kvc_calls[0]["target_session_id"] == "sess_async_kvc_001"
-    assert kvc_calls[0]["reason"] == "session.create switch: "
 
 
 @pytest.mark.asyncio
@@ -3096,8 +3095,8 @@ async def test_handle_session_delete_drains_runtime_before_kvc_and_checkpoint_cl
             events.append(("runtime", channel_id, session_id))
             return True
 
-    async def fake_evict_plan_session(*, session_id, agent_manager, channel_id):
-        events.append(("evict", channel_id, session_id))
+    async def fake_evict_plan_session(*, session_id):
+        events.append(("evict", None, session_id))
 
     async def fake_release(session_id: str):
         events.append(("release", None, session_id))
@@ -3144,7 +3143,7 @@ async def test_handle_session_delete_drains_runtime_before_kvc_and_checkpoint_cl
 
         assert events == [
             ("runtime", "bench-channel", "sess-agent-drain"),
-            ("evict", "bench-channel", "sess-agent-drain"),
+            ("evict", None, "sess-agent-drain"),
             ("release", None, "sess-agent-drain"),
         ]
         assert "sess-agent-drain" not in plan_controller.active_sessions

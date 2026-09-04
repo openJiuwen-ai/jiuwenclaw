@@ -1682,6 +1682,38 @@ def _ensure_mcp_builtins(
         pass  # 仅登记到 diff 摘要，文件已解压就位
 
 
+def prepare_runtime_workspace(*, cleanup_stale_descs: bool = True) -> None:
+    """Perform the idempotent workspace work required before runtime children start.
+
+    Desktop and the ``jiuwenswarm.app`` supervisor call this once before they
+    launch AgentServer and Gateway.  The children can then skip the same disk
+    work via ``JIUWENSWARM_RUNTIME_WORKSPACE_READY=1``.  Standalone child
+    entrypoints intentionally retain this function as their fallback.
+    """
+    if cleanup_stale_descs:
+        cleanup_stale_openjiuwen_descs()
+
+    workspace_dir = get_user_workspace_dir()
+    config_file = workspace_dir / "config" / "config.yaml"
+    new_workspace = workspace_dir / "agent" / "workspace"
+    old_workspace = workspace_dir / "agent" / "jiuwenclaw_workspace"
+    mcp_builtins_dir = new_workspace / "mcp" / "mcp_builtins"
+
+    cleanup_team_files(workspace_dir)
+
+    config_missing = not config_file.exists()
+    workspace_migration_needed = old_workspace.exists() and not new_workspace.exists()
+    mcp_builtins_missing = not mcp_builtins_dir.is_dir()
+    workspace_preparation_needed = any(
+        (config_missing, workspace_migration_needed, mcp_builtins_missing)
+    )
+    if workspace_preparation_needed:
+        prepare_workspace(overwrite=False, workspace_dir=workspace_dir)
+
+    ensure_config_migrated_from_template(workspace_dir)
+    ensure_default_builtin_skills()
+
+
 def _close_log_handlers() -> None:
     """Close all jiuwenswarm log handlers to release file locks.
 

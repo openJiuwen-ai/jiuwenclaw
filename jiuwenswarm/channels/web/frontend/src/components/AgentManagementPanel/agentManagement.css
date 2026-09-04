@@ -25,7 +25,6 @@
 }
 
 .agent-management-detail,
-.agent-management-detail,
 .agent-management-editor {
   width: min(calc(100% - (var(--agent-page-gutter) * 2)), var(--agent-content-max));
   margin-right: auto;
@@ -227,6 +226,16 @@
   flex-direction: column;
   gap: 4px;
   padding-top: 0;
+}
+
+.agent-management-card:hover .agent-management-card__content,
+.agent-management-card:focus-within .agent-management-card__content {
+  padding-right: 64px;
+}
+
+.agent-management-card--multi-action:hover .agent-management-card__content,
+.agent-management-card--multi-action:focus-within .agent-management-card__content {
+  padding-right: 148px;
 }
 
 .agent-management-card__title-row {
@@ -594,12 +603,21 @@
   gap: 16px;
 }
 
+.agent-management-detail__identity > div {
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+}
+
 .agent-management-detail__identity h1 {
   margin: 0 0 1px;
   color: var(--color-text-primary);
   font-size: 20px;
   font-weight: 600;
   line-height: 30px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .agent-management-avatar--detail {
@@ -727,10 +745,13 @@
 
 .agent-management-detail-description {
   max-width: 100%;
+  min-width: 0;
   margin: 0;
   color: var(--color-text-primary);
   font-size: 16px;
   line-height: 24px;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .agent-management-detail-capabilities {
@@ -840,10 +861,19 @@
 }
 
 .agent-management-detail-content {
+  min-width: 0;
+  max-width: 100%;
   padding-top: 21px;
   color: var(--color-text-primary);
   font-size: 16px;
   line-height: 24px;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.agent-management-detail-content :where(pre) {
+  max-width: 100%;
+  overflow-x: auto;
 }
 
 .agent-management-detail-content h1,
@@ -995,10 +1025,18 @@
   top: -2px;
 }
 
+.agent-management-file-content__header > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .agent-management-file-content__actions {
   display: flex;
   align-items: center;
   gap: 4px;
+  flex: 0 0 auto;
 }
 
 .agent-management-file-content__actions button {
@@ -1320,6 +1358,7 @@
 .agent-management-form-grid > .agent-management-form-field--tag-picker {
   gap: 2px;
   margin-bottom: 16px;
+  min-width: 0;
 }
 
 .agent-management-tag-picker {
@@ -1329,6 +1368,7 @@
 .agent-management-tag-picker__trigger {
   display: flex;
   width: 100%;
+  min-width: 0;
   min-height: 32px;
   align-items: center;
   justify-content: space-between;
@@ -1343,6 +1383,39 @@
   text-align: left;
 }
 
+.agent-management-tag-picker__scroll {
+  display: inline-flex;
+  width: 24px;
+  height: 24px;
+  flex: 0 0 24px;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-text-secondary);
+  padding: 0;
+  cursor: pointer;
+}
+
+.agent-management-tag-picker__scroll[data-hidden='true'] {
+  visibility: hidden;
+}
+
+.agent-management-tag-picker__scroll--prev[data-hidden='true'] {
+  display: none;
+}
+
+.agent-management-tag-picker__trigger[data-empty='true'] > .agent-management-tag-picker__scroll {
+  display: none;
+}
+
+.agent-management-tag-picker__scroll:hover,
+.agent-management-tag-picker__scroll:focus-visible {
+  background: var(--color-action-secondary);
+  outline: 0;
+}
+
 .agent-management-tag-picker__trigger:focus-visible {
   border-color: var(--color-border-focus);
   box-shadow: var(--effect-focus-ring);
@@ -1351,15 +1424,25 @@
 
 .agent-management-tag-picker__values {
   display: flex;
+  flex: 1 1 auto;
   min-width: 0;
-  flex-wrap: wrap;
   align-items: center;
+  flex-wrap: nowrap;
   gap: 4px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
+  white-space: nowrap;
+}
+
+.agent-management-tag-picker__values::-webkit-scrollbar {
+  display: none;
 }
 
 .agent-management-tag--selected {
   appearance: none;
   display: inline-flex;
+  flex: 0 0 auto;
   align-items: center;
   border: 0;
   gap: 8px;
@@ -2524,6 +2607,28 @@
 }
 
 @media (max-width: 800px) {
+  .page-content[data-testid="agent-management-panel"] {
+    --agent-page-gutter: 20px;
+  }
+
+  .agent-management-detail__header {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .agent-management-detail__identity {
+    width: 100%;
+  }
+
+  .agent-management-detail__identity h1 {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    overflow-wrap: anywhere;
+    text-overflow: ellipsis;
+    white-space: normal;
+  }
+
   .agent-management-primary-actions {
     width: 100%;
     padding-bottom: 16px;
@@ -2547,7 +2652,7 @@
     min-height: 160px;
   }
 
-  .agent-management-panel--mine .agent-management-card {
+  [data-testid="agent-management-panel"][data-variant="mine"] .agent-management-card {
     height: auto;
   }
 
@@ -2560,6 +2665,13 @@
     height: auto;
     min-height: 56px;
     flex: 0 0 auto;
+  }
+
+  .agent-management-card:hover .agent-management-card__content,
+  .agent-management-card:focus-within .agent-management-card__content,
+  .agent-management-card--multi-action:hover .agent-management-card__content,
+  .agent-management-card--multi-action:focus-within .agent-management-card__content {
+    padding-right: 0;
   }
 
   .agent-management-card__meta {
