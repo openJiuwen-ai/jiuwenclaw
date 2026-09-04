@@ -288,6 +288,7 @@ def build_envelope_json(
     is_stream: bool,
     routing: dict[str, str] | None = None,
     tenant_ids: dict[str, str] | None = None,
+    request_ext: dict[str, Any] | None = None,
 ) -> str:
     """组装与 WS 客户端等价的 E2A 信封 JSON。
 
@@ -295,8 +296,6 @@ def build_envelope_json(
     ``tests/transport/test_route_matrix.py::test_direct_agent_request_equals_json_roundtrip``
     用它比对新路径，防止两者漂移。删掉它等于删掉那份契约。
     """
-    from jiuwenswarm.common.request_identity import apply_routing_metadata
-
     env = E2AEnvelope(
         request_id=request_id,
         session_id=session_id,
@@ -305,12 +304,26 @@ def build_envelope_json(
         params=params or {},
         is_stream=is_stream,
         user_id=user_id,
-        channel_context=apply_routing_metadata({}, routing),
+        channel_context=_build_channel_context(routing, request_ext),
         service_id=(tenant_ids or {}).get("service_id"),
         agent_id=(tenant_ids or {}).get("agent_id"),
         workspace_key=(tenant_ids or {}).get("workspace_key"),
     )
     return json.dumps(env.to_dict(), ensure_ascii=False)
+
+
+def _build_channel_context(
+    routing: dict[str, str] | None,
+    request_ext: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """重建结构化 REST 入口丢弃的 E2A 请求上下文子集。"""
+    from jiuwenswarm.common.request_ext import attach_to_metadata
+    from jiuwenswarm.common.request_identity import apply_routing_metadata
+
+    channel_context = apply_routing_metadata({}, routing)
+    if not request_ext:
+        return channel_context
+    return attach_to_metadata(channel_context, ext=request_ext) or {}
 
 
 def build_agent_request(
@@ -324,6 +337,7 @@ def build_agent_request(
     is_stream: bool,
     routing: dict[str, str] | None = None,
     tenant_ids: dict[str, str] | None = None,
+    request_ext: dict[str, Any] | None = None,
 ) -> Any:
     """构造``AgentRequest``。
 
@@ -335,8 +349,6 @@ def build_agent_request(
     写入信封顶层后由 :func:`e2a_to_agent_request` 落到 ``AgentRequest``。
     """
     from jiuwenswarm.common.e2a.agent_compat import e2a_to_agent_request
-    from jiuwenswarm.common.request_identity import apply_routing_metadata
-
     tenant = tenant_ids or {}
     env = E2AEnvelope(
         request_id=request_id,
@@ -346,7 +358,7 @@ def build_agent_request(
         params=params or {},
         is_stream=is_stream,
         user_id=user_id,
-        channel_context=apply_routing_metadata({}, routing),
+        channel_context=_build_channel_context(routing, request_ext),
         service_id=tenant.get("service_id"),
         agent_id=tenant.get("agent_id"),
         workspace_key=tenant.get("workspace_key"),
@@ -493,6 +505,7 @@ class AgentHTTPServer:
         user_id: str | None = None,
         routing: dict[str, str] | None = None,
         tenant_ids: dict[str, str] | None = None,
+        request_ext: dict[str, Any] | None = None,
     ) -> tuple[dict[str, Any], int]:
         """非流式调用，返回 (响应体, 状态码)。"""
         if _is_enterprise_skill_forbidden(method):
@@ -514,6 +527,7 @@ class AgentHTTPServer:
             is_stream=False,
             routing=routing,
             tenant_ids=tenant_ids,
+            request_ext=request_ext,
         )
         sink = UnaryHTTPSink()
         try:
@@ -545,6 +559,7 @@ class AgentHTTPServer:
         user_id: str | None = None,
         routing: dict[str, str] | None = None,
         tenant_ids: dict[str, str] | None = None,
+        request_ext: dict[str, Any] | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
         """流式调用（结构化入口），产出 sse_starlette 所需的事件 dict。"""
         agent_request = build_agent_request(
@@ -557,6 +572,7 @@ class AgentHTTPServer:
             is_stream=True,
             routing=routing,
             tenant_ids=tenant_ids,
+            request_ext=request_ext,
         )
         sink = SSESink()
         async for event in self._pump_sse(

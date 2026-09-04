@@ -6,9 +6,10 @@ from __future__ import annotations
 
 import asyncio
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from jiuwenswarm.extensions.sdk.skill_source import (
+    DownloadPolicy,
     SourceConfig,
     SourceDescriptor,
     SkillSourceExtension,
@@ -63,10 +64,39 @@ class SourceRegistry:
                 "source_misconfigured",
                 f"provider {provider_type} does not implement {sorted(configured - declared)}",
             )
+        config = self._merge_provider_download_hosts(config, provider)
         self._entries[source_id] = _ProviderEntry(
             config=config,
             provider=provider,
             display_name=(display_name or provider.display_name or source_id).strip(),
+        )
+
+    @staticmethod
+    def _merge_provider_download_hosts(
+        config: SourceConfig,
+        provider: SkillSourceProvider,
+    ) -> SourceConfig:
+        """Merge the Provider-declared download allowlist into the source config.
+
+        SPI 来源下载 fail-closed：管理面显式配置的 allowed_hosts 优先；未配置时
+        采用扩展 Provider 显式声明的默认白名单（download_allowed_hosts）；两者
+        皆空则保持为空，由安装链路拒绝下载。
+        """
+        declared = tuple(getattr(provider, "download_allowed_hosts", ()) or ())
+        if not declared:
+            return config
+        policy = config.download_policy
+        if policy is not None and policy.allowed_hosts:
+            return config
+        return replace(
+            config,
+            download_policy=DownloadPolicy(
+                allowed_hosts=declared,
+                max_bytes=(policy.max_bytes if policy else DownloadPolicy.max_bytes),
+                timeout_seconds=(
+                    policy.timeout_seconds if policy else DownloadPolicy.timeout_seconds
+                ),
+            ),
         )
 
     def bind_extension(

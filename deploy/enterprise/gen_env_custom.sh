@@ -100,6 +100,10 @@ cat <<EOF
 DB_TYPE="mysql"
 GATEWAY_SESSION_MAP_SCOPE="per_chat_bot_user"
 
+# 请求级扩展字段白名单，逗号分隔；空值表示关闭。
+# HTTP 从同名请求头读取，WebSocket 从握手 query 读取。
+JIUWENSWARM_REQUEST_EXT_FORWARD_HEADERS=""
+
 # 不设置就能自动寻找空闲端口，如需要设置，请确保该端口的唯一性（范围: 30000-32767）
 # MYSQL_NODE_PORT=30036
 # POSTGRESQL_NODE_PORT=30032

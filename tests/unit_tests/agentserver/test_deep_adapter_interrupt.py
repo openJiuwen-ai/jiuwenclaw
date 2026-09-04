@@ -628,6 +628,70 @@ def test_stream_normal_completion_resets_route_and_legacy_context_once(
     assert _get_route()["session_id"] == ""
 
 
+def test_runtime_route_binds_current_session_workspace(tmp_path: Path) -> None:
+    from jiuwenswarm.agents.harness.common.tools.deepresearch import tools as dt
+
+    session_workspace = tmp_path / "current-session-workspace"
+    adapter = _make_adapter(
+        _env_service_id="service-session-output",
+        _env_agent_id="agent-session-output",
+        _workspace_dir=str(tmp_path / "agent-workspace"),
+    )
+    tokens = adapter._bind_runtime_cron_context(
+        channel_id="officeclaw",
+        session_id="sess-session-output",
+        metadata={},
+        request_id="req-session-output",
+        mode="agent",
+        project_dir=str(session_workspace),
+    )
+    try:
+        # Generation and rewrite tools both consume this routed output root.
+        assert dt._get_effective_request_output_dir() == session_workspace.resolve()
+    finally:
+        adapter._reset_runtime_cron_context(tokens)
+
+
+def test_deepresearch_tool_context_keeps_session_workspace_snapshot(
+    tmp_path: Path,
+) -> None:
+    session_workspace = tmp_path / "current-session-workspace"
+    adapter = _make_adapter(
+        _current_request_route={
+            "session_id": "sess-background-output",
+            "request_id": "req-background-output",
+            "channel_id": "officeclaw",
+            "output_dir": str(session_workspace),
+        },
+        _runtime_cron_tool_context=SimpleNamespace(
+            session_id=None,
+            channel_id="default",
+            metadata={},
+        ),
+        _env_service_id="service-background-output",
+        _env_agent_id="agent-background-output",
+        _workspace_dir=str(tmp_path / "agent-workspace"),
+    )
+
+    context = adapter._get_deepresearch_tool_context()
+
+    assert Path(context["output_dir"]) == session_workspace.resolve()
+
+
+def test_artifact_output_uses_session_project_when_request_omits_workspace(
+    tmp_path: Path,
+) -> None:
+    session_workspace = tmp_path / "session-project"
+    adapter = _make_adapter(
+        _project_dir=str(session_workspace),
+        _workspace_dir=str(tmp_path / "agent-workspace"),
+    )
+
+    assert Path(adapter._deepresearch_artifact_output_dir()) == (
+        session_workspace.resolve()
+    )
+
+
 def test_runtime_route_binds_adapter_artifact_output_dir(tmp_path: Path) -> None:
     from jiuwenswarm.agents.harness.common.tools.deepresearch import tools as dt
 

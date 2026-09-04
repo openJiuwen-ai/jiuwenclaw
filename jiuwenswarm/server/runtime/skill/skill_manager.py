@@ -51,20 +51,13 @@ from jiuwenswarm.extensions.sdk.skill_source import (
     SkillSourceExtension,
     SkillSourceProvider,
     SourceConfig,
-    TrustPolicy,
 )
 from jiuwenswarm.server.runtime.skill.artifact_security import (
     ArtifactVerificationError,
-    EnvironmentSecretResolver,
-    verify_skillhub_artifact,
 )
 from jiuwenswarm.server.runtime.skill.source_registry import (
     SourceRegistry,
     SourceRegistryError,
-)
-from jiuwenswarm.server.runtime.skill.sources import (
-    SWARM_SKILL_HUB_SOURCE_ID,
-    SwarmSkillHubProvider,
 )
 
 
@@ -509,7 +502,6 @@ class SkillManager:
         self._agent_id = str(agent_id or "").strip() or None
         self._state: dict[str, Any] = self._load_state()
         self._source_registry = SourceRegistry()
-        self._secret_resolver = EnvironmentSecretResolver()
         self._register_builtin_skill_sources()
         # 把手动拷入 skills 目录、未经任何安装流程登记的本地技能，自动补登记到
         # local_skills，使其与"导入本地技能"完全等价（可展示/卸载/查看详情/禁用）。
@@ -530,48 +522,57 @@ class SkillManager:
         self._skillnet_install_complete_hook = hook
 
     def _register_builtin_skill_sources(self) -> None:
-        """Register built-in protocol adapters; clients are started lazily."""
-        config = self._default_swarm_skill_hub_config()
-        self._source_registry.register(
-            config,
-            SwarmSkillHubProvider(
-                self._get_team_skills_hub_base_url(),
-                timeout=_TEAM_SKILLS_HUB_MARKET_TIMEOUT,
-            ),
-        )
+        """Register extension-offered default sources; clients are started lazily."""
+        self._register_default_sources(self._source_registry)
 
     @staticmethod
-    def _default_swarm_skill_hub_config() -> SourceConfig:
-        """Build the personal/standalone default using the common SourceConfig."""
-        key_id = str(os.getenv("TEAM_SKILLS_HUB_HMAC_KEY_ID") or "default").strip()
-        secret_env = str(
-            os.getenv("TEAM_SKILLS_HUB_HMAC_SECRET_ENV")
-            or "SKILL_DOWNLOAD_HMAC_SECRET"
-        ).strip()
-        # 默认 if-present：Hub 未下发签名时仅记 verified=false 不拦截安装；
-        # 需要强验签的环境通过 TEAM_SKILLS_HUB_HMAC_VERIFICATION=required 显式开启
-        verification = str(
-            os.getenv("TEAM_SKILLS_HUB_HMAC_VERIFICATION") or "if-present"
-        ).strip().lower()
-        if verification not in {"required", "if-present"}:
-            logger.warning(
-                "Invalid TEAM_SKILLS_HUB_HMAC_VERIFICATION=%s; using if-present",
-                verification,
-            )
-            verification = "if-present"
-        return SourceConfig(
-            source_id=SWARM_SKILL_HUB_SOURCE_ID,
-            provider_type="swarmskillhub",
-            enabled=True,
-            priority=100,
-            endpoint_ref="env://TEAM_SKILLS_HUB_BASE_URL",
-            capabilities=frozenset({"search", "check_updates", "get_artifact"}),
-            download_policy=DownloadPolicy(),
-            trust_policy=TrustPolicy(
-                verification=verification,
-                hmac_key_refs={key_id: f"env://{secret_env}"},
-            ),
-        )
+    def _register_default_sources(
+        registry: SourceRegistry, *, skip: set[str] | None = None
+    ) -> None:
+        """Ask each registered Skill Source factory for its default source and bind it.
+
+        是否提供默认源由扩展包自决（``default_source_config()`` 返回 None 即不注册）。
+        扩展系统未运行（如单测直接构造 SkillManager）时无工厂可问，直接不注册。
+        """
+        try:
+            from jiuwenswarm.extensions.registry import ExtensionRegistry
+
+            factories = ExtensionRegistry.get_instance().list_skill_source_extensions()
+        except RuntimeError:
+            factories = []
+        skipped = skip or set()
+        for factory in factories:
+            try:
+                config = factory.default_source_config()
+            except Exception:  # noqa: BLE001
+                logger.warning(
+                    "skill source extension %s failed to provide default source config",
+                    getattr(factory, "provider_type", "?"),
+                    exc_info=True,
+                )
+                continue
+            if config is None or config.source_id in skipped:
+                continue
+            try:
+                registry.bind_extension(config, factory)
+            except (SourceRegistryError, ValueError) as exc:
+                logger.warning(
+                    "default skill source %s rejected: %s", config.source_id, exc
+                )
+
+    @staticmethod
+    def _get_skill_source_extension(provider_type: str) -> SkillSourceExtension | None:
+        """Look up a registered Skill Source factory.
+
+        Returns None when the extension system is not running (e.g. unit tests
+        instantiating SkillManager directly).
+        """
+        try:
+            from jiuwenswarm.extensions.registry import ExtensionRegistry
+
+            return ExtensionRegistry.get_instance().get_skill_source_extension(provider_type)
+        except RuntimeError:
+            return None
 
     @staticmethod
     def _source_config_custom_payload(record: dict[str, Any]) -> dict[str, Any] | None:
@@ -588,41 +589,10 @@ class SkillManager:
         return raw if isinstance(raw, dict) else None
 
     @staticmethod
-    def _resolve_source_endpoint(reference: str | None) -> str | None:
-        value = str(reference or "").strip()
-        if not value.startswith("env://"):
-            return None
-        variable = value[6:]
-        if not re.fullmatch(r"[A-Z][A-Z0-9_]{0,127}", variable):
-            return None
-        resolved = str(os.getenv(variable) or "").strip()
-        return resolved or None
-
-    @staticmethod
     def _parse_source_config(raw: dict[str, Any]) -> SourceConfig:
-        trust_raw = raw.get("trust_policy")
-        trust_policy = None
-        if isinstance(trust_raw, dict):
-            verification = str(trust_raw.get("verification") or "if-present").strip().lower()
-            if verification not in {"required", "if-present"}:
-                raise SourceRegistryError(
-                    "source_misconfigured", "invalid trust_policy.verification"
-                )
-            refs = trust_raw.get("hmac_key_refs") or {}
-            if not isinstance(refs, dict):
-                raise SourceRegistryError(
-                    "source_misconfigured", "trust_policy.hmac_key_refs must be an object"
-                )
-            algorithms = trust_raw.get("allowed_algorithms") or ["HmacSHA256"]
-            if not isinstance(algorithms, list):
-                raise SourceRegistryError(
-                    "source_misconfigured", "trust_policy.allowed_algorithms must be an array"
-                )
-            trust_policy = TrustPolicy(
-                verification=verification,
-                allowed_algorithms=frozenset(str(item) for item in algorithms),
-                hmac_key_refs={str(key): str(value) for key, value in refs.items()},
-            )
+        # trust_policy 已从管理面摘除：验签信任策略内聚到 Provider（由扩展工厂
+        # 注入），管理面 dict 中的 trust_policy 键一律忽略。该键自 !5611 引入，
+        # 无存量使用方；SourceConfig.trust_policy 字段本身保留（SDK 模型不动）。
         capabilities = raw.get("capabilities") or []
         if not isinstance(capabilities, list):
             raise SourceRegistryError("source_misconfigured", "capabilities must be an array")
@@ -666,7 +636,6 @@ class SkillManager:
             auth_ref=str(raw.get("auth_ref") or "").strip() or None,
             capabilities=frozenset(str(item) for item in capabilities),
             download_policy=download_policy,
-            trust_policy=trust_policy,
             options=dict(options),
         )
 
@@ -702,48 +671,20 @@ class SkillManager:
         configs = [self._parse_source_config(item) for item in raw_sources]
         candidate = SourceRegistry()
         configured_ids = {config.source_id for config in configs}
-        if SWARM_SKILL_HUB_SOURCE_ID not in configured_ids:
-            default_config = self._default_swarm_skill_hub_config()
-            candidate.register(
-                default_config,
-                SwarmSkillHubProvider(
-                    self._get_team_skills_hub_base_url(),
-                    timeout=_TEAM_SKILLS_HUB_MARKET_TIMEOUT,
-                ),
-            )
+        # 默认源由扩展工厂自决是否提供（含企业版门控），与配置源同表绑定。
+        self._register_default_sources(candidate, skip=configured_ids)
 
         for config in configs:
-            if config.provider_type == "swarmskillhub":
-                endpoint = self._resolve_source_endpoint(config.endpoint_ref)
-                if not endpoint and config.source_id == SWARM_SKILL_HUB_SOURCE_ID:
-                    endpoint = self._get_team_skills_hub_base_url()
-                if not endpoint:
-                    raise SourceRegistryError(
-                        "source_misconfigured",
-                        f"unresolved endpoint_ref for source {config.source_id}",
-                    )
-                provider = SwarmSkillHubProvider(
-                    endpoint,
-                    source_id=config.source_id,
-                    display_name=str(config.options.get("display_name") or config.source_id),
-                    timeout=_TEAM_SKILLS_HUB_MARKET_TIMEOUT,
-                )
-                candidate.register(config, provider)
-                continue
-            try:
-                from jiuwenswarm.extensions.registry import ExtensionRegistry
-
-                extension = ExtensionRegistry.get_instance().get_skill_source_extension(
-                    config.provider_type
-                )
-            except RuntimeError:
-                extension = None
+            extension = self._get_skill_source_extension(config.provider_type)
             if extension is None:
                 raise SourceRegistryError(
                     "source_misconfigured",
                     f"provider_type is not registered: {config.provider_type}",
                 )
-            candidate.bind_extension(config, extension)
+            try:
+                candidate.bind_extension(config, extension)
+            except ValueError as exc:
+                raise SourceRegistryError("source_misconfigured", str(exc)) from exc
 
         previous = self._source_registry
         self._source_registry = candidate
@@ -2358,7 +2299,7 @@ class SkillManager:
         skill_id: str,
         version_id: str,
         params: dict[str, Any],
-    ) -> tuple[ArtifactDescriptor, bytes, dict[str, Any]]:
+    ) -> tuple[ArtifactDescriptor, bytes, dict[str, Any] | None]:
         """Fetch and verify one exact artifact for both install and update."""
         provider = await self._source_registry.get(source_id, "get_artifact")
         descriptor = await provider.get_artifact(
@@ -2374,31 +2315,30 @@ class SkillManager:
         )
         config = self._source_registry.get_config(source_id)
         download_policy = config.download_policy
+        allowed_hosts = tuple(download_policy.allowed_hosts) if download_policy else ()
+        if not allowed_hosts:
+            # SPI 来源 fail-closed：经扩展工厂/管理面注册的来源必须持有显式下载
+            # 主机白名单（管理面 download_policy 或 Provider 声明的默认白名单），
+            # 空白名单直接拒绝，不回退 legacy 白名单（import_local/teamskillshub
+            # 内置链路行为不变）。
+            raise SourceRegistryError(
+                "source_misconfigured",
+                f"skill source {source_id} 未配置 download_policy.allowed_hosts，拒绝下载",
+            )
         self._assert_skill_download_url_allowed(
             descriptor.download_url,
-            allowed_hosts=(download_policy.allowed_hosts if download_policy else None),
+            allowed_hosts=allowed_hosts,
         )
-        body = await self._download_zip_and_verify(
-            descriptor.download_url,
-            checksum_sha256=str(descriptor.checksum_sha256 or ""),
-            timeout=(download_policy.timeout_seconds if download_policy else None),
-            max_bytes=(download_policy.max_bytes if download_policy else None),
-        )
+        body = await provider.download_artifact(descriptor, download_policy)
         if descriptor.content_length is not None and len(body) != descriptor.content_length:
             raise SourceRegistryError(
                 "artifact_download_failed", "artifact content length does not match"
             )
-        trust_policy = config.trust_policy or TrustPolicy(verification="if-present")
         try:
-            verification = verify_skillhub_artifact(
-                descriptor,
-                body,
-                trust_policy=trust_policy,
-                secret_resolver=self._secret_resolver,
-            )
+            verification = await provider.verify_artifact(descriptor, body)
         except ArtifactVerificationError as exc:
             raise SourceRegistryError(exc.code, str(exc)) from exc
-        return descriptor, body, verification.to_audit_dict()
+        return descriptor, body, dict(verification) if verification is not None else None
 
     def _commit_source_skill_entity(
         self,
@@ -4331,7 +4271,11 @@ class SkillManager:
                 break
         for plugin in self._get_installed_plugins():
             if plugin.get("name") == skill_name:
-                display_name = str(plugin.get("display_name") or "").strip()
+                display_name = str(
+                    plugin.get("market_display_name")
+                    or plugin.get("display_name")
+                    or ""
+                ).strip()
                 if display_name:
                     return display_name
                 break

@@ -98,6 +98,9 @@ async def test_get_controller_concurrent_same_tenant(tmp_path, monkeypatch) -> N
 @pytest.mark.asyncio
 async def test_web_create_mirrors_to_agent_home(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(
+        "jiuwenswarm.common.utils.is_enterprise", lambda: True
+    )
+    monkeypatch.setattr(
         "jiuwenswarm.common.utils.get_user_workspace_dir", lambda: tmp_path
     )
     monkeypatch.setattr(
