@@ -108,7 +108,8 @@ export function RsiArtifactDetailDialog({ source, title, onClose }: RsiArtifactD
   const [entries, setEntries] = useState<RsiArtifactFileEntry[]>([]);
   const [selectedPath, setSelectedPath] = useState('');
   const [expandedFolders, setExpandedFolders] = useState<Set<string>>(new Set());
-  const [previewUrl, setPreviewUrl] = useState('');
+  const [preview, setPreview] = useState<{ path: string; url: string } | null>(null);
+  const [previewLoading, setPreviewLoading] = useState(false);
   const [fileContent, setFileContent] = useState('');
   const [copyState, setCopyState] = useState<'idle' | 'copied' | 'failed'>('idle');
   const sourceTaskId = source?.taskId ?? '';
@@ -121,7 +122,8 @@ export function RsiArtifactDetailDialog({ source, title, onClose }: RsiArtifactD
     setError('');
     setEntries([]);
     setSelectedPath('');
-    setPreviewUrl('');
+    setPreview(null);
+    setPreviewLoading(false);
     setFileContent('');
 
     if (!source) {
@@ -173,13 +175,18 @@ export function RsiArtifactDetailDialog({ source, title, onClose }: RsiArtifactD
 
   useEffect(() => {
     if (!source || !selectedEntry) {
-      setPreviewUrl('');
+      setPreview(null);
+      setPreviewLoading(false);
       setFileContent('');
       return;
     }
 
     let cancelled = false;
     let objectUrl = '';
+    setPreview(null);
+    setPreviewLoading(true);
+    setFileContent('');
+
     void readRsiArtifactFile(source, selectedEntry.path)
       .then((file) => {
         if (cancelled) return;
@@ -187,12 +194,14 @@ export function RsiArtifactDetailDialog({ source, title, onClose }: RsiArtifactD
           ? new Blob([file.content], { type: file.type })
           : new Blob([decodeBase64(file.content)], { type: file.type });
         objectUrl = URL.createObjectURL(blob);
-        setPreviewUrl(objectUrl);
+        setPreview({ path: selectedEntry.path, url: objectUrl });
+        setPreviewLoading(false);
         setFileContent(file.encoding === 'text' ? file.content : selectedEntry.path);
       })
       .catch(() => {
         if (!cancelled) {
-          setPreviewUrl('');
+          setPreview(null);
+          setPreviewLoading(false);
           setFileContent(selectedEntry.path);
         }
       });
@@ -208,15 +217,15 @@ export function RsiArtifactDetailDialog({ source, title, onClose }: RsiArtifactD
   }, [selectedPath]);
 
   const previewArtifact = useMemo(() => {
-    if (!selectedEntry || !previewUrl) return null;
+    if (!selectedEntry || !preview || preview.path !== selectedEntry.path) return null;
     return {
       id: selectedEntry.path,
       name: selectedEntry.name,
       mimeType: artifactMimeType(selectedEntry),
-      downloadUrl: previewUrl,
+      downloadUrl: preview.url,
       size: selectedEntry.size,
     };
-  }, [previewUrl, selectedEntry]);
+  }, [preview, selectedEntry]);
 
   const toggleFolder = useCallback((path: string) => {
     setExpandedFolders((previous) => {
@@ -242,12 +251,12 @@ export function RsiArtifactDetailDialog({ source, title, onClose }: RsiArtifactD
   }, [fileContent, selectedEntry]);
 
   const handleDownload = useCallback(() => {
-    if (!selectedEntry || !previewUrl) return;
+    if (!selectedEntry || !preview || preview.path !== selectedEntry.path) return;
     const anchor = document.createElement('a');
-    anchor.href = previewUrl;
+    anchor.href = preview.url;
     anchor.download = selectedEntry.name;
     anchor.click();
-  }, [previewUrl, selectedEntry]);
+  }, [preview, selectedEntry]);
 
   const renderTreeNode = useCallback(
     (treeNode: FileTreeNode, depth: number): JSX.Element => {
@@ -328,6 +337,11 @@ export function RsiArtifactDetailDialog({ source, title, onClose }: RsiArtifactD
               <div className="rsi-artifact-dialog__preview-empty">{t('rsi.artifact.loadFailed')}</div>
             ) : showEmpty ? (
               <div className="rsi-artifact-dialog__preview-empty">{t('rsi.artifact.empty')}</div>
+            ) : selectedEntry && previewLoading ? (
+              <div className="rsi-artifact-dialog__preview-empty">
+                <LoaderCircle size={18} className="animate-spin" />
+                <span>{t('common.loading')}</span>
+              </div>
             ) : selectedEntry && previewArtifact ? (
               <>
                 <div className="rsi-artifact-dialog__preview-header">
@@ -343,7 +357,7 @@ export function RsiArtifactDetailDialog({ source, title, onClose }: RsiArtifactD
                 </div>
                 <div className="rsi-artifact-dialog__divider" />
                 <div className="rsi-artifact-dialog__preview-content">
-                  {/\.tex$/i.test(selectedEntry.name) && previewArtifact.downloadUrl ? (
+                  {/\.(?:tex|bib|sty)$/i.test(selectedEntry.name) && previewArtifact.downloadUrl ? (
                     <RsiLatexPreview url={previewArtifact.downloadUrl} />
                   ) : (
                     <FilePreview artifact={previewArtifact} />
