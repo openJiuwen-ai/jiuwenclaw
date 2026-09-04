@@ -1,4 +1,4 @@
-﻿/**
+/**
  * SkillPanel 组件
  *
  * Skills 管理面板
