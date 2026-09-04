@@ -125,3 +125,43 @@ async def test_history_append_record_rejects_missing_session_or_content(monkeypa
             },
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_history_append_record_rejects_invalid_session_id(monkeypatch) -> None:
+    sent: list[dict] = []
+    monkeypatch.setattr(
+        agent_ws_server_module,
+        "encode_agent_response_for_wire",
+        lambda response, *, response_id: {
+            "response_id": response_id,
+            "ok": response.ok,
+            "payload": response.payload,
+        },
+    )
+
+    async def _capture_send(_ws, wire):
+        sent.append(wire)
+
+    monkeypatch.setattr(agent_ws_server_module, "send_wire_payload", _capture_send)
+    server = agent_ws_server_module.AgentWebSocketServer.__new__(
+        agent_ws_server_module.AgentWebSocketServer
+    )
+    request = AgentRequest(
+        request_id="rpc-invalid-session",
+        req_method=ReqMethod.HISTORY_APPEND_RECORD,
+        params={"session_id": "../outside", "content": "must not be written"},
+    )
+
+    await server._handle_history_append_record(_FakeWebSocket(), request, asyncio.Lock())
+
+    assert sent == [
+        {
+            "response_id": "rpc-invalid-session",
+            "ok": False,
+            "payload": {
+                "error": "session_id and content required",
+                "code": "BAD_REQUEST",
+            },
+        }
+    ]

@@ -26,7 +26,7 @@ import time
 from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 from urllib.parse import ParseResult, quote, unquote, urlparse
 
 # --- Early --dotenv parsing (before jiuwenswarm imports) ---
@@ -83,13 +83,16 @@ def _get_insecure_ssl_context() -> ssl.SSLContext:
     return get_insecure_ssl_context()
 
 
-def _format_ws_diagnostics(**kwargs: Any) -> str:
+def _format_ws_diagnostics(
+    *parts: Mapping[str, Any] | None,
+    **fields: Any,
+) -> str:
     from jiuwenswarm.common.ws_diagnostics import format_ws_diagnostics
 
-    return format_ws_diagnostics(**kwargs)
+    return format_ws_diagnostics(*parts, **fields)
 
 
-def _describe_ws_exception(exc: BaseException) -> str:
+def _describe_ws_exception(exc: BaseException) -> dict[str, Any]:
     from jiuwenswarm.common.ws_diagnostics import describe_ws_exception
 
     return describe_ws_exception(exc)
