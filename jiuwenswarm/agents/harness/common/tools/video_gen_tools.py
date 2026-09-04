@@ -127,9 +127,18 @@ async def _download_video(
 
 
 async def _poll_job(
-    client: httpx.AsyncClient, headers: dict[str, str], job_id: str, polling_url: str, status: str
+    client: httpx.AsyncClient,
+    headers: dict[str, str],
+    job_id: str,
+    polling_url: str,
+    status: str,
+    job: dict[str, Any] | None = None,
 ) -> tuple[str, dict[str, Any], int]:
-    job: dict[str, Any] = {}
+    # Seeded with the caller's already-known job state (e.g. the submit
+    # response) rather than {}, so that a job already terminal on submit -
+    # no polling iteration ever runs - doesn't lose its "error" field to an
+    # empty dict here.
+    job = dict(job) if job else {}
     elapsed = 0
     while status not in _TERMINAL_STATUSES and elapsed < _MAX_POLL_SECONDS:
         await asyncio.sleep(_POLL_INTERVAL_SECONDS)
@@ -224,7 +233,7 @@ async def generate_video(
             polling_url = job.get("polling_url") or f"{api_base}/videos/{job_id}"
             status = job.get("status", "pending")
 
-            status, job, elapsed = await _poll_job(client, headers, job_id, polling_url, status)
+            status, job, elapsed = await _poll_job(client, headers, job_id, polling_url, status, job)
 
             if status not in _TERMINAL_STATUSES:
                 return (
