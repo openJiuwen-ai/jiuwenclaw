@@ -74,6 +74,12 @@ workspace/agent/memory/*.db
 workspace/agent/memory/*.db-shm
 workspace/agent/memory/*.db-wal
 .cache/ohos-manifests/
+# 本地缓存：deepsearch 源码克隆 / Alpine apk / 临时转换产物（512MB+，勿入库）
+.cache/
+# 本地构建工具软链（cargo/maturin/rustc，随机器而变）
+bin/
+# 本机安装日志
+ohos-install-reports/
 
 jiuwenclaw/agentserver/tools/browser-move/.browser
 jiuwenclaw/agentserver/tools/browser-move/.browser-profiles
@@ -92,3 +98,4 @@ packages/jiuwenclaw-tui/jiuwenclaw_tui/resources/tui-bin/.worktrees/
 scripts/smoke_telemetry.py
 
 uv.lock
+office-claw-skills
