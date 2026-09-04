@@ -410,6 +410,17 @@ async def test_retention_cleanup_never_blocks_dispatch(monkeypatch) -> None:
 async def test_real_http_stream_can_outlive_connect_timeout_within_sync_budget() -> (
     None
 ):
+    """Connect/write 超时可以很短，但流式读应继续，只要仍在 sync_wait 预算内。
+
+    CI 机器负载高时，过紧的绝对时间（如 50ms write）会在请求尚未写完时断开，
+    表现为 IncompleteReadError + status=timed_out。这里用相对关系保证语义：
+    body_delay > connect_timeout，且 sync_wait 明显大于二者之和。
+    """
+    # connect/write 共用该值；需足以在 CI 上完成请求写出，但仍短于正文延迟。
+    connect_timeout_seconds = 0.2
+    body_delay_seconds = 0.45
+    sync_wait_seconds = 2.0
+
     served = asyncio.Event()
     received_requests = []
 
@@ -417,7 +428,11 @@ async def test_real_http_stream_can_outlive_connect_timeout_within_sync_budget()
         reader: asyncio.StreamReader, writer: asyncio.StreamWriter
     ) -> None:
         try:
-            header_bytes = await reader.readuntil(b"\r\n\r\n")
+            try:
+                header_bytes = await reader.readuntil(b"\r\n\r\n")
+            except (asyncio.IncompleteReadError, ConnectionResetError, BrokenPipeError):
+                # 连接池探测或客户端中途断开，忽略即可。
+                return
             header_text = header_bytes.decode("iso-8859-1")
             content_length = 0
             for line in header_text.split("\r\n"):
@@ -445,13 +460,14 @@ async def test_real_http_stream_can_outlive_connect_timeout_within_sync_budget()
                 + b"Connection: close\r\n\r\n"
             )
             await writer.drain()
-            await asyncio.sleep(0.12)
+            # 正文故意晚于 connect_timeout 发出，验证 read 不受 connect 限制。
+            await asyncio.sleep(body_delay_seconds)
             writer.write(body)
             await writer.drain()
+            served.set()
         finally:
             writer.close()
             await writer.wait_closed()
-            served.set()
 
     server = await asyncio.start_server(handle, "127.0.0.1", 0)
     port = server.sockets[0].getsockname()[1]
@@ -460,8 +476,8 @@ async def test_real_http_stream_can_outlive_connect_timeout_within_sync_budget()
         _agent(),
         source_url=f"http://127.0.0.1:{port}",
         selected_interface=A2ACompatibleInterface("JSONRPC", "1.0.0", endpoint),
-        connect_timeout_seconds=0.05,
-        sync_wait_seconds=0.4,
+        connect_timeout_seconds=connect_timeout_seconds,
+        sync_wait_seconds=sync_wait_seconds,
         agent_card={
             "name": "Slow Agent",
             "description": "Responds after the connect timeout",
@@ -492,7 +508,7 @@ async def test_real_http_stream_can_outlive_connect_timeout_within_sync_budget()
             mode="sync",
             source_session_id="s1",
         )
-        await asyncio.wait_for(served.wait(), timeout=1)
+        await asyncio.wait_for(served.wait(), timeout=sync_wait_seconds + 1.0)
     finally:
         server.close()
         await server.wait_closed()
