@@ -1253,7 +1253,8 @@ export function ConversationSidebar({
       <div className="conversation-sidebar__overlay" data-testid="multi-session-sidebar-overlay" onClick={onToggleCollapse} />
     )}
     <aside className={`conversation-sidebar${floating ? ' is-floating' : ''}${collapsed ? ' is-collapsed' : ''}`} aria-label={t('multiSession.conversations')} data-testid="multi-session-sidebar">
-      <div ref={workModeMenuRef} className="conversation-sidebar__mode" data-testid="multi-session-work-mode">
+      <div className="conversation-sidebar__inner">
+        <div ref={workModeMenuRef} className="conversation-sidebar__mode" data-testid="multi-session-work-mode">
         <button
           type="button"
           className="conversation-sidebar__mode-trigger"
@@ -1308,8 +1309,8 @@ export function ConversationSidebar({
         >
           <SidebarCollapseIcon aria-hidden />
         </button>
-      </div>
-      <div className="conversation-sidebar__operations" data-testid="multi-session-operations">
+        </div>
+        <div className="conversation-sidebar__operations" data-testid="multi-session-operations">
         <button type="button" className="conversation-sidebar__new" onClick={() => {
           setSelectedProject(null);
           setPinError(null);
@@ -1328,8 +1329,8 @@ export function ConversationSidebar({
           <CronIcon aria-hidden />
           <span data-testid="multi-session-open-cron-label">{t('nav.cron')}</span>
         </button>
-      </div>
-      <div className="conversation-sidebar__body" data-testid="multi-session-sidebar-body">
+        </div>
+        <div className="conversation-sidebar__body" data-testid="multi-session-sidebar-body">
         {hasPinnedSection ? (
           <div className="conversation-sidebar__group conversation-sidebar__group--pinned" data-testid="multi-session-pinned-group">
             <div className="conversation-sidebar__section-heading" data-testid="multi-session-pinned-group-heading">
@@ -1426,6 +1427,7 @@ export function ConversationSidebar({
             )}
             {defaultProject ? renderSessionPagination(defaultProject.project_id, false) : null}
           </div>
+        </div>
         </div>
       </div>
       {pathDialogOpen ? (
