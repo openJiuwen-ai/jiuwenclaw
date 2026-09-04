@@ -19,8 +19,8 @@ from jiuwenswarm.common.config import (
     upsert_mcp_server_in_config,
 )
 from jiuwenswarm.common.e2a.wire_codec import encode_agent_response_for_wire
-from jiuwenswarm.common.local_env_config import is_enterprise
 from jiuwenswarm.common.schema.agent import AgentResponse
+from jiuwenswarm.edition import is_enterprise
 from jiuwenswarm.server.context import RequestContext
 
 logger = logging.getLogger(__name__)
