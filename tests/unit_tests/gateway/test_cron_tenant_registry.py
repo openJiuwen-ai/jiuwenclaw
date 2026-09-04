@@ -9,6 +9,7 @@ import pytest
 
 from jiuwenswarm.common.utils import resolve_gateway_cron_jobs_path
 from tests.unit_tests.tenant_workspace_test_helpers import (
+    patch_multi_tenant_workspace_dirs,
     tenant_workspace_key,
     tenant_workspace_root,
 )
@@ -97,10 +98,6 @@ async def test_get_controller_concurrent_same_tenant(tmp_path, monkeypatch) -> N
 
 @pytest.mark.asyncio
 async def test_web_create_mirrors_to_agent_home(tmp_path, monkeypatch) -> None:
-    from tests.unit_tests.tenant_workspace_test_helpers import (
-        patch_multi_tenant_workspace_dirs,
-    )
-
     patch_multi_tenant_workspace_dirs(monkeypatch, tmp_path)
     monkeypatch.setattr(
         "jiuwenswarm.gateway.cron.tenant_registry.CronSchedulerService.start",

@@ -11,7 +11,6 @@ import { SkillPanel } from './components/SkillPanel';
 import { AgentPanel } from './components/AgentPanel/index';
 import { TeamPanel } from './components/TeamPanel';
 import { SessionsPanel } from './components/SessionsPanel';
-import { HistoryPanel } from './components/HistoryPanel';
 import CronPanel from './components/CronPanel';
 import { ToolPanel } from './components/ToolPanel';
 import { ConfigPanel } from './components/ConfigPanel';
@@ -261,6 +260,9 @@ async function saveShareImage(dataUrl: string, filename: string): Promise<boolea
   downloadDataUrl(dataUrl, filename);
   return true;
 }
+
+/** 切换会话时等待历史预载的上限：超过则放弃预载直接翻转视图，由 bootstrap effect 兜底 */
+const HISTORY_PRELOAD_MAX_WAIT_MS = 1500;
 
 function AppContent() {
   const { t, i18n } = useTranslation();
@@ -1314,6 +1316,204 @@ function AppContent() {
       .catch(() => {});
   }, [isConnected]);
 
+  /**
+   * 发起一次全量历史恢复：订阅 history.message 流 + 发送 history.get，最后一帧 done 后
+   * 一次性 replaceHistoryMessages 落库。bootstrap effect 与"切换会话预载"共用这套回放
+   * 回调，保证两种入口行为一致——预载在视图翻转前把目标会话消息填进 runtime，翻转后
+   * ChatPanel 直接渲染完整时间线，消除"空态 loading → 时间线整块弹出"的切换跳闪；
+   * 预载超时/失败则交给 sessionId 变化后的 bootstrap effect 走常规恢复路径兜底。
+   * 返回 done：resolve(true)=恢复完成（含空会话），resolve(false)=恢复失败。
+   */
+  const startHistoryRestore = useCallback((sid: string): { done: Promise<boolean> } => {
+    let settleDone!: (ok: boolean) => void;
+    const done = new Promise<boolean>((resolve) => { settleDone = resolve; });
+    const restoreHandle = beginHistoryRestore({
+      sessionId: sid,
+      onReady: (messages, totalPages) => {
+        historyRestoreFromPanelHintRef.current = false;
+        // "目标完成"回显消息纯前端合成，从未写进后端 session 历史，history.get 拉回来的
+        // messages 里不会有它——按时间戳把本地持久化的记录补回去，见
+        // hooks/useWebSocket.ts 的 applyIncomingGoal/mergePersistedGoalCompletionMessages。
+        // 同时给命中"曾经设置过目标"的 user 消息回填 isGoalObjectiveMessage 徽章标记，
+        // 见 stampGoalObjectiveMessages。
+        replaceHistoryMessages(
+          sid,
+          stampGoalObjectiveMessages(sid, mergePersistedGoalCompletionMessages(sid, messages))
+        );
+        const restoredTotalPages = totalPages ?? 1;
+        setHistoryPagerMeta(sid, {
+          loadedPages: 1,
+          totalPages: restoredTotalPages,
+        });
+        setLoadingHistory(sid, false);
+        startBackgroundHistoryPrefetch(sid, 1, restoredTotalPages);
+        queueMicrotask(() => {
+          if (historyRestoreHandlesRef.current.get(sid) === restoreHandle) {
+            historyRestoreHandlesRef.current.delete(sid);
+          }
+        });
+        settleDone(true);
+      },
+      onEmpty: (emptyTotalPages) => {
+        replaceHistoryMessages(sid, mergePersistedGoalCompletionMessages(sid, []));
+        const restoredTotalPages = emptyTotalPages ?? 1;
+        setHistoryPagerMeta(sid, {
+          loadedPages: 1,
+          totalPages: restoredTotalPages,
+        });
+        if (historyRestoreFromPanelHintRef.current) {
+          historyRestoreFromPanelHintRef.current = false;
+          addMessage(sid, {
+            id: `history-restore-empty-${Date.now()}`,
+            role: 'system',
+            content: tRef.current('sessions.restoreEmpty'),
+            timestamp: new Date().toISOString(),
+          });
+        }
+        setLoadingHistory(sid, false);
+        startBackgroundHistoryPrefetch(sid, 1, restoredTotalPages);
+        if (historyRestoreHandlesRef.current.get(sid) === restoreHandle) {
+          historyRestoreHandlesRef.current.delete(sid);
+        }
+        settleDone(true);
+      },
+      onToolReplay: (items) => {
+        clearSubtasks(sid);
+        for (const item of items) {
+          if (item.kind === 'tool_call') {
+            const n = normalizeToolCallPayload(item.payload);
+            addToolCall(
+              sid,
+              {
+                id: n.id,
+                name: n.name,
+                arguments: n.arguments,
+                description: n.description,
+                formatted_args: n.formatted_args,
+                display_name: n.display_name,
+                memberName: n.memberName,
+              },
+              { startedAt: item.at }
+            );
+          } else {
+            const n = normalizeToolResultPayload(item.payload);
+            addToolResult(
+              sid,
+              {
+                toolName: n.toolName,
+                result: n.result,
+                success: n.success,
+                toolCallId: n.toolCallId,
+                summary: n.summary,
+                skillTree: n.skillTree,
+                ...(n.timedOut ? { timedOut: true } : {}),
+                ...(n.beamSearch ? { beamSearch: n.beamSearch } : {}),
+              },
+              { updatedAt: item.at }
+            );
+          }
+        }
+        settleHistoricalToolExecutions(sid);
+      },
+      onHarnessReplay: (items: HistoryHarnessReplayItem[]) => {
+        const harnessStore = useHarnessStore.getState();
+        const harnessRuntime = harnessStore.getRuntime(sid);
+        for (const item of items) {
+          if (item.kind === 'harness_message') {
+            const content = typeof item.payload.content === 'string' ? item.payload.content : '';
+            const stage = typeof item.payload.stage === 'string' ? item.payload.stage : undefined;
+            if (content) {
+              harnessStore.addHarnessMessage(sid, content, stage);
+              // Update stage result with running status and label from message
+              if (stage) {
+                const existingStage = harnessRuntime?.stageResults.find((s) => s.stage === stage);
+                if (existingStage?.status !== 'running') {
+                  harnessStore.updateStageResult(sid, {
+                    stage,
+                    stageLabel: content,
+                    status: 'running',
+                    messages: [],
+                    metrics: {},
+                  });
+                }
+              }
+            }
+          } else if (item.kind === 'harness_stage_result') {
+            const stage = typeof item.payload.stage === 'string' ? item.payload.stage : '';
+            const status = typeof item.payload.status === 'string' ? item.payload.status : 'success';
+            const error = typeof item.payload.error === 'string' ? item.payload.error : undefined;
+            const messages = Array.isArray(item.payload.messages) ? item.payload.messages : [];
+            const metrics = item.payload.metrics || {};
+            if (stage) {
+              harnessStore.updateStageResult(sid, {
+                stage,
+                status: status as 'success' | 'failed' | 'timeout',
+                error,
+                messages,
+                metrics,
+              });
+            }
+          }
+        }
+      },
+      onReasoningReplay: (items) => {
+        restoreReasoningSegments(sid, items);
+      },
+      onError: (message) => {
+        console.warn('[history.restore]', message);
+        setLoadingHistory(sid, false);
+        settleDone(false);
+      },
+    });
+    historyRestoreHandlesRef.current.set(sid, restoreHandle);
+
+    // 调用历史会话接口
+    void (async () => {
+      try {
+        await request(HISTORY_GET_METHOD, {
+          session_id: sid,
+          page_idx: 1,
+        });
+      } catch (error) {
+        historyRestoreFromPanelHintRef.current = false;
+        restoreHandle.dispose();
+        if (historyRestoreHandlesRef.current.get(sid) === restoreHandle) {
+          historyRestoreHandlesRef.current.delete(sid);
+        }
+        // 发生错误时，设置 historyPagerMeta 为 null，显示欢迎信息
+        setHistoryPagerMeta(sid, null);
+        console.error('Failed to load history:', error);
+        setLoadingHistory(sid, false);
+        // 忽略 "invalid page_idx or session history not found" 错误，因为这是新会话的正常情况
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        if (sessionIdRef.current === sid && !errorMessage.includes('invalid page_idx or session history not found')) {
+          clearMessages(sid);
+          addMessage(sid, {
+            id: `history-load-failed-${Date.now()}`,
+            role: 'system',
+            content: tRef.current('sessions.errors.restoreFailed', { sessionId: sid }),
+            timestamp: new Date().toISOString(),
+          });
+        }
+        settleDone(false);
+      }
+    })();
+    return { done };
+  }, [
+    request,
+    addMessage,
+    addToolCall,
+    addToolResult,
+    settleHistoricalToolExecutions,
+    clearMessages,
+    clearSubtasks,
+    setLoadingHistory,
+    setHistoryPagerMeta,
+    replaceHistoryMessages,
+    restoreReasoningSegments,
+    startBackgroundHistoryPrefetch,
+  ]);
+
   // 当会话 ID 变化或页面加载时，自动加载历史会话
   useEffect(() => {
     if (!isConnected || !sessionId || sessionId === NEW_CONVERSATION_ID) return;
@@ -1353,191 +1553,15 @@ function AppContent() {
     setHistoryLoadingMore(false);
     
     setLoadingHistory(sessionId, true);
-    // 开始历史会话加载
-    const restoreHandle = beginHistoryRestore({
-      sessionId: sessionId,
-      onReady: (messages, totalPages) => {
-        historyRestoreFromPanelHintRef.current = false;
-        // "目标完成"回显消息纯前端合成，从未写进后端 session 历史，history.get 拉回来的
-        // messages 里不会有它——按时间戳把本地持久化的记录补回去，见
-        // hooks/useWebSocket.ts 的 applyIncomingGoal/mergePersistedGoalCompletionMessages。
-        // 同时给命中"曾经设置过目标"的 user 消息回填 isGoalObjectiveMessage 徽章标记，
-        // 见 stampGoalObjectiveMessages。
-        replaceHistoryMessages(
-          sessionId,
-          stampGoalObjectiveMessages(sessionId, mergePersistedGoalCompletionMessages(sessionId, messages))
-        );
-        const restoredTotalPages = totalPages ?? 1;
-        setHistoryPagerMeta(sessionId, {
-          loadedPages: 1,
-          totalPages: restoredTotalPages,
-        });
-        setLoadingHistory(sessionId, false);
-        startBackgroundHistoryPrefetch(sessionId, 1, restoredTotalPages);
-        queueMicrotask(() => {
-          if (historyRestoreHandlesRef.current.get(sessionId) === restoreHandle) {
-            historyRestoreHandlesRef.current.delete(sessionId);
-          }
-        });
-      },
-      onEmpty: (emptyTotalPages) => {
-        replaceHistoryMessages(sessionId, mergePersistedGoalCompletionMessages(sessionId, []));
-        const restoredTotalPages = emptyTotalPages ?? 1;
-        setHistoryPagerMeta(sessionId, {
-          loadedPages: 1,
-          totalPages: restoredTotalPages,
-        });
-        if (historyRestoreFromPanelHintRef.current) {
-          historyRestoreFromPanelHintRef.current = false;
-          addMessage(sessionId, {
-            id: `history-restore-empty-${Date.now()}`,
-            role: 'system',
-            content: tRef.current('sessions.restoreEmpty'),
-            timestamp: new Date().toISOString(),
-          });
-        }
-        setLoadingHistory(sessionId, false);
-        startBackgroundHistoryPrefetch(sessionId, 1, restoredTotalPages);
-        if (historyRestoreHandlesRef.current.get(sessionId) === restoreHandle) {
-          historyRestoreHandlesRef.current.delete(sessionId);
-        }
-      },
-      onToolReplay: (items) => {
-        clearSubtasks(sessionId);
-        for (const item of items) {
-          if (item.kind === 'tool_call') {
-            const n = normalizeToolCallPayload(item.payload);
-            addToolCall(
-              sessionId,
-              {
-                id: n.id,
-                name: n.name,
-                arguments: n.arguments,
-                description: n.description,
-                formatted_args: n.formatted_args,
-                display_name: n.display_name,
-                memberName: n.memberName,
-              },
-              { startedAt: item.at }
-            );
-          } else {
-            const n = normalizeToolResultPayload(item.payload);
-            addToolResult(
-              sessionId,
-              {
-                toolName: n.toolName,
-                result: n.result,
-                success: n.success,
-                toolCallId: n.toolCallId,
-                summary: n.summary,
-                skillTree: n.skillTree,
-                ...(n.timedOut ? { timedOut: true } : {}),
-                ...(n.beamSearch ? { beamSearch: n.beamSearch } : {}),
-              },
-              { updatedAt: item.at }
-            );
-          }
-        }
-        settleHistoricalToolExecutions(sessionId);
-      },
-      onHarnessReplay: (items: HistoryHarnessReplayItem[]) => {
-        const harnessStore = useHarnessStore.getState();
-        const harnessRuntime = harnessStore.getRuntime(sessionId);
-        for (const item of items) {
-          if (item.kind === 'harness_message') {
-            const content = typeof item.payload.content === 'string' ? item.payload.content : '';
-            const stage = typeof item.payload.stage === 'string' ? item.payload.stage : undefined;
-            if (content) {
-              harnessStore.addHarnessMessage(sessionId, content, stage);
-              // Update stage result with running status and label from message
-              if (stage) {
-                const existingStage = harnessRuntime?.stageResults.find((s) => s.stage === stage);
-                if (existingStage?.status !== 'running') {
-                  harnessStore.updateStageResult(sessionId, {
-                    stage,
-                    stageLabel: content,
-                    status: 'running',
-                    messages: [],
-                    metrics: {},
-                  });
-                }
-              }
-            }
-          } else if (item.kind === 'harness_stage_result') {
-            const stage = typeof item.payload.stage === 'string' ? item.payload.stage : '';
-            const status = typeof item.payload.status === 'string' ? item.payload.status : 'success';
-            const error = typeof item.payload.error === 'string' ? item.payload.error : undefined;
-            const messages = Array.isArray(item.payload.messages) ? item.payload.messages : [];
-            const metrics = item.payload.metrics || {};
-            if (stage) {
-              harnessStore.updateStageResult(sessionId, {
-                stage,
-                status: status as 'success' | 'failed' | 'timeout',
-                error,
-                messages,
-                metrics,
-              });
-            }
-          }
-        }
-      },
-      onReasoningReplay: (items) => {
-        restoreReasoningSegments(sessionId, items);
-      },
-      onError: (message) => {
-        console.warn('[history.restore]', message);
-        setLoadingHistory(sessionId, false);
-      },
-    });
-    historyRestoreHandlesRef.current.set(sessionId, restoreHandle);
-
-    // 调用历史会话接口
-    void (async () => {
-      try {
-        await request(HISTORY_GET_METHOD, {
-          session_id: sessionId,
-          page_idx: 1,
-        });
-      } catch (error) {
-        historyRestoreFromPanelHintRef.current = false;
-        restoreHandle.dispose();
-        if (historyRestoreHandlesRef.current.get(sessionId) === restoreHandle) {
-          historyRestoreHandlesRef.current.delete(sessionId);
-        }
-        // 发生错误时，设置 historyPagerMeta 为 null，显示欢迎信息
-        setHistoryPagerMeta(sessionId, null);
-        console.error('Failed to load history:', error);
-        setLoadingHistory(sessionId, false);
-        // 忽略 "invalid page_idx or session history not found" 错误，因为这是新会话的正常情况
-        const errorMessage = error instanceof Error ? error.message : String(error);
-        if (sessionIdRef.current === sessionId && !errorMessage.includes('invalid page_idx or session history not found')) {
-          clearMessages(sessionId);
-          addMessage(sessionId, {
-            id: `history-load-failed-${Date.now()}`,
-            role: 'system',
-            content: tRef.current('sessions.errors.restoreFailed', { sessionId }),
-            timestamp: new Date().toISOString(),
-          });
-        }
-      }
-    })();
+    startHistoryRestore(sessionId);
   }, [
     isConnected,
     sessionId,
     historyBootstrapKey,
-    request,
-    addMessage,
-    addToolCall,
-    addToolResult,
-    settleHistoricalToolExecutions,
-    clearMessages,
-    clearSubtasks,
     disposeInFlightHistoryHandles,
     setLoadingHistory,
     setHistoryPagerMeta,
-    replaceHistoryMessages,
-    restoreReasoningSegments,
-    startBackgroundHistoryPrefetch,
+    startHistoryRestore,
   ]);
 
   // 会话切换/页面加载时主动拉一次当前 Goal 状态（协议文档 v2 §11 推荐流程）——不然刷新页面
@@ -1896,26 +1920,6 @@ function AppContent() {
         useSessionStore.getState().getRuntime(previousSessionId)?.mode ?? mode;
       const resolvedMode = targetMode ?? targetSession?.mode ?? previousMode;
       disposeInFlightHistoryHandles(targetSessionId);
-      if (previousSessionId && previousSessionId !== targetSessionId) {
-        try {
-          await request('session.switch', {
-            session_id: targetSessionId,
-            previous_session_id: previousSessionId,
-            previous_mode: previousMode,
-            mode: resolvedMode,
-          });
-        } catch (error) {
-          if (isTeamMode(resolvedMode)) {
-            console.error('Failed to switch team session:', error);
-            window.alert(t('sessions.errors.switchSession'));
-            return;
-          }
-          console.warn('Session switch lifecycle hook failed; continuing restore:', error);
-        }
-      }
-
-      setHistoryPagerMeta(targetSessionId, null);
-      setHistoryLoadingMore(false);
       const existingRuntime = useChatStore.getState().getRuntime(targetSessionId);
       if (!existingRuntime) {
         useChatStore.getState().ensureRuntime(targetSessionId);
@@ -1932,7 +1936,61 @@ function AppContent() {
       // 确保 session runtime 存在；否则 useSessionStore.setMode 会因找不到 runtime 而直接跳过，
       // 导致从会话页签恢复后前端 mode 不会切换到目标会话对应的 mode。
       ensureSessionRuntimes(targetSessionId);
+      // historyLoadingMore 是全局单例（非按会话），切换后一律复位，避免上一会话遗留的
+      // "加载更多"转圈挂到新会话上。但 historyPagerMeta 是按会话的"历史已完整加载"标记：
+      // 目标会话已加载过就别清——清了会让翻转后的 bootstrap effect 把它当成从未加载过而
+      // 整页重拉历史，replaceHistoryMessages 换掉整条时间线（render key 重排+滚动效果
+      // 重跑），这就是"切回已访问会话时的跳闪"。只有即将走预载/重载路径的会话才清旧状态。
+      setHistoryLoadingMore(false);
+      const willLoadHistory =
+        !options?.skipHistoryLoad &&
+        !existingRuntime?.historyPagerMeta &&
+        !existingRuntime?.isNewSession &&
+        !promotedFromNewSessionIdsRef.current.has(targetSessionId);
+      if (willLoadHistory) {
+        setHistoryPagerMeta(targetSessionId, null);
+        setLoadingHistory(targetSessionId, true);
+      }
+
+      // 切换原子化：并行发起 session.switch 生命周期与目标会话历史预载，两者都就绪后再翻转
+      // 视图。旧实现先翻转 sessionId，ChatPanel 会先渲染一帧"空时间线+加载中"，history
+      // 到达后整块时间线弹出并滚底——即切换会话后的跳闪。预载 1.5s 封顶：超时/失败不再
+      // 等待，翻转后由 bootstrap effect 走常规恢复路径兜底（等价旧行为）。
+      let switchError: unknown = null;
+      const switchPromise =
+        previousSessionId && previousSessionId !== targetSessionId
+          ? request('session.switch', {
+              session_id: targetSessionId,
+              previous_session_id: previousSessionId,
+              previous_mode: previousMode,
+              mode: resolvedMode,
+            }).catch((error: unknown) => {
+              switchError = error;
+              return null;
+            })
+          : Promise.resolve(true as const);
+      const preloadPromise = willLoadHistory ? startHistoryRestore(targetSessionId).done : null;
+
+      const switchOk = await switchPromise;
+      if (switchOk === null) {
+        if (isTeamMode(resolvedMode)) {
+          console.error('Failed to switch team session:', switchError);
+          window.alert(t('sessions.errors.switchSession'));
+          return;
+        }
+        console.warn('Session switch lifecycle hook failed; continuing restore:', switchError);
+      }
+      if (preloadPromise) {
+        await Promise.race([
+          preloadPromise,
+          new Promise<void>((resolve) => { window.setTimeout(resolve, HISTORY_PRELOAD_MAX_WAIT_MS); }),
+        ]);
+      }
+
       sessionIdRef.current = targetSessionId;
+      // 同步切 activeSessionId（缺省由 effect 在渲染后才补同步）：否则切换后首帧
+      // ChatPanel 仍按上一个会话读取消息，旧会话内容会在新会话标题下闪回一帧。
+      useChatStore.getState().setActiveSessionId(targetSessionId);
       setSessionId(targetSessionId);
       if (targetSession) {
         upsertSessionMetadata(targetSession, { setCurrent: true });
@@ -1973,11 +2031,13 @@ function AppContent() {
       setCurrentSession,
       setHistoryLoadingMore,
       setHistoryPagerMeta,
+      setLoadingHistory,
       setMode,
       setPaused,
       setProcessing,
       setSessionId,
       setThinking,
+      startHistoryRestore,
       t,
       upsertSessionMetadata,
     ]
@@ -2210,7 +2270,7 @@ function AppContent() {
         isConnected={isConnected}
         onNewSession={handleNewSession}
         showNewSession={false}
-        hiddenNavItems={enterpriseMode ? ['sessions', ...ENTERPRISE_HIDDEN_NAV_ITEMS] : ['sessions', 'history']}
+        hiddenNavItems={enterpriseMode ? ['sessions', 'history', ...ENTERPRISE_HIDDEN_NAV_ITEMS] : ['sessions', 'history']}
         onMorePanelOpenChange={setSidebarMorePanelOpen}
       />
 
@@ -2352,16 +2412,6 @@ function AppContent() {
                 serverConfig.gateway_web_session_storage.trim().toLowerCase() === 'remote'
               }
             />
-          </div>
-        )}
-        {enterpriseMode && (
-          <div
-            className={`app-section ${activeNav === 'history' ? '' : 'hidden'}`}
-            aria-hidden={activeNav !== 'history'}
-          >
-            {/* 企业版历史页保持挂载，切换导航时不丢失已加载的会话列表和详情。
-                个人版不挂载该旁路历史组件，维持原有个人版行为。 */}
-            <HistoryPanel />
           </div>
         )}
         {activeNav === 'cron' && (

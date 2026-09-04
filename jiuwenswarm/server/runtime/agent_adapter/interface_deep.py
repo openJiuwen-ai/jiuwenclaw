@@ -7500,7 +7500,9 @@ class JiuWenSwarmDeepAdapter:
                 "service_id": scope.service_id,
                 "agent_id": scope.agent_id,
                 "workspace_key": scope.workspace_key,
-                "output_dir": self._deepresearch_artifact_output_dir(),
+                "output_dir": self._deepresearch_artifact_output_dir(
+                    route.get("output_dir")
+                ),
             }
         context = self._runtime_cron_tool_context
         metadata = context.metadata if isinstance(context.metadata, dict) else {}
@@ -7512,11 +7514,25 @@ class JiuWenSwarmDeepAdapter:
             "service_id": scope.service_id,
             "agent_id": scope.agent_id,
             "workspace_key": scope.workspace_key,
-            "output_dir": self._deepresearch_artifact_output_dir(),
+            "output_dir": self._deepresearch_artifact_output_dir(
+                metadata.get("project_dir")
+            ),
         }
 
-    def _deepresearch_artifact_output_dir(self) -> str:
-        """Return the tenant-owned root used for immutable report artifacts."""
+    def _deepresearch_artifact_output_dir(
+        self, request_workspace: str | None = None
+    ) -> str:
+        """Return the current session workspace, or the legacy artifact root."""
+        normalized_request_workspace = (
+            request_workspace.strip()
+            if isinstance(request_workspace, str)
+            else ""
+        )
+        session_workspace = normalized_request_workspace or str(
+            getattr(self, "_project_dir", None) or ""
+        ).strip()
+        if session_workspace:
+            return str(Path(session_workspace).expanduser().resolve())
         workspace = Path(
             getattr(self, "_workspace_dir", None) or get_agent_workspace_dir()
         ).expanduser().resolve()
@@ -9332,7 +9348,9 @@ class JiuWenSwarmDeepAdapter:
                 service_id=scope.service_id,
                 agent_id=scope.agent_id,
                 workspace_key=scope.workspace_key,
-                output_dir=self._deepresearch_artifact_output_dir(),
+                output_dir=self._deepresearch_artifact_output_dir(
+                    normalized_metadata.get("project_dir")
+                ),
             )
         except BaseException:
             self._reset_runtime_cron_context(
@@ -15093,6 +15111,16 @@ class JiuWenSwarmDeepAdapter:
             getattr(self, "_model", None) and getattr(self._model, "model_config", None)
             and getattr(self._model.model_config, "model_name", "") or ""
         )
+        self._current_request_route = {
+            "session_id": session_id,
+            "request_id": request.request_id or "",
+            "channel_id": request.channel_id or "",
+            "output_dir": self._deepresearch_artifact_output_dir(
+                request.params.get("project_dir")
+                if isinstance(request.params, dict)
+                else None
+            ),
+        }
 
         slash_result = await self._handle_slash_command(
             query,
@@ -15736,6 +15764,11 @@ class JiuWenSwarmDeepAdapter:
             "session_id": session_id,
             "request_id": rid or "",
             "channel_id": cid or "",
+            "output_dir": self._deepresearch_artifact_output_dir(
+                request.params.get("project_dir")
+                if isinstance(request.params, dict)
+                else None
+            ),
         }
 
         # Team 模式处理
