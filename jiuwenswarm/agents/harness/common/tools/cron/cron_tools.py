@@ -25,8 +25,8 @@ from jiuwenswarm.server.gateway_push import (
     GatewayPushTransport,
     WebSocketGatewayPushTransport,
 )
+from jiuwenswarm.common import utils as _jiuwenswarm_utils
 from jiuwenswarm.common.utils import (
-    get_multi_tenant_user_workspace_dir,
     normalize_tenant_scope_id,
 )
 
@@ -41,7 +41,8 @@ def resolve_cron_jobs_path(
     """Per-tenant cron_jobs.json under ``workspace_{key}/agent/home/``."""
     del service_id, agent_id  # routing ids; disk isolation is workspace_key
     wk = normalize_tenant_scope_id(workspace_key)
-    base = get_multi_tenant_user_workspace_dir(wk)
+    # Look up via module attribute so unit-test monkeypatch on utils applies.
+    base = _jiuwenswarm_utils.get_multi_tenant_user_workspace_dir(wk)
     return base / "agent" / "home" / "cron_jobs.json"
 
 # 按 asyncio Task 隔离：多 session 并发时不能用单例字段存路由，否则后到的请求会覆盖先到的 session_id。

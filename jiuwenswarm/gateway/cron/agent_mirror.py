@@ -8,7 +8,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from jiuwenswarm.common.utils import resolve_tenant_agent_root_dir
+from jiuwenswarm.common import utils as _jiuwenswarm_utils
 from jiuwenswarm.gateway.cron.store import CronJobStore
 from jiuwenswarm.gateway.tenant_paths import workspace_key_from_channel_ids
 
@@ -17,7 +17,8 @@ logger = logging.getLogger(__name__)
 
 def _agent_cron_jobs_path(workspace_key: str = "default") -> Path:
     wk = str(workspace_key or "default").strip() or "default"
-    return resolve_tenant_agent_root_dir(wk) / "home" / "cron_jobs.json"
+    # Module attribute lookup so tests can monkeypatch utils helpers.
+    return _jiuwenswarm_utils.resolve_tenant_agent_root_dir(wk) / "home" / "cron_jobs.json"
 
 
 def _agent_store(workspace_key: str = "default") -> CronJobStore:
