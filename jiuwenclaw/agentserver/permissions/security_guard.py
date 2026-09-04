@@ -18,6 +18,7 @@ import json
 import os
 import pathlib
 import http.client
+import ntpath
 from urllib.parse import urlparse
 
 # ── RMS detection (pure local, no network) ──
@@ -145,7 +146,10 @@ async def check_kia_file(path: str) -> bool:
     try:
         # 先规范化路径（解析 .. / 符号链接 / 相对路径），确保守卫查的目录与
         # 实际读取的文件一致，否则 .. / symlink / 相对路径可绕过 KIA 守卫。
-        resolved = _resolve_path(path)
+        # ICPM speaks Windows paths — use ntpath so the guard is correct
+        # regardless of host OS (CI runs on Linux where os.path is posixpath
+        # and would mangle backslash / drive-letter paths).
+        resolved = _resolve_kia_path(path)
         # ICPM service only accepts Windows backslash format paths
         normalized_path = resolved.replace("/", "\\")
         dir_path = _get_parent_directory(normalized_path)
@@ -159,12 +163,39 @@ async def check_kia_file(path: str) -> bool:
 
 
 def _get_parent_directory(file_path: str) -> str:
-    """Get parent directory with trailing separator (matches ICPM directory matching)."""
-    parent = os.path.dirname(file_path)
+    """Get parent directory with trailing separator (matches ICPM directory matching).
+
+    Uses ``ntpath`` (Windows semantics) because ICPM directory matching operates
+    on Windows paths — backslash is the separator, drive letters are significant.
+    On a Linux host ``os.path.dirname`` would treat backslash as a regular char
+    and return ``""`` for a Windows path, breaking the parent-directory query.
+    """
+    parent = ntpath.dirname(file_path)
     if parent and not parent.endswith(("\\", "/")):
         sep = "\\" if "\\" in file_path else "/"
         return parent + sep
     return parent
+
+
+def _resolve_kia_path(path: str) -> str:
+    """Resolve ``..`` / symlinks / relative path for ICPM using Windows semantics.
+
+    ICPM speaks Windows paths. Using ``ntpath`` keeps the guard correct
+    regardless of host OS: production runs on Windows, but CI runs on Linux
+    where ``os.path`` is posixpath and would mangle Windows-style paths
+    (treat backslash as a regular char, prepend cwd to drive-letter paths).
+
+    ``ntpath.realpath`` resolves ``..`` and (on Windows) symlinks, preserving
+    the path-canonicalisation anti-bypass behaviour. On non-Windows hosts it
+    falls back to syntactic normalisation, which is sufficient because the KIA
+    guard is only enabled on W3 Windows machines (non-W3 degrades before
+    reaching here).
+    """
+    try:
+        return ntpath.realpath(ntpath.abspath(path))
+    except (OSError, ValueError):
+        # 路径含非法字符等异常 — 退回原值，由后续 ICPM/读取各自处理
+        return path
 
 
 def _normalize_for_kia_compare(path: str) -> str:

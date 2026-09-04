@@ -283,6 +283,17 @@ def test_get_parent_directory_no_parent() -> None:
     assert sg._get_parent_directory("file.md") == ""
 
 
+def test_resolve_kia_path_dotdot_windows_cross_platform() -> None:
+    # ntpath resolves `..` regardless of host OS (regression: os.path on Linux
+    # mangles Windows paths). Drive-letter + backslash stays Windows-style.
+    assert sg._resolve_kia_path("C:\\projects\\..\\secret\\kia.md").lower() == "c:\\secret\\kia.md"
+
+
+def test_resolve_kia_path_forward_slash_normalised() -> None:
+    # Forward slashes are accepted by ntpath and normalised to backslash.
+    assert sg._resolve_kia_path("C:/projects/sub/file.md").lower() == "c:\\projects\\sub\\file.md"
+
+
 def test_normalize_for_kia_compare() -> None:
     assert sg._normalize_for_kia_compare("C:/Secret/KIA.MD") == "c:\\secret\\kia.md"
 
