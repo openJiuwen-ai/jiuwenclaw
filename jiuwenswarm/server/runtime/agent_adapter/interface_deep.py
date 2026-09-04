@@ -10103,6 +10103,11 @@ class JiuWenSwarmDeepAdapter:
                 # 随机 UUID sid 下、恢复时无法命中（fallback DeepAgent 全量重跑）。
                 if self._stream_event_rail is not None:
                     self._stream_event_rail.set_skill_turbo_request_metadata(meta)
+                # 同步副本到 TaskExecutionRail：其 priority(85) 高于
+                # StreamEventRail(80)，before_tool_call 先于 ContextVar 重绑
+                # 执行，产物基线懒建需直接从副本解析请求级工作区
+                if self._task_execution_rail is not None:
+                    self._task_execution_rail.set_skill_turbo_request_metadata(meta)
             except Exception:
                 logger.warning(
                     "[AgentServer] bind request metadata for skill_turbo failed: "
