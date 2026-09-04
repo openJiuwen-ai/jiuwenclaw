@@ -3344,6 +3344,8 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                         "created_at": row.get("created_at", 0),
                         "last_message_at": row.get("updated_at", 0),
                         "message_count": row.get("message_count", 0),
+                        "pinned": bool(row.get("pinned")),
+                        "pin_order": int(row.get("pin_order") or 0),
                         "mode": "web",
                     })
 
@@ -3444,8 +3446,8 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                         "message_count": int(detail.get("message_count") or 0),
                         "mode": "unknown",
                         "team_name": "",
-                        "pinned": False,
-                        "pin_order": 0,
+                        "pinned": bool(detail.get("pinned")),
+                        "pin_order": int(detail.get("pin_order") or 0),
                         "project_dir": "",
                         "project_id": "",
                         "cron_id": "",
@@ -3560,10 +3562,13 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 ws, req_id, ok=False, error=err or "session.rename failed", code=code,
             )
 
-    async def _session_pin(ws, req_id, params, session_id):
+    async def _session_pin(ws, req_id, params, session_id, user_id=None):
         """置顶/取消置顶会话,操作后对所有置顶会话紧凑重编号为 1..N。幂等。
 
         置顶时会话从项目分组剥离,进入全局置顶区;取消置顶时回归原项目。
+        remote(PG) 模式下 Gateway 本地没有会话目录（元数据在按会话拉起的
+        AgentServer pod 上）,置顶状态持久化到 Web 历史库 sessions 行,与
+        session.list / project.pinned_sessions 的 remote 读取同源。
         """
         if not isinstance(params, dict):
             await channel.send_response(
@@ -3581,6 +3586,32 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         if not isinstance(raw_pinned, bool):
             await channel.send_response(
                 ws, req_id, ok=False, error="pinned must be boolean", code="BAD_REQUEST",
+            )
+            return
+
+        from jiuwenswarm.gateway.routing.session_index import is_remote_storage
+
+        if is_remote_storage():
+            from jiuwenswarm.channels.web.history_store.api import set_session_pinned_sync
+
+            _uid = (str(user_id).strip() if isinstance(user_id, str) and user_id.strip() else "") or "guest"
+            try:
+                result = await asyncio.to_thread(set_session_pinned_sync, sid, raw_pinned, user=_uid)
+            except Exception:  # noqa: BLE001
+                logger.exception("[session.pin] remote(PG) 置顶失败: session_id=%s", sid)
+                await channel.send_response(
+                    ws, req_id, ok=False,
+                    error="session pin failed: history store unavailable", code="INTERNAL_ERROR",
+                )
+                return
+            if result is None:
+                await channel.send_response(
+                    ws, req_id, ok=False, error="session not found", code="NOT_FOUND",
+                )
+                return
+            new_pinned, new_order = result
+            await channel.send_response(
+                ws, req_id, ok=True, payload={"pinned": new_pinned, "pin_order": new_order},
             )
             return
 
@@ -4583,12 +4614,36 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         })
         await channel.send_response(ws, req_id, ok=True, payload={"project": info, **info})
 
-    async def _project_pinned_sessions(ws, req_id, params, session_id):
+    async def _project_pinned_sessions(ws, req_id, params, session_id, user_id=None):
         """获取全部置顶会话,按 ``pin_order`` 升序排列。
 
         置顶会话已从项目分组中剥离,通过本接口独立获取。``project_dir`` 仍指向
         原归属项目。不接受任何参数。
+        remote(PG) 模式从 Web 历史库 sessions 行读取（与 session.pin 写入同源）。
         """
+        from jiuwenswarm.gateway.routing.session_index import is_remote_storage
+
+        if is_remote_storage():
+            from jiuwenswarm.channels.web.history_store.api import list_pinned_sessions_sync
+
+            _uid = (str(user_id).strip() if isinstance(user_id, str) and user_id.strip() else "") or "guest"
+            try:
+                rows = await asyncio.to_thread(list_pinned_sessions_sync, user=_uid)
+            except Exception:  # noqa: BLE001
+                logger.exception("[project.pinned_sessions] remote(PG) 读取失败")
+                rows = []
+            pinned = sorted(rows, key=lambda s: int(s.get("pin_order") or 0))
+            # 历史库行的时间字段是 updated_at，而 _to_session_info 读 last_message_at——
+            # 不补映射前端会把置顶会话时间渲染成 epoch 0（与 session.list 的
+            # _db_row_to_session_info 是同一处映射，两条 remote 读路径须保持一致）。
+            await channel.send_response(ws, req_id, ok=True, payload={
+                "sessions": [
+                    _to_session_info({**s, "last_message_at": s.get("updated_at", 0), "mode": "web"})
+                    for s in pinned
+                ],
+            })
+            return
+
         from jiuwenswarm.server.runtime.session.session_metadata import collect_all_sessions_metadata
 
         sessions = collect_all_sessions_metadata()

@@ -29,6 +29,12 @@ LOG_MASKING_RULE_TABLE_DEF = TableDefinition(
             default="******",
         ),
         ColumnDefinition("priority", "integer", nullable=False),
+        ColumnDefinition(
+            "with_fingerprint",
+            "boolean",
+            nullable=False,
+            default=False,
+        ),
         ColumnDefinition("source", "string", length=16, nullable=False),
         ColumnDefinition("enabled", "boolean", nullable=False, default=True),
         ColumnDefinition("data", "json", nullable=True),

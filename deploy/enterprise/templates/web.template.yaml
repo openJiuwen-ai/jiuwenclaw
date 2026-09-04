@@ -66,6 +66,19 @@ spec:
               value: "<<WEB_DB_NAME>>"
             - name: TZ
               value: "<<TIMEZONE>>"
+            # 对象存储（与 Gateway 一致）；OBS_SECRET_KEY 来自上方 secretRef
+            - name: OBS_URL
+              value: "<<OBS_URL>>"
+            - name: OBS_ACCESS_KEY
+              value: "<<OBS_ACCESS_KEY>>"
+            - name: OBS_BUCKET
+              value: "<<OBS_BUCKET>>"
+            - name: OBS_SECURE
+              value: "<<OBS_SECURE>>"
+            - name: OBS_PUBLIC_BASE_URL
+              value: "<<OBS_PUBLIC_BASE_URL>>"
+            - name: OBS_REGION
+              value: "<<OBS_REGION>>"
 
 ---
 # 集群内部访问： 提供稳定 DNS 域名

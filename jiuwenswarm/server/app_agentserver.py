@@ -239,6 +239,15 @@ async def _run_with_telemetry(host: str, port: int, telemetry_lifecycle) -> None
     from jiuwenswarm.extensions.registry import ExtensionRegistry
     from jiuwenswarm.common.config import get_config
 
+    # 脱敏冷加载尽量提前：读库走 gateway_db/module_importer，不依赖扩展加载完成。
+    # 失败时仍保留内置规则；企业版 identity 在 import 阶段已可对 user_id= 等脱敏。
+    try:
+        from jiuwenswarm.infrastructure.log_masking.engine import LogMaskingEngine
+
+        await LogMaskingEngine.reload_log_masking_rule()
+    except Exception:  # noqa: BLE001
+        logger.warning("[AgentServer] log_masking_rule cold load skipped", exc_info=True)
+
     logger.info("[AgentServer] starting: ws://%s:%s", host, port)
 
     from jiuwenswarm.perf.config import init_perf_summary_config
@@ -270,13 +279,6 @@ async def _run_with_telemetry(host: str, port: int, telemetry_lifecycle) -> None
         register_code_source_unicode_hook()
     except Exception:  # noqa: BLE001
         logger.warning("[AgentServer] code_source_unicode hook registration skipped", exc_info=True)
-
-    try:
-        from jiuwenswarm.infrastructure.log_masking.engine import LogMaskingEngine
-
-        await LogMaskingEngine.reload_log_masking_rule()
-    except Exception:  # noqa: BLE001
-        logger.warning("[AgentServer] log_masking_rule cold load skipped", exc_info=True)
 
     if is_enterprise():
         try:

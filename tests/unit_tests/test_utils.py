@@ -151,7 +151,7 @@ class TestSourceRecordMasking:
     Covers the security-critical paths called out in review:
     - third-party (non-jiuwenswarm) logger message masking,
     - traceback-embedded secret masking,
-    - double-masking safety (_is_already_masked keeps fingerprint stable),
+    - double-masking safety (engine sanitize is idempotent on already-masked text),
     - idempotency.
     """
 
@@ -239,12 +239,9 @@ class TestSourceRecordMasking:
         finally:
             self._restore_state(state)
 
-    def test_double_masking_preserves_fingerprint(self):
-        """A record masked at source, then re-processed by _sanitize_log_text (handler
-        layer), keeps the same fingerprint — _is_already_masked prevents 'fingerprint
-        of fingerprint' corruption."""
+    def test_double_masking_is_idempotent(self):
+        """Source 脱敏后再经 ``_sanitize_log_text``（引擎）处理，明文仍被掩码且结果稳定。"""
         import logging
-        import re
 
         state = self._save_state()
         try:
@@ -256,19 +253,13 @@ class TestSourceRecordMasking:
             key = self.PLAINTEXT_KEY
             lg.info("api_key=%s", key)
             source_out = buf.getvalue()
+            assert key not in source_out
+            assert "******" in source_out
 
-            # Re-run the handler-layer sanitizer on the already-masked text.
             double_masked = utils._sanitize_log_text(source_out)
-
-            fp_source = re.search(r"fp:([0-9a-f]+)", source_out)
-            fp_double = re.search(r"fp:([0-9a-f]+)", double_masked)
-            assert fp_source, "source masking should produce a fingerprint"
-            assert fp_double, "double-masked text should still carry a fingerprint"
-            assert fp_source.group(1) == fp_double.group(1), (
-                "fingerprint changed after double masking — _is_already_masked not effective"
-            )
-            # True fingerprint of the plaintext key (cross-check).
-            assert fp_source.group(1) == utils._fingerprint(key)
+            assert key not in double_masked
+            assert "******" in double_masked
+            assert utils._sanitize_log_text(double_masked) == double_masked
         finally:
             self._restore_state(state)
 
@@ -431,7 +422,8 @@ class TestHardcodedPathsPhase2:
         workspace = get_user_workspace_dir()
         expected_path = (
             workspace
-            / "workspace_default"
+            / "service_default"
+            / "agent_default"
             / "agent"
             / "home"
             / "cron_jobs.json"
@@ -457,7 +449,8 @@ class TestHardcodedPathsPhase2:
         workspace = get_user_workspace_dir()
         expected_path = (
             workspace
-            / "workspace_default"
+            / "service_default"
+            / "agent_default"
             / "agent"
             / "workspace"
             / "task-data.json"
@@ -482,7 +475,8 @@ class TestHardcodedPathsPhase2:
         workspace = get_user_workspace_dir()
         expected_path = (
             workspace
-            / "workspace_default"
+            / "service_default"
+            / "agent_default"
             / "agent"
             / "workspace"
             / "USER.md"
@@ -500,6 +494,31 @@ class TestAdditionalHardcodedPaths:
     """
 
     @staticmethod
+    def test_multi_tenant_workspace_dir_edition_layout(monkeypatch, tmp_path):
+        """个人版固定 service_default/agent_default；企业版按 workspace_key 分桶。"""
+        from jiuwenswarm.common.utils import get_multi_tenant_user_workspace_dir
+
+        monkeypatch.setattr(
+            "jiuwenswarm.common.utils.get_user_workspace_dir",
+            lambda: tmp_path,
+        )
+        monkeypatch.setattr(
+            "jiuwenswarm.common.utils.is_enterprise",
+            lambda: False,
+        )
+        assert get_multi_tenant_user_workspace_dir("anything") == (
+            tmp_path / "service_default" / "agent_default"
+        )
+
+        monkeypatch.setattr(
+            "jiuwenswarm.common.utils.is_enterprise",
+            lambda: True,
+        )
+        assert get_multi_tenant_user_workspace_dir("abc") == (
+            tmp_path / "workspace_abc"
+        )
+
+    @staticmethod
     def test_rail_manager_path_structure():
         """Test rail_manager uses multi-tenant workspace for extensions path."""
         from jiuwenswarm.agents.harness.common.plugins.rail_manager import get_rail_manager
@@ -507,11 +526,11 @@ class TestAdditionalHardcodedPaths:
         from jiuwenswarm.server.runtime.runtime_scope import RuntimeScopeKey
 
         scope = RuntimeScopeKey.from_ids()
-        workspace = get_multi_tenant_user_workspace_dir(scope.workspace_key)
-        expected_path = workspace / "agent" / "workspace" / "extensions"
         import os
         os.environ["JIUWENSWARM_EDITION"] = "enterprise"
         try:
+            workspace = get_multi_tenant_user_workspace_dir(scope.workspace_key)
+            expected_path = workspace / "agent" / "workspace" / "extensions"
             rail_manager = get_rail_manager(scope)
 
             extensions_dir = rail_manager.extensions_dir
@@ -548,7 +567,8 @@ class TestAdditionalHardcodedPaths:
         workspace = get_user_workspace_dir()
         expected_path = (
             workspace
-            / "workspace_default"
+            / "service_default"
+            / "agent_default"
             / "agent"
             / "workspace"
             / "interactions"

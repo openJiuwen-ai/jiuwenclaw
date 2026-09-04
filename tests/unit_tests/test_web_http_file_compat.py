@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from unittest.mock import patch
 from urllib.parse import quote
 
 import pytest
@@ -208,3 +209,94 @@ def test_catalog_includes_file_routes(file_client):
     paths = {row["path"] for row in r.json()["data"]["routes"]}
     assert "/file-api/list-files" in paths
     assert "/share-api/snapshot" in paths
+
+
+def test_download_obs_proxy_streams(file_client, monkeypatch: pytest.MonkeyPatch):
+    client, *_ = file_client
+    monkeypatch.setenv("JIUWENSWARM_EDITION", "enterprise")
+
+    class _Cfg:
+        endpoint = "127.0.0.1:9000"
+        public_base_url = ""
+
+    class _Resp:
+        status_code = 200
+        headers = {"Content-Type": "text/plain", "Content-Length": "5"}
+
+        def iter_content(self, chunk_size=65536):
+            yield b"hello"
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(
+        "jiuwenswarm.channels.web.minio_upload.load_minio_upload_config",
+        lambda: _Cfg(),
+    )
+    with patch(
+        "jiuwenswarm.gateway.message_handler.outbound_file_materialize.requests.get",
+        return_value=_Resp(),
+    ) as get_obs:
+        r = client.get(
+            "/file-api/download",
+            params={
+                "url": "http://127.0.0.1:9000/b/downloads/x.txt",
+                "name": "x.txt",
+            },
+        )
+    assert r.status_code == 200
+    assert r.content == b"hello"
+    get_obs.assert_called_once()
+    assert get_obs.call_args.kwargs.get("allow_redirects") is False
+
+    with patch(
+        "jiuwenswarm.gateway.message_handler.outbound_file_materialize.requests.get",
+        return_value=_Resp(),
+    ):
+        h = client.head(
+            "/file-api/download",
+            params={"url": "http://127.0.0.1:9000/b/downloads/x.txt", "name": "x.txt"},
+        )
+    assert h.status_code == 200
+
+
+def test_download_obs_proxy_personal_not_available(
+    file_client, monkeypatch: pytest.MonkeyPatch
+):
+    client, *_ = file_client
+    monkeypatch.delenv("JIUWENSWARM_EDITION", raising=False)
+
+    class _Cfg:
+        endpoint = "127.0.0.1:9000"
+        public_base_url = ""
+
+    monkeypatch.setattr(
+        "jiuwenswarm.channels.web.minio_upload.load_minio_upload_config",
+        lambda: _Cfg(),
+    )
+    r = client.get(
+        "/file-api/download",
+        params={"url": "http://127.0.0.1:9000/b/downloads/x.txt", "name": "x.txt"},
+    )
+    assert r.status_code == 404
+    assert r.json()["error"] == "not_available"
+
+
+def test_download_obs_proxy_rejects_foreign_host(file_client, monkeypatch: pytest.MonkeyPatch):
+    client, *_ = file_client
+    monkeypatch.setenv("JIUWENSWARM_EDITION", "enterprise")
+
+    class _Cfg:
+        endpoint = "127.0.0.1:9000"
+        public_base_url = ""
+
+    monkeypatch.setattr(
+        "jiuwenswarm.channels.web.minio_upload.load_minio_upload_config",
+        lambda: _Cfg(),
+    )
+    r = client.get(
+        "/file-api/download",
+        params={"url": "http://evil.example/steal", "name": "x.txt"},
+    )
+    assert r.status_code == 403
+    assert r.json()["error"] == "forbidden_path"

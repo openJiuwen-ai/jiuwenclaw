@@ -3821,6 +3821,7 @@ class JiuWenSwarmDeepAdapter:
         tool_ids: list[str] = []
         tool_names: list[str] = []
         registered_tools: list[RequestScopedOfficeClawMcpTool] = []
+        invocation_id = "-"
         try:
             request_scope = hashlib.sha256(
                 f"{request.session_id}:{request.request_id}".encode("utf-8")
@@ -3830,7 +3831,6 @@ class JiuWenSwarmDeepAdapter:
             seen_names: set[str] = set()
 
             # --- Source 1: 自带 office-claw MCP（identity-pinned）。 ---
-            invocation_id = "-"
             if raw_config is not None:
                 params = validate_office_claw_mcp_config(raw_config)
                 tool_defs = await list_office_claw_mcp_tools(params)
@@ -3862,6 +3862,7 @@ class JiuWenSwarmDeepAdapter:
                     # are still fully removable by the common cleanup path.
                     tool_ids.append(tool_id)
                     tool_names.append(tool_name)
+                    registered_tools.append(tool)
                     self._install_office_claw_ability_card(card)
                 request_env = params.get("env") if isinstance(params.get("env"), dict) else {}
                 invocation_id = str(request_env.get("OFFICE_CLAW_INVOCATION_ID") or "").strip() or "-"
@@ -3946,8 +3947,24 @@ class JiuWenSwarmDeepAdapter:
                             continue
                         tool_ids.append(tool_id)
                         tool_names.append(tool_name)
+                        registered_tools.append(tool)
                         self._install_office_claw_ability_card(card)
                         _connector_registered += 1
+                        if (
+                            server_name == "office-claw"
+                            and invocation_id == "-"
+                        ):
+                            connector_env = (
+                                connector_params.get("env")
+                                if isinstance(connector_params.get("env"), dict)
+                                else {}
+                            )
+                            invocation_id = (
+                                str(
+                                    connector_env.get("OFFICE_CLAW_INVOCATION_ID") or ""
+                                ).strip()
+                                or "-"
+                            )
                     if _connector_registered == 0:
                         logger.error(
                             "[JiuWenSwarmDeepAdapter] request-scoped MCP connector "
@@ -3971,6 +3988,7 @@ class JiuWenSwarmDeepAdapter:
                 tool_ids=tuple(tool_ids),
                 tool_names=tuple(tool_names),
                 tool_instances=tuple(registered_tools),
+                invocation_id="" if invocation_id == "-" else invocation_id,
             )
             self._active_office_claw_mcp = registration
             # Store tool_ids on the agent's shared ability_manager so the
@@ -3983,15 +4001,23 @@ class JiuWenSwarmDeepAdapter:
                     registered_tool,
                     registration.tool_ids,
                 )
-            self._sync_office_claw_allowlist_to_progressive_rail(registration.tool_ids)
+            self._sync_office_claw_allowlist_to_progressive_rail(
+                registration.tool_ids,
+                delivery_thread_id=self._office_claw_thread_id_from_tools(
+                    registered_tools
+                ),
+                invocation_id="" if invocation_id == "-" else invocation_id,
+            )
             logger.info(
                 "[JiuWenSwarmDeepAdapter] request-scoped OfficeClaw MCP registered: "
-                "request_id=%s session_id=%s invocation_id=%s tools=%s tool_ids=%s",
+                "request_id=%s session_id=%s invocation_id=%s tools=%s tool_ids=%s "
+                "tool_instances=%d",
                 request.request_id,
                 request.session_id,
                 invocation_id,
                 tool_names,
                 tool_ids,
+                len(registered_tools),
             )
             logger.info("[latency] stage=2 name=mcp request_id=%s", request.request_id)
             return registration
@@ -4001,6 +4027,7 @@ class JiuWenSwarmDeepAdapter:
                 tool_ids=tuple(tool_ids),
                 tool_names=tuple(tool_names),
                 tool_instances=tuple(registered_tools),
+                invocation_id="" if invocation_id == "-" else invocation_id,
             )
             await self.cleanup_request_scoped_office_claw_mcp(registration)
             raise
@@ -4010,6 +4037,7 @@ class JiuWenSwarmDeepAdapter:
                 tool_ids=tuple(tool_ids),
                 tool_names=tuple(tool_names),
                 tool_instances=tuple(registered_tools),
+                invocation_id="" if invocation_id == "-" else invocation_id,
             )
             await self.cleanup_request_scoped_office_claw_mcp(registration)
             _raw_command = str(raw_config.get("command") or "").strip() if isinstance(raw_config, dict) else ""
@@ -4166,8 +4194,20 @@ class JiuWenSwarmDeepAdapter:
         ):
             self._active_office_claw_mcp = None
             self._sync_office_claw_allowlist_to_progressive_rail(None)
-        # Clear the shared ability_manager allowlist so stale ids are not reused.
-        clear_agent_office_claw_tool_ids(self._instance)
+            # Only clear the shared AM allowlist when we are cleaning the *current*
+            # active registration. A superseded request's cleanup must not wipe the
+            # newer request's allowlist (ask_user resume race → active_id empty).
+            clear_agent_office_claw_tool_ids(self._instance)
+        elif self._active_office_claw_mcp is None:
+            clear_agent_office_claw_tool_ids(self._instance)
+            self._sync_office_claw_allowlist_to_progressive_rail(None)
+        else:
+            logger.info(
+                "[JiuWenSwarmDeepAdapter] cleanup skipped clearing active OfficeClaw "
+                "allowlist: cleaned_request=%s active_request=%s",
+                registration.request_id,
+                self._active_office_claw_mcp.request_id,
+            )
         revoke_live_office_claw_allowlist(registration.tool_ids)
         # 销毁本请求池化的长生命周期 stdio session（如 chrome-devtools-mcp 浏览器进程），
         # 以免其活过 chat.send。best-effort，不阻塞清理。
@@ -4188,6 +4228,9 @@ class JiuWenSwarmDeepAdapter:
     def _sync_office_claw_allowlist_to_progressive_rail(
         self,
         tool_ids: tuple[str, ...] | list[str] | frozenset[str] | None,
+        *,
+        delivery_thread_id: str | None = None,
+        invocation_id: str | None = None,
     ) -> None:
         """Keep ProgressiveToolRail's interaction-round allowlist in sync."""
 
@@ -4196,6 +4239,13 @@ class JiuWenSwarmDeepAdapter:
         if not callable(setter):
             return
         try:
+            setter(
+                tool_ids,
+                delivery_thread_id=delivery_thread_id,
+                invocation_id=invocation_id,
+            )
+        except TypeError:
+            # Older rail signature without keyword binding metadata.
             setter(tool_ids)
         except Exception as exc:
             logger.warning(
@@ -4203,6 +4253,22 @@ class JiuWenSwarmDeepAdapter:
                 "ProgressiveToolRail: %s",
                 exc,
             )
+
+    @staticmethod
+    def _office_claw_thread_id_from_tools(
+        tools: list[RequestScopedOfficeClawMcpTool],
+    ) -> str:
+        for tool in tools:
+            params = getattr(tool, "_params", None)
+            if not isinstance(params, dict):
+                continue
+            env = params.get("env")
+            if not isinstance(env, dict):
+                continue
+            thread_id = str(env.get("OFFICE_CLAW_THREAD_ID") or "").strip()
+            if thread_id:
+                return thread_id
+        return ""
 
     async def _register_mcp_servers_from_config(
         self, config_base: dict[str, Any], *, tag: str = "agent.main"
@@ -7379,7 +7445,9 @@ class JiuWenSwarmDeepAdapter:
                 "service_id": scope.service_id,
                 "agent_id": scope.agent_id,
                 "workspace_key": scope.workspace_key,
-                "output_dir": self._deepresearch_artifact_output_dir(),
+                "output_dir": self._deepresearch_artifact_output_dir(
+                    route.get("output_dir")
+                ),
             }
         context = self._runtime_cron_tool_context
         metadata = context.metadata if isinstance(context.metadata, dict) else {}
@@ -7391,11 +7459,25 @@ class JiuWenSwarmDeepAdapter:
             "service_id": scope.service_id,
             "agent_id": scope.agent_id,
             "workspace_key": scope.workspace_key,
-            "output_dir": self._deepresearch_artifact_output_dir(),
+            "output_dir": self._deepresearch_artifact_output_dir(
+                metadata.get("project_dir")
+            ),
         }
 
-    def _deepresearch_artifact_output_dir(self) -> str:
-        """Return the tenant-owned root used for immutable report artifacts."""
+    def _deepresearch_artifact_output_dir(
+        self, request_workspace: str | None = None
+    ) -> str:
+        """Return the current session workspace, or the legacy artifact root."""
+        normalized_request_workspace = (
+            request_workspace.strip()
+            if isinstance(request_workspace, str)
+            else ""
+        )
+        session_workspace = normalized_request_workspace or str(
+            getattr(self, "_project_dir", None) or ""
+        ).strip()
+        if session_workspace:
+            return str(Path(session_workspace).expanduser().resolve())
         workspace = Path(
             getattr(self, "_workspace_dir", None) or get_agent_workspace_dir()
         ).expanduser().resolve()
@@ -7960,6 +8042,18 @@ class JiuWenSwarmDeepAdapter:
             progressive_tool_rail = self._build_progressive_tool_rail(config)
             if progressive_tool_rail is not None:
                 self._progressive_tool_rail = progressive_tool_rail
+                # Rebuild wipes rail-local OfficeClaw pins; re-sync from the
+                # still-active request registration so concurrent schedule
+                # creates do not invoke unbound / foreign MCP tools.
+                active_mcp = self._active_office_claw_mcp
+                if active_mcp is not None:
+                    self._sync_office_claw_allowlist_to_progressive_rail(
+                        active_mcp.tool_ids,
+                        delivery_thread_id=self._office_claw_thread_id_from_tools(
+                            list(active_mcp.tool_instances)
+                        ),
+                        invocation_id=active_mcp.invocation_id or None,
+                    )
             elif old_progressive_tool_rail is not None:
                 rails_to_unregister.append(old_progressive_tool_rail)
 
@@ -9198,7 +9292,9 @@ class JiuWenSwarmDeepAdapter:
                 service_id=scope.service_id,
                 agent_id=scope.agent_id,
                 workspace_key=scope.workspace_key,
-                output_dir=self._deepresearch_artifact_output_dir(),
+                output_dir=self._deepresearch_artifact_output_dir(
+                    normalized_metadata.get("project_dir")
+                ),
             )
         except BaseException:
             self._reset_runtime_cron_context(
@@ -14959,6 +15055,16 @@ class JiuWenSwarmDeepAdapter:
             getattr(self, "_model", None) and getattr(self._model, "model_config", None)
             and getattr(self._model.model_config, "model_name", "") or ""
         )
+        self._current_request_route = {
+            "session_id": session_id,
+            "request_id": request.request_id or "",
+            "channel_id": request.channel_id or "",
+            "output_dir": self._deepresearch_artifact_output_dir(
+                request.params.get("project_dir")
+                if isinstance(request.params, dict)
+                else None
+            ),
+        }
 
         slash_result = await self._handle_slash_command(
             query,
@@ -15602,6 +15708,11 @@ class JiuWenSwarmDeepAdapter:
             "session_id": session_id,
             "request_id": rid or "",
             "channel_id": cid or "",
+            "output_dir": self._deepresearch_artifact_output_dir(
+                request.params.get("project_dir")
+                if isinstance(request.params, dict)
+                else None
+            ),
         }
 
         # Team 模式处理
@@ -17475,6 +17586,18 @@ class JiuWenSwarmDeepAdapter:
                     if isinstance(payload, dict):
                         return {
                             "event_type": "chat.retract",
+                            **payload,
+                        }
+                    return None
+
+                # send_file OBS path: OutputSchema(type="chat.file", payload={files:[url...]})
+                # must not fall through to _stream_text_payload — files-only payload has
+                # no content/output, so the frame would be dropped and Gateway never
+                # materializes a download token.
+                if chunk_type == "chat.file":
+                    if isinstance(payload, dict):
+                        return {
+                            "event_type": "chat.file",
                             **payload,
                         }
                     return None
