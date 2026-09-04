@@ -24,7 +24,8 @@ from typing import Any, AsyncIterator, Tuple
 from datetime import datetime, timedelta, timezone
 from jiuwenswarm.dotenv_early import load_dotenv_runtime
 
-from jiuwenswarm.common.local_env_config import promote_staged_env, is_enterprise
+from jiuwenswarm.common.local_env_config import promote_staged_env
+from jiuwenswarm.edition import is_enterprise
 from jiuwenswarm.server.runtime.reload_result import ReloadResult
 from jiuwenswarm.server.runtime.agent_adapter.agent_adapters import (
     AgentAdapter,

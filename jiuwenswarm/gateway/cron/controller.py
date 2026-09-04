@@ -6,7 +6,7 @@ from zoneinfo import ZoneInfo
 
 from openjiuwen.core.foundation.tool import LocalFunction, Tool, ToolCard
 
-from jiuwenswarm.common.local_env_config import is_enterprise
+from jiuwenswarm.edition import is_enterprise
 from jiuwenswarm.gateway.cron.cron_expr import clamp_wake_offset_for_delay_seconds, normalize_cron_expr
 from jiuwenswarm.gateway.cron.enterprise_gate import (
     coerce_routing_id,

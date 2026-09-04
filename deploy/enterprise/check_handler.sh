@@ -248,6 +248,7 @@ check_if_obs_up() {
     fi
 
     info "Use built-in Minio server"
+    DEPLOY_VARS["OBS_URL"]="${name}-headless:9000"
 }
 
 ensure_redis_up() {
@@ -467,7 +468,6 @@ check_gateway_up_dependency(){
     check_if_db_up
     check_if_jina_up
     ensure_redis_up
-    # Gateway POST /file-api/upload-obs 注入 OBS_*；内置 MinIO 时需先有 minio STS
     check_if_obs_up
 }
 
@@ -481,7 +481,6 @@ check_web_up_dependency(){
 }
 
 check_manager_up_dependency(){
-    #check_if_rabbitmq_up
     check_if_db_up
 }
 

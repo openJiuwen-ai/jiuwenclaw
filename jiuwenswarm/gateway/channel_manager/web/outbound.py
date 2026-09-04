@@ -10,6 +10,8 @@ import logging
 import uuid
 from typing import Any, AsyncIterator, Protocol, runtime_checkable
 
+from jiuwenswarm.edition import is_enterprise
+
 logger = logging.getLogger(__name__)
 
 # Agent ``session.create`` rejects params.session_id (restore via session.switch).
@@ -58,13 +60,11 @@ def _is_sse_end_frame(frame: dict[str, Any]) -> bool:
     # 企业版 HTTP/SSE 的 chat.final 只结束当前回复段，必须继续转发到
     # processing_status(false)；个人版维持原有 chat.final 终止语义。
     if ev == "chat.final":
-        from jiuwenswarm.common.local_env_config import is_enterprise
         if not is_enterprise():
             return True
         return False
     payload = frame.get("payload") if isinstance(frame.get("payload"), dict) else {}
     if ev == "chat.processing_status" and payload.get("is_processing") is False:
-        from jiuwenswarm.common.local_env_config import is_enterprise
         return is_enterprise()
     return ev == "history.message" and payload.get("status") == "done"
 

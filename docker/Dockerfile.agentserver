@@ -19,6 +19,7 @@ RUN pip install -e . \
     --no-cache-dir \
     ${PIP_EXTRA_ARGS}
 
+ENV JIUWENSWARM_EDITION=enterprise
 RUN mkdir -p /home/app/.jiuwenswarm && printf 'yes\nzh\n' | jiuwenswarm-init
 RUN chown -R app:app /home/app/.jiuwenswarm
 

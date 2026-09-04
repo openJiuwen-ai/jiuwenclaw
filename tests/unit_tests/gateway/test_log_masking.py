@@ -87,10 +87,7 @@ def test_compile_masking_rows_reads_with_fingerprint_default_false():
 
 
 def test_with_fingerprint_false_masks_without_fp(monkeypatch):
-    monkeypatch.setattr(
-        "jiuwenswarm.common.local_env_config.is_enterprise",
-        lambda: False,
-    )
+    monkeypatch.setenv("JIUWENSWARM_EDITION", "personal")
     LogMaskingEngine.reload_from_rows(
         [
             {
@@ -116,10 +113,7 @@ def test_builtin_kv_with_fingerprint_even_in_enterprise(monkeypatch):
     """敏感 KV（with_fingerprint=True）企业版同样附指纹。"""
     from jiuwenswarm.infrastructure.utils import fingerprint
 
-    monkeypatch.setattr(
-        "jiuwenswarm.common.local_env_config.is_enterprise",
-        lambda: True,
-    )
+    monkeypatch.setenv("JIUWENSWARM_EDITION", "enterprise")
     LogMaskingEngine.reset_for_tests()
     secret = "mySecretValue"
     out = LogMaskingEngine.get_instance().sanitize(f"api_key={secret}")

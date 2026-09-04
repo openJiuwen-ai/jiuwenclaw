@@ -3,7 +3,7 @@
 """Mount legacy ``/file-api/*`` and ``/share-api/*`` on Gateway Web HTTP."""
 
 from __future__ import annotations
-from jiuwenswarm.common.local_env_config import is_enterprise
+from jiuwenswarm.edition import is_enterprise
 
 import logging
 import os

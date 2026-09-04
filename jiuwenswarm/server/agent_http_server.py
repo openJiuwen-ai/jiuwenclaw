@@ -13,6 +13,7 @@ from typing import Any, AsyncIterator, Awaitable, Callable
 from jiuwenswarm.common.e2a.constants import E2A_RESPONSE_STATUS_FAILED
 from jiuwenswarm.common.e2a.models import E2AEnvelope
 from jiuwenswarm.common.schema.message import ReqMethod
+from jiuwenswarm.edition import is_enterprise
 from jiuwenswarm.server.transports.sink import STREAM_DONE, SSESink, UnaryHTTPSink
 
 logger = logging.getLogger(__name__)
@@ -51,8 +52,6 @@ def _is_enterprise_skill_forbidden(method: str) -> bool:
     正常链路已由 Gateway 的 ``is_enterprise_write_forbidden`` 拦截；此处兜底
     AgentServer 被直连（HTTP 直连）时绕过 Gateway 改启停/安装/卸载的情况。
     """
-    from jiuwenswarm.common.utils import is_enterprise
-
     if not is_enterprise():
         return False
     return method.startswith("skills.") and method not in _ENTERPRISE_SKILL_ALLOWED
