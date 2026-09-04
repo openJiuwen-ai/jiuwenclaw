@@ -9,6 +9,7 @@ import pytest
 
 from jiuwenswarm.common.utils import resolve_gateway_cron_jobs_path
 from tests.unit_tests.tenant_workspace_test_helpers import (
+    patch_multi_tenant_workspace_dirs,
     tenant_workspace_key,
     tenant_workspace_root,
 )
@@ -103,6 +104,9 @@ async def test_web_create_mirrors_to_agent_home(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(
         "jiuwenswarm.common.utils.get_user_workspace_dir", lambda: tmp_path
     )
+    # mirror 路径经 get_multi_tenant_user_workspace_dir 解析，须一并 patch，
+    # 否则非企业环境下会落到 service_default/agent_default 固定目录。
+    patch_multi_tenant_workspace_dirs(monkeypatch, tmp_path)
     monkeypatch.setattr(
         "jiuwenswarm.gateway.cron.tenant_registry.CronSchedulerService.start",
         AsyncMock(),

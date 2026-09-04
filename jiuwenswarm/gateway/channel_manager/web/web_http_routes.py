@@ -210,6 +210,17 @@ _CRON_ROUTES: tuple[WebHttpMappedRoute, ...] = (
         query_keys=_CRON_QUERY,
     ),
     WebHttpMappedRoute(
+        "POST", "/cron/jobs", "cron.job.create",
+        "cron", "创建定时任务（body 字段与 RPC params 一致）",
+        query_keys=_TENANT_QUERY,
+        accept_body=True,
+        bind_session_param=True,
+    ),
+    WebHttpMappedRoute(
+        "GET", "/cron/jobs/meta", "cron.job.meta",
+        "cron", "Cron 元数据（modes/timeout 等）",
+    ),
+    WebHttpMappedRoute(
         "GET", "/cron/jobs/{id}", "cron.job.get",
         "cron", "获取单个任务",
         path_to_param={"id": "id"},

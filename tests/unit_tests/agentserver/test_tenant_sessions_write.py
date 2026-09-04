@@ -26,6 +26,8 @@ def test_resolve_tenant_sessions_dir_layout(tmp_path, monkeypatch):
         "jiuwenswarm.common.utils.get_user_workspace_dir",
         lambda: tmp_path,
     )
+    # 多租户分桶是企业版语义；个人版固定 service_default/agent_default。
+    monkeypatch.setattr("jiuwenswarm.common.utils.is_enterprise", lambda: True)
     path = resolve_tenant_sessions_dir("office")
     assert path == tmp_path / "workspace_office" / "agent" / "sessions"
 
@@ -74,6 +76,8 @@ def test_cache_isolated_by_sessions_root(tmp_path, monkeypatch):
         "jiuwenswarm.common.utils.get_user_workspace_dir",
         lambda: tmp_path,
     )
+    # 多租户分桶是企业版语义；个人版固定目录会使不同 key 落到同一 sessions_root。
+    monkeypatch.setattr("jiuwenswarm.common.utils.is_enterprise", lambda: True)
     global_sessions = tmp_path / "workspace_default" / "agent" / "sessions"
     global_sessions.mkdir(parents=True)
     monkeypatch.setattr(

@@ -214,7 +214,9 @@ class AgentWarmPool:
 
     @staticmethod
     def _new_session_id(channel_id: str) -> str:
-        prefix = str(channel_id or "default").strip() or "default"
+        from jiuwenswarm.server.runtime.agent_manager import _session_id_prefix_for_channel
+
+        prefix = _session_id_prefix_for_channel(channel_id)
         return f"{prefix}_{int(time.time() * 1000):x}_{secrets.token_hex(6)}"
 
     def _marker_path(self, session_id: str) -> Path:
