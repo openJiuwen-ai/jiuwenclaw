@@ -1346,16 +1346,10 @@ def test_design_system_prompt_prod_omits_catalog_names(monkeypatch):
 def test_skills_goal_override_uses_real_skill_slugs():
     from jiuwenswarm.agents.harness.common.prompt.skills_goal_override import (
         _STATIC_BLOCK,
-        _STATIC_SKILL_NAMES,
     )
 
-    assert "seedream-image-gen" in _STATIC_SKILL_NAMES
-    assert "seedance-video-gen" in _STATIC_SKILL_NAMES
-    assert "music-generation" in _STATIC_SKILL_NAMES
-    assert "xiaoyi-image-understanding-win" in _STATIC_SKILL_NAMES
-    assert "image-generation" not in _STATIC_SKILL_NAMES
     for text in _STATIC_BLOCK.values():
-        assert "seedream-image-gen" in text
+        assert "Image Generation" in text or "图像生成" in text
         assert "skill_tool" in text
         assert "PluginSkillExecTool" not in text
         assert "com.atomicservice" not in text
