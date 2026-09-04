@@ -79,6 +79,8 @@ const ROUTES: Record<string, RouteRow> = {
   'locale.get_conf': { verb: 'GET', path: '/locale', kind: 'unary' },
   'locale.set_conf': { verb: 'PUT', path: '/locale', kind: 'unary' },
   'cron.job.list': { verb: 'GET', path: '/cron/jobs', kind: 'unary' },
+  'cron.job.create': { verb: 'POST', path: '/cron/jobs', kind: 'unary' },
+  'cron.job.meta': { verb: 'GET', path: '/cron/jobs/meta', kind: 'unary' },
   'cron.job.get': { verb: 'GET', path: '/cron/jobs/{id}', kind: 'unary' },
   'cron.job.update': { verb: 'PATCH', path: '/cron/jobs/{id}', kind: 'unary' },
   'cron.job.delete': { verb: 'DELETE', path: '/cron/jobs/{id}', kind: 'unary' },

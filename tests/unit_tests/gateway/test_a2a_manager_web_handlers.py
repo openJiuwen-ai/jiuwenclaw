@@ -121,6 +121,45 @@ async def test_a2a_ingress_web_handlers_return_snapshots():
 
 
 @pytest.mark.asyncio
+async def test_saved_ingress_credential_is_returned_to_configuration_ui():
+    channel = _WebChannelProbe()
+    manager = A2AManager(
+        _ChannelManagerProbe(),
+        object(),
+        A2AIngressConfig(),
+        repository=_RepositoryProbe(),
+        channel_factory=lambda config, router: _ChannelProbe(),
+    )
+    _register_web_handlers(WebHandlersBindParams(channel=channel, a2a_manager=manager))
+    credential = "test-viewable-ingress-credential"
+    await channel.methods["a2a.ingress.update"](
+        object(),
+        "save",
+        {"config": {"auth_type": "bearer", "credential": credential}, "apply": True},
+        "session",
+    )
+    await channel.methods["a2a.ingress.get"](object(), "refresh", {}, "session")
+    await channel.methods["a2a.ingress.get"](object(), "poll", {}, "session")
+    for response in channel.responses:
+        assert response["ok"] is True
+        assert credential not in str(response)
+        assert "credential" not in response["payload"]
+        assert "desired_credential" not in response["payload"]
+        assert "credential_hash" not in response["payload"]
+    await channel.methods["a2a.ingress.update"](
+        object(), "failed-save", {"config": {"rpc_path": "invalid"}}, "session"
+    )
+    assert channel.responses[-1]["ok"] is False
+    assert credential not in str(channel.responses[-1])
+    await channel.methods["a2a.ingress.edit"](object(), "edit", {}, "session")
+    assert channel.responses[-1]["payload"]["credential"] == credential
+    assert not any(
+        route.rpc_method in {"a2a.ingress.edit", "a2a.outbound.edit"}
+        for route in MAPPED_ROUTES
+    )
+
+
+@pytest.mark.asyncio
 async def test_a2a_ingress_update_apply_disables_the_running_service():
     channel = _WebChannelProbe()
     manager = A2AManager(
@@ -379,7 +418,9 @@ async def test_a2a_outbound_handlers_tolerate_missing_manager():
     )
 
     assert [item["ok"] for item in channel.responses] == [False] * 8
-    assert {item["code"] for item in channel.responses} == {"A2A_OUTBOUND_STORE_INVALID"}
+    assert {item["code"] for item in channel.responses} == {
+        "A2A_OUTBOUND_STORE_INVALID"
+    }
 
 
 def test_a2a_outbound_http_routes_map_to_rpc_methods():
@@ -392,10 +433,7 @@ def test_a2a_outbound_http_routes_map_to_rpc_methods():
     assert routes[("POST", "/a2a/outbound/discover")] == "a2a.outbound.discover"
     assert routes[("POST", "/a2a/outbound/agents")] == "a2a.outbound.register"
     assert routes[("GET", "/a2a/outbound/agents")] == "a2a.outbound.list"
-    assert (
-        routes[("GET", "/a2a/outbound/dispatches")]
-        == "a2a.outbound.dispatch.list"
-    )
+    assert routes[("GET", "/a2a/outbound/dispatches")] == "a2a.outbound.dispatch.list"
     assert routes[("PATCH", "/a2a/outbound/agents/{agent_id}")] == "a2a.outbound.update"
     assert (
         routes[("POST", "/a2a/outbound/agents/{agent_id}:refresh")]

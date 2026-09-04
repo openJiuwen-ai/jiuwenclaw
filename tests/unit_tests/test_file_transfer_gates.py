@@ -48,30 +48,14 @@ def test_file_transfer_config_default_disabled():
     assert FileTransferConfig().enabled is False
 
 
-def test_resolve_enabled_defaults_false_even_for_enterprise():
-    with patch(
-        "jiuwenswarm.common.local_env_config.is_enterprise",
-        return_value=True,
-    ):
-        assert resolve_file_transfer_enabled({}) is False
-    with patch(
-        "jiuwenswarm.common.local_env_config.is_enterprise",
-        return_value=False,
-    ):
-        assert resolve_file_transfer_enabled({}) is False
+def test_resolve_enabled_defaults_false():
+    # 默认关闭（个人/企业均如此，OBS 为主路径，不再读 is_enterprise）。
+    assert resolve_file_transfer_enabled({}) is False
 
 
 def test_resolve_enabled_yaml_override():
-    with patch(
-        "jiuwenswarm.common.local_env_config.is_enterprise",
-        return_value=True,
-    ):
-        assert resolve_file_transfer_enabled({"enabled": False}) is False
-    with patch(
-        "jiuwenswarm.common.local_env_config.is_enterprise",
-        return_value=False,
-    ):
-        assert resolve_file_transfer_enabled({"enabled": True}) is True
+    assert resolve_file_transfer_enabled({"enabled": False}) is False
+    assert resolve_file_transfer_enabled({"enabled": True}) is True
 
 
 def test_resolve_enabled_escape_env(monkeypatch):

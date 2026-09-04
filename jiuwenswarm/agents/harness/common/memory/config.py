@@ -16,8 +16,8 @@ from pathlib import Path
 
 import yaml
 
+from jiuwenswarm.edition import is_enterprise
 from jiuwenswarm.common.local_env_config import (
-    is_enterprise,
     SPAWN_ENV_KEYS,
     get_local_config,
     ingest_bare_business_into_tip,

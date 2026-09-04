@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from jiuwenswarm.common.local_env_config import is_enterprise
+from jiuwenswarm.edition import is_enterprise
 from jiuwenswarm.common.utils import _require_tenant_ids
 from jiuwenswarm.server.runtime.skill.skill_manager import (
     SkillManager,

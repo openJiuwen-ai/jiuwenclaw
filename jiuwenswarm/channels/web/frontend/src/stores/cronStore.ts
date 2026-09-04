@@ -1,6 +1,11 @@
 import { create } from 'zustand';
-import { webRequest } from '../services/webClient';
+import {
+  buildCronJobFingerprintMap,
+  detectCronJobRunUpdates,
+  type CronJobRunFingerprint,
+} from '../features/cron/cronJobSync';
 import { projectRegistryClient } from '../features/workspace/projectRegistryClient';
+import { webRequest } from '../services/webClient';
 import type { Session } from '../types';
 
 export interface SidebarCronJob {
@@ -15,6 +20,10 @@ export interface SidebarCronJob {
   targets?: string;
   created_at: number | string | null;
   updated_at: number | string | null;
+  /** 最近一次执行完成时间（epoch 秒），来自 cron.job.list */
+  last_run_at?: number | null;
+  /** 最近一次执行会话 ID，来自 cron.job.list */
+  last_session_id?: string | null;
 }
 
 /** 判断 cron job 的 targets 是否含 "web"(空串按后端 normalize 默认 web 处理) */
@@ -40,6 +49,10 @@ interface CronState {
   markCronJobUnread: (jobId: string) => void;
   clearCronJobUnread: (jobId: string) => void;
   loadJobs: () => Promise<void>;
+  /** HTTP Pull transport：静默同步执行状态，发现新 run 时标记未读 */
+  syncJobRuns: () => Promise<void>;
+  /** cron.job.list 运行态指纹，供 Pull sync diff */
+  runSyncFingerprints: Record<string, CronJobRunFingerprint>;
   reload: () => Promise<void>;
   toggleCronGroup: (groupId: string) => void;
   loadCronSessions: (projectId: string, cronId: string) => Promise<void>;
@@ -54,9 +67,15 @@ function persistCronUnread(state: Record<string, boolean>) {
   });
 }
 
+async function fetchWebCronJobs(): Promise<SidebarCronJob[]> {
+  const payload = await webRequest<{ jobs: SidebarCronJob[] }>('cron.job.list');
+  return (payload.jobs || []).filter((job) => isWebChannelJob(job.targets));
+}
+
 export const useCronStore = create<CronState>((set, get) => ({
   jobs: [],
   isLoading: false,
+  runSyncFingerprints: {},
   expandedCronGroups: {},
   cronSessions: {},
   cronSessionsLoading: {},
@@ -92,12 +111,37 @@ export const useCronStore = create<CronState>((set, get) => ({
   loadJobs: async () => {
     set({ isLoading: true });
     try {
-      const payload = await webRequest<{ jobs: SidebarCronJob[] }>('cron.job.list');
-      // 侧边栏是 Web 端工作区,只展示 targets 含 "web" 的定时任务
-      const webJobs = (payload.jobs || []).filter((j) => isWebChannelJob(j.targets));
-      set({ jobs: webJobs, isLoading: false });
+      const webJobs = await fetchWebCronJobs();
+      set({
+        jobs: webJobs,
+        isLoading: false,
+        runSyncFingerprints: buildCronJobFingerprintMap(webJobs),
+      });
     } catch {
-      set({ jobs: [], isLoading: false });
+      set({ jobs: [], isLoading: false, runSyncFingerprints: {} });
+    }
+  },
+
+  syncJobRuns: async () => {
+    try {
+      const webJobs = await fetchWebCronJobs();
+      const previous = get().runSyncFingerprints;
+      const { updatedJobIds, nextFingerprints } = detectCronJobRunUpdates(previous, webJobs);
+
+      set({
+        jobs: webJobs,
+        runSyncFingerprints: nextFingerprints,
+      });
+
+      for (const jobId of updatedJobIds) {
+        get().markCronJobUnread(jobId);
+        const job = webJobs.find((item) => item.id === jobId);
+        if (job) {
+          void get().loadCronSessions(job.project_id || 'default', jobId);
+        }
+      }
+    } catch {
+      // Pull sync is best-effort; avoid surfacing transient HTTP errors in the sidebar.
     }
   },
 

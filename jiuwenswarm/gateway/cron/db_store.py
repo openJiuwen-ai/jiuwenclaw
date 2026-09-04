@@ -8,9 +8,10 @@ import asyncio
 import json
 import logging
 import time
+from dataclasses import replace
 from datetime import datetime, timezone as dt_timezone
+from pathlib import Path
 from typing import Any
-from zoneinfo import ZoneInfo
 
 from jiuwenswarm.gateway.cron.cron_expr import _DEFAULT_WAKE_OFFSET_SECONDS
 from jiuwenswarm.gateway.cron.cron_job_mutations import (
@@ -72,16 +73,14 @@ def _dt_to_epoch(value: Any) -> float | None:
 
 
 def _compute_next_run_at(job: CronJob) -> str | None:
-    try:
-        from jiuwenswarm.gateway.cron.scheduler import _cron_next_push_dt
+    from jiuwenswarm.gateway.cron.db_schedule import (
+        compute_next_push_dt,
+        datetime_to_db_value,
+    )
 
-        tz = ZoneInfo(job.timezone or "Asia/Shanghai")
-        base = datetime.now(tz=tz)
-        nxt = _cron_next_push_dt(job.cron_expr, base)
-        if nxt is None:
-            return None
-        dt = nxt if nxt.tzinfo is not None else nxt.replace(tzinfo=dt_timezone.utc)
-        return dt.astimezone(dt_timezone.utc).isoformat()
+    try:
+        push_dt = compute_next_push_dt(job.cron_expr, job.timezone)
+        return datetime_to_db_value(push_dt).isoformat(sep=" ")
     except Exception:
         return None
 
@@ -145,6 +144,8 @@ def _row_to_job(row: Any) -> CronJob | None:
             "user_id": data.get("user_id"),
             "created_at": _dt_to_epoch(data.get("created_at")),
             "updated_at": _dt_to_epoch(data.get("updated_at")),
+            "next_run_at": _dt_to_epoch(data.get("next_run_at")),
+            "last_run_at": _dt_to_epoch(data.get("last_run_at")),
         }
         for key in _EXTRA_DATA_KEYS:
             if key in extra and extra.get(key) is not None:
@@ -162,6 +163,11 @@ class GatewayDbCronJobStore:
         self._lock = asyncio.Lock()
         self._revision = 0
 
+    @property
+    def path(self) -> Path:
+        """Compatibility marker for CronTenantRegistry logging."""
+        return Path("db://cron_job")
+
     @staticmethod
     async def _require_store() -> PersistentStore:
         from jiuwenswarm.gateway.storage.access import require_persistent_store
@@ -173,7 +179,14 @@ class GatewayDbCronJobStore:
         return {"job_id": job_id}
 
     async def get_revision(self) -> int:
-        return int(self._revision)
+        jobs = await self.list_jobs()
+        if not jobs:
+            return int(self._revision or 0)
+        stamp = max(float(j.updated_at or 0) for j in jobs)
+        db_rev = int(stamp * 1_000_000)
+        if self._revision:
+            return max(int(self._revision), db_rev)
+        return db_rev
 
     def _bump_revision(self) -> None:
         self._revision = int(time.time() * 1_000_000)
@@ -222,6 +235,8 @@ class GatewayDbCronJobStore:
         )
         extra = _extra_from_job(job)
         return {
+            "service_id": job.service_id or "default",
+            "agent_id": job.agent_id or "default",
             "job_id": job.id,
             "group_id": job.group_id,
             "bot_id": job.bot_id,
@@ -250,7 +265,13 @@ class GatewayDbCronJobStore:
 
     async def create_job(self, **kwargs: Any) -> CronJob:
         store = await self._require_store()
-        job = build_new_cron_job(**kwargs)
+        tenant_sid = str(kwargs.pop("service_id", None) or "default").strip() or "default"
+        tenant_aid = str(kwargs.pop("agent_id", None) or "default").strip() or "default"
+        job = replace(
+            build_new_cron_job(**kwargs),
+            service_id=tenant_sid,
+            agent_id=tenant_aid,
+        )
         row_data = self._job_to_row(job)
         identity = self._job_identity(job_id=job.id)
         async with self._lock:

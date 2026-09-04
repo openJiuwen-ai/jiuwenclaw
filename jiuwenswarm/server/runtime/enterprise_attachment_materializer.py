@@ -14,7 +14,7 @@ from urllib.parse import urlparse
 
 import requests
 
-from jiuwenswarm.common.local_env_config import is_enterprise
+from jiuwenswarm.edition import is_enterprise
 from jiuwenswarm.gateway.channel_manager.web.file_http import safe_filename
 
 logger = logging.getLogger(__name__)

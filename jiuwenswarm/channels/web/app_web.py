@@ -36,7 +36,7 @@ parse_dotenv_early("jiuwenswarm-web")
 from jiuwenswarm.agents.harness.common.tools.ssl_config import get_insecure_ssl_context, get_ssl_verify
 from jiuwenswarm.common.debug_dump import install_async_dump_handler
 from jiuwenswarm.common.ws_diagnostics import describe_ws_exception, format_ws_diagnostics
-from jiuwenswarm.common.local_env_config import is_enterprise
+from jiuwenswarm.edition import is_enterprise
 from jiuwenswarm.common.utils import (
     get_logs_dir,
     get_root_dir,

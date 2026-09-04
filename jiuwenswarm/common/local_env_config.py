@@ -31,6 +31,7 @@ import sys
 from collections.abc import Iterable, Iterator, Mapping, MutableMapping
 from contextvars import ContextVar, Token
 from typing import Any
+from jiuwenswarm.edition import is_enterprise
 
 DEFAULT_HEADERS_ENV_KEY = "default_headers"
 _DEFAULT_HEADERS_ALIASES = (
@@ -928,11 +929,6 @@ def hydrate_default_tip_from_baseline() -> None:
         _DEFAULT_AGENT_ID,
         reserved_keys=(),
     )
-
-
-def is_enterprise() -> bool:
-    """True if JIUWENSWARM_EDITION is 'enterprise' (企业版)."""
-    return os.getenv("JIUWENSWARM_EDITION", "").strip().lower() == "enterprise"
 
 
 def should_hydrate_default_tip() -> bool:

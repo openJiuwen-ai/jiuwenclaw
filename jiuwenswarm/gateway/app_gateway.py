@@ -64,7 +64,8 @@ from jiuwenswarm.gateway.routing.route_binding import GatewayRouteBinding
 from jiuwenswarm.common.debug_dump import install_async_dump_handler
 from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
 from jiuwenswarm.common.schema.message import ReqMethod, Message, Mode
-from jiuwenswarm.common.local_env_config import decrypt, is_enterprise
+from jiuwenswarm.common.local_env_config import decrypt
+from jiuwenswarm.edition import is_enterprise
 
 load_dotenv_runtime(dotenv_path=get_env_file(), override=True)
 reset_free_search_runtime_flags()
@@ -1774,6 +1775,8 @@ async def _run_with_telemetry(
     im_outbound = IMOutboundPipeline()
     message_handler.set_inbound_pipeline(im_inbound)
     message_handler.set_outbound_pipeline(im_outbound)
+
+    from jiuwenswarm.gateway.cron.tenant_registry import CronTenantRegistry
 
     cron_registry = CronTenantRegistry.get_instance(
         agent_client=client,

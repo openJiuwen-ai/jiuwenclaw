@@ -21,6 +21,8 @@ from typing import Any, List, Optional, Union
 
 from openjiuwen.core.foundation.tool import LocalFunction, Tool, ToolCard
 
+from jiuwenswarm.edition import is_enterprise
+
 
 logger = logging.getLogger(__name__)
 
@@ -468,8 +470,6 @@ class SendFileToolkit:
     @classmethod
     def _should_use_obs_download(cls) -> bool:
         """Enterprise default: MinIO URL on current chat SSE (not file.download.*)."""
-        from jiuwenswarm.common.local_env_config import is_enterprise
-
         return bool(is_enterprise()) and not cls._escape_file_download_via_push()
 
     async def _send_file_via_obs(
