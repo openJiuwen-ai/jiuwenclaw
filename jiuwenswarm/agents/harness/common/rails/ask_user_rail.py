@@ -368,6 +368,19 @@ class StructuredAskUserRail(AskUserRail):
                     )
                 )
 
+        if not questions_data and not (
+            isinstance(args.get("query"), str) and args.get("query").strip()
+        ):
+            # 模型把字段名拼错（如 questions_list）或完全没给题干时，不能再走
+            # legacy 纯文本分支生成空问题中断：空问题会被 wire 层误判成
+            # permission_interrupt 审批卡，用户点允许/拒绝都会死循环。
+            return self.reject(
+                tool_result=(
+                    "[INVALID_ARGUMENT] ask_user requires a non-empty `questions` "
+                    "array (or a legacy non-empty `query`); received=%r" % (args,)
+                )
+            )
+
         if user_input is None:
             return self.interrupt(self._build_ask_request(tool_call))
 
