@@ -1523,6 +1523,8 @@ async def _fetch_all_sessions_from_agent(
     *,
     user_id: str | None = None,
     channel_id: str = "web",
+    group_id: str | None = None,
+    bot_id: str | None = None,
 ) -> list[dict[str, Any]]:
     """Remote 模式下从 AgentServer ``session.list`` 分页拉取全量会话 metadata。"""
     from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
@@ -1536,6 +1538,14 @@ async def _fetch_all_sessions_from_agent(
     total: int | None = None
     authenticated_user_id = str(user_id or "").strip() or None
 
+    # 复用 apply_invoke_ids_to_envelope：把 routing 三元组带进信封，
+    # 让 AgentServer 按 bot/group/user 定位到正确的 workspace_{key}。
+    routing: dict[str, str] = {}
+    if str(group_id or "").strip():
+        routing["group_id"] = str(group_id).strip()
+    if str(bot_id or "").strip():
+        routing["bot_id"] = str(bot_id).strip()
+
     while True:
         env = e2a_from_agent_fields(
             request_id=f"session-list-{uuid.uuid4().hex[:12]}",
@@ -1545,6 +1555,7 @@ async def _fetch_all_sessions_from_agent(
             is_stream=False,
             timestamp=time.time(),
             user_id=authenticated_user_id,
+            metadata={"routing": routing} if routing else None,
         )
         try:
             response = await agent_client.send_request(env)
@@ -4082,40 +4093,28 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         def _belongs(meta: dict[str, Any]) -> bool:
             return _attribute_session_project(meta, visible_by_id) == project_id
 
-        sessions = collect_all_sessions_metadata()
-        # remote(PG)模式：PG sessions 表没有 pinned/cron_id/channel_id/project_id 等字段，
-        # 企业版会话历史存在 PG，session_metadata 本地文件不含这些会话。
-        # 从 PG 读全量会话并补默认字段，让下面的过滤逻辑统一处理。
+        # remote 模式：普通会话与 cron 会话统一从 AgentServer 的 session.list 拉取，
+        # 不再叠加 gateway 本地磁盘（否则 cron 失败兜底写入的本地脏数据会被误当成普通会话）。
         if is_remote_storage():
-            _raw_uid = str(user_id or "").strip() or "guest"
-            try:
-                from jiuwenswarm.channels.web.history_store.api import (
-                    count_sessions_sync,
-                    list_sessions_sync,
+            ac = _resolve(agent_client)
+            if ac is None:
+                await channel.send_response(
+                    ws,
+                    req_id,
+                    ok=False,
+                    error="AgentServer is unavailable",
+                    code="SERVICE_UNAVAILABLE",
                 )
-
-                # count 先行（库不可用时抛异常）：PG 故障时不把空列表混入结果，
-                # 与 session.list 的回退语义保持一致。
-                await asyncio.to_thread(count_sessions_sync, None, user=_raw_uid)
-                db_sessions = await asyncio.to_thread(
-                    list_sessions_sync,
-                    None,
-                    limit=500,
-                    offset=0,
-                    user=_raw_uid,
-                )
-            except Exception:  # noqa: BLE001
-                logger.warning(
-                    "[project.sessions] PG 会话历史库不可用，跳过 PG 会话", exc_info=True,
-                )
-                db_sessions = []
-            for s in db_sessions:
-                s.setdefault("pinned", False)
-                s.setdefault("cron_id", "")
-                s.setdefault("channel_id", "web")
-                s.setdefault("project_id", "")
-                s.setdefault("last_user_message_at", s.get("updated_at", 0))
-            sessions = db_sessions + sessions
+                return
+            sessions = await _fetch_all_sessions_from_agent(
+                ac,
+                channel_id=channel.channel_id,
+                user_id=str(params.get("user_id") or user_id or "").strip() or None,
+                group_id=str(params.get("group_id") or "").strip() or None,
+                bot_id=str(params.get("bot_id") or "").strip() or None,
+            )
+        else:
+            sessions = collect_all_sessions_metadata()
         # 仅非置顶普通会话(cron_id 为空) + 归属匹配 + web 渠道
         # cron 会话由 get_cron_sessions 返回
         matched = [
@@ -4206,6 +4205,9 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             sessions = await _fetch_all_sessions_from_agent(
                 ac,
                 channel_id=channel.channel_id,
+                user_id=str(params.get("user_id") or "").strip() or None,
+                group_id=str(params.get("group_id") or "").strip() or None,
+                bot_id=str(params.get("bot_id") or "").strip() or None,
             )
         else:
             from jiuwenswarm.server.runtime.session.session_metadata import collect_all_sessions_metadata

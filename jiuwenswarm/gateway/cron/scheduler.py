@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any, Callable
 from zoneinfo import ZoneInfo
 
 from jiuwenswarm.gateway.routing.agent_client import AgentServerClient
+from jiuwenswarm.gateway.routing.session_index import is_remote_storage
 from jiuwenswarm.gateway.cron.dingtalk_routing import (
     is_usable_dingtalk_staff_id,
     resolve_dingtalk_push_metadata,
@@ -1518,7 +1519,11 @@ class CronSchedulerService:
                 # a job the user has removed.
                 if not state.result_text and state.error and not is_cancelled_ghost:
                     state.result_text = f"[cron] 任务执行失败: {state.error}"
-                if state.result_text and not ok and not is_cancelled_ghost:
+                # 仅在 local 模式写 gateway 本地磁盘兜底历史；remote 模式下会话
+                # 数据由 AgentServer 持久化，本地写入会污染 gateway 磁盘并被
+                # project.get_sessions 误读为普通会话(cron_id 丢失)。
+                local_fallback_ok = not is_cancelled_ghost and not is_remote_storage()
+                if state.result_text and not ok and local_fallback_ok:
                     query = ""
                     if envelope is not None and isinstance(envelope.params, dict):
                         query = str(
