@@ -1207,6 +1207,13 @@ body.workspace-resize-active iframe {
     margin: 0;
   }
 
+  /* ====== Member detail body (team-area / subagent shared) ====== */
+  .member-detail-body > * {
+    max-width: max(720px, calc(100% - 640px));
+    margin-left: auto;
+    margin-right: auto;
+  }
+
   /* ====== Team Event Group Cards ====== */
   .team-event-group {
     margin: 0;
