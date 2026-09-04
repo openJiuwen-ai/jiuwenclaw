@@ -16606,15 +16606,20 @@ class JiuWenSwarmDeepAdapter:
                 and not goal_stream_request
             )
             async for chunk in interaction_stream:
+                # After ask_user, skip trailing metadata until a real resume
+                # chunk arrives (in-place HITL). Unknown types default to clear
+                # so new SDK frames cannot re-hang the stream.
                 if suppress_stream_after_hitl:
-                    continue
-                # [DIAG] HITL resume 调试：对照 forwarder([DeepAgent][fwd]) 转发的 chunk，
-                # 确认主循环实际从 interaction_stream 消费到什么类型。
-                _stream_ct = getattr(chunk, "type", None) or type(chunk).__name__
-                logger.debug(
-                    "[JiuWenSwarmDeepAdapter][stream] consumer chunk type=%s request_id=%s",
-                    _stream_ct, rid,
-                )
+                    if self._is_hitl_suppress_noise_chunk(chunk):
+                        continue
+                    suppress_stream_after_hitl = False
+                    hitl_pending_stream = False
+                    logger.info(
+                        "[JiuWenSwarmDeepAdapter] HITL suppress cleared on "
+                        "runner resume: request_id=%s chunk_type=%s",
+                        rid,
+                        getattr(chunk, "type", None) or type(chunk).__name__,
+                    )
                 # First chunk handed back by the runner: records the time to
                 # first token for this round.
                 if not first_chunk_seen:
@@ -17321,6 +17326,15 @@ class JiuWenSwarmDeepAdapter:
     def _is_ask_user_payload(payload: Any) -> bool:
         """HITL 暂停判定：payload 是否为 ask_user 卡片事件。"""
         return isinstance(payload, dict) and payload.get("event_type") == "chat.ask_user_question"
+
+    @staticmethod
+    def _is_hitl_suppress_noise_chunk(chunk: Any) -> bool:
+        """Metadata that may follow ask_user before the stream truly pauses.
+
+        These must not clear suppress / hitl_pending; any other chunk means the
+        runner resumed in-place and outbound must resume.
+        """
+        return getattr(chunk, "type", None) in ("llm_usage", "context.usage")
 
     @staticmethod
     def _run_failure(chunk) -> tuple[str, str] | None:
