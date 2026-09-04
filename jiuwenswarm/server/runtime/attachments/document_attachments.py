@@ -26,6 +26,12 @@ from jiuwenswarm.server.runtime.attachments.upload_storage import (
 
 logger = logging.getLogger(__name__)
 
+# Base64 persist is used only for browser / remote-web uploads; cap it so a
+# single payload cannot exhaust memory. Large documents are handled by the
+# Gateway-side ``_pre_persist_large_documents`` (HTTP/local persist) instead.
+_MAX_DOCUMENT_BYTES = 10 * 1024 * 1024
+_MAX_DOCUMENT_COUNT = 8
+
 # Executable / script / package types rejected by document upload.
 FORBIDDEN_DOCUMENT_EXTENSIONS: frozenset[str] = frozenset(
     {
@@ -113,7 +119,7 @@ def persist_and_parse_documents(params: dict[str, Any], session_id: str | None =
     stored: list[dict[str, Any]] = []
     errors: list[dict[str, Any]] = []
 
-    for index, item in enumerate(raw_items):
+    for index, item in enumerate(raw_items[:_MAX_DOCUMENT_COUNT]):
         try:
             stored_item = _resolve_document_item(item, index=index, session_id=session_id)
             if stored_item:
@@ -233,6 +239,10 @@ def _resolve_document_item(
         with suppress(binascii.Error):
             data = base64.b64decode(raw_base64, validate=True)
         if data:
+            if len(data) > _MAX_DOCUMENT_BYTES:
+                raise ValueError(
+                    f"Document too large: {len(data)} bytes exceeds {_MAX_DOCUMENT_BYTES}"
+                )
             filename = filename_hint or f"document-{index + 1}"
             if is_forbidden_document(filename=filename):
                 raise ValueError(
