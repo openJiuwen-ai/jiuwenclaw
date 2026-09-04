@@ -43,6 +43,18 @@ log()  { printf '[deepsearch-install] %s\n' "$*"; }
 warn() { printf '[deepsearch-install][警告] %s\n' "$*"; }
 fail() { printf '[deepsearch-install][失败] %s\n' "$*"; exit 1; }
 py_ok() { "$VENV_PY" -c "$1" >/dev/null 2>&1; }
+# pip 刚解包的 .so 在鸿蒙 hmdfs 上偶发"延迟可见"：立即 import 可能短暂失败，
+# 1~2 秒后自愈（本机实测 git/head 同样有此现象）。安装后的功能测试必须重试，
+# 否则会把瞬时 I/O 错误误判为安装失败（已在新机器 numpy 重签路径上实际踩坑）。
+py_ok_retry() {
+    _i=0
+    while [ "$_i" -lt 3 ]; do
+        py_ok "$1" && return 0
+        _i=$((_i + 1))
+        [ "$_i" -lt 3 ] && sleep 2
+    done
+    return 1
+}
 # 真实 wheel 以 zip 魔数 "PK" 开头。仓库里 >10MiB 的 wheel（两个 pandas）走
 # Git LFS（gitcode 单文件限 10 MiB）；未装 git-lfs 的机器克隆下来是 ~130 字节的
 # 指针文本文件，必须识别并跳过，让后续在线兜底路径接管。
@@ -149,7 +161,7 @@ install_native() {
         fi
         log "  $_label: 安装离线 wheel ($(basename "$_w"))"
         "$VENV_PY" -m pip install --no-deps --force-reinstall "$_w" >/dev/null 2>&1
-        if py_ok "$_test"; then
+        if py_ok_retry "$_test"; then
             log "  $_label 安装成功（离线 wheel）"
             return 0
         fi
@@ -165,7 +177,7 @@ install_native() {
             _out="$TMP/$(basename "$_w")"
             if "$VENV_PY" "$CONVERTER" "$_w" -o "$_out" >/dev/null 2>&1; then
                 "$VENV_PY" -m pip install --no-deps --force-reinstall "$_out" >/dev/null 2>&1
-                if py_ok "$_test"; then
+                if py_ok_retry "$_test"; then
                     log "  $_label 安装成功（本机重签）"
                     return 0
                 fi
@@ -207,7 +219,7 @@ install_native() {
                     for _o in "$TMP"/$_mpkg-*harmonyos_aarch64.whl; do
                         [ -f "$_o" ] || continue
                         "$VENV_PY" -m pip install --no-deps --force-reinstall "$_o" >/dev/null 2>&1
-                        if py_ok "$_test"; then
+                        if py_ok_retry "$_test"; then
                             log "  $_label 安装成功（musl 现场转换）"
                             return 0
                         fi
@@ -217,7 +229,8 @@ install_native() {
             fi
         fi
     fi
-    warn "  $_label 所有安装路径均失败"
+    warn "  $_label 所有安装路径均失败（功能测试已各重试 3 次）；真实错误："
+    "$VENV_PY" -c "$_test" 2>&1 | tail -5 | sed 's/^/    /'
     return 1
 }
 
@@ -423,6 +436,7 @@ while [ "$_i" -lt 12 ]; do
     log "  补装缺失模块: $_missing"
     "$VENV_PY" -m pip install --no-deps -i "$MIRROR" "$_missing" >/dev/null 2>&1 \
         || warn "  无法安装 $_missing（无网络或无兼容 wheel）"
+    sleep 2   # hmdfs 延迟可见：给刚解包的文件稳定时间，避免复测误判导致重复安装
     _i=$((_i + 1))
 done
 if [ "$_i" -ge 12 ]; then
@@ -505,9 +519,19 @@ if FAIL:
 print("全部验证通过")
 PYVERIFY
 
-if LD_LIBRARY_PATH= "$VENV_PY" "$TMP/verify_final.py" > "$TMP/verify.log" 2>&1; then
-    grep -v ohos_build_env "$TMP/verify.log"
-else
+_vc=0
+while [ "$_vc" -lt 2 ]; do
+    if LD_LIBRARY_PATH= "$VENV_PY" "$TMP/verify_final.py" > "$TMP/verify.log" 2>&1; then
+        grep -v ohos_build_env "$TMP/verify.log"
+        break
+    fi
+    _vc=$((_vc + 1))
+    if [ "$_vc" -lt 2 ]; then
+        warn "最终验证未通过，2 秒后重试一次（排除 hmdfs 文件延迟可见的误判）..."
+        sleep 2
+    fi
+done
+if [ "$_vc" -ge 2 ]; then
     grep -v ohos_build_env "$TMP/verify.log"
     fail "验证未通过 —— 请把以上输出连同日志 $TMP/verify.log 发给我"
 fi
