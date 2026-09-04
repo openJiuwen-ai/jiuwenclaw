@@ -1,7 +1,9 @@
 import { webRequest } from '../../../services/webClient';
 import type { Message } from '../../../types/message';
+import { useGoalStore } from '../../../stores/goalStore';
 import { usePlanStore } from '../../../stores/planStore';
 import { NEW_CONVERSATION_ID } from '../../../multi-session/state/newConversationLifecycle';
+import { resolvePlanGoalInterlock } from './semantics';
 
 /**
  * 斜杠命令注册表（/btw、/compact、/plan、/persist，对齐 TUI）。
@@ -25,6 +27,50 @@ export interface SlashCommand {
   /** 是否要求真实会话；纯本地命令（/plan）设 false，欢迎页也能用 */
   requiresSession?: boolean;
   execute: (ctx: SlashCommandContext, args: string) => Promise<void>;
+}
+
+interface PlanSlashStore {
+  ensureRuntime: (sessionId: string) => unknown;
+  isActive: (sessionId: string) => boolean;
+  setActive: (
+    sessionId: string,
+    active: boolean,
+    options?: { explicitEntry?: boolean; entrySource?: 'slash_command' },
+  ) => void;
+}
+
+interface GoalSlashStore {
+  getRuntime: (sessionId: string) =>
+    | { goal: { status: string } | null; armed: boolean }
+    | undefined;
+  setArmed: (sessionId: string, armed: boolean) => void;
+}
+
+export type PlanSlashToggleResult = 'activated' | 'deactivated' | 'blocked_by_goal';
+
+/** Apply `/plan` through the same Goal interlock used by the toolbar. */
+export function togglePlanFromSlash(
+  sessionId: string,
+  planStore: PlanSlashStore = usePlanStore.getState(),
+  goalStore: GoalSlashStore = useGoalStore.getState(),
+): PlanSlashToggleResult {
+  planStore.ensureRuntime(sessionId);
+  if (planStore.isActive(sessionId)) {
+    planStore.setActive(sessionId, false);
+    return 'deactivated';
+  }
+
+  const goalRuntime = goalStore.getRuntime(sessionId);
+  const goalInterlock = resolvePlanGoalInterlock(goalRuntime?.goal, goalRuntime?.armed ?? false);
+  if (goalInterlock === 'block') return 'blocked_by_goal';
+  if (goalInterlock === 'clear_goal_armed') {
+    goalStore.setArmed(sessionId, false);
+  }
+  planStore.setActive(sessionId, true, {
+    explicitEntry: true,
+    entrySource: 'slash_command',
+  });
+  return 'activated';
 }
 
 /** 解析 "/btw some question" → { name: "btw", args: "some question" } */
@@ -141,16 +187,12 @@ const planCommand: SlashCommand = {
       );
       return;
     }
-    const store = usePlanStore.getState();
-    store.ensureRuntime(ctx.sessionId);
-    if (store.isActive(ctx.sessionId)) {
-      store.setActive(ctx.sessionId, false);
+    const result = togglePlanFromSlash(ctx.sessionId);
+    if (result === 'blocked_by_goal') {
+      // 选择器会直接禁用 /plan；手工输入或旧页面竞态命中时也只静默拦截，
+      // 不再把同一条互斥提示反复写进聊天记录。
       return;
     }
-    store.setActive(ctx.sessionId, true, {
-      explicitEntry: true,
-      entrySource: 'slash_command',
-    });
   },
 };
 

@@ -122,10 +122,7 @@ import {
 } from './features/a2ui/actionBridge';
 import { saveBlob } from './utils/desktopSave';
 import { generateUuidV4 } from './utils/uuid';
-import {
-  ModelSetupGuide,
-  type ModelSetupGuideStep,
-} from './features/modelSetupGuide/ModelSetupGuide';
+import { ModelSetupGuide, type ModelSetupGuideStep } from './features/modelSetupGuide/ModelSetupGuide';
 import { isSetupGuideEnabled } from './features/modelSetupGuide/modelSetupGuideState';
 import { isTeamAgentMode } from './features/planMode/wireMode';
 import {
@@ -879,7 +876,14 @@ function AppContent({
     drainTaskQueueIfIdle,
   } = useWebSocket({
     activeSessionId: sessionId,
-    onConnect: () => console.log('Connected'),
+    onConnect: () => {
+      console.log('Connected');
+      // 连接建立/断线重连后重拉侧边栏定时任务列表（useCronStore）：web 先行
+      // 导航时首屏挂载早于 gateway 就绪，挂载期的 cron.job.list 会失败并被
+      // store 静默清空，且无其它重试入口，导致 project 页签定时任务空白直到
+      // 侧边栏重新挂载。这里在每次连接可用后补齐拉取。
+      void useCronStore.getState().loadJobs();
+    },
     onDisconnect: () => {
       console.log('Disconnected');
     },
@@ -2326,13 +2330,9 @@ function AppContent({
   }, [kvCacheAffinityEnabled, mode, request]);
 
   const handleUseAgent = useCallback((agentId: string) => {
-    const currentSessionId = sessionIdRef.current || NEW_CONVERSATION_ID;
-    const sessionStore = useSessionStore.getState();
-    sessionStore.setAgentSelectionIntent(currentSessionId, { kind: 'select', id: agentId });
-    sessionStore.setMode(currentSessionId, 'agent');
-    setActiveNav('chat');
-    requestComposerFocus();
-  }, [requestComposerFocus]);
+    enterNewConversation('agent');
+    useSessionStore.getState().setAgentSelectionIntent(NEW_CONVERSATION_ID, { kind: 'select', id: agentId });
+  }, [enterNewConversation]);
 
   const handleUseAgentPrompt = useCallback((agentId: string, prompt: string) => {
     enterNewConversation('agent', { initialInputValue: prompt });
@@ -3195,18 +3195,20 @@ const showWorkspaceDivider = effectiveTeamAreaExpanded && !showConversationNotFo
         {activeNav === 'sessions' && (
           <div className="app-section">
             <SessionsPanel
-              currentSessionId={sessionId}
-              isConnected={isConnected}
-              isProcessing={isProcessing}
-              onRestoreSession={handleRestoreSession}
+                currentSessionId={sessionId}
+                isConnected={isConnected}
+                isProcessing={isProcessing}
+                onRestoreSession={handleRestoreSession}
             />
           </div>
         )}
         {activeNav === 'cron' && (
           <div className="chat-layout flex-1 flex min-h-0 overflow-hidden">
+            {/*
+              停留在定时任务时，项目/会话列表不应该还显示"选中"效果——定时任务和它们是同一级的。
+              互斥选中关系，传 null 让列表里的选中态清空（沿用"新建会话时传 null"的既有语义）。
+            */}
             <ConversationSidebar
-              // 停留在定时任务时，项目/会话列表不应该还显示"选中"效果——定时任务和它们是同一级的
-              // 互斥选中关系，传 null 让列表里的选中态清空（沿用"新建会话时传 null"的既有语义）
               activeSessionId={null}
               onNew={(options) => requestSessionNavigation('new', options)}
               onSelect={requestSessionNavigation}
@@ -3219,9 +3221,9 @@ const showWorkspaceDivider = effectiveTeamAreaExpanded && !showConversationNotFo
             />
             <div className="chat-workspace flex-1 flex min-h-0 overflow-hidden">
               <CronPanel
-                sessionId={sessionId}
-                onCreateViaChat={(initialInputValue) => requestSessionNavigation('new', { initialInputValue })}
-                onSelectSession={(session) => {
+                  sessionId={sessionId}
+                  onCreateViaChat={(initialInputValue) => requestSessionNavigation('new', { initialInputValue })}
+                  onSelectSession={(session) => {
                   if (typeof session === 'string') {
                     // 立即执行返回的 session_id 可能还未在后端创建（agent 刚开始执行），
                     // 构造最小 Session 占位对象，让 upsertSessionMetadata 直接加入会话列表，
@@ -3243,7 +3245,7 @@ const showWorkspaceDivider = effectiveTeamAreaExpanded && !showConversationNotFo
                     return;
                   }
                   requestSessionNavigation(session);
-                }}
+                  }}
               />
             </div>
           </div>
@@ -3251,21 +3253,21 @@ const showWorkspaceDivider = effectiveTeamAreaExpanded && !showConversationNotFo
         {activeNav === 'settings' && (
           <div className="app-section">
             <SettingsPage
-              definition={settingsPageDefinition}
-              isConnected={isConnected}
-              connectionState={connectionState}
-              request={settingsRequest}
-              onHasChangesChange={handleSettingsHasChangesChange}
-              onConfigSaved={handleSettingsConfigSaved}
-              onDetectExternalCli={detectExternalCli}
-              onSelectExternalCliPath={selectExternalCliPath}
-              onTrackExternalCliDependencyInstalls={trackExternalCliDependencyInstalls}
-              externalCliInstallStatuses={externalCliInstallStatuses}
-              externalCliInstallBusy={Object.values(externalCliInstallStatuses).some(
-                (status) => status?.status === 'running',
-              )}
-              onOpenExternalCliInstallDialog={() => setExternalCliInstallDialogOpen(true)}
-              initialModuleId={requestedSettingsModuleId ?? undefined}
+                definition={settingsPageDefinition}
+                isConnected={isConnected}
+                connectionState={connectionState}
+                request={settingsRequest}
+                onHasChangesChange={handleSettingsHasChangesChange}
+                onConfigSaved={handleSettingsConfigSaved}
+                onDetectExternalCli={detectExternalCli}
+                onSelectExternalCliPath={selectExternalCliPath}
+                onTrackExternalCliDependencyInstalls={trackExternalCliDependencyInstalls}
+                externalCliInstallStatuses={externalCliInstallStatuses}
+                externalCliInstallBusy={Object.values(externalCliInstallStatuses).some(
+                  (status) => status?.status === 'running',
+                )}
+                onOpenExternalCliInstallDialog={() => setExternalCliInstallDialogOpen(true)}
+                initialModuleId={requestedSettingsModuleId ?? undefined}
             />
           </div>
         )}
@@ -3278,12 +3280,12 @@ const showWorkspaceDivider = effectiveTeamAreaExpanded && !showConversationNotFo
         {hasVisitedSkills && (
           <div className={`app-section ${activeNav === 'skills' ? '' : 'is-hidden'}`}>
             <SkillPanel
-              sessionId={sessionId}
-              isConnected={isConnected}
-              isActive={activeNav === 'skills'}
-              symphonyEnabled={normalizeConfigBoolean(serverConfig?.symphony_enabled)}
-              onSymphonyEnabledChange={saveSymphonyEnabled}
-              onNavigateToSettings={() => requestSettingsModule('agent')}
+                sessionId={sessionId}
+                isConnected={isConnected}
+                isActive={activeNav === 'skills'}
+                symphonyEnabled={normalizeConfigBoolean(serverConfig?.symphony_enabled)}
+                onSymphonyEnabledChange={saveSymphonyEnabled}
+                onNavigateToSettings={() => requestSettingsModule('agent')}
             />
           </div>
         )}

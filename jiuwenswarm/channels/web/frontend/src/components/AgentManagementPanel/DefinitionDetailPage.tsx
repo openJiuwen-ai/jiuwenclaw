@@ -143,7 +143,7 @@ export function DefinitionDetailPage({
         <div className="agent-management-detail__identity">
           <Avatar name={detail.displayName} avatarUrl={avatarUrl} />
           <div>
-            <h1>{detail.displayName}</h1>
+            <h1 title={detail.displayName}>{detail.displayName}</h1>
             <div className="agent-management-detail__badges">
               <span className="agent-management-tag">
                 {t(`agentManagement.categories.${detail.category}`, { defaultValue: detail.category || t('agentManagement.categoryOther') })}

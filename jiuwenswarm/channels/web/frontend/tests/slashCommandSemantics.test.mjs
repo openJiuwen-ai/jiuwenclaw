@@ -3,6 +3,9 @@ import test from 'node:test';
 
 import {
   getWebSlashCommandsForMode,
+  hasUnfinishedGoal,
+  isSlashCommandDisabledByGoal,
+  resolvePlanGoalInterlock,
   shouldExecuteRegisteredSlashCommand,
   supportsWebSlashCommands,
 } from '../node_modules/.cache/slash-command-semantics/components/ChatPanel/slashCommands/semantics.js';
@@ -39,4 +42,27 @@ test('single-agent mode keeps command visibility and execution', () => {
   assert.equal(getWebSlashCommandsForMode(commands, 'agent'), commands);
   assert.equal(shouldExecuteRegisteredSlashCommand('btw', '问题', 'agent'), true);
   assert.equal(shouldExecuteRegisteredSlashCommand('compact', '', 'agent'), true);
+});
+
+test('plan entry is blocked while a real goal is unfinished', () => {
+  for (const status of ['active', 'paused', 'blocked']) {
+    const goal = { status };
+    assert.equal(hasUnfinishedGoal(goal), true);
+    assert.equal(resolvePlanGoalInterlock(goal, false), 'block');
+    assert.equal(resolvePlanGoalInterlock(goal, true), 'block');
+  }
+});
+
+test('plan entry clears only an uncommitted goal toggle', () => {
+  assert.equal(resolvePlanGoalInterlock(null, true), 'clear_goal_armed');
+  assert.equal(resolvePlanGoalInterlock({ status: 'completed' }, true), 'clear_goal_armed');
+  assert.equal(resolvePlanGoalInterlock(null, false), 'allow');
+  assert.equal(resolvePlanGoalInterlock({ status: 'completed' }, false), 'allow');
+});
+
+test('only /plan is disabled in the picker while a goal is unfinished', () => {
+  assert.equal(isSlashCommandDisabledByGoal('plan', true), true);
+  assert.equal(isSlashCommandDisabledByGoal('PLAN', true), true);
+  assert.equal(isSlashCommandDisabledByGoal('compact', true), false);
+  assert.equal(isSlashCommandDisabledByGoal('plan', false), false);
 });

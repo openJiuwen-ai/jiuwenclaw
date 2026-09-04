@@ -625,7 +625,7 @@ class WebChannel(BaseWsChannel):
         self._uvicorn_server = uvicorn.Server(uv_cfg)
         self._running = True
         logger.info(
-            "WebChannel 已启动(dual_protocol): ws://%s:%s%s (HTTP-ready same port)",
+            "WebChannel 正在启动(dual_protocol): ws://%s:%s%s",
             self.config.host,
             self.config.port,
             self.config.path,

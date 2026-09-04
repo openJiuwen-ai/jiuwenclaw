@@ -137,10 +137,8 @@ export function DefinitionFilePreview({
   }, [fileContent]);
 
   useEffect(() => {
-    if (filesStatus === 'success' && selectedFilePath) {
-      setExpanded(findExpandedDirectories(files));
-    }
-  }, [files, filesStatus, selectedFilePath]);
+    if (filesStatus === 'success') setExpanded(findExpandedDirectories(files));
+  }, [files, filesStatus]);
 
   const toggleFolder = (path: string) => {
     setExpanded(current => {
