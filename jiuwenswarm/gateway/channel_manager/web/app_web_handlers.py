@@ -1705,6 +1705,25 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
     async def _a2a_ingress_get(ws, req_id, params, session_id):
         await _send_a2a_snapshot(ws, req_id, lambda: _a2a_snapshot_async(a2a_manager))
 
+    async def _a2a_ingress_edit(ws, req_id, params, session_id):
+        if a2a_manager is None:
+            await channel.send_response(
+                ws, req_id, ok=False, error="A2A ingress manager is unavailable", code="A2A_BIND_FAILED"
+            )
+            return
+        try:
+            payload = await a2a_manager.edit_config()
+        except Exception:
+            await channel.send_response(
+                ws,
+                req_id,
+                ok=False,
+                error="Unable to read A2A ingress configuration",
+                code="A2A_CONFIG_INVALID",
+            )
+            return
+        await channel.send_response(ws, req_id, ok=True, payload=payload)
+
     async def _a2a_ingress_history(ws, req_id, params, session_id):
         if a2a_manager is None:
             await channel.send_response(
@@ -1747,6 +1766,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         await _send_a2a_snapshot(ws, req_id, lambda: a2a_manager.reload())
 
     channel.register_method("a2a.ingress.get", _a2a_ingress_get)
+    channel.register_method("a2a.ingress.edit", _a2a_ingress_edit)
     channel.register_method("a2a.ingress.history", _a2a_ingress_history)
     channel.register_method("a2a.ingress.update", _a2a_ingress_update)
     channel.register_method("a2a.ingress.enable", _a2a_ingress_enable)
@@ -1829,6 +1849,11 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             ws, req_id, lambda: a2a_manager.outbound_get(str(params.get("agent_id") or ""))
         )
 
+    async def _a2a_outbound_edit(ws, req_id, params, session_id):
+        await _send_a2a_outbound(
+            ws, req_id, lambda: a2a_manager.outbound_edit(str(params.get("agent_id") or ""))
+        )
+
     async def _a2a_outbound_update(ws, req_id, params, session_id):
         payload = dict(params)
         agent_id = str(payload.pop("agent_id", ""))
@@ -1904,6 +1929,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
     channel.register_method("a2a.outbound.register", _a2a_outbound_register)
     channel.register_method("a2a.outbound.list", _a2a_outbound_list)
     channel.register_method("a2a.outbound.get", _a2a_outbound_get)
+    channel.register_method("a2a.outbound.edit", _a2a_outbound_edit)
     channel.register_method("a2a.outbound.update", _a2a_outbound_update)
     channel.register_method("a2a.outbound.refresh", _a2a_outbound_refresh)
     channel.register_method(
