@@ -2062,6 +2062,7 @@ class JiuWenSwarmDeepAdapter:
         self._stream_event_rail: JiuSwarmStreamEventRail | None = None
         self._task_execution_rail: TaskExecutionRail | None = None
         self._skill_turbo_prompt_rail: Any = None
+        self._skill_turbo_delivery_summary_rail: Any = None
         self._skill_protocol_prompt_rail: Any = None
         self._request_summary_rail: Any | None = None
         # Track session IDs currently executing on this adapter instance.
@@ -7730,6 +7731,13 @@ class JiuWenSwarmDeepAdapter:
                 self._build_skill_turbo_prompt_rail,
             )
         )
+        # SkillTurboDeliverySummaryRail: 外层 tool_result 之后发出 PPT 交付总结
+        rail_infos.append(
+            _RailBuildInfo(
+                "_skill_turbo_delivery_summary_rail",
+                self._build_skill_turbo_delivery_summary_rail,
+            )
+        )
 
         # SkillProtocolPromptRail: 注入技能执行规范（skill_protocol 段），仅 agent 模式挂载。
         if isinstance(mode, str) and mode.startswith("agent"):
@@ -10434,6 +10442,36 @@ class JiuWenSwarmDeepAdapter:
             return rail
         except Exception as exc:
             logger.warning("[JiuWenSwarmDeepAdapter] SkillTurboPromptRail create failed: %s", exc)
+            return None
+
+    @staticmethod
+    def _build_skill_turbo_delivery_summary_rail() -> Any | None:
+        """构建 SkillTurboDeliverySummaryRail: tool_result 后发出 PPT 交付总结。
+
+        仅在 config.react.skill_turbo.enabled = true 时创建，否则返回 None。
+        """
+        try:
+            config_base = get_config()
+            react_config = config_base.get("react", {}) if isinstance(config_base, dict) else {}
+            skill_turbo_config = react_config.get("skill_turbo", {}) if isinstance(react_config, dict) else {}
+            enabled = skill_turbo_config.get("enabled", False) if isinstance(skill_turbo_config, dict) else False
+            if not enabled:
+                return None
+
+            from jiuwenswarm.server.runtime.skill_turbo.rails.delivery_summary_rail import (
+                SkillTurboDeliverySummaryRail,
+            )
+
+            rail = SkillTurboDeliverySummaryRail()
+            logger.info(
+                "[JiuWenSwarmDeepAdapter] SkillTurboDeliverySummaryRail create success"
+            )
+            return rail
+        except Exception as exc:
+            logger.warning(
+                "[JiuWenSwarmDeepAdapter] SkillTurboDeliverySummaryRail create failed: %s",
+                exc,
+            )
             return None
 
     # ──────────── SkillTurbo 集成 ────────────

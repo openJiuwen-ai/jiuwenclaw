@@ -34,6 +34,12 @@ _SKILL_TURBO_STOP_HINT = (
     "work is already done; calling any of them again would duplicate the work."
 )
 
+_PPT_DELIVERY_SUMMARY_POST_TOOL_HINT = (
+    "\n\n[SYSTEM] PPT 交付总结骨架将由系统在本工具结果之后通过流式通道发送给用户，"
+    "无需在本回合重复输出交付总结。禁止 tool_call，禁止再调 "
+    "send_file_to_user / skill_tool / skill_acceleration_exec。"
+)
+
 # 工具返回值会先被 AbilityManager 收成 ToolMessage。after_tool_call 再用
 # StreamEventRail._tool_interrupted_message（随 prompt 语言中/英）覆写 tool_msg。
 # _fix_incomplete_tool_context 认 rail 文案 + 中英文 legacy 模板，故本常量取中文
@@ -41,6 +47,15 @@ _SKILL_TURBO_STOP_HINT = (
 # str(dict) 进 ToolMessage 后模型会当成加速失败并回退 skill_tool。
 _SKILL_TURBO_HITL_PLACEHOLDER = (
     "[工具执行被中断] 工具 skill_acceleration_exec 执行过程中被用户打断，没有执行结果。"
+)
+
+# ── 待在外层 tool_result 之后发出的 PPT 交付总结 ──
+# 不可在 ppt_gen_root / 工具执行中途以 chat.delta 发出：那时无 task_id，会与过程尾
+# 同桶；且早于 skill_acceleration_exec 的 tool_result，RelayClaw 收集窗口会清空。
+# 由 SkillTurboDeliverySummaryRail.after_tool_call（晚于 StreamEventRail 发
+# tool_result）读取并发出。
+_pending_ppt_delivery_summary: ContextVar[str | None] = ContextVar(
+    "pending_ppt_delivery_summary", default=None
 )
 
 # ── SkillTurbo event_type -> DeepAgent OutputSchema.type 反向映射 ──
@@ -126,6 +141,60 @@ def set_skill_turbo_hitl_tic(tic: Any) -> Token:
 
 def get_skill_turbo_hitl_tic() -> Any:
     return _skill_turbo_hitl_tic.get()
+
+
+def set_pending_ppt_delivery_summary(summary: str) -> None:
+    text = str(summary or "").strip()
+    _pending_ppt_delivery_summary.set(text or None)
+
+
+def clear_pending_ppt_delivery_summary() -> None:
+    _pending_ppt_delivery_summary.set(None)
+
+
+def take_pending_ppt_delivery_summary() -> str:
+    text = str(_pending_ppt_delivery_summary.get() or "").strip()
+    _pending_ppt_delivery_summary.set(None)
+    return text
+
+
+async def emit_pending_ppt_delivery_summary(session: "Session") -> bool:
+    """在外层 tool_result 之后发出无 task_id 的交付总结 chat.delta。
+
+    返回是否实际发出。session 为 None 或骨架非法时静默跳过。
+    """
+    from jiuwenswarm.server.runtime.skill_turbo.skill_codes.ppt.delivery_summary import (
+        DELIVERY_SUMMARY_START,
+    )
+    from openjiuwen.core.session.stream.base import OutputSchema
+
+    summary = take_pending_ppt_delivery_summary()
+    if not summary.startswith(DELIVERY_SUMMARY_START):
+        return False
+    if session is None:
+        logger.warning(
+            "[SkillTurboTool] pending PPT delivery summary dropped: parent session is None"
+        )
+        return False
+    try:
+        await session.write_stream(
+            OutputSchema(
+                type="llm_output",
+                index=0,
+                payload={"content": summary},
+            )
+        )
+        logger.info(
+            "[SkillTurboTool] emitted PPT delivery summary after tool_result chars=%d",
+            len(summary),
+        )
+        return True
+    except Exception:
+        logger.warning(
+            "[SkillTurboTool] emit PPT delivery summary after tool_result failed",
+            exc_info=True,
+        )
+        return False
 
 
 def set_current_skill_turbo_adapter(adapter: Any) -> Token:
@@ -265,6 +334,14 @@ def _build_artifact_summary(holder: dict[str, Any]) -> str:
     return "\n".join(lines) if len(lines) > 1 else ""
 
 
+def _ppt_delivery_summary(artifact_holder: dict[str, Any] | None) -> str:
+    node = (artifact_holder or {}).get("p10_delivery")
+    if not isinstance(node, dict):
+        return ""
+    text = node.get("delivery_summary")
+    return text.strip() if isinstance(text, str) else ""
+
+
 def _wrap_skill_turbo_result(
     result_dict: dict[str, Any],
     artifact_holder: dict[str, Any] | None = None,
@@ -275,13 +352,22 @@ def _wrap_skill_turbo_result(
     若此处追加 "finish your turn" 会与之矛盾。
     """
     artifact_text = _build_artifact_summary(artifact_holder or {})
+    ppt_summary = _ppt_delivery_summary(artifact_holder)
     if result_dict.get("success"):
         parts = [result_dict.get("result") or ""]
         if artifact_text:
             parts.append(artifact_text)
-        parts.append(_SKILL_TURBO_STOP_HINT)
+        if ppt_summary:
+            # 骨架不进 tool_result 正文、也不在流水线内提前 chat.delta；
+            # 挂到 ContextVar，由 after_tool_call 在外层 tool_result 之后流式发出。
+            set_pending_ppt_delivery_summary(ppt_summary)
+            parts.append(_PPT_DELIVERY_SUMMARY_POST_TOOL_HINT)
+        else:
+            clear_pending_ppt_delivery_summary()
+            parts.append(_SKILL_TURBO_STOP_HINT)
         result_dict["result"] = "\n\n".join(p for p in parts if p)
     else:
+        clear_pending_ppt_delivery_summary()
         parts = [result_dict.get("error") or ""]
         if artifact_text:
             parts.append(artifact_text)
