@@ -156,3 +156,26 @@ def test_failed_resolution_retains_nothing(resource_mgr: _FakeResourceMgr) -> No
     assert adapter._create_sys_operation() is None
     assert adapter._retained_sys_operation_ids == []
     assert interface_deep._SYS_OPERATION_REFCOUNTS == {}
+
+
+def test_local_resolution_works_without_removed_sandbox_api(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression for #3360: local code mode must work with current AgentCore."""
+    adapter = _make_adapter()
+    monkeypatch.setattr(interface_deep, "get_sandbox_endpoint", lambda: {})
+    monkeypatch.setattr(
+        interface_deep,
+        "get_sandbox_runtime",
+        lambda: {"enabled": False},
+    )
+
+    sys_operation = adapter._create_sys_operation()
+
+    try:
+        assert sys_operation is not None
+        assert sys_operation.fs() is not None
+        assert sys_operation.shell() is not None
+        assert sys_operation.code() is not None
+    finally:
+        adapter._release_sys_operations()
