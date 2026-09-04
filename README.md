@@ -113,7 +113,7 @@ uv pip install -e .
 
 ### Configure Model
 
-JiuwenSwarm supports multiple model platforms: Huawei Cloud MaaS, OpenAI, DeepSeek, DashScope, SiliconFlow, OpenRouter and other OpenAI-compatible APIs, as well as local model deployment.
+JiuwenSwarm supports multiple model platforms: Huawei Cloud MaaS, OpenAI, DeepSeek, DashScope, SiliconFlow, OpenRouter, OrcaRouter and other OpenAI-compatible APIs, as well as local model deployment.
 
 A default model is the one piece of configuration you cannot skip. Set it in the web UI under **More → Configuration**, or edit `~/.jiuwenswarm/config/config.yaml` directly. The file is created on your first `jiuwenswarm-start`, and saving it reloads the config without a restart.
 

@@ -39,6 +39,7 @@ const VENDOR_TRANSLATION_KEYS: Record<string, string> = {
   minimax: 'minimax',
   mimo: 'mimo',
   openrouter: 'openrouter',
+  orcarouter: 'orcarouter',
   volcengine: 'volcengine',
   zhipu: 'zhipu',
 };
