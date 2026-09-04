@@ -48,26 +48,19 @@ class SkillTurboPermissionRail(SkillAuthorizationPermissionRail):
     ) -> str:
         tool_name = tool_call.name if tool_call else ""
         if tool_name == "skill_acceleration_exec":
-            return self._build_skill_turbo_message(tool_call, result)
+            return self._build_skill_turbo_message()
         return super()._build_message(tool_call, result)
 
-    def _build_skill_turbo_message(
-        self,
-        tool_call: Optional[Any],
-        result: Any,
-    ) -> str:
-        """skill_turbo 外层统一审批消息：通用兜底描述 + 工具清单。"""
-        tool_args = self.parse_tool_args(tool_call)
-        risk = self.build_risk_for_message(tool_call.name, tool_args, result)
-
+    def _build_skill_turbo_message(self) -> str:
+        """skill_turbo 外层统一审批消息（工具清单）；勿再调用已移除的 risk API。"""
         tool_lines = "\n".join(
             f"- `{name}` — {desc}" for name, desc in SKILL_TURBO_APPROVAL_TOOLS
         )
+        # 文案需含「需要授权」，供 Relay 权限桥识别为审批卡。
         return (
             f"**即将调用 `skill加速`，需要授权后整体放行：**\n\n"
             f"{SKILL_TURBO_APPROVAL_DESCRIPTION}\n\n"
             f"**可能用到的工具：**\n\n{tool_lines}\n\n"
-            f"**风险等级：{risk.get('level', '')}风险**\n\n"
         )
 
 
