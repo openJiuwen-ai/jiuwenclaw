@@ -478,6 +478,14 @@ async def skill_turbo(query: str) -> dict[str, Any] | str:
     turbo_session = None
     resume_ctx = None
     resume_answers = get_skill_turbo_resume_answers()
+    # 纯文本 chat.send（如"继续执行"）：不降级为 fresh run_stream（会从 p0 全跑），
+    # 而是仍进入 resume 路径（复用 task_states 跳过已完成节点），但传 user_input=None
+    # 避免 ask_user re-interrupt 死循环（None → 首次中断路径，不是 re-interrupt）。
+    if isinstance(resume_answers, str) and resume_answers.strip():
+        logger.info(
+            "[SkillTurboTool] resume answers is plain text, will resume with "
+            "user_input=None to skip completed nodes and avoid re-interrupt loop"
+        )
     if resume_answers is not None:
         try:
             from openjiuwen.core.session.agent import create_agent_session
@@ -554,8 +562,11 @@ async def skill_turbo(query: str) -> dict[str, Any] | str:
                 request_id=request_id,
                 channel_id=channel_id,
                 pending_tool_call_id=resume_ctx["pending_tool_call_id"],
-                user_input=_resume_user_input_from_raw(
-                    resume_answers, resume_ctx, adapter
+                user_input=(
+                    None if isinstance(resume_answers, str)
+                    else _resume_user_input_from_raw(
+                        resume_answers, resume_ctx, adapter
+                    )
                 ),
                 task_states=resume_ctx.get("task_states"),
             )
@@ -686,6 +697,21 @@ async def skill_turbo(query: str) -> dict[str, Any] | str:
                         "[SkillTurboTool] clear_resume_ctx failed",
                         exc_info=True,
                     )
+            # 清理 node_artifacts：skill_turbo 成功完成（非 HITL 中断）时，
+            # 产物已通过 artifact_holder 返回给 LLM，checkpointer 里的持久化
+            # 副本不再需要。prepare_interrupt_artifacts_for_request 不再提前清，
+            # 由此处负责终态清理。
+            try:
+                from jiuwenswarm.server.runtime.skill_turbo.node_artifact_store import (
+                    clear_node_artifacts,
+                )
+
+                await clear_node_artifacts(turbo_session)
+            except Exception:
+                logger.debug(
+                    "[SkillTurboTool] clear_node_artifacts failed",
+                    exc_info=True,
+                )
             try:
                 await turbo_session.post_run()
             except Exception:

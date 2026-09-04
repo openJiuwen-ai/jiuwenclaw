@@ -51,6 +51,7 @@ from jiuwenswarm.server.runtime.skill_turbo.permission_bridge import (
     build_tool_ctx,
     clear_resume_ctx,
     extract_tool_interrupt,
+    load_resume_ctx,
     save_resume_ctx,
     set_skill_turbo_id,
 )
@@ -1174,6 +1175,11 @@ class SkillTurboExecutor:
         注意：必须使用独立 session 而非主 session（_session_var.get()），因为
         post_run() 会调用 close_stream() 关闭 stream emitter，导致后续
         _execute_node_stream 的 drain_session_stream 读不到 tool_call 等事件。
+
+        守卫：若 session 中存在未消费的 resume_ctx（上一轮 HITL 中断后 cancel
+        未清、或用户"继续执行"想沿用产物），跳过清盘——此时清掉 node_artifacts
+        会割裂"中断后继续"的复用语义，让 prepare_interrupt_artifacts_for_request
+        无法注入产物摘要，LLM 只能盲目从头重跑。
         """
         session = _session_var.get()
         if session is None:
@@ -1190,6 +1196,16 @@ class SkillTurboExecutor:
             # 残留产物存储在 {card.id}__skill_turbo key 下永远无法被清除。
             set_skill_turbo_id(clear_session, card)
             await clear_session.pre_run(inputs=None)
+            # 守卫：存在未消费的 resume_ctx 时跳过清盘（中断后继续场景）。
+            pending_resume_ctx = await load_resume_ctx(clear_session)
+            if pending_resume_ctx is not None:
+                logger.info(
+                    "[SkillTurboExecutor] skip clear_stale_node_artifacts: "
+                    "pending resume_ctx found (sid=%s tcid=%s)",
+                    sid,
+                    pending_resume_ctx.get("pending_tool_call_id"),
+                )
+                return
             await clear_node_artifacts(clear_session)
         except Exception:
             logger.debug(

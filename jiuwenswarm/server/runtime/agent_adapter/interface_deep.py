@@ -10561,12 +10561,9 @@ class JiuWenSwarmDeepAdapter:
             else:
                 params["supplementary_info"] = supplementary
 
-            # 一次性使用：注入后清除 SkillTurbo 节点产物记录，避免下一轮再次注入。
-            from jiuwenswarm.server.runtime.skill_turbo.node_artifact_store import (
-                clear_node_artifacts,
-            )
-            await clear_node_artifacts(skill_turbo_session)
-
+            # 不在此处 clear_node_artifacts：保留产物让 skill_turbo 成功完成时
+            # （skill_turbo_tools.py finally）或下一轮全新任务（_clear_stale_node_artifacts）
+            # 负责清理。提前清会让 LLM 仍调 skill_turbo 时读不到产物 → 从头重跑。
             logger.info(
                 "[JiuWenSwarmDeepAdapter] SkillTurbo interrupt artifacts summary "
                 "injected session=%s",
