@@ -168,7 +168,7 @@ _DESKTOP_SESSION_LIMIT_MESSAGE = (
     "当前检测到多个会话正在并行处理，可能会导致所有任务的响应变慢或机器性能下降，"
     "请等待其他会话结束后再发起新会话。"
 )
-_DEFAULT_DESKTOP_MAX_PARALLEL_SESSIONS = 3
+_DEFAULT_DESKTOP_MAX_PARALLEL_SESSIONS = 5
 
 
 def format_permission_wire_diagnostic(
@@ -4472,6 +4472,26 @@ class AgentWebSocketServer:
                             session_id=target,
                             agent_manager=self._agent_manager,
                             channel_id=channel_id,
+                        )
+                    try:
+                        from openjiuwen.core.sys_operation.shell_process_registry import (
+                            kill_shell_processes_for_session_tree,
+                        )
+
+                        killed = kill_shell_processes_for_session_tree(target)
+                        if killed:
+                            logger.info(
+                                "[AgentWebSocketServer] session.delete: killed %d shell "
+                                "process(es) session=%s",
+                                killed,
+                                target,
+                            )
+                    except Exception:
+                        logger.debug(
+                            "[AgentWebSocketServer] session.delete: kill_shell_processes "
+                            "failed session=%s",
+                            target,
+                            exc_info=True,
                         )
                     try:
                         if is_team_mode:
