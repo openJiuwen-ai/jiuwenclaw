@@ -778,6 +778,59 @@ class TestStructuredAskUserRailResolveInterrupt:
         assert "questions[0].options must be an array" in decision.tool_result
 
     @staticmethod
+    @pytest.mark.parametrize(
+        "arguments",
+        [
+            # 顶层字段名拼错（如 questions_list）时不得生成空问题中断
+            {"questions_list": [{"header": "测试", "question": "test"}], "call_goal": "x"},
+            # 既没有 questions 也没有 legacy query
+            {"call_goal": "x"},
+            # 显式空数组也不代表自由输入
+            {"questions": []},
+            # query 全空白等同缺失
+            {"questions": [], "query": "   "},
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_missing_question_content_is_rejected(arguments):
+        """没有任何可用题干时必须 reject，而不是弹空问题/审批卡死循环。"""
+        rail = StructuredAskUserRail()
+        tc = _make_tool_call(arguments=arguments)
+
+        decision = await rail.resolve_interrupt(MagicMock(), tc, None)
+
+        from openjiuwen.harness.rails.interrupt.interrupt_base import RejectResult
+        assert isinstance(decision, RejectResult)
+        assert "[INVALID_ARGUMENT]" in decision.tool_result
+        assert "questions" in decision.tool_result
+
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_questions_only_first_call_still_interrupts():
+        """结构化工具有 questions 且无 legacy query 时仍正常弹问卷。"""
+        rail = StructuredAskUserRail()
+        tc = _make_tool_call(arguments={
+            "questions": [{"question": "Which option?", "header": "Choice"}],
+        })
+
+        decision = await rail.resolve_interrupt(MagicMock(), tc, None)
+
+        from openjiuwen.harness.rails.interrupt.interrupt_base import InterruptResult
+        assert isinstance(decision, InterruptResult)
+
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_legacy_query_only_first_call_still_interrupts():
+        """legacy query-only 调用保持原有纯文本询问。"""
+        rail = StructuredAskUserRail()
+        tc = _make_tool_call(arguments={"query": "What is your role?"})
+
+        decision = await rail.resolve_interrupt(MagicMock(), tc, None)
+
+        from openjiuwen.harness.rails.interrupt.interrupt_base import InterruptResult
+        assert isinstance(decision, InterruptResult)
+
+    @staticmethod
     @pytest.mark.asyncio
     async def test_empty_options_array_is_allowed():
         """An empty options array represents a free-input question."""
