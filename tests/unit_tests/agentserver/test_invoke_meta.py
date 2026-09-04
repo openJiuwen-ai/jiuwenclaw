@@ -1197,6 +1197,10 @@ def test_design_system_prompt_points_at_skills_not_catalog():
     )
 
     prompt = build_design_system_prompt()
+    assert "# Identity\n\nYou are 小艺Work" in prompt
+    assert "# Design mode\n\nAct as an interactive creative-design agent." in prompt
+    assert "小艺Work Design" not in prompt
+    assert "小艺 work" not in prompt
     assert "seedance-video-gen" in prompt
     assert "seedream-image-gen" in prompt
     assert "music-generation" in prompt
