@@ -506,8 +506,10 @@ from jiuwenswarm.server.runtime.runtime_scope import RuntimeScopeKey
 from jiuwenswarm.server.runtime.skill_turbo.permission_bridge import (
     build_interaction_output_from_abort as _skill_turbo_build_interaction_output,
     clear_resume_ctx as _skill_turbo_clear_resume_ctx,
+    clear_resume_in_flight as _skill_turbo_clear_resume_in_flight,
     extract_tool_interrupt as _skill_turbo_extract_tool_interrupt,
     load_resume_ctx as _skill_turbo_load_resume_ctx,
+    mark_resume_in_flight as _skill_turbo_mark_resume_in_flight,
     set_skill_turbo_id as _skill_turbo_set_agent_id,
 )
 from jiuwenswarm.server.runtime.skill_turbo.plan_node import AbortError as _SkillTurboAbortError
@@ -11049,7 +11051,14 @@ class JiuWenSwarmDeepAdapter:
         request: AgentRequest,
         inputs: dict[str, Any],
     ) -> AsyncIterator[AgentResponseChunk] | None:
-        """检测 resume 请求并走 SkillTurbo resume 路径。"""
+        """检测 resume 请求并走 SkillTurbo resume 路径。
+
+        Nested HITL: SkillTurbo ask_user may leave DeepAgent holding an outer
+        ``skill_acceleration_exec`` interrupt (StreamEventRail rewrite). That must
+        not block resume when ``resume_ctx`` already exists — otherwise answers
+        update AskUserRail while nobody runs the SkillTurbo resume stream, and a
+        re-sent outer permission is deduplicated into a no-op.
+        """
         params = request.params if isinstance(getattr(request, "params", None), dict) else {}
         answers: list = params.get("answers") or []
         if not answers:
@@ -11057,12 +11066,6 @@ class JiuWenSwarmDeepAdapter:
         if str(params.get("source") or "").strip() != "ask_user_interrupt":
             return None
         if self._instance is None:
-            return None
-        if self._deep_agent_has_skill_turbo_interrupt():
-            logger.info(
-                "[JiuWenSwarmDeepAdapter] SkillTurbo resume deferred to DeepAgent "
-                "(outer skill_acceleration_exec interrupt present)"
-            )
             return None
         from openjiuwen.core.session.agent import create_agent_session
 
@@ -11073,9 +11076,31 @@ class JiuWenSwarmDeepAdapter:
         _skill_turbo_set_agent_id(session, self._instance.card)
         resume_ctx = await _skill_turbo_load_resume_ctx(session)
         if resume_ctx is None:
+            # No inner SkillTurbo hang: outer permission / DeepAgent owns the turn.
+            if self._deep_agent_has_skill_turbo_interrupt():
+                logger.info(
+                    "[JiuWenSwarmDeepAdapter] SkillTurbo resume deferred to DeepAgent "
+                    "(outer skill_acceleration_exec interrupt present, no resume_ctx)"
+                )
+            else:
+                logger.warning(
+                    "[JiuWenSwarmDeepAdapter] SkillTurbo resume requested but resume_ctx is None; "
+                    "falling back to DeepAgent. session_id=%s",
+                    request.session_id,
+                )
+            try:
+                await session.post_run()
+            except Exception:
+                logger.debug(
+                    "[JiuWenSwarmDeepAdapter] skill_turbo resume post_run failed",
+                    exc_info=True,
+                )
+            return None
+        if resume_ctx.get("resume_in_flight"):
             logger.warning(
-                "[JiuWenSwarmDeepAdapter] SkillTurbo resume requested but resume_ctx is None; "
-                "falling back to DeepAgent. session_id=%s",
+                "[JiuWenSwarmDeepAdapter] SkillTurbo resume already in flight: "
+                "tcid=%s session_id=%s (ignoring duplicate answers)",
+                resume_ctx.get("pending_tool_call_id"),
                 request.session_id,
             )
             try:
@@ -11085,11 +11110,28 @@ class JiuWenSwarmDeepAdapter:
                     "[JiuWenSwarmDeepAdapter] skill_turbo resume post_run failed",
                     exc_info=True,
                 )
-            return None
+            return self._make_skill_turbo_resume_duplicate_placeholder(request)
+        pending = str(resume_ctx.get("pending_tool_call_id") or "")
+        answer_rid = str(params.get("request_id") or "").strip()
+        if pending and answer_rid and answer_rid != pending:
+            logger.warning(
+                "[JiuWenSwarmDeepAdapter] SkillTurbo resume request_id mismatch: "
+                "pending=%s got=%s session_id=%s (continuing with resume_ctx)",
+                pending,
+                answer_rid,
+                request.session_id,
+            )
+        if self._deep_agent_has_skill_turbo_interrupt():
+            logger.info(
+                "[JiuWenSwarmDeepAdapter] SkillTurbo resume with outer interrupt still "
+                "present (nested ask_user): tcid=%s",
+                pending or resume_ctx.get("pending_tool_call_id"),
+            )
         logger.info(
             "[JiuWenSwarmDeepAdapter] SkillTurbo resume detected: tcid=%s",
             resume_ctx.get("pending_tool_call_id"),
         )
+        await _skill_turbo_mark_resume_in_flight(session, resume_ctx)
         try:
             session.update_state({INTERRUPTION_KEY: None})
         except Exception as exc:
@@ -11105,6 +11147,22 @@ class JiuWenSwarmDeepAdapter:
             resume_ctx=resume_ctx,
             answers=answers,
         )
+
+    @staticmethod
+    def _make_skill_turbo_resume_duplicate_placeholder(
+        request: AgentRequest,
+    ) -> AsyncIterator[AgentResponseChunk]:
+        """No-op stream for duplicate ask_user answers while resume is in flight."""
+
+        async def _impl() -> AsyncIterator[AgentResponseChunk]:
+            yield AgentResponseChunk(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                payload=None,
+                is_complete=True,
+            )
+
+        return _impl()
 
     def _make_skill_turbo_resume_stream(
         self,
@@ -11240,6 +11298,7 @@ class JiuWenSwarmDeepAdapter:
                 await _clear_resume_ctx()
                 finish_text = _finish_text(False, f"SkillAccelerationExec 未处理: {exc}")
             finally:
+                await _skill_turbo_clear_resume_in_flight(session)
                 _LLM_TRACE_SESSION_ID.reset(token_trace_sid)
                 _LLM_TRACE_REQUEST_ID.reset(token_trace_rid)
                 _LLM_TRACE_ITERATION.reset(token_trace_iter)
@@ -11346,8 +11405,10 @@ class JiuWenSwarmDeepAdapter:
                     raw_interaction
                 ])
                 if ask_payload:
-                    if isinstance(ask_payload, dict):
-                        ask_payload["request_id"] = rid
+                    # Keep convert()'s request_id (= interrupt tool_call.id /
+                    # skill_turbo-tc-*). Overwriting with HTTP request.request_id
+                    # diverges from StreamEventRail nested cards and makes the
+                    # resume mismatch check fire on every normal answer.
                     yield AgentResponseChunk(
                         request_id=rid,
                         channel_id=cid,
@@ -17375,9 +17436,19 @@ class JiuWenSwarmDeepAdapter:
         """Metadata that may follow ask_user before the stream truly pauses.
 
         These must not clear suppress / hitl_pending; any other chunk means the
-        runner resumed in-place and outbound must resume.
+        runner resumed in-place and outbound must resume. Includes
+        ``__interaction__`` / non-fatal ``controller_output`` tails that arrive
+        with the ask_user card itself (not a user-answer resume).
+
+        ``controller_output.task_failed`` is NOT noise: it must clear suppress
+        and surface ``chat.error`` (otherwise HITL stays paused forever).
         """
-        return getattr(chunk, "type", None) in ("llm_usage", "context.usage")
+        ctype = getattr(chunk, "type", None)
+        if ctype in ("llm_usage", "context.usage", "__interaction__"):
+            return True
+        if ctype == "controller_output":
+            return JiuWenSwarmDeepAdapter._run_failure(chunk) is None
+        return False
 
     @staticmethod
     def _run_failure(chunk) -> tuple[str, str] | None:
@@ -17403,9 +17474,14 @@ class JiuWenSwarmDeepAdapter:
 
         if ctype == "controller_output" and payload is not None:
             inner_t = getattr(payload, "type", None)
+            if inner_t is None and isinstance(payload, dict):
+                inner_t = payload.get("type")
             inner_val = getattr(inner_t, "value", inner_t) if inner_t is not None else None
             if inner_val == "task_failed":
-                data = getattr(payload, "data", None) or []
+                data = getattr(payload, "data", None)
+                if data is None and isinstance(payload, dict):
+                    data = payload.get("data")
+                data = data or []
                 msg = next(
                     (
                         getattr(item, "text", None)
@@ -17414,6 +17490,15 @@ class JiuWenSwarmDeepAdapter:
                     ),
                     None,
                 )
+                if msg is None and isinstance(data, list):
+                    msg = next(
+                        (
+                            item.get("text")
+                            for item in data
+                            if isinstance(item, dict) and item.get("text")
+                        ),
+                        None,
+                    )
                 return "task_failed", (msg or "task failed")
             return None
 
@@ -17470,15 +17555,34 @@ class JiuWenSwarmDeepAdapter:
 
                 if chunk_type == "controller_output" and payload is not None:
                     inner_t = getattr(payload, "type", None)
+                    if inner_t is None and isinstance(payload, dict):
+                        inner_t = payload.get("type")
                     inner_val = getattr(inner_t, "value", inner_t) if inner_t is not None else None
                     if inner_val == "task_completion":
                         return None
                     if inner_val == "task_failed":
+                        data = getattr(payload, "data", None)
+                        if data is None and isinstance(payload, dict):
+                            data = payload.get("data")
+                        data = data or []
                         error = next(
-                            (item.text for item in payload.data if hasattr(item, "text")),
-                            "任务执行失败",
+                            (
+                                item.text
+                                for item in data
+                                if hasattr(item, "text")
+                            ),
+                            None,
                         )
-                        return {"event_type": "chat.error", "error": error}
+                        if error is None:
+                            error = next(
+                                (
+                                    item.get("text")
+                                    for item in data
+                                    if isinstance(item, dict) and item.get("text")
+                                ),
+                                "任务执行失败",
+                            )
+                        return {"event_type": "chat.error", "error": error or "任务执行失败"}
 
                 if chunk_type == "llm_output":
                     content = (
