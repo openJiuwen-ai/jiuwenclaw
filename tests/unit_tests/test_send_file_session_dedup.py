@@ -18,11 +18,8 @@ from jiuwenswarm.agents.harness.common.tools.send_file_to_user import (
 def _clear_dedup_registry(monkeypatch):
     """Personal-path send_file tests must not enter enterprise OBS branch."""
     _SENT_FILE_PATHS_BY_SESSION.clear()
+    monkeypatch.setenv("JIUWENSWARM_EDITION", "personal")
     monkeypatch.delenv("JIUWENSWARM_FILE_DOWNLOAD_VIA_PUSH", raising=False)
-    monkeypatch.setattr(
-        "jiuwenswarm.common.local_env_config.is_enterprise",
-        lambda: False,
-    )
     yield
     _SENT_FILE_PATHS_BY_SESSION.clear()
 

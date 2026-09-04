@@ -26,6 +26,7 @@ def _clear_dedup():
 
 
 def test_send_file_obs_enterprise_writes_stream(tmp_path, monkeypatch):
+    monkeypatch.setenv("JIUWENSWARM_EDITION", "enterprise")
     monkeypatch.delenv("JIUWENSWARM_FILE_DOWNLOAD_VIA_PUSH", raising=False)
     file_path = tmp_path / "out.docx"
     file_path.write_bytes(b"docx-bytes")
@@ -39,10 +40,6 @@ def test_send_file_obs_enterprise_writes_stream(tmp_path, monkeypatch):
     mock_session.write_stream = AsyncMock()
 
     with (
-        patch(
-            "jiuwenswarm.common.local_env_config.is_enterprise",
-            return_value=True,
-        ),
         patch(
             "jiuwenswarm.agents.harness.common.tools.subagent_executor.context_vars.get_subagent_parent_session",
             return_value=mock_session,
@@ -78,6 +75,7 @@ def test_send_file_obs_enterprise_writes_stream(tmp_path, monkeypatch):
 
 def test_send_file_obs_skipped_when_personal(tmp_path, monkeypatch):
     """Personal edition must keep send_push local path (no MinIO)."""
+    monkeypatch.setenv("JIUWENSWARM_EDITION", "personal")
     monkeypatch.delenv("JIUWENSWARM_FILE_DOWNLOAD_VIA_PUSH", raising=False)
     file_path = tmp_path / "local.txt"
     file_path.write_text("hi", encoding="utf-8")
@@ -104,10 +102,6 @@ def test_send_file_obs_skipped_when_personal(tmp_path, monkeypatch):
     upload = MagicMock()
     with (
         patch(
-            "jiuwenswarm.common.local_env_config.is_enterprise",
-            return_value=False,
-        ),
-        patch(
             "jiuwenswarm.channels.web.minio_upload.upload_local_file_to_minio",
             upload,
         ),
@@ -123,6 +117,7 @@ def test_send_file_obs_skipped_when_personal(tmp_path, monkeypatch):
 
 
 def test_distributed_fails_when_delivered_zero(tmp_path, monkeypatch):
+    monkeypatch.setenv("JIUWENSWARM_EDITION", "personal")
     monkeypatch.delenv("JIUWENSWARM_FILE_DOWNLOAD_VIA_PUSH", raising=False)
     file_path = tmp_path / "big.bin"
     file_path.write_bytes(b"0123456789")
@@ -150,10 +145,6 @@ def test_distributed_fails_when_delivered_zero(tmp_path, monkeypatch):
     ft_cfg.enabled = True
 
     with (
-        patch(
-            "jiuwenswarm.common.local_env_config.is_enterprise",
-            return_value=False,
-        ),
         patch(
             "jiuwenswarm.common.file_transfer_config.get_file_transfer_config",
             return_value=ft_cfg,
