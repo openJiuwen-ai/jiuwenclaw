@@ -1363,7 +1363,10 @@ def _run_external_cli_version_command(cli_agent: str, resolved_path: str) -> tup
         if process.returncode == 0:
             return output, ""
         errors.append(output or f"exit code {process.returncode}")
-    return "", "; ".join(errors)
+    # Both flag variants usually fail with the same message (e.g. WinError 193
+    # for a non-executable path); show it once instead of repeating it.
+    unique_errors = list(dict.fromkeys(errors))
+    return "", "; ".join(unique_errors)
 
 
 def _detect_external_cli_agent(cli_agent: str, cli_path: str = "") -> dict[str, Any]:
