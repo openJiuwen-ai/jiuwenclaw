@@ -50,6 +50,8 @@ import {
 } from './slashCommands/registry';
 import {
   getWebSlashCommandsForMode,
+  hasUnfinishedGoal as isUnfinishedGoal,
+  isSlashCommandDisabledByGoal,
   shouldExecuteRegisteredSlashCommand,
   supportsWebSlashCommands,
 } from './slashCommands/semantics';
@@ -160,6 +162,8 @@ type ComposerSuggestionItem = {
   itemKind?: 'command' | 'skill';
   source?: string;
   takesArgs?: boolean;
+  disabled?: boolean;
+  disabledReason?: string;
 };
 
 function getComposerSuggestionItems(
@@ -755,7 +759,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
   // 见 backend-requests.md #1）。走排队后消息复用现有的通用队列机制，行为和普通排队一致。
   const isGoalActive = currentGoal?.status === 'active';
   // 未完成目标：active/paused/blocked 都算，只有 completed（或没有目标）才能再设新目标
-  const hasUnfinishedGoal = currentGoal != null && currentGoal.status !== 'completed';
+  const hasUnfinishedGoal = isUnfinishedGoal(currentGoal);
   const isInterruptible = isProcessing || isPaused || isGoalActive;
   const isAgentMode = mode === 'agent';
   const isTeamMode = mode === 'team';
@@ -812,14 +816,26 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
       }));
   }, [teamMembers]);
 
-  const composerSuggestionItems = useMemo(
-    () => getComposerSuggestionItems(
+  const composerSuggestionItems = useMemo(() => {
+    const items = getComposerSuggestionItems(
       composerSuggestion,
       mentionableMembers,
       getWebSlashCommandsForMode(slashCommands, mode),
       slashSkills,
-    ),
-    [composerSuggestion, mentionableMembers, mode, slashCommands, slashSkills],
+    );
+    return items.map((item) => (
+      item.itemKind === 'command' && isSlashCommandDisabledByGoal(item.id, hasUnfinishedGoal)
+        ? { ...item, disabled: true, disabledReason: t('plan.toolbarUnavailableGoal') }
+        : item
+    ));
+  }, [composerSuggestion, hasUnfinishedGoal, mentionableMembers, mode, slashCommands, slashSkills, t]);
+
+  const selectableComposerSuggestionIndices = useMemo(
+    () => composerSuggestionItems.reduce<number[]>((indices, item, index) => {
+      if (!item.disabled) indices.push(index);
+      return indices;
+    }, []),
+    [composerSuggestionItems],
   );
 
   useEffect(() => {
@@ -863,20 +879,28 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
   }, [activeSession?.work_mode, composerSuggestion?.kind, slashCatalogLoaded, workMode]);
 
   useEffect(() => {
-    setComposerSuggestionIndex(0);
-  }, [composerSuggestion?.kind, composerSuggestion?.query]);
+    setComposerSuggestionIndex(selectableComposerSuggestionIndices[0] ?? -1);
+  }, [composerSuggestion?.kind, composerSuggestion?.query, selectableComposerSuggestionIndices]);
 
   useEffect(() => {
     setComposerSuggestionNavigationMode('pointer');
   }, [composerSuggestion?.kind]);
 
-  useEffect(() => {
-    if (composerSuggestionItems.length === 0) {
-      setComposerSuggestionIndex(0);
-      return;
-    }
-    setComposerSuggestionIndex((index) => Math.min(index, composerSuggestionItems.length - 1));
-  }, [composerSuggestionItems.length]);
+  const moveComposerSuggestionHighlight = useCallback((delta: 1 | -1) => {
+    if (selectableComposerSuggestionIndices.length === 0) return;
+    setComposerSuggestionIndex((current) => {
+      const position = selectableComposerSuggestionIndices.indexOf(current);
+      if (position === -1) {
+        return delta > 0
+          ? selectableComposerSuggestionIndices[0]
+          : selectableComposerSuggestionIndices[selectableComposerSuggestionIndices.length - 1];
+      }
+      const nextPosition = (
+        position + delta + selectableComposerSuggestionIndices.length
+      ) % selectableComposerSuggestionIndices.length;
+      return selectableComposerSuggestionIndices[nextPosition];
+    });
+  }, [selectableComposerSuggestionIndices]);
 
   const inputProjectOptions = useMemo(
     () => getInputProjectOptions(projects, projectSearch),
@@ -2088,20 +2112,14 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
         if (e.key === 'ArrowDown') {
           e.preventDefault();
           setComposerSuggestionNavigationMode('keyboard');
-          if (composerSuggestionItems.length > 0) {
-            setComposerSuggestionIndex((index) => (index + 1) % composerSuggestionItems.length);
-          }
+          moveComposerSuggestionHighlight(1);
           return;
         }
 
         if (e.key === 'ArrowUp') {
           e.preventDefault();
           setComposerSuggestionNavigationMode('keyboard');
-          if (composerSuggestionItems.length > 0) {
-            setComposerSuggestionIndex((index) => (
-              index - 1 + composerSuggestionItems.length
-            ) % composerSuggestionItems.length);
-          }
+          moveComposerSuggestionHighlight(-1);
           return;
         }
 
@@ -2109,7 +2127,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
           if (isImeCompositionKey(e.nativeEvent, isComposingRef.current)) return;
           e.preventDefault();
           const item = composerSuggestionItems[composerSuggestionIndex];
-          if (item) {
+          if (item && !item.disabled) {
             insertComposerToken(
               composerSuggestion.kind,
               item.id,
@@ -2133,6 +2151,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
       composerSuggestionItems,
       handleSubmit,
       insertComposerToken,
+      moveComposerSuggestionHighlight,
       notifyKVCInputIntent,
     ]
   );
@@ -4037,21 +4056,31 @@ function ComposerSuggestionMenu({
                 type="button"
                 className={clsx(
                   'chat-composer-suggestion__item',
-                  highlightedIndex === index && 'chat-composer-suggestion__item--active',
+                  !item.disabled && highlightedIndex === index && 'chat-composer-suggestion__item--active',
+                  item.disabled && 'chat-composer-suggestion__item--disabled',
                 )}
                 role="option"
-                aria-selected={highlightedIndex === index}
+                aria-selected={!item.disabled && highlightedIndex === index}
+                aria-disabled={item.disabled || undefined}
+                disabled={item.disabled}
+                title={item.disabledReason}
                 data-testid="chat-panel-composer-suggestion-item"
                 data-variant={item.id}
                 onMouseDown={(event) => event.preventDefault()}
-                onPointerMove={() => onPointerHighlight(index)}
-                onClick={() => onPick(
-                  suggestion.kind,
-                  item.id,
-                  item.label,
-                  item.itemKind,
-                  item.takesArgs,
-                )}
+                onPointerMove={() => {
+                  if (!item.disabled) onPointerHighlight(index);
+                }}
+                onClick={() => {
+                  if (!item.disabled) {
+                    onPick(
+                      suggestion.kind,
+                      item.id,
+                      item.label,
+                      item.itemKind,
+                      item.takesArgs,
+                    );
+                  }
+                }}
               >
                 {isSlash ? (
                   <>

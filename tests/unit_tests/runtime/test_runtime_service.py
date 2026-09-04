@@ -145,6 +145,42 @@ class FakePlanController:
 
 
 @pytest.mark.asyncio
+async def test_runtime_kvc_tracking_uses_current_product_hook_contract(
+    monkeypatch,
+) -> None:
+    from jiuwenswarm.server.runtime.session.kv_cache import kv_cache_product_hooks
+
+    started: list[tuple[str, str]] = []
+    finished: list[tuple[str, bool]] = []
+
+    async def record_started(
+        *, session_id: str, params: dict[str, object], channel_id: str
+    ) -> None:
+        started.append((session_id, channel_id))
+
+    def record_finished(*, session_id: str, succeeded: bool) -> None:
+        finished.append((session_id, succeeded))
+
+    monkeypatch.setattr(kv_cache_product_hooks, "record_chat_started", record_started)
+    monkeypatch.setattr(kv_cache_product_hooks, "record_chat_finished", record_finished)
+
+    runtime = AgentRuntime(agent_manager=FakeAgentManager())
+    request = AgentRequest(
+        request_id="kvc-contract",
+        channel_id="web",
+        session_id="session-a",
+        req_method=ReqMethod.CHAT_SEND,
+        params={},
+    )
+
+    await runtime._record_kvc_chat_started(request)
+    runtime._record_kvc_chat_finished(request, succeeded=True)
+
+    assert started == [("session-a", "web")]
+    assert finished == [("session-a", True)]
+
+
+@pytest.mark.asyncio
 async def test_start_and_close_are_idempotent() -> None:
     manager = FakeAgentManager()
     initialize_calls = 0

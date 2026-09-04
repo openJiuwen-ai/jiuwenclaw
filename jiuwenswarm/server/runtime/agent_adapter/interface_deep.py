@@ -39,7 +39,7 @@ from openjiuwen.core.context_engine.schema.config import (
 )
 from openjiuwen.core.context_engine.token.tokenizer_registry import TokenizerRegistry
 from openjiuwen.core.context_engine.token.tokenizer_spec import TokenizerSpec
-from openjiuwen.core.foundation.kv_cache import KVCacheAffinityConfig
+from openjiuwen.core.kv_cache import KVCacheAffinityConfig
 from openjiuwen.core.foundation.llm import ModelRequestConfig, ModelClientConfig, Model
 from openjiuwen.core.foundation.llm.utils.provider_utils import is_openai_account_provider
 from openjiuwen.core.foundation.store.base_embedding import EmbeddingConfig
@@ -954,7 +954,7 @@ def _build_deep_agent_context_engine_config(
     """Build the agent-core Context Engine configuration.
 
     仅承接 ContextEngine 自身配置；KV cache affinity 由独立
-    ``react.kv_cache_affinity_config`` 管理。
+    Application 级 ``kv_cache_affinity_config`` 管理。
 
     context_window（模型支持的上下文总长度）由 ``_build_model_from_entry`` 放进
     core 的 ``ModelRequestConfig``，再由 ReActAgent 注入当前 ContextEngine 的模型级
@@ -1201,7 +1201,7 @@ def _deep_agent_context_engine_config_for_model(
 
 
 def _deep_agent_kv_cache_affinity_config(
-    react_cfg: dict[str, Any] | None,
+    application_config: dict[str, Any] | None,
     model: Model | None = None,
 ) -> KVCacheAffinityConfig:
     """Build the ReActAgent KV cache affinity config from jiuwenswarm config."""
@@ -1209,7 +1209,7 @@ def _deep_agent_kv_cache_affinity_config(
     # model_provider 兼容旧 AscendAffinity 别名。
     mcc = getattr(model, "model_client_config", None)
     return build_kv_cache_affinity_config(
-        react_cfg,
+        application_config,
         provider=model_provider(model),
         model_client_config=mcc,
     )
@@ -7493,7 +7493,7 @@ class JiuWenSwarmDeepAdapter:
                 language=self._resolve_prompt_language(),
             ),
             context_engine_config=context_engine_config,
-            kv_cache_affinity_config=_deep_agent_kv_cache_affinity_config(config, model),
+            kv_cache_affinity_config=_deep_agent_kv_cache_affinity_config(config_base, model),
             enable_task_loop=self._resolve_enable_task_loop(config, config_base),
             enable_subagent_runtime=self._resolve_enable_subagent_runtime(config_base),
             max_iterations=config.get("max_iterations", 15),
@@ -8143,7 +8143,7 @@ class JiuWenSwarmDeepAdapter:
         self._instance = create_deep_agent(
             **common_kwargs,
             context_engine_config=context_engine_config,
-            kv_cache_affinity_config=_deep_agent_kv_cache_affinity_config(config, model),
+            kv_cache_affinity_config=_deep_agent_kv_cache_affinity_config(config_base, model),
             vision_model_config=self._vision_model_config,
             audio_model_config=self._audio_model_config,
             enable_read_image_multimodal=self._resolve_enable_read_image_multimodal(config),
@@ -9516,9 +9516,14 @@ class JiuWenSwarmDeepAdapter:
         if self._instance is None:
             raise RuntimeError("DeepAgent instance is not initialized")
 
+        from jiuwenswarm.server.runtime.session.kv_cache.kv_cache_application_runtime import (
+            get_kv_cache_runtime,
+        )
+
         session = create_agent_session(
             session_id=session_id,
             card=getattr(self._instance, "card", None),
+            kv_cache_runtime=get_kv_cache_runtime(),
         )
         await session.pre_run(inputs={})
         await self._instance.start(session=session)
@@ -12626,6 +12631,21 @@ class JiuWenSwarmDeepAdapter:
                 mode=_debug_trace_mode,
                 request_debug=bool(inputs.get("_request_debug")),
             )
+            # The SDK TaskTool patch is useful only when this request is
+            # writing a debug dump that includes subagent flow.  Deferring it
+            # keeps AgentServer's listener path free of this optional import;
+            # apply it before dispatch so the first qualifying request is
+            # captured too.
+            if (
+                _dbg_settings.enabled
+                and _dbg_settings.dump_enabled
+                and _dbg_settings.include_subagent_flow
+            ):
+                from jiuwenswarm.server.runtime.debug_trace.task_tool_patch import (
+                    apply_task_tool_debug_patch,
+                )
+
+                apply_task_tool_debug_patch()
             # Sync single-agent / coding-agent observability with current config
             # before running.
             sync_agent_observability(force=_dbg_settings.otel_enabled)

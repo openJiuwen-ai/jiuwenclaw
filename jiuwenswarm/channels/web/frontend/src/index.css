@@ -1167,7 +1167,6 @@ body.workspace-resize-active iframe {
   }
 
   .team-member-message__plain {
-    max-width: min(100%, 720px);
     min-width: 0;
     overflow-x: auto;
     color: var(--color-text-primary);
@@ -1206,6 +1205,13 @@ body.workspace-resize-active iframe {
   .team-message-markdown--inline>p:first-child {
     display: inline;
     margin: 0;
+  }
+
+  /* ====== Member detail body (team-area / subagent shared) ====== */
+  .member-detail-body > * {
+    max-width: max(720px, calc(100% - 640px));
+    margin-left: auto;
+    margin-right: auto;
   }
 
   /* ====== Team Event Group Cards ====== */

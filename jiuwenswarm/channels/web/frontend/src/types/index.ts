@@ -43,6 +43,7 @@ export interface Session {
   user_id?: string;            // 创建人ID
   last_message_at?: number;    // 最近对话时间(Unix时间戳)
   last_user_message_at?: number; // 最后一条用户消息时间(Unix时间戳)
+  cron_id?: string;            // 定时任务ID；非空表示 cron 触发的会话，侧栏仅归属定时任务分组
 }
 
 export type AgentMode =

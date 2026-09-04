@@ -33,7 +33,7 @@ from openjiuwen.agent_teams.schema.deep_agent_spec import (
 )
 from openjiuwen.agent_teams.rails.builtin_elements import SKILL_USE as CORE_SKILL_USE
 from openjiuwen.agent_teams.rails.elements import TEAM_SKILL_USE
-from openjiuwen.core.foundation.kv_cache import KVCacheAffinityConfig
+from openjiuwen.core.kv_cache import KVCacheAffinityConfig
 from openjiuwen.core.foundation.tool import McpServerConfig
 from openjiuwen.core.single_agent import AgentCard
 from openjiuwen.harness.prompts import resolve_language
@@ -49,6 +49,7 @@ from jiuwenswarm.common.config import (
 )
 from jiuwenswarm.common.kv_cache_affinity_config import (
     build_kv_cache_affinity_config,
+    get_default_model_client_config,
 )
 from jiuwenswarm.agents.harness.team.team_runtime_inheritance import (
     get_context_engine_enabled,
@@ -75,11 +76,10 @@ _CODE_MODES: frozenset[str] = frozenset(
 
 
 def _kv_cache_affinity_config(config: dict[str, Any]) -> KVCacheAffinityConfig:
-    react = config.get("react")
-    react = react if isinstance(react, dict) else {}
     return build_kv_cache_affinity_config(
-        react,
+        config,
         provider=get_default_model_provider(config),
+        model_client_config=get_default_model_client_config(config),
     )
 
 
