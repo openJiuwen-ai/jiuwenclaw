@@ -112,6 +112,10 @@ def is_interrupt_resume_payload(params: Any) -> bool:
 
 _SUBAGENT_PERMISSION_APPROVAL_TIMEOUT = 120.0
 
+# Hosted cards need chat.ask_user_question rendering (web / OfficeClaw / TUI).
+# ACP keeps native session/request_permission JSON-RPC — do not hijack it.
+_HOSTED_PERMISSION_CHANNELS = frozenset({"web", "officeclaw", "tui"})
+
 _HOSTED_ALLOW_ONCE_LABELS = frozenset({
     "本次允许",
     "允许",
@@ -152,16 +156,16 @@ def _session_id_of(session: Any) -> str | None:
 
 
 def resolve_subagent_permission_parent_session(ctx: Any) -> Any | None:
-    """Return parent session when ``ctx`` is a child under ``task_tool``.
+    """Return parent session when ``ctx`` is a nested agent under an outer tool.
 
-    ``StreamEventRail`` binds the parent session ContextVar for the duration of
-    an outer tool call. ``PermissionInterruptRail`` (priority 90) runs before
-    that rail on the *same* agent, so main-agent ASK still sees no foreign
-    parent. On a child agent the ContextVar still points at the parent while
-    ``ctx.session`` is the child — that identity gap is the subagent signal.
+    Real trigger surface (not ``task_tool`` inheriting PermissionInterruptRail):
+    a child agent that still mounts its own permission rail, with
+    ``ctx.session`` id different from the parent session ContextVar bound by
+    ``StreamEventRail`` for the outer tool call (OfficeClaw worker / nested
+    agent). Same-session bindings must not take the hosted path.
 
-    Same-session bindings (parallel sibling tools on the main agent) must not
-    take the hosted path.
+    ``PermissionInterruptRail`` on the *same* agent as the outer tool still
+    sees no foreign parent, so main-agent ASK stays on interrupt / ACP.
     """
     try:
         from jiuwenswarm.agents.harness.common.tools.subagent_executor.context_vars import (
@@ -207,7 +211,12 @@ def _selected_option_labels(answer: Any) -> list[str]:
 
 
 def parse_hosted_permission_answer(answer: Any) -> Any:
-    """Map card answers to :class:`PermissionConfirmResponse` (or None if empty)."""
+    """Map card answers to :class:`PermissionConfirmResponse` (or None if empty).
+
+    Enterprise never persists permanent-remember to local config.yaml (same
+    constraint as :func:`_default_interrupt_options`); those labels degrade to
+    session auto_confirm only.
+    """
     from openjiuwen.harness.security.models import PermissionConfirmResponse
 
     labels = _selected_option_labels(answer)
@@ -220,14 +229,13 @@ def parse_hosted_permission_answer(answer: Any) -> Any:
             persist_allow=False,
             feedback="[PERMISSION_REJECTED] User rejected the request.",
         )
-    if any(
-        label in _PERMANENT_REMEMBER_LABELS or label == "永久记住"
-        for label in labels
-    ):
+    if any(label in _PERMANENT_REMEMBER_LABELS for label in labels):
+        # 企业版：永久标签降级为会话内记住，不写本地 config。
+        persist = not is_enterprise()
         return PermissionConfirmResponse(
             approved=True,
             auto_confirm=True,
-            persist_allow=True,
+            persist_allow=persist,
             feedback="",
         )
     if any(label in _HOSTED_SESSION_REMEMBER_LABELS for label in labels):
@@ -316,7 +324,7 @@ async def request_subagent_hosted_permission_confirmation(
     if isinstance(raw_args, str):
         try:
             tool_args = json.loads(raw_args) if raw_args.strip() else {}
-        except (TypeError, ValueError, json.JSONDecodeError):
+        except (TypeError, ValueError):
             tool_args = {"_raw": raw_args}
     elif isinstance(raw_args, dict):
         tool_args = raw_args
@@ -330,7 +338,14 @@ async def request_subagent_hosted_permission_confirmation(
         reason=reason or "Operation requires approval",
         agent_scope_id=agent_scope_id,
     )
-    options = _default_interrupt_options()
+    # Session remember is stored on the child rail session; copy must not
+    # imply parent-session scope.
+    options = []
+    for opt in _default_interrupt_options():
+        item = dict(opt)
+        if item.get("label") in _HOSTED_SESSION_REMEMBER_LABELS:
+            item["description"] = "该子 Agent 委托内自动放行同类操作"
+        options.append(item)
 
     async def _send(request: Any) -> None:
         await emit_subagent_approval(
@@ -566,14 +581,20 @@ def build_permission_rail(
         async def _request_permission_confirmation(
             req: PermissionConfirmationRequest,
         ) -> PermissionConfirmResponse | str | None:
+            channel = (TOOL_PERMISSION_CHANNEL_ID.get() or "web").strip() or "web"
             parent_session = resolve_subagent_permission_parent_session(req.ctx)
-            if parent_session is not None:
+            # Hosted parent-card path: nested agent with own rail + different
+            # session id (e.g. OfficeClaw worker). Only channels that render
+            # chat.ask_user_question — never hijack ACP JSON-RPC.
+            if (
+                parent_session is not None
+                and channel in _HOSTED_PERMISSION_CHANNELS
+            ):
                 return await request_subagent_hosted_permission_confirmation(
                     req,
                     parent_session=parent_session,
                 )
 
-            channel = TOOL_PERMISSION_CHANNEL_ID.get() or "web"
             if channel != "acp":
                 return "interrupt"
 
@@ -1202,6 +1223,7 @@ def _normalize_question_preview(preview: Any) -> dict[str, Any] | None:
 
 _PERMANENT_REMEMBER_LABELS = frozenset({
     "永久记住",
+    "总是允许",  # OfficeClaw PermissionBridge global scope 回传标签
     "Always Allow",
     "always_allow",
     "allow_always",
