@@ -1673,7 +1673,7 @@ def get_agent_workspace_dir() -> Path:
 
     Returns:
         Path to agent workspace:
-        ``~/.jiuwenswarm/service_default/agent_default/agent/workspace``
+        ``~/.jiuwenswarm/workspace_default/agent/workspace``
         (or the request-bound tenant workspace when ContextVar is set).
     """
     try:
@@ -2182,9 +2182,10 @@ def get_builtin_skills_dir() -> Path:
 
 
 def get_agent_sessions_dir() -> Path:
-    """Get sessions directory (bound tenant or ``service_default/agent_default``).
+    """Get sessions directory (bound tenant or ``workspace_default``).
 
-    Path: ``~/.jiuwenswarm/service_default/agent_default/agent/sessions``
+    Path: ``~/.jiuwenswarm/workspace_default/agent/sessions``
+    (or the request-bound tenant sessions dir when ContextVar is set).
     """
     return get_agent_root_dir() / "sessions"
 

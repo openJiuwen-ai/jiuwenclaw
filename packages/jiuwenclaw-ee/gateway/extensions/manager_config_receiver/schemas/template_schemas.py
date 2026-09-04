@@ -163,6 +163,63 @@ class SkillWhitelistTemplateCreateRequest(SkillWhitelistTemplateUpdateRequest):
     skill_id: str = Field(..., min_length=1, max_length=512)
 
 
+_VALID_MCP_TRANSPORTS = frozenset({
+    "stdio",
+    "sse",
+    "http",
+    "streamable-http",
+    "streamable_http",
+})
+
+
+def validate_mcp_entry(entry: dict[str, Any]) -> dict[str, Any]:
+    """校验 MCP 模板 ``mcp_entry``；丢弃条目级 ``enabled``（开关只认模板行）。"""
+    if not isinstance(entry, dict):
+        raise ValueError("mcp_entry must be a JSON object")
+    normalized = dict(entry)
+    normalized.pop("enabled", None)
+    name = str(normalized.get("name", "")).strip()
+    if not name:
+        raise ValueError("mcp_entry.name is required")
+    transport = str(normalized.get("transport", "")).strip().lower()
+    if transport not in _VALID_MCP_TRANSPORTS:
+        raise ValueError(
+            "mcp_entry.transport must be one of: "
+            + ", ".join(sorted(_VALID_MCP_TRANSPORTS))
+        )
+    if transport == "stdio":
+        command = str(normalized.get("command", "")).strip()
+        if not command:
+            raise ValueError("mcp_entry.command is required for stdio transport")
+    else:
+        url = str(normalized.get("url", "")).strip()
+        if not url:
+            raise ValueError("mcp_entry.url is required for remote MCP transport")
+    normalized["name"] = name
+    normalized["transport"] = transport
+    return normalized
+
+
+class McpTemplateUpdateRequest(SafeTextMixin):
+    template_name: str | None = Field(default=None, max_length=128)
+    description: str | None = Field(default=None, max_length=512)
+    mcp_entry: dict[str, Any] | None = None
+    enabled: bool | None = None
+    data: dict[str, Any] | None = None
+
+    @model_validator(mode="after")
+    def _validate_entry(self) -> McpTemplateUpdateRequest:
+        if self.mcp_entry is not None:
+            validate_mcp_entry(self.mcp_entry)
+        return self
+
+
+class McpTemplateCreateRequest(McpTemplateUpdateRequest):
+    template_id: str = Field(..., min_length=1, max_length=100)
+    template_name: str = Field(..., min_length=1, max_length=128)
+    mcp_entry: dict[str, Any]
+
+
 class PermissionsTemplateUpdateRequest(SafeTextMixin):
     template_name: str | None = Field(default=None, max_length=128)
     description: str | None = Field(default=None, max_length=512)

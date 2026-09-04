@@ -47,18 +47,47 @@ def tenant_workspace_root(
 
 
 def patch_multi_tenant_workspace_dirs(monkeypatch, tmp_path: Path) -> None:
-    """让多租户工作区按 key 分桶并落在 ``tmp_path`` 下（企业版行为）。
+    """Redirect tenant disk roots under ``tmp_path/workspace_{key}/``.
 
-    直接 patch ``get_multi_tenant_user_workspace_dir`` 会因被测模块的
-    ``from ... import get_multi_tenant_user_workspace_dir`` 引用而失效；
-    改为 patch ``is_enterprise``（走企业版按 key 分桶分支）与
-    ``get_user_workspace_dir``（落在 tmp_path），对任意调用方都生效。
+    Patches both ``utils`` and modules that ``from utils import get_multi_tenant...``
+    (import binding), resets ``_workspace_base_dir`` cache, and clears tenant
+    ContextVar bindings so tests cannot leak ``service_*/agent_*`` defaults.
     """
-    monkeypatch.setattr(
-        "jiuwenswarm.common.utils.is_enterprise",
-        lambda: True,
-    )
-    monkeypatch.setattr(
+    import jiuwenswarm.common.utils as utils_mod
+
+    try:
+        from jiuwenswarm.server.runtime.tenant_context import clear_tenant_bindings
+
+        clear_tenant_bindings()
+    except ImportError:
+        pass
+
+    # Drop cached workspace base so get_user_workspace_dir sees the patch.
+    monkeypatch.setattr(utils_mod, "_workspace_base_dir", None, raising=False)
+
+    def _mock_user_workspace_dir() -> Path:
+        return tmp_path
+
+    def _mock_multi_tenant(workspace_key: str, agent_id: str | None = None) -> Path:
+        # New API: one workspace_key. Old API: (service_id, agent_id).
+        if agent_id is not None:
+            wk = tenant_workspace_key(workspace_key, agent_id)
+        else:
+            wk = str(workspace_key or "default").strip() or "default"
+        return tmp_path / f"workspace_{wk}"
+
+    targets = [
         "jiuwenswarm.common.utils.get_user_workspace_dir",
-        lambda: tmp_path,
-    )
+        "jiuwenswarm.common.utils.get_multi_tenant_user_workspace_dir",
+        "jiuwenswarm.gateway.tenant_paths.get_multi_tenant_user_workspace_dir",
+        "jiuwenswarm.agents.harness.common.tools.cron.cron_tools.get_multi_tenant_user_workspace_dir",
+    ]
+    for target in targets:
+        try:
+            if target.endswith("get_user_workspace_dir"):
+                monkeypatch.setattr(target, _mock_user_workspace_dir)
+            else:
+                monkeypatch.setattr(target, _mock_multi_tenant)
+        except AttributeError:
+            # Module may be absent in slim installs; ignore.
+            pass
