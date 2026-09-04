@@ -13,8 +13,12 @@ check (degrade-to-allow). RMS detection is pure-local and never degrades.
 
 from __future__ import annotations
 
+import asyncio
+import json
 import os
 import pathlib
+import http.client
+from urllib.parse import urlparse
 
 # ── RMS detection (pure local, no network) ──
 
@@ -69,6 +73,56 @@ def detect_rms_file(path: str) -> str | None:
 
 # ── KIA detection (ICPM HTTP service) ──
 
+_ICPM_DEFAULT_BASE_URL = "http://127.0.0.1:32200"
+_ICPM_TIMEOUT_SECONDS = 3
+
+
+def _icpm_endpoint() -> tuple[str, int]:
+    """Return ICPM host/port from ``ICPM_BASE_URL`` env (default 127.0.0.1:32200).
+
+    Mirrors the TS-side ``ICPM_BASE_URL`` so the Python guard can target a
+    stub during tests or an alternate ICPM instance.
+    """
+    base = os.environ.get("ICPM_BASE_URL", "").strip() or _ICPM_DEFAULT_BASE_URL
+    parsed = urlparse(base)
+    host = parsed.hostname or "127.0.0.1"
+    port = parsed.port or 32200
+    return host, port
+
+
+def _query_kia_paths_for_dir(dir_path: str) -> list[str]:
+    """Query ICPM for KIA file paths under ``dir_path`` (blocking, sync).
+
+    Uses stdlib :mod:`http.client` — its lenient HTTP parser tolerates ICPM's
+    non-conformant responses that simultaneously send ``Content-Length`` and
+    ``Transfer-Encoding`` (which ``aiohttp``/``httpx`` reject). Because it is
+    blocking, it **must** run off the event loop — :func:`check_kia_file`
+    dispatches it via :func:`asyncio.to_thread` so a slow/unreachable ICPM
+    never stalls concurrent tasks for up to the 3s timeout.
+
+    Returns the list of KIA paths under the directory (possibly empty).
+    Raises on connection failure / HTTP error so the caller can degrade.
+    """
+    host, port = _icpm_endpoint()
+    conn = http.client.HTTPConnection(host, port, timeout=_ICPM_TIMEOUT_SECONDS)
+    try:
+        body = json.dumps({"filePath": dir_path, "pageNo": 1, "pageSize": 500})
+        conn.request(
+            "POST",
+            "/api/queryDirKiaPaths",
+            body=body,
+            headers={"Content-Type": "application/json"},
+        )
+        resp = conn.getresponse()
+        if resp.status != 200:
+            return []
+        data = json.loads(resp.read().decode("utf-8"))
+        if data.get("status") != "success" or not data.get("isExistKia"):
+            return []
+        return list(data.get("kiaPaths", []))
+    finally:
+        conn.close()
+
 
 async def check_kia_file(path: str) -> bool:
     """Check if a file is KIA-classified via ICPM. Returns True if KIA.
@@ -78,37 +132,30 @@ async def check_kia_file(path: str) -> bool:
       2. Call POST /api/queryDirKiaPaths with that directory
       3. Check if the file path appears in the returned kiaPaths list
 
-    Controlled by KIA_GUARD_ENABLED env var. Degrades to allow (returns False)
-    if ICPM is unavailable or errors.
+    The blocking HTTP call is dispatched to a worker thread via
+    :func:`asyncio.to_thread`, so the event loop stays responsive while ICPM
+    responds (up to the 3s timeout) — previously the sync ``http.client``
+    call ran inline and stalled the loop for the whole timeout window.
+
+    Controlled by ``KIA_GUARD_ENABLED`` env var. Degrades to allow (returns
+    False) if ICPM is unavailable or errors.
     """
     if os.environ.get("KIA_GUARD_ENABLED", "").lower() not in ("1", "true", "yes"):
         return False
     try:
-        import http.client
-        import json
-
         # 先规范化路径（解析 .. / 符号链接 / 相对路径），确保守卫查的目录与
         # 实际读取的文件一致，否则 .. / symlink / 相对路径可绕过 KIA 守卫。
         resolved = _resolve_path(path)
         # ICPM service only accepts Windows backslash format paths
-        # Normalize to backslash format for ICPM API
         normalized_path = resolved.replace("/", "\\")
-
         dir_path = _get_parent_directory(normalized_path)
-        conn = http.client.HTTPConnection("127.0.0.1", 32200, timeout=3)
-        body = json.dumps({"filePath": dir_path, "pageNo": 1, "pageSize": 500})
-        conn.request("POST", "/api/queryDirKiaPaths", body=body,
-                     headers={"Content-Type": "application/json"})
-        resp = conn.getresponse()
-        if resp.status == 200:
-            data = json.loads(resp.read().decode("utf-8"))
-            if data.get("status") != "success" or not data.get("isExistKia"):
-                return False
-            kia_paths = data.get("kiaPaths", [])
-            return _is_file_in_kia_list(normalized_path, kia_paths)
+        # Off-load the blocking HTTP call to a worker thread — never stall the
+        # event loop while ICPM responds (up to the 3s timeout per file).
+        kia_paths = await asyncio.to_thread(_query_kia_paths_for_dir, dir_path)
+        return _is_file_in_kia_list(normalized_path, kia_paths)
     except Exception:
-        pass  # ICPM unavailable — degrade to allow
-    return False
+        # ICPM unreachable / errored — degrade to allow.
+        return False
 
 
 def _get_parent_directory(file_path: str) -> str:
@@ -120,13 +167,17 @@ def _get_parent_directory(file_path: str) -> str:
     return parent
 
 
+def _normalize_for_kia_compare(path: str) -> str:
+    """Normalise a path for KIA list comparison: lowercase + backslash separators."""
+    return path.lower().replace("/", "\\")
+
+
 def _is_file_in_kia_list(file_path: str, kia_paths: list) -> bool:
     """Check if file_path appears in kia_paths (normalised for comparison)."""
     if not kia_paths:
         return False
-    normalize = lambda p: p.lower().replace("/", "\\")
-    target = normalize(file_path)
-    return any(normalize(kp) == target for kp in kia_paths)
+    target = _normalize_for_kia_compare(file_path)
+    return any(_normalize_for_kia_compare(kp) == target for kp in kia_paths)
 
 
 # Tool names that read file content and must go through KIA+RMS guards.
