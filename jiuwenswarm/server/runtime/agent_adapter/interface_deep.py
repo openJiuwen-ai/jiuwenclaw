@@ -11005,6 +11005,16 @@ class JiuWenSwarmDeepAdapter(ExpertCapabilityMixin):
                                     result_payload[key] = result_info[key]
                     else:
                         result_payload = {"result": str(payload)}
+                    # ask_user 校验失败（模型参数有误 / 用户空提交被拦截）时，
+                    # 不要把原始 [INVALID_ARGUMENT] 细节展示给用户（会误以为用户填错）。
+                    # 这里只屏蔽发往前端的展示文本；给模型自纠的详细 tool_result 在
+                    # runner 上下文里保持不变。
+                    if (
+                        result_payload.get("tool_name") == "ask_user"
+                        and isinstance(result_payload.get("result"), str)
+                        and result_payload["result"].startswith("[INVALID_ARGUMENT]")
+                    ):
+                        result_payload["result"] = "[已跳过]"
                     return {
                         "event_type": "chat.tool_result",
                         **result_payload,
