@@ -2402,7 +2402,7 @@ export function SkillPanel({
                       onSelect={() => { setSelectedHubSkill(skill); fetchHubSkillDetail(skill); }}
                       action={renderHubSkillActionButton(skill)}
                     />
-))}
+                  ))}
                 </div>
               ) : (
                 /* 无搜索词：按 plugin_type 分组展示 */
