@@ -64,6 +64,19 @@ py_ok_retry() {
 # 指针文本文件，必须识别并跳过，让后续在线兜底路径接管。
 is_real_wheel() { [ -f "$1" ] && [ "$(head -c 2 "$1" 2>/dev/null)" = "PK" ]; }
 
+# hmdfs 沉降治理：pip 刚写入的 .so 存在分钟级"沉降窗口"（冷启动时更久），
+# 期间 dlopen 报 Permission denied。全量 cat 强制数据落盘/入缓存可缩短窗口。
+# 关键在于入口探测失败时先暖读+重试而不是立即重装 —— force-reinstall 会重写
+# .so、把沉降时钟归零，形成"越重跑越坏"的恶性循环（本机实测：连续重跑 2 次
+# 均失败，停止重跑等 2 分钟后 import 直接通过）。
+SP="$REPO_ROOT/.venv/lib/python3.12/site-packages"
+warm_sos() {
+    [ -d "$SP" ] || return 0
+    find "$SP" \( -name '*.so' -o -name '*.so.*' \) -type f -exec cat {} + \
+        >/dev/null 2>&1
+    return 0
+}
+
 mkdir -p "$TMP"
 
 # ============================================================================
@@ -156,6 +169,12 @@ install_native() {
         log "  $_label 已可用，跳过"
         return 0
     fi
+    # 上次运行可能已装好、只是 .so 还在沉降窗口：暖读 + 重试探测，通过则
+    # 不重装（重装会重写文件、重置沉降时钟）
+    if warm_sos && py_ok_retry "$_test"; then
+        log "  $_label 已安装（文件沉降后通过），跳过"
+        return 0
+    fi
     # --- 路径 1: 仓库内离线 harmonyos wheel ---
     for _w in "$WHEELS"/$_glob; do
         [ -f "$_w" ] || continue
@@ -165,6 +184,7 @@ install_native() {
         fi
         log "  $_label: 安装离线 wheel ($(basename "$_w"))"
         "$VENV_PY" -m pip install --no-deps --force-reinstall "$_w" >/dev/null 2>&1
+        warm_sos
         if py_ok_retry "$_test"; then
             log "  $_label 安装成功（离线 wheel）"
             return 0
@@ -181,6 +201,7 @@ install_native() {
             _out="$TMP/$(basename "$_w")"
             if "$VENV_PY" "$CONVERTER" "$_w" -o "$_out" >/dev/null 2>&1; then
                 "$VENV_PY" -m pip install --no-deps --force-reinstall "$_out" >/dev/null 2>&1
+                warm_sos
                 if py_ok_retry "$_test"; then
                     log "  $_label 安装成功（本机重签）"
                     return 0
@@ -223,6 +244,7 @@ install_native() {
                     for _o in "$TMP"/$_mpkg-*harmonyos_aarch64.whl; do
                         [ -f "$_o" ] || continue
                         "$VENV_PY" -m pip install --no-deps --force-reinstall "$_o" >/dev/null 2>&1
+                        warm_sos
                         if py_ok_retry "$_test"; then
                             log "  $_label 安装成功（musl 现场转换）"
                             return 0
@@ -234,26 +256,27 @@ install_native() {
         fi
     fi
     warn "  $_label 所有安装路径均失败（功能测试已各重试 5 次）；真实错误："
-    "$VENV_PY" -c "$_test" 2>&1 | tail -5 | sed 's/^/    /'
-    warn "  若错误是 Permission denied 加载 .so：多为 hmdfs 冷启动沉降，等待 1 分钟后直接重跑本脚本即可（安装其实已成功）"
+    LD_LIBRARY_PATH= "$VENV_PY" -c "$_test" 2>&1 | tail -5 | sed 's/^/    /'
+    warn "  若错误为 Permission denied：安装大概率已成功，只是 hmdfs 沉降窗口未过 —— 等待 2~5 分钟后重跑本脚本即可（入口探测通过即跳过，不会重装重写文件）"
     return 1
 }
 
+DEGRADED=""
 install_native "numpy"      "import numpy; numpy.array([1,2]).sum()" \
     "numpy-*harmonyos_aarch64.whl" "none" \
-    || fail "numpy 缺失且无法从 wheels/ 安装 —— 基础环境不完整，请先执行 scripts/install-ohos-agentserver.sh"
+    || DEGRADED="$DEGRADED numpy"
 
 install_native "pypdfium2"  "import pypdfium2 as p; d=p.PdfDocument.new(); d.new_page(10,10)" \
     "pypdfium2-*harmonyos_aarch64.whl" "pypdfium2==4.30.0 py3" \
-    || fail "pypdfium2 安装失败（DeepResearch 必需）"
+    || DEGRADED="$DEGRADED pypdfium2"
 
 install_native "Pillow"     "from PIL import Image; Image.new('RGB',(8,8))" \
     "Pillow-*harmonyos_aarch64.whl" "none" \
-    || warn "Pillow 安装失败 —— 请从旧机器复制 wheels/Pillow-12.2.0-*.whl 后重跑"
+    || DEGRADED="$DEGRADED Pillow"
 
 install_native "pandas"     "import pandas as pd; assert pd.Series(range(10)).rolling(3).sum().iloc[2]==3.0" \
     "pandas-*harmonyos_aarch64.whl" "pandas==2.3.1 cp312" \
-    || fail "pandas 安装失败（DeepResearch 必需）"
+    || DEGRADED="$DEGRADED pandas"
 
 # ============================================================================
 log "步骤 4/6: 配置 pymilvus 平台桩"
@@ -433,8 +456,9 @@ except Exception:
 PYPROBE
 
 _i=0
+warm_sos
 while [ "$_i" -lt 12 ]; do
-    _missing=$("$VENV_PY" "$TMP/probe_mod.py" 2>/dev/null | tail -1)
+    _missing=$(LD_LIBRARY_PATH= "$VENV_PY" "$TMP/probe_mod.py" 2>/dev/null | tail -1)
     [ "$_missing" = "OK" ] && break
     [ -n "$_missing" ] || break
     [ "$_missing" = "NONMOD" ] && break
@@ -525,21 +549,26 @@ print("全部验证通过")
 PYVERIFY
 
 _vc=0
-while [ "$_vc" -lt 2 ]; do
+while :; do
+    warm_sos
     if LD_LIBRARY_PATH= "$VENV_PY" "$TMP/verify_final.py" > "$TMP/verify.log" 2>&1; then
         grep -v ohos_build_env "$TMP/verify.log"
+        [ -n "$DEGRADED" ] && warn "以下包安装时未通过即时验证，但最终验证已通过（hmdfs 沉降误报）:$DEGRADED"
         break
     fi
     _vc=$((_vc + 1))
-    if [ "$_vc" -lt 2 ]; then
-        warn "最终验证未通过，2 秒后重试一次（排除 hmdfs 文件延迟可见的误判）..."
-        sleep 2
-    fi
+    case "$_vc" in
+        1) warn "最终验证未通过，5 秒后重试（等待文件沉降）..." ; sleep 5 ;;
+        2) warn "仍未通过，20 秒后重试..." ; sleep 20 ;;
+        3) warn "仍未通过，60 秒后最后重试..." ; sleep 60 ;;
+        *)
+            grep -v ohos_build_env "$TMP/verify.log"
+            fail "验证未通过 —— 若错误为 Permission denied：等 5 分钟后重跑本脚本（已装内容会跳过重装）；若仍失败请在你的终端执行下面两条命令并把输出发我：
+    .venv/bin/python -c 'import numpy'
+    grep -m1 ' /storage' /proc/self/mountinfo"
+            ;;
+    esac
 done
-if [ "$_vc" -ge 2 ]; then
-    grep -v ohos_build_env "$TMP/verify.log"
-    fail "验证未通过 —— 请把以上输出连同日志 $TMP/verify.log 发给我"
-fi
 
 # ============================================================================
 log "==================================================================="
