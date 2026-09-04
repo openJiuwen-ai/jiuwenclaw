@@ -9,6 +9,8 @@ import { RsiDetailHeader } from './RsiDetailHeader';
 import { RsiResultSummary } from './RsiResultSummary';
 import { RsiCanvasArea } from './RsiCanvasArea';
 import { ConfigInfoDialog } from './ConfigInfoDialog';
+import { RsiArtifactDetailDialog } from './RsiArtifactDetailDialog';
+import type { RsiArtifactSource } from '../rsiArtifactFiles';
 
 export function RsiDetail() {
   const { t } = useTranslation();
@@ -19,6 +21,8 @@ export function RsiDetail() {
   const list = useRsiStore((s) => s.list);
 
   const [configOpen, setConfigOpen] = useState(false);
+  const [artifactSource, setArtifactSource] = useState<RsiArtifactSource | null>(null);
+  const [artifactTitle, setArtifactTitle] = useState('RSI 产物');
 
   useEffect(() => {
     if (selectedTaskId) void refreshDetail(selectedTaskId);
@@ -49,12 +53,24 @@ export function RsiDetail() {
         liveCost={liveCost}
         createdAt={createdAt}
         onOpenConfig={() => setConfigOpen(true)}
+        onOpenArtifact={(path, title) => {
+          if (!selectedTaskId) return;
+          setArtifactTitle(title);
+          setArtifactSource({ taskId: selectedTaskId, path, initialFilePath: null });
+        }}
       />
       <div className="rsi-stage">
         <RsiResultSummary task={detail.task} report={detail.report} usage={detail.usage} />
         <RsiCanvasArea task={detail.task} tree={detail.tree} />
       </div>
       <ConfigInfoDialog open={configOpen} task={detail.task} onClose={() => setConfigOpen(false)} />
+      {artifactSource && (
+        <RsiArtifactDetailDialog
+          source={artifactSource}
+          title={artifactTitle}
+          onClose={() => setArtifactSource(null)}
+        />
+      )}
     </>
   );
 }

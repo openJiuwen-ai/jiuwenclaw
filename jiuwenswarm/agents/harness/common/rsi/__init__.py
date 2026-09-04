@@ -60,6 +60,7 @@ from jiuwenswarm.agents.harness.common.rsi.model_resolver import (
     select_rsi_model_entry,
 )
 from jiuwenswarm.agents.harness.common.rsi.models import RsiTask, RsiTaskView, TaskStatus
+from jiuwenswarm.agents.harness.common.rsi.paper_provider import PaperProvider
 from jiuwenswarm.agents.harness.common.rsi.provider_factory import (
     build_mock_rsi_adapters,
     build_rsi_adapters,
@@ -72,6 +73,7 @@ __all__ = [
     "HarnessEngineRequest",
     "HarnessProviderContract",
     "MockHarnessProvider",
+    "PaperProvider",
     "RsiArtifactNotFound",
     "RsiBadRequest",
     "RsiDatasetInvalid",

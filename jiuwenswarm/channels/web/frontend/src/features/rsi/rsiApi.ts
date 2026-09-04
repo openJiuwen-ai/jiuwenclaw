@@ -691,6 +691,9 @@ export function rsiUsageGet(taskId: string): Promise<RsiUsageGetResult | null> {
 }
 
 export function rsiArtifactDownload(taskId: string, artifactId?: string): Promise<RsiArtifactDownloadResult> {
+  if (isMockEnabled()) {
+    return rsiMock.delay(rsiMock.artifactDownload(taskId, artifactId));
+  }
   const params: Record<string, unknown> = { task_id: taskId };
   if (artifactId) params.artifact_id = artifactId;
   return webRequest<unknown>(METHOD.artifactDownload, withRsiSession(params)).then((value) => {
@@ -700,6 +703,7 @@ export function rsiArtifactDownload(taskId: string, artifactId?: string): Promis
       kind: asString(raw.kind) === 'artifact_package' ? 'artifact_package' : 'harness_plugin',
       is_best: raw.is_best === true,
       filename: asString(raw.filename, asString(raw.path).split(/[\\/]/).pop() || 'download'),
+      is_directory: raw.is_directory === true,
       download_url: asNullableString(raw.download_url) ?? undefined,
       download_token: asNullableString(raw.download_token) ?? undefined,
     };
@@ -711,23 +715,23 @@ export function rsiArtifactDownloadUrl(result: RsiArtifactDownloadResult): strin
 }
 
 export function rsiArtifactFilesList(taskId: string, path: string): Promise<RsiArtifactFilesListResult> {
-  return webRequest<RsiArtifactFilesListResult>(
-    METHOD.artifactFilesList,
-    withRsiSession({
-      task_id: taskId,
-      path,
-    }),
-  );
+  if (isMockEnabled()) {
+    return rsiMock.delay(rsiMock.artifactFilesList(taskId, path));
+  }
+  return webRequest<RsiArtifactFilesListResult>(METHOD.artifactFilesList, withRsiSession({
+    task_id: taskId,
+    path,
+  }));
 }
 
 export function rsiArtifactFilesGet(taskId: string, path: string): Promise<RsiArtifactFileGetResult> {
-  return webRequest<RsiArtifactFileGetResult>(
-    METHOD.artifactFilesGet,
-    withRsiSession({
-      task_id: taskId,
-      path,
-    }),
-  );
+  if (isMockEnabled()) {
+    return rsiMock.delay(rsiMock.artifactFilesGet(taskId, path));
+  }
+  return webRequest<RsiArtifactFileGetResult>(METHOD.artifactFilesGet, withRsiSession({
+    task_id: taskId,
+    path,
+  }));
 }
 
 export function rsiTreeGet(taskId: string): Promise<RsiTreeGetResult> {

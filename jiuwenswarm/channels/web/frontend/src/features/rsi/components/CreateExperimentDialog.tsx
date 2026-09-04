@@ -115,10 +115,11 @@ export function CreateExperimentDialog({ open, onClose, onCreated }: CreateExper
   const switchArtifactType = useCallback((at: RsiArtifactType) => {
     setErrors({});
     setForm((f) => {
-      if (at === 'PAPER') return { ...f, artifactType: 'PAPER' };
+      if (at === 'PAPER') return { ...f, artifactType: 'PAPER', artifactPath: '' };
       return {
         ...f,
         artifactType: 'PROGRAM',
+        artifactPath: '',
         optimizationInstruction: '',
         maxIterations: 3,
       };
@@ -131,6 +132,19 @@ export function CreateExperimentDialog({ open, onClose, onCreated }: CreateExper
 
   const pickPath = useCallback(
     async (target: 'dataset' | 'artifact') => {
+      if (target === 'artifact' && branch === 'PAPER') {
+        const result = await selectProjectDirectory({
+          initialDir: form.artifactPath || undefined,
+        });
+        if (!result.ok || !result.path) return;
+        update('artifactPath', result.path);
+        setErrors((prev) => {
+          const next = { ...prev };
+          delete next.paper;
+          return next;
+        });
+        return;
+      }
       if (target === 'dataset') {
         const fileResult = await selectLocalFiles(false);
         const file = fileResult.ok ? fileResult.files[0] : undefined;
@@ -143,7 +157,7 @@ export function CreateExperimentDialog({ open, onClose, onCreated }: CreateExper
         update('artifactPath', result.path);
       }
     },
-    [update],
+    [branch, form.artifactPath, update],
   );
 
   const validate = useCallback((): boolean => {

@@ -157,7 +157,10 @@ def provider_best_artifact(report: Any) -> dict[str, Any] | None:
     best_node_id = raw.get("best_node_id")
     refs = raw.get("artifact_index") or []
     best: dict[str, Any] | None = None
-    for ref in refs:
+    # The report can contain a module-level node package followed by the
+    # complete iteration snapshot.  Both may point at the same best node;
+    # the newest ref is the one the task-level download should expose.
+    for ref in reversed(refs):
         if not isinstance(ref, dict):
             continue
         if best_node_id is not None and ref.get("node_id") == best_node_id:
@@ -194,6 +197,9 @@ def provider_report_to_web(report: Any, state: Any = None) -> dict[str, Any]:
     metrics.setdefault("eval_total", 0)
     metrics.setdefault("pruned_count", 0)
     metrics.setdefault("iterations", _safe_int(state_raw.get("iteration")))
+    best_artifact = provider_best_artifact(report)
+    if not metrics.get("best_artifact_id"):
+        metrics["best_artifact_id"] = best_artifact.get("artifact_id") if best_artifact else None
     return {
         "status": provider_status(raw.get("status") or state_raw.get("status")),
         "best_score": _safe_float_or_none(
@@ -204,7 +210,7 @@ def provider_report_to_web(report: Any, state: Any = None) -> dict[str, Any]:
         ),
         "metrics": metrics,
         "usage": usage,
-        "best_artifact": provider_best_artifact(report),
+        "best_artifact": best_artifact,
         "report_summary": str(raw.get("summary") or ""),
         "markdown": None,
     }

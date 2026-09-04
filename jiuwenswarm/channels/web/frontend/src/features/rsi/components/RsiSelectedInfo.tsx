@@ -14,9 +14,22 @@ import selectedInfoIcon from '../../../assets/rsi/rsi-icon.svg';
 import { useRsiStore } from '../rsiStore';
 import { nodeChangeGroup, nodeChangeSummary, nodeDisplayName } from '../rsiPresentation';
 import { resolveRsiArtifactSource } from '../rsiArtifactFiles';
+import {
+  rsiArtifactDownload,
+  rsiArtifactDownloadUrl,
+} from '../rsiApi';
+import { executeDesktopSave, type DesktopSaveApiResult } from '../../../utils/desktopSave';
 import { RsiArtifactDetailDialog } from './RsiArtifactDetailDialog';
 
 const HARNESS_GROUPS = ['prompt', 'skill', 'tool', 'rail'] as const;
+
+type DownloadCapableWindow = Window & {
+  pywebview?: {
+    api?: {
+      download_file?: (url: string, filename: string) => DesktopSaveApiResult;
+    };
+  };
+};
 
 interface RsiSelectedInfoProps {
   taskId: string;
@@ -29,6 +42,8 @@ export function RsiSelectedInfo({ taskId }: RsiSelectedInfoProps) {
   const selectedNodeId = useRsiStore((s) => s.detail[taskId]?.selectedNodeId ?? null);
   const setSelectedNode = useRsiStore((s) => s.setSelectedNode);
   const [detailOpen, setDetailOpen] = useState(false);
+  const [downloadBusy, setDownloadBusy] = useState(false);
+  const [downloadError, setDownloadError] = useState<string | null>(null);
 
   const selected = useMemo(() => {
     if (!tree || !selectedNodeId) return null;
@@ -63,6 +78,45 @@ export function RsiSelectedInfo({ taskId }: RsiSelectedInfoProps) {
   const desc = [parent ? t('rsi.detail.inherit') + ' ' + parent.node_id : null, selected.description]
     .filter(Boolean)
     .join('，');
+
+  const downloadNodeArtifact = async () => {
+    const artifactId = selected.snapshot_artifact_id;
+    if (!artifactId) return;
+    setDownloadBusy(true);
+    setDownloadError(null);
+    try {
+      const artifact = await rsiArtifactDownload(taskId, artifactId);
+      const downloadUrl = rsiArtifactDownloadUrl(artifact);
+      if (artifact.is_directory || !downloadUrl) {
+        // Directory artifacts are browsed through the folder dialog. The
+        // dialog downloads each selected file without repackaging the folder.
+        if (canViewArtifact) {
+          setDetailOpen(true);
+          return;
+        }
+        throw new Error('RSI 产物目录不可用');
+      }
+      const pywebviewApi = (window as DownloadCapableWindow).pywebview?.api;
+      if (pywebviewApi?.download_file) {
+        const outcome = await executeDesktopSave(() => pywebviewApi.download_file!(downloadUrl, artifact.filename));
+        if (outcome === 'failed') throw new Error('桌面端保存失败');
+      } else {
+        const link = document.createElement('a');
+        link.href = downloadUrl;
+        link.download = artifact.filename;
+        link.target = '_blank';
+        link.rel = 'noopener noreferrer';
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setDownloadError(message);
+    } finally {
+      setDownloadBusy(false);
+    }
+  };
 
   return (
     <>
@@ -103,6 +157,29 @@ export function RsiSelectedInfo({ taskId }: RsiSelectedInfoProps) {
             </div>
             <div className="rsi-selected-info__desc">{desc || '—'}</div>
           </div>
+          <div className="rsi-selected-info__meta-grid">
+            <div><span>迭代</span><strong>{selected.iteration}</strong></div>
+            <div><span>类型</span><strong>{selected.type}</strong></div>
+            <div><span>分数</span><strong>{selected.score == null ? '—' : selected.score}</strong></div>
+            <div><span>采纳</span><strong>{selected.adopted ? '是' : '否'}</strong></div>
+          </div>
+          {selected.snapshot_artifact_id && (
+            <div className="rsi-selected-info__artifact">
+              <div className="rsi-selected-info__section-label">节点产物</div>
+              <div className="rsi-selected-info__artifact-row">
+                <code>{selected.snapshot_artifact_id}</code>
+                <button
+                  type="button"
+                  className="rsi-selected-info__download-btn"
+                  onClick={() => void downloadNodeArtifact()}
+                  disabled={downloadBusy}
+                >
+                  {downloadBusy ? '处理中…' : canViewArtifact ? '打开产物' : '下载'}
+                </button>
+              </div>
+              {downloadError && <div className="rsi-selected-info__download-error">{downloadError}</div>}
+            </div>
+          )}
         </div>
         <div className="rsi-selected-info__footer">
           {canViewArtifact && (

@@ -193,7 +193,9 @@ async def test_paper_provider_closes_instruction_only_service_loop(artifact_cont
     downloaded = handlers.handle(FakeRequest(ReqMethod.RSI_ARTIFACT_DOWNLOAD, {"task_id": task_id}))
     assert downloaded["ok"] is True
     assert downloaded["payload"]["kind"] == "artifact_package"
-    assert Path(downloaded["payload"]["path"]).is_file()
+    assert downloaded["payload"]["is_directory"] is True
+    assert Path(downloaded["payload"]["path"]).is_dir()
+    assert "download_url" not in downloaded["payload"]
     await _stop_worker(context)
 
 
