@@ -23,6 +23,7 @@ import {
 } from './mediaModelConfig';
 
 const EMPTY_VENDOR_CATALOG: VendorPresetMap = {
+  reasoning: null,
   token_plan: [],
   coding_plan: [],
   custom_api: [],

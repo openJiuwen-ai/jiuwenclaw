@@ -185,9 +185,10 @@
 }
 
 .skill-graph-panel__error {
-  display: flex;
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr);
   align-items: flex-start;
-  gap: 8px;
+  column-gap: 10px;
   border-radius: var(--radius-sm);
   background: var(--color-feedback-danger-subtle);
   padding: 9px 10px;
@@ -197,12 +198,12 @@
 }
 
 .skill-graph-panel__error svg {
-  flex-shrink: 0;
+  display: block;
+  margin-top: 2px;
 }
 
 .skill-graph-panel__error span {
   min-width: 0;
-  flex: 1;
   white-space: normal;
   overflow-wrap: anywhere;
 }

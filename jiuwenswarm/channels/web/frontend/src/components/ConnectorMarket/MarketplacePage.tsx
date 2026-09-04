@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Search, Plus, ChevronDown, ChevronLeft, ChevronRight } from 'lucide-react';
+import { Plus, ChevronDown, ChevronLeft, ChevronRight } from 'lucide-react';
 import { useConnectorStore } from '../../stores/connectorStore';
 import { usePluginPackageStore } from '../../stores/pluginPackageStore';
 import { localizedText } from '../../types/pluginPackage';
@@ -13,6 +13,7 @@ import type { ConnectorConnectResponse } from '../../types/connector';
 import { deriveCardState, derivePluginCardState, deriveMcpAvailability, cardStateToStatusFilter } from './mcpState';
 import { useClickOutside } from './useClickOutside';
 import { usePendingConnectorFlow, PendingConnectorModals } from './usePendingConnectorFlow';
+import { CategoryTabs, PageHeader, PageToolbarSearch } from '../ui';
 import SimpleSelect from '../CronPanel/SimpleSelect';
 
 export type MarketKind = 'plugin' | 'mcp';
@@ -37,6 +38,7 @@ interface MarketplacePageProps {
   onCreateWithSkill: () => void;
   onCreateWithUpload: () => void;
   onRegisterCustomMcp: () => void;
+  onOpenApplicationPlugins: () => void;
 }
 
 // 2026-08-07：backend-requests.md 需求8 已解决——plugin_packages.list/show 现在真的下发单值
@@ -98,7 +100,7 @@ function PaginationBar({ currentPage, totalPages, pageSize, totalCount, onPageCh
   const rangeEnd = showAll ? totalCount : Math.min(currentPage * pageSize, totalCount);
 
   return (
-    <div className="mt-4 flex flex-wrap items-center justify-between gap-3 text-[13px] text-text-muted">
+    <div className="mt-4 flex flex-wrap items-center justify-between gap-3 text-[13px] text-text-muted" data-testid="connector-market-pagination">
       <div className="flex items-center gap-2">
         <span>{t('connectorMarket.pagination.pageSize')}</span>
         <SimpleSelect
@@ -108,7 +110,7 @@ function PaginationBar({ currentPage, totalPages, pageSize, totalCount, onPageCh
           className="w-20"
           menuPlacement="up"
         />
-        <span>{t('connectorMarket.pagination.rangeInfo', { start: rangeStart, end: rangeEnd, total: totalCount })}</span>
+        <span data-testid="connector-market-pagination-range-info">{t('connectorMarket.pagination.rangeInfo', { start: rangeStart, end: rangeEnd, total: totalCount })}</span>
       </div>
       {totalPages > 1 && (
         <div className="flex items-center gap-1">
@@ -118,6 +120,7 @@ function PaginationBar({ currentPage, totalPages, pageSize, totalCount, onPageCh
             onClick={() => onPageChange(currentPage - 1)}
             aria-label={t('connectorMarket.pagination.prev') ?? undefined}
             className="flex h-7 w-7 items-center justify-center rounded-md border border-border text-text hover:bg-bg-hover disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent"
+            data-testid="connector-market-pagination-prev"
           >
             <ChevronLeft size={14} />
           </button>
@@ -131,6 +134,8 @@ function PaginationBar({ currentPage, totalPages, pageSize, totalCount, onPageCh
                 key={p}
                 type="button"
                 onClick={() => onPageChange(p)}
+                data-testid="connector-market-pagination-page"
+                data-variant={p}
                 className={`flex h-7 min-w-7 items-center justify-center rounded-md px-1.5 text-[13px] ${
                   p === currentPage ? 'bg-text font-bold text-text-inverse' : 'text-text hover:bg-bg-hover'
                 }`}
@@ -145,6 +150,7 @@ function PaginationBar({ currentPage, totalPages, pageSize, totalCount, onPageCh
             onClick={() => onPageChange(currentPage + 1)}
             aria-label={t('connectorMarket.pagination.next') ?? undefined}
             className="flex h-7 w-7 items-center justify-center rounded-md border border-border text-text hover:bg-bg-hover disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent"
+            data-testid="connector-market-pagination-next"
           >
             <ChevronRight size={14} />
           </button>
@@ -166,6 +172,7 @@ export function MarketplacePage({
   onCreateWithSkill,
   onCreateWithUpload,
   onRegisterCustomMcp,
+  onOpenApplicationPlugins,
 }: MarketplacePageProps) {
   const { t, i18n } = useTranslation();
   const [category, setCategory] = useState<string>('all');
@@ -248,13 +255,23 @@ export function MarketplacePage({
   // id 起的——原因同 PluginDetailPage.tsx 的 pendingUseAfterConnectRef：onAllConnected 里要读到
   // 的是"发起连接续跑那一刻"的 id，用 state 会有同一渲染周期内 setState 未生效的陈旧闭包问题。
   const pendingInstallIdRef = useRef<string | null>(null);
-  const pluginInstallFlow = usePendingConnectorFlow(() => {
-    const id = pendingInstallIdRef.current;
-    if (!id) return;
-    pendingInstallIdRef.current = null;
-    clearPluginInstallPending(id);
-    void installPlugin(id);
-  });
+  const pluginInstallFlow = usePendingConnectorFlow(
+    () => {
+      const id = pendingInstallIdRef.current;
+      if (!id) return;
+      pendingInstallIdRef.current = null;
+      clearPluginInstallPending(id);
+      void installPlugin(id);
+    },
+    () => {
+      // 依赖 connector 自动连接失败/被取消：清掉这条 pending 记录。不清的话下面这个 effect 会
+      // 立刻再匹配到它、又 start() 一遍——尤其是以前 deps 里带着 pluginInstallFlow.active 时，
+      // flow 一结束 active 变 false 就重新触发，直接死循环狂打 mcp.connect（2026-08-31 修）。
+      const id = pendingInstallIdRef.current;
+      pendingInstallIdRef.current = null;
+      if (id) clearPluginInstallPending(id);
+    },
+  );
 
   useEffect(() => {
     if (pluginInstallFlow.active) return;
@@ -263,8 +280,11 @@ export function MarketplacePage({
     const [id, names] = entry;
     pendingInstallIdRef.current = id;
     pluginInstallFlow.start(names!);
+    // deps 不放 pluginInstallFlow.active：flow 成功/失败收尾都会改写 pluginInstallPendingMap
+    // （onAllConnected→clearPluginInstallPending、onAborted→clearPluginInstallPending），靠 map
+    // 变化重新驱动就够了；放 active 反而会在 flow 中止时立刻重启，造成死循环。
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pluginInstallPendingMap, pluginInstallFlow.active]);
+  }, [pluginInstallPendingMap]);
 
   // 分类 tab 只在"MCP广场"用，统计源直接是 builtinConnectors（filter=builtin 的结果，恒为
   // built_in），不再需要按 source 过滤——后端已经按 filter 分好了。
@@ -368,6 +388,14 @@ export function MarketplacePage({
   // 对应 store 的 isLoading 短暂置 true，10s 静默轮询不影响它（见两个 store 的 loadList 实现），
   // 用它区分空态文案该显示"加载中"还是"没有找到匹配的结果"。
   const activeIsLoading = activeKindForEmpty === 'mcp' ? connectorIsLoading : pluginIsLoading;
+  // 空状态文案分两种：有搜索词/状态筛选/分类筛选时列表为空 = "没有找到匹配的结果"；什么都没筛
+  // 却为空才是真的 "这里还没有内容"（"我的"下 = 还没创建/添加过，与安装/连接状态无关；"广场"
+  // 下 = 后端没返回可用项）。加载态分支同理按 topTab/myKind 区分，两者逻辑保持一致。
+  const activeCategoryForEmpty = activeKindForEmpty === 'mcp' ? category : pluginCategory;
+  const hasEmptyNarrowing =
+    query.trim() !== '' ||
+    statusFilter !== 'all' ||
+    (topTab !== 'my' && activeCategoryForEmpty !== 'all');
 
   // 切换 tab/子筛选/分类/状态筛选/搜索词都会让 activeList 变成一份新列表，统一重置回第1页，
   // 避免停留在一个对新列表来说已经越界的页码上看到空白（同款处理见 CronPanel/index.tsx 的
@@ -399,14 +427,11 @@ export function MarketplacePage({
   }
 
   return (
-    <div ref={scrollRef} className="relative h-full overflow-y-auto bg-card px-8 py-6">
-      <div className="mb-5">
-        <h1 className="text-[18px] font-semibold leading-7 text-text">{t('connectorMarket.title')}</h1>
-        <p className="mt-0.5 text-[12px] leading-[18px] text-text-muted">{t('connectorMarket.subtitle')}</p>
-      </div>
+    <div className="relative flex min-h-0 flex-1 flex-col overflow-hidden" data-testid="connector-market-marketplace">
+      <PageHeader title={t('connectorMarket.title')} subtitle={t('connectorMarket.subtitle')} />
 
-      <div className="mb-4 flex items-center justify-between gap-4">
-        <div className="flex items-center gap-6">
+      <div className="page-toolbar" data-testid="page-toolbar">
+        <div className="chat-picker-panel__tabs">
           {(['plugin', 'mcp', 'my'] as const).map((tab) => {
             const active = topTab === tab;
             return (
@@ -414,16 +439,25 @@ export function MarketplacePage({
                 key={tab}
                 type="button"
                 onClick={() => onTopTabChange(tab)}
-                className={`relative pb-2 text-[14px] leading-[22px] ${active ? 'font-semibold text-text' : 'font-normal text-text'}`}
+                aria-pressed={active}
+                data-testid="connector-market-tab"
+                data-variant={tab}
+                className={active ? 'is-active' : ''}
               >
-                {t(`connectorMarket.tabs.${tab}`)}
-                {active && <span className="absolute inset-x-0 -bottom-px h-0.5 rounded-full bg-text" />}
+                {t(tab === 'my' ? 'connectorMarket.tabs.my' : `connectorMarket.tabs.${tab}Market`)}
               </button>
             );
           })}
+          <button
+            type="button"
+            onClick={onOpenApplicationPlugins}
+            className="relative pb-2 text-[14px] font-normal leading-[22px] text-text"
+          >
+            {t('connectorMarket.tabs.applicationPlugins')}
+          </button>
         </div>
 
-        <div className="flex shrink-0 items-center gap-2">
+        <div className="flex items-center gap-3">
           <div className="flex items-center gap-1">
             {(['all', 'available', 'pending'] as const).map((key) => {
               const active = statusFilter === key;
@@ -432,6 +466,9 @@ export function MarketplacePage({
                   key={key}
                   type="button"
                   onClick={() => setStatusFilter(key)}
+                  aria-pressed={active}
+                  data-testid="connector-market-status-filter"
+                  data-variant={key}
                   className={`h-8 shrink-0 whitespace-nowrap px-3 text-[13px] font-medium ${
                     active ? 'rounded-[8px] bg-secondary text-text' : 'text-text-muted hover:text-text'
                   }`}
@@ -441,21 +478,20 @@ export function MarketplacePage({
               );
             })}
           </div>
-          <div className="relative w-80">
-            <Search size={14} strokeWidth={2} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-[color:var(--color-text-placeholder)]" />
-            <input
-              value={query}
-              onChange={(event) => setQuery(event.target.value)}
-              placeholder={t(`connectorMarket.search.${topTab}`)}
-              className="h-8 w-full rounded-lg border border-border bg-card pl-8 pr-3 text-[12px] leading-[18px] text-text placeholder:text-[color:var(--color-text-placeholder)] outline-none focus:border-border-hover"
-            />
-          </div>
+          <PageToolbarSearch
+            wrapperTestId="connector-market-search"
+            inputTestId="connector-market-search-input"
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+            placeholder={t(`connectorMarket.search.${topTab}`)}
+          />
 
           {topTab === 'my' && (
             <div className="relative" ref={createMenuRef}>
               <button
                 type="button"
                 onClick={() => setCreateMenuOpen((v) => !v)}
+                data-testid="connector-market-create-menu"
                 className="flex h-8 shrink-0 items-center gap-1 rounded-lg bg-text px-3 text-[12px] text-text-inverse"
               >
                 <Plus size={13} />
@@ -463,7 +499,7 @@ export function MarketplacePage({
                 <ChevronDown size={13} />
               </button>
               {createMenuOpen && (
-                <div className="absolute right-0 top-9 z-20 w-40 rounded-lg border border-border bg-card py-1 shadow-lg">
+                <div className="absolute right-0 top-9 z-20 w-40 rounded-lg border border-border bg-card py-1 shadow-lg" data-testid="connector-market-create-menu-popover">
                   {myKind === 'plugin' ? (
                     <>
                       <MenuItem label={t('connectorMarket.create.manual')} onClick={() => { setCreateMenuOpen(false); onCreateManual(); }} />
@@ -480,58 +516,38 @@ export function MarketplacePage({
         </div>
       </div>
 
-      {topTab === 'mcp' && categoryTabs.length > 1 && (
-        <div className="mb-5 flex flex-wrap items-center">
-          {categoryTabs.map((tab, index) => (
-            <span key={tab.key} className="flex items-center">
-              {index > 0 && <span className="mx-3 text-[14px] leading-[22px] text-border-strong">|</span>}
-              <button
-                type="button"
-                onClick={() => setCategory(tab.key)}
-                className={`text-[14px] leading-[22px] ${category === tab.key ? 'font-semibold text-text' : 'font-normal text-text-muted'}`}
-              >
-                {tab.label}
-              </button>
-            </span>
-          ))}
+      {/* 2026-08-29 MCP 广场目前都不带 tag（category 多为空），分类 tab 行先隐藏——去掉 false 即恢复 */}
+      {false && topTab === 'mcp' && categoryTabs.length > 1 && (
+        <div className="mb-5">
+          <CategoryTabs
+            items={categoryTabs.map((tab) => ({ value: tab.key, label: tab.label }))}
+            value={category}
+            onChange={setCategory}
+          />
         </div>
       )}
 
       {topTab === 'plugin' && pluginCategoryTabs.length > 1 && (
-        <div className="mb-5 flex flex-wrap items-center">
-          {pluginCategoryTabs.map((tab, index) => (
-            <span key={tab.key} className="flex items-center">
-              {index > 0 && <span className="mx-3 text-[14px] leading-[22px] text-border-strong">|</span>}
-              <button
-                type="button"
-                onClick={() => setPluginCategory(tab.key)}
-                className={`text-[14px] leading-[22px] ${pluginCategory === tab.key ? 'font-semibold text-text' : 'font-normal text-text-muted'}`}
-              >
-                {tab.label}
-              </button>
-            </span>
-          ))}
+        <div className="mb-5">
+          <CategoryTabs
+            items={pluginCategoryTabs.map((tab) => ({ value: tab.key, label: tab.label }))}
+            value={pluginCategory}
+            onChange={setPluginCategory}
+          />
         </div>
       )}
 
       {topTab === 'my' && (
-        <div className="mb-5 flex flex-wrap items-center">
-          {(['plugin', 'mcp'] as const).map((kind, index) => (
-            <span key={kind} className="flex items-center">
-              {index > 0 && <span className="mx-3 text-[14px] leading-[22px] text-border-strong">|</span>}
-              <button
-                type="button"
-                onClick={() => onMyKindChange(kind)}
-                className={`text-[14px] leading-[22px] ${myKind === kind ? 'font-semibold text-text' : 'font-normal text-text-muted'}`}
-              >
-                {t(`connectorMarket.tabs.${kind}`)}
-              </button>
-            </span>
-          ))}
+        <div className="mb-5">
+          <CategoryTabs
+            items={(['plugin', 'mcp'] as const).map((kind) => ({ value: kind, label: t(`connectorMarket.tabs.${kind}`) }))}
+            value={myKind}
+            onChange={onMyKindChange}
+          />
         </div>
       )}
 
-      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3">
+      <div ref={scrollRef} className="card-grid-auto min-h-0 overflow-y-auto" data-testid="connector-market-card-list">
         {topTab === 'my' ? (
           myKind === 'mcp' ? (
             paginatedConnectors.map((connector) => {
@@ -621,7 +637,7 @@ export function MarketplacePage({
           })
         )}
         {isEmpty && (
-          <div className="col-span-full flex flex-col items-center justify-center gap-2 rounded-xl border border-dashed border-border py-16 text-[13px] text-text-muted">
+          <div className="col-span-full flex flex-col items-center justify-center gap-2 rounded-xl border border-dashed border-border py-16 text-[13px] text-text-muted" data-testid="connector-market-empty">
             {activeIsLoading
               ? t(
                   topTab === 'my'
@@ -632,9 +648,17 @@ export function MarketplacePage({
                       ? 'connectorMarket.empty.loadingMcp'
                       : 'connectorMarket.empty.loadingPlugin',
                 )
-              : topTab === 'my'
-                ? t(myKind === 'mcp' ? 'connectorMarket.empty.myMcp' : 'connectorMarket.empty.myPlugin')
-                : t('connectorMarket.empty.searchNoResult')}
+              : hasEmptyNarrowing
+                ? t('connectorMarket.empty.searchNoResult')
+                : t(
+                    topTab === 'my'
+                      ? myKind === 'mcp'
+                        ? 'connectorMarket.empty.myMcp'
+                        : 'connectorMarket.empty.myPlugin'
+                      : topTab === 'mcp'
+                        ? 'connectorMarket.empty.mcp'
+                        : 'connectorMarket.empty.plugin',
+                  )}
           </div>
         )}
       </div>

@@ -15,6 +15,7 @@ import logging
 import mimetypes
 import os
 import posixpath
+import re
 import select
 import socket
 import ssl
@@ -24,7 +25,7 @@ from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote, unquote, urlparse
+from urllib.parse import ParseResult, quote, unquote, urlparse
 
 # --- Early --dotenv parsing (before jiuwenswarm imports) ---
 from jiuwenswarm.dotenv_early import parse_dotenv_early
@@ -255,6 +256,13 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
         "transfer-encoding",
         "upgrade",
     }
+    _UNTRUSTED_FORWARDED_HOST_HEADERS = {
+        "forwarded",
+        "x-forwarded-host",
+        "x-forwarded-server",
+        "x-jiuwenswarm-original-host",
+        "x-original-host",
+    }
     _WS_LOG_MAX_CHARS = 2000
     _HTTP_PROXY_TIMEOUT = 30
     _WS_CONNECT_TIMEOUT = 10
@@ -460,7 +468,89 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
         connection = self.headers.get("Connection", "")
         return "websocket" in upgrade.lower() and "upgrade" in connection.lower()
 
+    @staticmethod
+    def _is_malformed_raw_host(raw_host: str) -> bool:
+        """Return whether a raw Host header value is unusable before parsing."""
+        if not raw_host or len(raw_host) > 512:
+            return True
+        if not raw_host.isascii() or raw_host.endswith(":"):
+            return True
+        has_control_character = any(
+            character.isspace() or ord(character) < 32 or ord(character) == 127
+            for character in raw_host
+        )
+        if has_control_character:
+            return True
+        return any(
+            separator in raw_host
+            for separator in ("/", "\\", "?", "#", "@", ",")
+        )
+
+    @staticmethod
+    def _has_unexpected_host_parts(parsed_host: ParseResult) -> bool:
+        """Return whether a parsed Host authority carries non-authority parts."""
+        if parsed_host.username is not None or parsed_host.password is not None:
+            return True
+        return bool(
+            parsed_host.path
+            or parsed_host.params
+            or parsed_host.query
+            or parsed_host.fragment
+        )
+
+    def _clean_outer_host(self) -> str | None:
+        """Return one canonical browser-facing Host value for proxying."""
+        host_values = self.headers.get_all("Host") or []
+        if len(host_values) != 1:
+            return None
+        raw_host = str(host_values[0] or "").strip()
+        if self._is_malformed_raw_host(raw_host):
+            return None
+        try:
+            parsed_host = urlparse(f"//{raw_host}")
+            hostname = parsed_host.hostname
+            port = parsed_host.port
+        except ValueError:
+            return None
+        if hostname is None or self._has_unexpected_host_parts(parsed_host):
+            return None
+        normalized_hostname = hostname.lower().rstrip(".")
+        if (
+            not normalized_hostname
+            or not normalized_hostname.isascii()
+            or "%" in normalized_hostname
+        ):
+            return None
+        if ":" in normalized_hostname:
+            normalized_host = f"[{normalized_hostname}]"
+        else:
+            if re.fullmatch(r"[a-z0-9._-]+", normalized_hostname) is None:
+                return None
+            normalized_host = normalized_hostname
+        if port is not None:
+            normalized_host = f"{normalized_host}:{port}"
+        return normalized_host
+
+    def _write_proxy_error(self, status: int, error: str) -> None:
+        """Write a non-cacheable JSON proxy rejection."""
+        data = json.dumps(
+            {"error": error, "code": "BAD_PROXY_REQUEST"},
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        if self.command != "HEAD":
+            self.wfile.write(data)
+
     def _proxy_http(self) -> None:
+        outer_host = self._clean_outer_host()
+        if outer_host is None:
+            self._write_proxy_error(400, "invalid Host header")
+            return
         parsed = urlparse(self.api_target)
         if parsed.scheme == "https":
             ssl_ctx = None if get_ssl_verify() else get_insecure_ssl_context()
@@ -485,12 +575,15 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
 
             forward_headers: dict[str, str] = {}
             for key, value in self.headers.items():
-                if key.lower() in self._HOP_BY_HOP_HEADERS:
+                normalized_key = key.lower()
+                if normalized_key in self._HOP_BY_HOP_HEADERS:
                     continue
-                if key.lower() == "host":
+                if normalized_key == "host":
+                    continue
+                if normalized_key in self._UNTRUSTED_FORWARDED_HOST_HEADERS:
                     continue
                 forward_headers[key] = value
-            forward_headers["Host"] = parsed.netloc
+            forward_headers["Host"] = outer_host
 
             conn.request(self.command, self.path, body=body, headers=forward_headers)
             resp = conn.getresponse()
@@ -506,7 +599,7 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
                 self.wfile.write(resp_body)
         except Exception as exc:  # noqa: BLE001
             self.log_error("proxy http error: %s", exc)
-            self.send_error(502, "proxy http error")
+            self._write_proxy_error(502, "proxy http error")
         finally:
             conn.close()
 
@@ -1273,12 +1366,15 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
                 return
             self._serve_verified_local_download(str(file_path), inline=True)
             return
+        verified_download_name: str | None = None
         if payload is not None:
             # 本进程 secret 能校验并不意味着 token 的路径位于 Gateway 宿主机。
             # AgentOS 的部署与用户 AgentServer 可能共用下载密钥；此时 token
             # 仍可被 Gateway 验证，但 ``path`` 是用户容器内路径，必须先按 token
             # 携带的 bridge 地址代理给目标 AgentServer，不能在这里误判 404。
             file_path = str(payload.get("path") or "")
+            if payload.get("kind") == "verified_asset_v1":
+                verified_download_name = str(payload.get("name") or "")
             has_target_bridge = bool(
                 str(payload.get("download_http_base") or "").strip()
             )
@@ -1296,7 +1392,10 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
                     raw_inline = raw_inline[0] if raw_inline else ""
                 inline = str(raw_inline or "").strip().lower() in {"1", "true"}
                 _SpaStaticHandler._serve_verified_local_download(
-                    self, file_path, inline=inline
+                    self,
+                    file_path,
+                    inline=inline,
+                    download_name=verified_download_name,
                 )
                 return
 
@@ -1316,18 +1415,29 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
         # the same secret, but it must never fall back to the Gateway directory.
         if payload is not None and os.path.isfile(file_path):
             _SpaStaticHandler._serve_verified_local_download(
-                self, file_path, inline=inline
+                self,
+                file_path,
+                inline=inline,
+                download_name=verified_download_name,
             )
             return
 
         self.logger.warning("[file-api/download] 目标 AgentServer 不可达: token=%s...", token[:8])
         self._write_json(503, {"error": "agent_server_unavailable"})
 
-    def _serve_verified_local_download(self, file_path: str, *, inline: bool) -> None:
+    def _serve_verified_local_download(
+        self,
+        file_path: str,
+        *,
+        inline: bool,
+        download_name: str | None = None,
+    ) -> None:
         """Stream a token-verified legacy single-user file with Range support."""
         try:
             file_size = os.path.getsize(file_path)
-            file_name = os.path.basename(file_path)
+            file_name = os.path.basename(str(download_name or "").replace("\\", "/"))
+            if not file_name:
+                file_name = os.path.basename(file_path)
             mime_type = mimetypes.guess_type(file_name)[0] or "application/octet-stream"
             byte_range = None
             range_header = self.headers.get("Range")

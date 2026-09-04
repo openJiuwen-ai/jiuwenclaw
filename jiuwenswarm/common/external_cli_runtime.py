@@ -256,6 +256,7 @@ def install_external_cli_runtime(
     if not artifacts:
         raise RuntimeError(f"{cli_agent} runtime is not available for {platform_key}")
 
+    activate_external_cli_runtime_paths()
     if _is_frozen_windows():
         with tempfile.TemporaryDirectory(
             prefix=f"{DISPLAY_NAME}-{cli_agent}-runtime-",
@@ -274,7 +275,19 @@ def install_external_cli_runtime(
                     "eta_seconds": 0.0,
                 },
             )
-            _run_elevated_windows_runtime_installer(cli_agent, artifact_directory)
+            try:
+                _install_external_cli_runtime_artifacts_with_lock(
+                    cli_agent,
+                    platform_key,
+                    artifacts,
+                    artifact_directory,
+                )
+            except PermissionError:
+                emit(
+                    f"Current user cannot update the {cli_agent} runtime; "
+                    "requesting administrator permission"
+                )
+                _run_elevated_windows_runtime_installer(cli_agent, artifact_directory)
     else:
         target = external_cli_site_packages(cli_agent)
         agent_root = target.parent
@@ -323,6 +336,23 @@ def install_external_cli_runtime_from_artifacts(
     if not artifacts:
         raise RuntimeError(f"{cli_agent} runtime is not available for {platform_key}")
 
+    activate_external_cli_runtime_paths()
+    _install_external_cli_runtime_artifacts_with_lock(
+        cli_agent,
+        platform_key,
+        artifacts,
+        artifact_directory,
+    )
+    _verify_installed_runtime(cli_agent)
+
+
+def _install_external_cli_runtime_artifacts_with_lock(
+    cli_agent: str,
+    platform_key: str,
+    artifacts: list[dict[str, str]],
+    artifact_directory: Path,
+) -> None:
+    """Install downloaded runtime artifacts while holding the agent lock."""
     target = external_cli_site_packages(cli_agent)
     agent_root = target.parent
     agent_root.mkdir(parents=True, exist_ok=True)
@@ -341,15 +371,13 @@ def install_external_cli_runtime_from_artifacts(
             f"another {cli_agent} runtime installation is already running"
         ) from exc
 
-    _verify_installed_runtime(cli_agent)
-
 
 def _download_and_install_external_cli_runtime_files(
     artifacts: list[dict[str, str]],
     context: _RuntimeInstallContext,
 ) -> None:
     agent_root = context.target.parent
-    staging_root = Path(tempfile.mkdtemp(prefix=".install-", dir=agent_root))
+    staging_root = _create_runtime_staging_root(agent_root)
     staging_site_packages = staging_root / "site-packages"
     staging_site_packages.mkdir()
     try:
@@ -410,7 +438,7 @@ def _install_external_cli_runtime_from_artifacts(
             f"external CLI artifact directory does not exist: {artifact_directory}"
         )
     agent_root = target.parent
-    staging_root = Path(tempfile.mkdtemp(prefix=".install-", dir=agent_root))
+    staging_root = _create_runtime_staging_root(agent_root)
     staging_site_packages = staging_root / "site-packages"
     staging_site_packages.mkdir()
     try:
@@ -430,6 +458,13 @@ def _install_external_cli_runtime_from_artifacts(
         )
     finally:
         shutil.rmtree(staging_root, ignore_errors=True)
+
+
+def _create_runtime_staging_root(agent_root: Path) -> Path:
+    """Create a unique staging directory that inherits its parent permissions."""
+    staging_root = agent_root / f".install-{uuid.uuid4().hex}"
+    staging_root.mkdir()
+    return staging_root
 
 
 def _complete_staged_runtime_install(
@@ -562,6 +597,13 @@ def _is_frozen_macos() -> bool:
 
 def _verify_installed_runtime(cli_agent: str) -> None:
     importlib.invalidate_caches()
+    target = external_cli_site_packages(cli_agent)
+    try:
+        next(target.iterdir(), None)
+    except OSError as exc:
+        raise RuntimeError(
+            f"installed {cli_agent} runtime directory is not readable: {target}: {exc}"
+        ) from exc
     missing = [
         module
         for module in _REQUIRED_MODULES[cli_agent]

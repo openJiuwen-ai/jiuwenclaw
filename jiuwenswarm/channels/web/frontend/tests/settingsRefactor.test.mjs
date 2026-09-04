@@ -23,6 +23,7 @@ import {
 } from '../node_modules/.cache/settings-refactor/registry/buildSettingsPageDefinition.js';
 import {
   isMediaCapabilityConfigured,
+  mediaCapabilityModalities,
   mediaCapabilityConfigFields,
   mediaCapabilityEnabledField,
   mediaCapabilityPersistenceFields,
@@ -1014,6 +1015,20 @@ test('Settings i18n is symmetrical and includes the optional field affordance', 
   assert.equal(zh.channels.xiaoyiApps.defaultAppName, '默认小艺应用');
   assert.equal(en.channels.xiaoyiApps.defaultAppName, 'Default Xiaoyi App');
   assert.doesNotMatch(source('src/features/settings/modules/channels/channelAdapters.ts'), /默认小艺应用|zh-Hans-CN/);
+  const dynamicAgentKeys = [
+    ...mediaCapabilityModalities.flatMap((modality) => [
+      `settingsPanel.agent.${modality}`,
+      `settingsPanel.agent.${modality}Description`,
+      `settingsPanel.agent.${modality}ConfigTitle`,
+    ]),
+    'settingsPanel.agent.toggleCapability',
+    'settingsPanel.agent.saveAndEnable',
+    'settingsPanel.agent.savedRestartRequired',
+  ];
+  for (const key of dynamicAgentKeys) {
+    assert.equal(typeof translationAt(zh, key), 'string', `Missing Chinese translation ${key}`);
+    assert.equal(typeof translationAt(en, key), 'string', `Missing English translation ${key}`);
+  }
   for (const file of sourceFilesUnder('src/features/settings').filter((candidate) =>
     /\.tsx?$/.test(candidate.pathname),
   )) {
@@ -1072,6 +1087,7 @@ test('every visible Settings control maps to an exact persistence field or RPC',
     'proactive_recommendation_enabled',
     'proactive_recommendation_max_recommend_per_day',
     'proactive_recommendation_max_rounds_per_tick',
+    'trajectory_ui_enabled',
   ]);
 
   const channelCatalogFile = parseTsx('src/features/settings/modules/channels/channelCatalog.ts');
@@ -1150,6 +1166,18 @@ test('every visible Settings control maps to an exact persistence field or RPC',
     assert.match(channelController, new RegExp(`getMethod: 'channel\\.${channelId}\\.get_conf'`));
     assert.match(channelController, new RegExp(`setMethod: 'channel\\.${channelId}\\.set_conf'`));
   }
+});
+
+test('saving the free-model switch refreshes the shared model catalog after persistence', () => {
+  const settingsConfig = source('src/features/settings/services/useSettingsConfig.ts');
+  const settingsPage = source('src/features/settings/SettingsPage.tsx');
+  const settingsServices = source('src/features/settings/services/SettingsServicesProvider.tsx');
+  const app = source('src/App.tsx');
+  assert.match(settingsServices, /onConfigSaved\?: \(updatedKeys: readonly string\[\]\) => Promise<void> \| void/);
+  assert.match(settingsConfig, /setConfig\([\s\S]{0,120}await onConfigSaved\?\.\(Object\.keys\(updates\)\)/);
+  assert.match(settingsPage, /onConfigSaved=\{onConfigSaved\}/);
+  assert.match(app, /updatedKeys\.includes\('enable_free_models'\)\) await handleModelsRefresh\(\)/);
+  assert.match(app, /onConfigSaved=\{handleSettingsConfigSaved\}/);
 });
 
 test('Settings form dialogs share the same dirty-close contract without disabling save', () => {
@@ -1512,6 +1540,10 @@ test('Settings high-fidelity visual contract remains wired to exact assets and s
   );
   assert.doesNotMatch(generalDefinition, /groupedRows|separatedRows/);
   assert.match(modelsDefinition, /id: 'model-manager',[\s\S]{0,80}separatedRows: true/);
+  assert.ok(
+    modelsDefinition.indexOf("id: 'model-manager'") < modelsDefinition.indexOf("id: 'free-models'"),
+    'free models should render after the chat model manager',
+  );
   assert.match(channelsDefinition, /id: 'channels',[\s\S]{0,80}separatedRows: true/);
   assert.match(modelsSettings, /<SettingsSection[\s\S]{0,120}separatedRows/);
   assert.match(channelList, /<SettingsSection separatedRows>/);

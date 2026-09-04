@@ -5,6 +5,7 @@ import { useTranslation } from 'react-i18next';
 import { Button, Switch } from '../../../../components/ui';
 import { Form, FormDialog, useForm } from '../../../../components/form';
 import { setA2UIFeatureEnabled } from '../../../../features/a2ui/featureConfig';
+import { setTrajectoryUiEnabled } from '../../../../features/trajectory/featureConfig';
 import {
   EXTERNAL_CLI_AGENT_KINDS,
   ExternalCliAgentsSection,
@@ -289,6 +290,32 @@ export function A2UISetting({ disabled }: SettingsCustomItemProps) {
         checked={a2ui}
         disabled={disabled || !isConnected || source.savingKeys.has('a2ui_enabled')}
         onChange={(next) => void updateA2UI(next).catch(() => undefined)}
+      />
+    </SettingRow>
+  );
+}
+
+export function TrajectoryUiSetting({ disabled }: SettingsCustomItemProps) {
+  const { t } = useTranslation();
+  const { isConnected } = useSettingsServices();
+  const source = useSettingsSource();
+  const enabled = parseConfigBoolean(source.values.trajectory_ui_enabled);
+
+  async function updateTrajectoryUi(next: boolean): Promise<void> {
+    await source.save({ trajectory_ui_enabled: next }, 'trajectory-ui-enabled');
+    setTrajectoryUiEnabled(next);
+  }
+
+  return (
+    <SettingRow
+      title={t('settingsPanel.fields.trajectory_ui_enabled.title')}
+      description={t('settingsPanel.fields.trajectory_ui_enabled.description')}
+    >
+      <Switch
+        aria-label={t('settingsPanel.fields.trajectory_ui_enabled.title')}
+        checked={enabled}
+        disabled={disabled || !isConnected || source.savingKeys.has('trajectory_ui_enabled')}
+        onChange={(next) => void updateTrajectoryUi(next).catch(() => undefined)}
       />
     </SettingRow>
   );

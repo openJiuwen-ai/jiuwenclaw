@@ -56,14 +56,34 @@ def normalize_provider(provider: Any) -> str:
     return str(value or "").strip()
 
 
+def _provider_from_client_config(config: Any) -> str:
+    """Resolve the service identity before transport normalization.
+
+    ``agent-core`` may normalize legacy providers such as DeepSeek or
+    OpenRouter to the OpenAI-compatible transport while retaining the
+    original value in ``legacy_client_provider``.  The original provider is
+    the value callers need for policy and diagnostics.
+    """
+
+    if config is None:
+        return ""
+    legacy_provider = getattr(config, "legacy_client_provider", None)
+    if legacy_provider is not None:
+        normalized_legacy = normalize_provider(legacy_provider)
+        if normalized_legacy:
+            return normalized_legacy
+    return normalize_provider(getattr(config, "client_provider", None))
+
+
 def model_provider(model: Any | None) -> str:
     """Resolve the effective provider from an OpenJiuwen Model or its client."""
 
     for owner in (model, getattr(model, "_client", None)):
-        model_client_config = getattr(owner, "model_client_config", None)
-        provider = getattr(model_client_config, "client_provider", None)
-        if provider is not None:
-            return normalize_provider(provider)
+        provider = _provider_from_client_config(
+            getattr(owner, "model_client_config", None)
+        )
+        if provider:
+            return provider
     return ""
 
 
@@ -124,7 +144,12 @@ def default_model_provider_from_entries(models: list[dict[str, Any]]) -> str:
     if entry is None:
         return ""
     model_client_config = entry.get("model_client_config") or {}
-    return str(model_client_config.get("client_provider") or "").strip()
+    if not isinstance(model_client_config, dict):
+        return ""
+    return normalize_provider(
+        model_client_config.get("legacy_client_provider")
+        or model_client_config.get("client_provider")
+    )
 
 
 def set_default_model_provider_in_entries(
@@ -157,15 +182,19 @@ def get_default_model_provider(config: dict[str, Any] | None) -> str:
         if isinstance(target, dict):
             model_client_config = target.get("model_client_config")
             if isinstance(model_client_config, dict):
-                return str(
-                    model_client_config.get("client_provider") or ""
-                ).strip()
+                return normalize_provider(
+                    model_client_config.get("legacy_client_provider")
+                    or model_client_config.get("client_provider")
+                )
 
     react = config.get("react")
     react = react if isinstance(react, dict) else {}
     model_client_config = react.get("model_client_config")
     if isinstance(model_client_config, dict):
-        provider = str(model_client_config.get("client_provider") or "").strip()
+        provider = normalize_provider(
+            model_client_config.get("legacy_client_provider")
+            or model_client_config.get("client_provider")
+        )
         if provider:
             return provider
     return str(os.getenv("MODEL_PROVIDER", "")).strip()

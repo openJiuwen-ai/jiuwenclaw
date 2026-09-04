@@ -1148,6 +1148,42 @@ async def test_config_get_returns_setup_guide_switch(monkeypatch, raw_config, ex
     assert channel.responses[-1]["payload"]["setup_guide_enabled"] == expected
 
 
+@pytest.mark.asyncio
+async def test_trajectory_ui_switch_round_trips_through_config_rpc(monkeypatch):
+    channel = FakeWebChannel()
+    persisted: list[bool] = []
+    monkeypatch.setattr(
+        app_web_handlers,
+        "get_config_raw",
+        lambda: {"trajectory_ui": {"enabled": False}},
+    )
+    monkeypatch.setattr(
+        app_web_handlers,
+        "get_config",
+        lambda: {"trajectory_ui": {"enabled": False}},
+    )
+    monkeypatch.setattr(
+        app_web_handlers,
+        "update_trajectory_ui_in_config",
+        lambda enabled: persisted.append(enabled),
+    )
+    _register_web_handlers(WebHandlersBindParams(channel=channel))
+
+    await channel.methods["config.get"](object(), "req-trajectory-get", {}, "session")
+    assert channel.responses[-1]["payload"]["trajectory_ui_enabled"] == "false"
+
+    await channel.methods["config.set"](
+        object(),
+        "req-trajectory-set",
+        {"trajectory_ui_enabled": "true"},
+        "session",
+    )
+    assert persisted == [True]
+    assert channel.responses[-1]["payload"]["updated"] == ["trajectory_ui_enabled"]
+    change_set = app_web_handlers._ConfigChangeSet({}, ["trajectory_ui_enabled"])
+    assert change_set.reload_scopes == {"agent_runtime", "web_ui"}
+
+
 def test_media_capability_config_uses_multimodal_hot_reload_scope():
     for env_key in app_web_handlers._MULTIMODAL_RELOAD_ENV_KEYS:
         change_set = app_web_handlers._ConfigChangeSet({env_key: "true"}, [])
@@ -1323,6 +1359,33 @@ async def test_models_replace_all_rejects_invalid_vendor_identity(vendor_key, pl
     assert response["ok"] is False
     assert response["code"] == "BAD_REQUEST"
     assert expected_error in response["error"]
+
+
+@pytest.mark.asyncio
+async def test_models_replace_all_rejects_reasoning_level_not_supported_by_model():
+    channel = FakeWebChannel()
+    _register_web_handlers(WebHandlersBindParams(channel=channel))
+
+    await channel.methods["models.replace_all"](
+        object(),
+        "req-models-invalid-reasoning",
+        {
+            "models": [{
+                "model_name": "kimi-k3",
+                "api_base": "https://api.moonshot.cn/v1",
+                "api_key": "secret",
+                "model_provider": "OpenAI",
+                "reasoning_level": "off",
+                "is_default": True,
+            }],
+        },
+        "sess-1",
+    )
+
+    response = channel.responses[-1]
+    assert response["ok"] is False
+    assert response["code"] == "BAD_REQUEST"
+    assert "reasoning_level must be one of: low, high, max" in response["error"]
 
 
 @pytest.mark.asyncio
@@ -1998,6 +2061,46 @@ async def test_external_cli_codex_install_status_returns_snapshot():
     assert payload["download_attempt"] == 3
     assert payload["download_max_attempts"] == 5
     assert payload["switching_source"] is False
+
+
+@pytest.mark.parametrize("cli_agent", ["claude", "codex"])
+def test_external_cli_install_success_clears_download_artifact_state(cli_agent: str) -> None:
+    lock = app_web_handlers._EXTERNAL_CLI_DEPENDENCY_INSTALL_LOCKS[cli_agent]
+    status = app_web_handlers._EXTERNAL_CLI_DEPENDENCY_INSTALL_STATUSES[cli_agent]
+    with lock:
+        status.update({
+            "status": "running",
+            "phase": "downloading",
+            "downloaded_bytes": 1024,
+            "total_bytes": 4096,
+            "bytes_per_second": 512.0,
+            "eta_seconds": 6.0,
+            "artifact_index": 1,
+            "artifact_count": 1,
+            "current_package": "claude-agent-sdk",
+            "current_version": "0.2.115",
+            "download_attempt": 2,
+            "download_max_attempts": 5,
+            "switching_source": True,
+        })
+
+    app_web_handlers._update_external_cli_dependency_install_status(
+        cli_agent,
+        app_web_handlers._external_cli_dependency_install_succeeded_updates(),
+    )
+
+    snapshot = app_web_handlers._snapshot_external_cli_dependency_install_status(cli_agent)
+    assert snapshot["status"] == "succeeded"
+    assert snapshot["phase"] == "succeeded"
+    assert snapshot["downloaded_bytes"] == 0
+    assert snapshot["total_bytes"] == 0
+    assert snapshot["artifact_index"] == 0
+    assert snapshot["artifact_count"] == 0
+    assert snapshot["current_package"] == ""
+    assert snapshot["current_version"] == ""
+    assert snapshot["download_attempt"] == 0
+    assert snapshot["download_max_attempts"] == 0
+    assert snapshot["switching_source"] is False
 
 
 @pytest.mark.asyncio

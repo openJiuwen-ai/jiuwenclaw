@@ -202,13 +202,14 @@ export function McpDetailPage({ name, onBack, onUse, onUseExample, onEdit }: Mcp
   }
 
   return (
-    <div className="relative h-full overflow-y-auto bg-card px-8 py-6">
+    <div className="relative h-full overflow-y-auto bg-card px-8 py-6" data-testid="connector-market-mcp-detail">
       {/* 用户明确要求：去掉路径说明（原来的"MCP/MCP详情"面包屑），返回挪到整个页面最顶行，
           图标+文字（黑色），不再是原来那个跟扩展图标同排的圆形纯图标按钮。 */}
       <button
         type="button"
         onClick={onBack}
         className="mb-4 flex items-center gap-1 text-[14px] leading-[22px] text-text hover:opacity-70"
+        data-testid="connector-market-mcp-detail-back"
       >
         <ChevronLeft size={16} />
         {t('connectorMarket.common.back')}
@@ -224,20 +225,22 @@ export function McpDetailPage({ name, onBack, onUse, onUseExample, onEdit }: Mcp
           <h1 className="text-[18px] font-semibold leading-7 text-text">{connector.displayName}</h1>
           <span
             data-tooltip={detail?.cliSpecPresent ? t('connectorMarket.detail.cliSpecPresentHint') : undefined}
+            data-testid="connector-market-mcp-detail-integration-type"
+            data-variant={connector.integrationType}
             className="flex items-center gap-1 rounded-full border border-border px-2 py-0.5 text-[11px] leading-4 text-text-muted"
           >
             {detail?.cliSpecPresent && <Terminal size={11} />}
             {t(integrationTypeLabelKey(connector.integrationType))}
           </span>
           {cardState === 'error' && (
-            <span className="flex items-center gap-1 text-[12px] text-danger">
+            <span className="flex items-center gap-1 text-[12px] text-danger" data-testid="connector-market-mcp-detail-state-error">
               <AlertCircle size={14} />
               {t('connectorMarket.card.stateError')}
             </span>
           )}
         </div>
 
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-3" data-testid="connector-market-mcp-detail-actions">
           {/* 自定义 MCP 才能编辑（source==='customize'，built_in 没有可改的连接配置）——放在
               解绑左边，和"卸载/解绑的左边一个小编辑按键"的产品要求对齐。 */}
           {isCustomize && onEdit && (
@@ -269,6 +272,7 @@ export function McpDetailPage({ name, onBack, onUse, onUseExample, onEdit }: Mcp
               // 精确），专门用来盖掉禁用态下鼠标悬停仍然变蓝的问题——原生 disabled 属性不保证
               // 阻止 :hover 伪类生效，具体行为跟浏览器有关，不能只靠 disabled 属性本身。
               className="flex items-center gap-1 text-[13px] text-text hover:text-[color:var(--color-chat-accent)] disabled:cursor-not-allowed disabled:opacity-60 disabled:hover:text-text"
+              data-testid="connector-market-mcp-detail-use"
             >
               <NewConversationIcon size={14} />
               {t('connectorMarket.card.use')}
@@ -292,7 +296,7 @@ export function McpDetailPage({ name, onBack, onUse, onUseExample, onEdit }: Mcp
           lucide 没有现成的实心圆+X 组合图标）；"连接MCP"文字从红色改成蓝色（用跟全局一致的
           accent 蓝 token）。 */}
       {installed && !linked && (
-        <div className="mb-6 flex items-center gap-1.5 rounded-lg bg-[#FCE3E1] px-3 py-2 text-[13px] text-text-muted">
+        <div className="mb-6 flex items-center gap-1.5 rounded-lg bg-[#FCE3E1] px-3 py-2 text-[13px] text-text-muted" data-testid="connector-market-mcp-detail-disconnect-banner">
           <span className="flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded-full bg-danger">
             <X size={9} strokeWidth={3} className="text-text-inverse" />
           </span>
@@ -302,6 +306,7 @@ export function McpDetailPage({ name, onBack, onUse, onUseExample, onEdit }: Mcp
             onClick={handleInstall}
             disabled={installing}
             className="flex items-center gap-0.5 font-medium text-[color:var(--color-chat-accent)] hover:opacity-80 disabled:opacity-60"
+            data-testid="connector-market-mcp-detail-connect-mcp"
           >
             {t('connectorMarket.detail.connectMcp')}
             <ExternalLink size={12} />
@@ -331,14 +336,14 @@ export function McpDetailPage({ name, onBack, onUse, onUseExample, onEdit }: Mcp
       )}
 
       <div className="mb-6">
-        <h2 className="mb-3 text-[14px] font-semibold leading-[22px] text-text">{t('connectorMarket.detail.sections.basicInfo')}</h2>
+        <h2 className="mb-3 text-[14px] font-semibold leading-[22px] text-text" data-testid="connector-market-mcp-detail-basic-info-title">{t('connectorMarket.detail.sections.basicInfo')}</h2>
         <p className="text-[12px] leading-[18px] text-text">{detail?.description ?? ''}</p>
       </div>
 
       {detail?.examples && detail.examples.length > 0 && (
         <div className="mb-6">
-          <h2 className="mb-3 text-[14px] font-semibold leading-[22px] text-text">{t('connectorMarket.detail.sections.examples')}</h2>
-          <div className="flex flex-wrap gap-2">
+          <h2 className="mb-3 text-[14px] font-semibold leading-[22px] text-text" data-testid="connector-market-mcp-detail-examples-title">{t('connectorMarket.detail.sections.examples')}</h2>
+          <div className="flex flex-wrap gap-2" data-testid="connector-market-mcp-detail-examples">
             {/* 未连接/连接失败态下，这个 MCP 在会话里根本用不了（跟顶部"会话使用"按钮的 linked
                 门控是同一个判断），示例点了跳过去也没意义——之前只判断 onUseExample 有没有传，
                 没管 MCP 当下能不能真用，2026-08-12 用户实测发现禁用态下示例还能点，改成两个
@@ -349,6 +354,8 @@ export function McpDetailPage({ name, onBack, onUse, onUseExample, onEdit }: Mcp
                   key={example}
                   type="button"
                   onClick={() => onUseExample(example, name)}
+                  data-testid="connector-market-mcp-detail-example"
+                  data-variant={example}
                   className="flex items-center gap-1.5 rounded-full border border-border bg-bg-muted px-3 py-1 text-[12px] leading-[18px] text-text-muted transition-colors hover:border-[color:var(--color-chat-accent)] hover:text-[color:var(--color-chat-accent)]"
                 >
                   <NewConversationIcon size={12} />
@@ -357,6 +364,8 @@ export function McpDetailPage({ name, onBack, onUse, onUseExample, onEdit }: Mcp
               ) : (
                 <span
                   key={example}
+                  data-testid="connector-market-mcp-detail-example"
+                  data-variant={example}
                   className="rounded-full border border-border bg-bg-muted px-3 py-1 text-[12px] leading-[18px] text-text-muted"
                 >
                   {example}
@@ -373,8 +382,8 @@ export function McpDetailPage({ name, onBack, onUse, onUseExample, onEdit }: Mcp
         // 不在这块小卡片里直接改。env/headers 只展示 key，不展示 value——即使后端
         // 这两个字段是明文返回的（给编辑表单回填用），只读场景没必要把密钥渲染到页面上。
         <div className="mb-6">
-          <h2 className="mb-3 text-[14px] font-semibold leading-[22px] text-text">{t('connectorMarket.detail.sections.connectionConfig')}</h2>
-          <div className="space-y-2 rounded-xl border border-border bg-card p-4 text-[12px] leading-5">
+          <h2 className="mb-3 text-[14px] font-semibold leading-[22px] text-text" data-testid="connector-market-mcp-detail-connection-config-title">{t('connectorMarket.detail.sections.connectionConfig')}</h2>
+          <div className="space-y-2 rounded-xl border border-border bg-card p-4 text-[12px] leading-5" data-testid="connector-market-mcp-detail-connection-config">
             {detail.transport && (
               <div className="flex gap-2">
                 <span className="shrink-0 text-text-muted">{t('connectorMarket.detail.config.transport')}</span>
@@ -423,10 +432,10 @@ export function McpDetailPage({ name, onBack, onUse, onUseExample, onEdit }: Mcp
 
       {installed && skills && skills.length > 0 && (
         <div className="mb-6">
-          <h2 className="mb-3 text-[14px] font-semibold leading-[22px] text-text">{t('connectorMarket.detail.sections.skills')}</h2>
-          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+          <h2 className="mb-3 text-[14px] font-semibold leading-[22px] text-text" data-testid="connector-market-mcp-detail-skills-title">{t('connectorMarket.detail.sections.skills')}</h2>
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2" data-testid="connector-market-mcp-detail-skills">
             {skills.map((skill) => (
-              <div key={skill.name} className="relative rounded-xl border border-border bg-card p-4">
+              <div key={skill.name} className="relative rounded-xl border border-border bg-card p-4" data-testid="connector-market-mcp-detail-skill" data-variant={skill.name}>
                 <div className="mb-1.5 flex items-center gap-2.5">
                   <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-[7.5px] border border-connector-tool-icon-border bg-connector-tool-icon-surface text-text-muted">
                     <SkillIcon aria-hidden width={16} height={16} />
@@ -447,10 +456,10 @@ export function McpDetailPage({ name, onBack, onUse, onUseExample, onEdit }: Mcp
 
       {installed && tools && tools.length > 0 && (
         <div className="mb-6">
-          <h2 className="mb-3 text-[14px] font-semibold leading-[22px] text-text">{t('connectorMarket.detail.sections.tools')}</h2>
-          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+          <h2 className="mb-3 text-[14px] font-semibold leading-[22px] text-text" data-testid="connector-market-mcp-detail-tools-title">{t('connectorMarket.detail.sections.tools')}</h2>
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2" data-testid="connector-market-mcp-detail-tools">
             {tools.map((tool) => (
-              <div key={tool.name} className="relative rounded-xl border border-border bg-card p-4">
+              <div key={tool.name} className="relative rounded-xl border border-border bg-card p-4" data-testid="connector-market-mcp-detail-tool" data-variant={tool.name}>
                 <div className="mb-1.5 flex items-center gap-2.5">
                   <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-[7.5px] border border-connector-tool-icon-border bg-connector-tool-icon-surface text-text-muted">
                     <Wrench size={16} />
