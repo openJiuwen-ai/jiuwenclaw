@@ -4646,33 +4646,30 @@ class JiuWenSwarmDeepAdapter:
         await self._load_enterprise_config(request)
 
     def _inject_extension_config_into_inputs(self, inputs: dict[str, Any]) -> None:
-        """将企业策略中的 extension_config 注入 inputs（替代 ee gateway channel_context 透传）。"""
+        """将企业策略中的 extension_config 注入 inputs（替代 ee gateway channel_context 透传）。
+
+        优先使用 inputs 里已有的列表（例如上游透传），否则从企业策略加载。
+        过滤后**同时**写入 ``inputs["extension_config"]`` 与
+        ``inputs["run"]["context"]["extra"]["extension_config"]``，保证 Rails
+        从 ``run_context.extra`` 读取时与顶层一致。
+        """
         if not is_enterprise():
             return
-        if "extension_config" in inputs:
-            return
-        if self._enterprise_config is None:
-            return
-        ext_config = getattr(self._enterprise_config, "extension_config", None)
+        from jiuwenswarm.agents.harness.common.rails.extension_config_util import (
+            write_extension_config_into_inputs,
+        )
+
+        enterprise_raw = None
+        if self._enterprise_config is not None:
+            candidate = getattr(self._enterprise_config, "extension_config", None)
+            if isinstance(candidate, list):
+                enterprise_raw = candidate
+
+        ext_config = write_extension_config_into_inputs(inputs, enterprise_raw)
         if ext_config:
-            inputs["extension_config"] = ext_config
-            # Rails 从 InvokeInputs.run_context.extra 读取，同步写入 run.context.extra
-            run_payload = inputs.get("run")
-            if not isinstance(run_payload, dict):
-                run_payload = {}
-                inputs["run"] = run_payload
-            context = run_payload.get("context")
-            if not isinstance(context, dict):
-                context = {}
-                run_payload["context"] = context
-            extra = context.get("extra")
-            if not isinstance(extra, dict):
-                extra = {}
-                context["extra"] = extra
-            extra["extension_config"] = ext_config
             logger.info(
                 "[JiuWenSwarmDeepAdapter] extension_config injected from enterprise config: count=%s",
-                len(ext_config) if isinstance(ext_config, list) else "?",
+                len(ext_config),
             )
 
     def _refresh_multimodal_configs(
@@ -7015,7 +7012,19 @@ class JiuWenSwarmDeepAdapter:
 
     @staticmethod
     def _build_extension_config_debug_rail() -> Any | None:
-        """Build ExtensionConfigDebugRail for extension config end-to-end debugging."""
+        """Build ExtensionConfigDebugRail when explicitly enabled.
+
+        Off by default. Enterprise only; set ``AGENT_EXTENSION_CONFIG_DEBUG_RAIL``
+        to ``1`` / ``true`` / ``yes`` / ``on`` to mount the debug rail.
+        """
+        if not is_enterprise():
+            return None
+        from jiuwenswarm.agents.harness.common.rails.extension_config_util import (
+            is_extension_config_debug_rail_enabled,
+        )
+
+        if not is_extension_config_debug_rail_enabled():
+            return None
         try:
             from jiuwenswarm.agents.harness.common.rails.extension_config_debug_rail import (
                 ExtensionConfigDebugRail,
@@ -7638,8 +7647,11 @@ class JiuWenSwarmDeepAdapter:
                 self._build_deepresearch_execution_rail,
             ),
             _RailBuildInfo("_stream_event_rail", self._build_stream_event_rail),
-            # an example to use extension rail (enterprise)
-            # _RailBuildInfo("_extension_config_debug_rail", self._build_extension_config_debug_rail),
+            # opt-in: AGENT_EXTENSION_CONFIG_DEBUG_RAIL=1 (default off)
+            _RailBuildInfo(
+                "_extension_config_debug_rail",
+                self._build_extension_config_debug_rail,
+            ),
             _RailBuildInfo(
                 "_task_planning_rail",
                 self._build_task_planning_rail,
