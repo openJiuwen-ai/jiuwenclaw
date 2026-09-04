@@ -3154,6 +3154,10 @@ class SkillTurboExecutor:
                 result_or_error if is_error else None,
             )
 
+        # 子节点若未 yield 任何 chunk 就结束，enqueue_chunk 不会触发 flush；
+        # 必须先释放延期的 task.start，再入队 complete，避免 complete 抢在 start 前。
+        self._flush_deferred_task_lifecycle_events()
+
         events_queue.append(
             self._build_task_complete_event(
                 TaskCompleteEventData(

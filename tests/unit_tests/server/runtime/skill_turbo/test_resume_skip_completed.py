@@ -187,6 +187,64 @@ async def test_deferred_task_start_flushes_after_start_banner() -> None:
 
 
 @pytest.mark.asyncio
+async def test_after_subplan_flushes_deferred_start_before_complete() -> None:
+    """无中间 chunk 时，after 必须先 flush deferred start，再入队 complete。"""
+    from jiuwenswarm.server.runtime.skill_turbo import executor as executor_mod
+
+    ex = _make_executor()
+    queue: list[dict] = []
+    token_queue = executor_mod._task_events_queue_var.set(queue)
+    token_ctx = executor_mod._current_task_context_var.set(
+        {"task_id": "task_1", "start_time": 1.0}
+    )
+    try:
+        subplan = _LeafNode("stage_x", depth=1)
+        task_states = {
+            "task_1": {
+                "task_id": "task_1",
+                "task_name": "stage_x",
+                "status": "pending",
+                "task_index": 1,
+            }
+        }
+        ex._task_states_holder.update(task_states)
+        ex._get_or_create_task_state = lambda sp, states: ("task_1", states["task_1"])  # type: ignore[method-assign]
+
+        await ex._before_subplan_execute(subplan, {})
+        assert queue == []
+        assert len(ex._deferred_task_lifecycle_events) == 2
+
+        await ex._after_subplan_execute(subplan, {}, {"status": "ok"})
+        assert len(ex._deferred_task_lifecycle_events) == 0
+        event_types = [
+            evt.get("payload", {}).get("event_type")
+            or ("task.start" if "task_id" in evt.get("payload", {}) and "status" not in evt.get("payload", {}) else None)
+            for evt in queue
+        ]
+        # start (+update) must precede complete (+update)
+        start_idx = next(
+            i
+            for i, evt in enumerate(queue)
+            if evt.get("payload", {}).get("task_id") == "task_1"
+            and "status" not in evt.get("payload", {})
+            and evt.get("payload", {}).get("event_type") != "task.update"
+        )
+        complete_idx = next(
+            i
+            for i, evt in enumerate(queue)
+            if evt.get("payload", {}).get("event_type") == "task.complete"
+            or (
+                evt.get("payload", {}).get("task_id") == "task_1"
+                and evt.get("payload", {}).get("status") in ("completed", "failed")
+            )
+        )
+        assert start_idx < complete_idx, event_types
+    finally:
+        executor_mod._current_task_context_var.reset(token_ctx)
+        executor_mod._task_events_queue_var.reset(token_queue)
+
+
+@pytest.mark.asyncio
 async def test_bubble_progress_bypasses_delta_buffer(monkeypatch) -> None:
     """横幅单独即时发送，不能与已缓冲的 stage 文本合并。"""
     ex = _make_executor()
