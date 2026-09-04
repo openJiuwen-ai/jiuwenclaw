@@ -1,6 +1,6 @@
 import { settingsNavigationIcons } from '../../../../assets/settings';
 import type { SettingsModuleDefinition } from '../../registry/types';
-import { A2UISetting, ExternalCliSettingsItem, ProactiveLimitsSetting } from './ExperimentalSettings';
+import { A2UISetting, ExternalCliSettingsItem, ProactiveLimitsSetting, RSISetting } from './ExperimentalSettings';
 
 export const experimentalModule: SettingsModuleDefinition = {
   id: 'experimental',
@@ -12,6 +12,11 @@ export const experimentalModule: SettingsModuleDefinition = {
       id: 'external-cli-agents',
       titleKey: 'settingsPanel.experimental.externalCliAgents',
       items: [{ id: 'external-cli-agents', component: 'custom', render: ExternalCliSettingsItem }],
+    },
+    {
+      id: 'rsi',
+      titleKey: 'settingsPanel.experimental.rsi',
+      items: [{ id: 'rsi-enabled', component: 'custom', render: RSISetting }],
     },
     {
       id: 'a2ui',

@@ -113,10 +113,15 @@
   min-width: 0;
   min-height: 0;
   padding: 24px 48px 24px 48px;
+  background-image: url("../../../assets/rsi/rsi-background.svg");
+  background-repeat: no-repeat;
+  background-position: center;
+  background-size: cover;
 }
 .rsi-detail--intro {
   padding: 0;
   overflow: hidden;
+  background: none;
 }
 .rsi-detail__header {
   display: flex;
@@ -823,7 +828,11 @@
   max-height: none;
   padding: 24px;
   box-sizing: border-box;
-  background: linear-gradient(135deg, #ffffff, #e7e7e7);
+  background: linear-gradient(160deg, 
+    #ffffff 0%, 
+    #ffffff 65%,    /* 到50%位置都是纯白 */
+    #d2efff 100%    /* 50%-100% 渐变到蓝色 */
+  );
 
   display: flex;
   flex-direction: column;
@@ -906,10 +915,9 @@
 .rsi-selected-info__detail-btn {
   height: 28px;
   padding: 0 14px;
-  border: none;
+  border: 1px solid #595959;
   border-radius: 999px;
   background: #ffffff;
-  border: #595959;
   font-size: 12px;
   font-weight: 400;
   cursor: pointer;
