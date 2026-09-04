@@ -1353,6 +1353,21 @@ overflow: hidden;
   background: var(--color-action-secondary);
 }
 
+.chat-composer-suggestion--slash .chat-composer-suggestion__item:disabled,
+.chat-composer-suggestion--slash .chat-composer-suggestion__item--disabled,
+.chat-composer-suggestion--slash .chat-composer-suggestion__item:disabled:hover,
+.chat-composer-suggestion--slash .chat-composer-suggestion__item:disabled:focus-visible {
+  background: transparent;
+  color: var(--color-text-disabled, var(--color-text-placeholder));
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.chat-composer-suggestion--slash .chat-composer-suggestion__item:disabled .chat-composer-suggestion__label,
+.chat-composer-suggestion--slash .chat-composer-suggestion__item:disabled .chat-composer-suggestion__meta {
+  color: var(--color-text-disabled, var(--color-text-placeholder));
+}
+
 /* 键盘导航时，停在列表上的静止鼠标不能再绘制第二个 hover 高亮。
    一旦指针真实移动，组件会切回 pointer 模式并高亮指针所在项。 */
 .chat-composer-suggestion--slash.chat-composer-suggestion--keyboard-nav
