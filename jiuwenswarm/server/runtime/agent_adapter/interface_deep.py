@@ -4643,15 +4643,20 @@ class JiuWenSwarmDeepAdapter:
             )
             await self._load_enterprise_config(request)
         except Exception as exc:  # noqa: BLE001
+            # _load_enterprise_config 失败时不得留下 None：后续 merge 会清掉全部 MCP。
+            self._enterprise_config = cached
             logger.warning(
                 "[JiuWenSwarmDeepAdapter] refresh enterprise config on reload failed: %s",
                 exc,
             )
 
     async def _load_enterprise_config(self, request: AgentRequest) -> None:
-        """按当前请求的 ``params`` 从 Gateway DB 加载生效企业策略到 ``self._enterprise_config``。"""
-        self._enterprise_config = None
+        """按当前请求的 ``params`` 从 Gateway DB 加载生效企业策略到 ``self._enterprise_config``。
+
+        先加载成功再替换缓存，避免「先清后载」时异常把已有企业配置（含 MCP）冲成 None。
+        """
         if not is_enterprise():
+            self._enterprise_config = None
             return
         try:
             from jiuwenswarm.server.runtime.enterprise_config import (
