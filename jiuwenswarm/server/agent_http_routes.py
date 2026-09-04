@@ -19,7 +19,7 @@ from typing import Any, Callable, Mapping
 # NOTE: 这些必须是**模块级**导入。本模块启用了 ``from __future__ import annotations``，
 # 注解在运行时是字符串，FastAPI 通过 ``get_type_hints()`` 在模块全局命名空间解析；
 # 若把 ``Request`` 放在函数内导入，FastAPI 解析不到就会把它当查询参数，导致 422。
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from sse_starlette.sse import EventSourceResponse
@@ -53,6 +53,7 @@ class RequestContext:
     user_id: str | None
     routing: dict[str, str]
     tenant_ids: dict[str, str]
+    request_ext: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -472,6 +473,11 @@ def request_context(request: Any) -> RequestContext:
     ``tenant_ids`` 含可选的 ``service_id`` / ``agent_id`` / ``workspace_key``
     （来自 ``X-Service-Id`` / ``X-Agent-Id`` / ``X-Workspace-Key``）。
     """
+    from jiuwenswarm.common.request_ext import (
+        INTERNAL_HEADER_NAME,
+        RequestExtCodecError,
+        decode_internal_header,
+    )
     from jiuwenswarm.common.request_identity import normalize_routing_identity
 
     headers = request.headers
@@ -497,6 +503,14 @@ def request_context(request: Any) -> RequestContext:
         text = str(raw).strip() if raw is not None else ""
         if text:
             tenant_ids[tenant_key] = text
+    try:
+        request_ext = decode_internal_header(headers.get(INTERNAL_HEADER_NAME)) or {}
+    except RequestExtCodecError as exc:
+        logger.warning("[AgentHTTPRoutes] 非法内部扩展字段头: %s", exc)
+        raise HTTPException(
+            status_code=400,
+            detail="invalid internal request extension header",
+        ) from exc
     return RequestContext(
         request_id=request_id,
         channel_id=channel_id,
@@ -504,6 +518,7 @@ def request_context(request: Any) -> RequestContext:
         user_id=user_id,
         routing=routing,
         tenant_ids=tenant_ids,
+        request_ext=request_ext,
     )
 
 
@@ -573,6 +588,7 @@ def build_fastapi_app(server: AgentHTTPServer) -> Any:
                 user_id=ctx.user_id,
                 routing=ctx.routing,
                 tenant_ids=ctx.tenant_ids,
+                request_ext=ctx.request_ext,
             )
             if payload.get("ok") and status == 200:
                 status = spec.status
@@ -691,6 +707,7 @@ def _register_special_routes(app: Any, server: AgentHTTPServer) -> None:
                     user_id=ctx.user_id,
                     routing=ctx.routing,
                     tenant_ids=ctx.tenant_ids,
+                    request_ext=ctx.request_ext,
                 ),
                 headers={"X-Request-Id": ctx.request_id},
             )
@@ -703,6 +720,7 @@ def _register_special_routes(app: Any, server: AgentHTTPServer) -> None:
             user_id=ctx.user_id,
             routing=ctx.routing,
             tenant_ids=ctx.tenant_ids,
+            request_ext=ctx.request_ext,
         )
         return JSONResponse(
             payload, status_code=status, headers={"X-Request-Id": ctx.request_id}
@@ -731,6 +749,7 @@ def _register_special_routes(app: Any, server: AgentHTTPServer) -> None:
                 user_id=ctx.user_id,
                 routing=ctx.routing,
                 tenant_ids=ctx.tenant_ids,
+                request_ext=ctx.request_ext,
             ),
             headers={"X-Request-Id": ctx.request_id},
         )
@@ -767,6 +786,7 @@ def _register_special_routes(app: Any, server: AgentHTTPServer) -> None:
                     user_id=ctx.user_id,
                     routing=ctx.routing,
                     tenant_ids=ctx.tenant_ids,
+                    request_ext=ctx.request_ext,
                 ),
                 headers={"X-Request-Id": ctx.request_id},
             )
@@ -779,6 +799,7 @@ def _register_special_routes(app: Any, server: AgentHTTPServer) -> None:
             user_id=ctx.user_id,
             routing=ctx.routing,
             tenant_ids=ctx.tenant_ids,
+            request_ext=ctx.request_ext,
         )
         return JSONResponse(
             payload, status_code=status, headers={"X-Request-Id": ctx.request_id}
