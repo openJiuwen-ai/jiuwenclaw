@@ -310,8 +310,8 @@ health_check:
   target: web
   # 探活生效时间段（本地时间）
   active_hours:
-    start: 08:00
-    end: 22:00
+    start: "08:00"
+    end: "22:00"
 
 # 执行护栏：工具循环检测与主动中断（分布式模板为完整配置，不合并基础 config.yaml）
 execution_guard:
