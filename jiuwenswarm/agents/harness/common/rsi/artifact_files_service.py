@@ -19,6 +19,10 @@ from jiuwenswarm.agents.harness.common.rsi.errors import (
 
 _MAX_PREVIEW_BYTES = 10 * 1024 * 1024
 _TASK_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
+# Task materialization keeps dataset, Harness refs, model YAML (which may
+# contain a decrypted API key), and the hidden profile beside engine output.
+# Only these top-level directories are public artifact surfaces.
+_PUBLIC_TOP_LEVEL_DIRS = frozenset({"artifact", "run", "snapshots"})
 _TEXT_SUFFIXES = {
     ".bib", ".css", ".htm", ".html", ".js", ".json", ".jsx", ".md", ".markdown",
     ".py", ".sty", ".tex", ".toml", ".ts", ".tsx", ".txt", ".xml", ".yaml", ".yml",
@@ -44,6 +48,8 @@ class RsiArtifactFilesService:
 
         files: list[dict[str, Any]] = []
         for item in root.rglob("*"):
+            if not _is_public_path(item, self._resolve_task_root(task_id)):
+                continue
             if "__MACOSX" in item.parts:
                 continue
             files.append(
@@ -105,6 +111,8 @@ class RsiArtifactFilesService:
             candidate.relative_to(task_root)
         except ValueError as exc:
             raise RsiPathInvalid("产物路径超出当前任务目录") from exc
+        if not _is_public_path(candidate, task_root):
+            raise RsiPathInvalid("产物路径不在公开产物目录")
         return candidate
 
     def _resolve_task_root(self, task_id: str) -> Path:
@@ -124,3 +132,13 @@ class RsiArtifactFilesService:
     @staticmethod
     def _mime_type(path: Path) -> str:
         return mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+
+
+def _is_public_path(path: Path, task_root: Path) -> bool:
+    """Return whether *path* belongs to a public artifact subtree."""
+
+    try:
+        relative = path.resolve().relative_to(task_root.resolve())
+    except ValueError:
+        return False
+    return bool(relative.parts) and relative.parts[0] in _PUBLIC_TOP_LEVEL_DIRS

@@ -7,7 +7,8 @@ from types import SimpleNamespace
 import pytest
 
 from jiuwenswarm.agents.harness.common.rsi import build_rsi_service_context
-from jiuwenswarm.agents.harness.common.rsi.errors import RsiPathInvalid
+from jiuwenswarm.agents.harness.common.rsi.errors import RsiBadRequest, RsiPathInvalid
+from jiuwenswarm.agents.harness.common.rsi.harness_provider import HarnessProvider
 from jiuwenswarm.agents.harness.common.rsi.services import _ensure_provider_valid
 from jiuwenswarm.common.schema.message import ReqMethod
 from jiuwenswarm.server.rsi import RsiAgentServerHandlers
@@ -28,11 +29,12 @@ RSI_METHOD_NAMES = {
     "rsi.artifact.files.list",
     "rsi.artifact.files.get",
     "rsi.tree.get",
+    "rsi.harness.install",
 }
 
 
 class TestReqMethod:
-    def test_15_rsi_methods_registered(self):
+    def test_16_rsi_methods_registered(self):
         present = {m.value for m in ReqMethod if m.value.startswith("rsi.")}
         assert present == RSI_METHOD_NAMES
 
@@ -57,6 +59,44 @@ def handlers():
 
 
 class TestDispatch:
+    def test_harness_install_dispatches_to_context_installer(self, handlers):
+        h, ctx, _ = handlers
+        calls = []
+
+        class Installer:
+            def install(self, task_id):
+                calls.append(task_id)
+                return {"task_id": task_id, "status": "ACTIVE"}
+
+        ctx.harness_installer = Installer()
+        result = h.handle(
+            FakeRequest(ReqMethod.RSI_HARNESS_INSTALL, {"task_id": "rsi-ready"})
+        )
+        assert result == {
+            "ok": True,
+            "payload": {"task_id": "rsi-ready", "status": "ACTIVE"},
+        }
+        assert calls == ["rsi-ready"]
+
+    @pytest.mark.asyncio
+    async def test_async_harness_install_awaits_and_maps_rsi_error(self, handlers):
+        h, ctx, _ = handlers
+
+        class Installer:
+            async def install(self, task_id):
+                assert task_id == "rsi-async"
+                raise RsiBadRequest("install request is invalid")
+
+        ctx.harness_installer = Installer()
+        result = await h.handle_async(
+            FakeRequest(ReqMethod.RSI_HARNESS_INSTALL, {"task_id": "rsi-async"})
+        )
+        assert result == {
+            "ok": False,
+            "error": "install request is invalid",
+            "code": "BAD_REQUEST",
+        }
+
     def test_unknown_method(self, handlers):
         h, _, _ = handlers
         result = h.handle(FakeRequest(ReqMethod.MODELS_LIST))
@@ -97,6 +137,35 @@ class TestDispatch:
         assert result["ok"] is True
         assert result["payload"]["sample_count"] == 2
         assert result["payload"]["valid"] is True
+
+    def test_dataset_validate_accepts_dataset_path_alias(self, handlers, tmp_path: Path):
+        h, _, _ = handlers
+        dataset = tmp_path / "dataset.json"
+        dataset.write_text('{"cases": [{"case_id": "alias"}]}', encoding="utf-8")
+        result = h.handle(FakeRequest(ReqMethod.RSI_DATASET_VALIDATE, {
+            "dataset_path": str(dataset), "scenario": "HARNESS",
+        }))
+        assert result["ok"] is True
+        assert result["payload"] == {"valid": True, "sample_count": 1, "errors": []}
+
+    def test_dataset_validate_uses_real_harness_provider_semantics(self, tmp_path: Path):
+        tasks_root = tmp_path / "tasks"
+        context = build_rsi_service_context(tasks_root)
+        context.register_harness_provider(HarnessProvider(tasks_root))
+        h = RsiAgentServerHandlers(context)
+        dataset = tmp_path / "duplicate.json"
+        dataset.write_text(
+            '[{"case_id": "same"}, {"case_id": "same"}]',
+            encoding="utf-8",
+        )
+        result = h.handle(FakeRequest(ReqMethod.RSI_DATASET_VALIDATE, {
+            "input_file": str(dataset), "scenario": "HARNESS",
+        }))
+        # Validation failures are a successful method response with
+        # ``payload.valid=false``; transport/protocol errors use ``ok=false``.
+        assert result["ok"] is True
+        assert result["payload"]["valid"] is False
+        assert result["payload"]["errors"][0]["code"] == "DATASET_INVALID"
 
     def test_provider_path_error_uses_matching_error_reason(self):
         result = SimpleNamespace(
@@ -162,6 +231,17 @@ class TestDispatch:
         }))
         assert not result["ok"]
         assert result["code"] == "TASK_NOT_FOUND"
+
+        private_dir = Path(ctx.store.tasks_root) / task_id / "models"
+        private_dir.mkdir(parents=True)
+        private_file = private_dir / "evaluation.yaml"
+        private_file.write_text("api_key: should-not-leak\n", encoding="utf-8")
+        result = h.handle(FakeRequest(ReqMethod.RSI_ARTIFACT_FILES_GET, {
+            "task_id": task_id,
+            "path": str(private_file),
+        }))
+        assert not result["ok"]
+        assert result["code"] == "PATH_INVALID"
 
 
 class TestP1Push:

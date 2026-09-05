@@ -35,6 +35,83 @@ class RsiPathInvalid(RsiError):
         super().__init__("PATH_INVALID", message)
 
 
+class RsiPathNotAllowed(RsiError):
+    """A supplied path is outside the configured RSI input root."""
+
+    def __init__(self, message: str = "路径不在允许的 RSI 根目录内") -> None:
+        super().__init__("PATH_NOT_ALLOWED", message)
+
+
+class RsiInvalidHarness(RsiError):
+    """The selected Harness package/config cannot be used for RSI."""
+
+    def __init__(self, message: str = "Harness 配置无效") -> None:
+        super().__init__("INVALID_HARNESS", message)
+
+
+class RsiHarnessNotReady(RsiError):
+    """The RSI task has not reached the publishable Harness state."""
+
+    def __init__(self, message: str = "RSI Harness 尚未完成") -> None:
+        super().__init__("RSI_HARNESS_NOT_READY", message)
+
+
+class RsiHarnessNotPublished(RsiError):
+    """The RSI engine did not publish a final Harness refs file."""
+
+    def __init__(self, message: str = "RSI Harness 没有可发布版本") -> None:
+        super().__init__("RSI_HARNESS_NOT_PUBLISHED", message)
+
+
+class RsiHarnessInvalid(RsiError):
+    """Published refs or package contents violate the RSI install contract."""
+
+    def __init__(self, message: str = "RSI Harness 发布物无效") -> None:
+        super().__init__("RSI_HARNESS_INVALID", message)
+
+
+class RsiHarnessInstallConflict(RsiError):
+    """A live Harness replacement could not be rolled back safely."""
+
+    def __init__(self, message: str = "RSI Harness 安装发生资源冲突") -> None:
+        super().__init__("RSI_HARNESS_INSTALL_CONFLICT", message)
+
+
+class RsiHarnessInstallFailed(RsiError):
+    """The RSI Harness install failed while preserving the old active version."""
+
+    def __init__(self, message: str = "RSI Harness 安装失败") -> None:
+        super().__init__("RSI_HARNESS_INSTALL_FAILED", message)
+
+
+class RsiModelNotFound(RsiError):
+    """A models.list reference did not resolve exactly to one model entry."""
+
+    def __init__(self, message: str = "模型不存在") -> None:
+        super().__init__("MODEL_NOT_FOUND", message)
+
+
+class RsiModelConfigInvalid(RsiError):
+    """A selected model entry cannot be materialized for openjiuwen."""
+
+    def __init__(self, message: str = "模型配置无效") -> None:
+        super().__init__("MODEL_CONFIG_INVALID", message)
+
+
+class RsiUnsupportedParameter(RsiError):
+    """A public parameter has no supported openjiuwen Validation mapping."""
+
+    def __init__(self, message: str = "参数暂不支持") -> None:
+        super().__init__("UNSUPPORTED_PARAMETER", message)
+
+
+class RsiResumeInputChanged(RsiError):
+    """Task-private input/config material changed since create."""
+
+    def __init__(self, message: str = "resume 输入材料已变化") -> None:
+        super().__init__("RESUME_INPUT_CHANGED", message)
+
+
 class RsiTaskNotFound(RsiError):
     def __init__(self, task_id: str) -> None:
         super().__init__("TASK_NOT_FOUND", f"任务不存在: {task_id}")

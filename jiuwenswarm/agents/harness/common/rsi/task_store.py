@@ -162,6 +162,21 @@ class RsiTaskStore:
             payload["updated_at"] = utcnow_iso()
             self._write_task(task_dir, payload)
 
+    def merge_config(self, task_id: str, values: dict[str, Any]) -> None:
+        """Merge service-owned config metadata without replacing other fields."""
+
+        if not isinstance(values, dict):
+            raise ValueError("config values must be a mapping")
+        task_dir = self.task_dir(self.tasks_root, task_id)
+        with _LOCK:
+            current = self.get(task_id)
+            payload = current.to_dict()
+            config = dict(payload.get("config") or {})
+            config.update(values)
+            payload["config"] = config
+            payload["updated_at"] = utcnow_iso()
+            self._write_task(task_dir, payload)
+
     def set_status_changed_callback(self, callback: Callable[[str, str, str], None] | None) -> None:
         """公开注入状态变更 P1 钩子（替代直接改私有属性，PR !5798 #12）。"""
         self._on_status_changed = callback

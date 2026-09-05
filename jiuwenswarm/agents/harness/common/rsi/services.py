@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import logging
+import shutil
 from dataclasses import asdict, is_dataclass
 from collections.abc import Mapping
 from pathlib import Path
@@ -26,8 +27,10 @@ from jiuwenswarm.agents.harness.common.rsi.errors import (
     RsiArtifactNotFound,
     RsiBadRequest,
     RsiDatasetInvalid,
+    RsiInvalidHarness,
     RsiNotReady,
     RsiPathInvalid,
+    RsiUnsupportedParameter,
     RsiTaskNotFound,
 )
 from jiuwenswarm.agents.harness.common.rsi.models import (
@@ -44,6 +47,20 @@ from jiuwenswarm.agents.harness.common.rsi.models import (
 logger = logging.getLogger(__name__)
 
 
+def _remove_uncommitted_task_dir(tasks_root: Path, task_id: str) -> None:
+    """Remove only a freshly-created task materialization after create fails."""
+
+    root = Path(tasks_root).expanduser().resolve()
+    candidate = (root / str(task_id)).resolve()
+    try:
+        candidate.relative_to(root)
+    except ValueError:
+        logger.warning("[RSI] refused cleanup outside tasks root: %s", candidate)
+        return
+    if candidate.is_dir():
+        shutil.rmtree(candidate)
+
+
 class RsiTaskService:
     """任务命令/查询（I2/I3/I4/I5）。"""
 
@@ -54,11 +71,15 @@ class RsiTaskService:
         adapter: Any = None,
         adapter_resolver: Any = None,
         harness_refs_provider: Any = None,
+        harness_materializer: Any = None,
+        model_resolver: Any = None,
     ) -> None:
         self.store = store
         self.adapter = adapter
         self.adapter_resolver = adapter_resolver
         self.harness_refs_provider = harness_refs_provider
+        self.harness_materializer = harness_materializer
+        self.model_resolver = model_resolver
 
     # -- I2 create --
 
@@ -95,7 +116,9 @@ class RsiTaskService:
         input_file: str | None = None
         artifact_path: str | None = None
         if scenario is Scenario.HARNESS:
-            input_file = str(params.get("input_file") or "").strip()
+            input_file = str(
+                params.get("input_file") or params.get("dataset_path") or ""
+            ).strip()
             if not input_file:
                 raise RsiBadRequest("harness 优化必填 input_file（数据集）")
             if params.get("artifact_path"):
@@ -138,16 +161,78 @@ class RsiTaskService:
         task_id = generate_task_id()
         run_dir = str(self.store.tasks_root / task_id / "run")
         harness_refs_path: str | None = None
-        if scenario is Scenario.HARNESS and self.harness_refs_provider is not None:
-            harness_refs_path = self.harness_refs_provider()
+        materialization = None
+        if scenario is Scenario.HARNESS and self._harness_materialization_enabled:
+            # The public contract retains these legacy fields for generic RSI
+            # clients, but current openjiuwen Validation has fixed values for
+            # them.  Reject non-default overrides instead of silently ignoring
+            # what the frontend believes it configured.
+            if max_iterations != 1:
+                raise RsiUnsupportedParameter(
+                    "HARNESS Validation 不支持调整 max_iterations；请使用默认值 1"
+                )
+            if search_width != 1:
+                raise RsiUnsupportedParameter(
+                    "HARNESS Validation 不支持调整 search_width；请使用默认值 1"
+                )
+            source_harness = self._resolve_harness_source(params)
+            if not source_harness:
+                raise RsiInvalidHarness("当前没有可用的活动 Harness 配置")
+
+            validator = None
+            if selected_adapter is not None and hasattr(selected_adapter, "validate_input"):
+                validator = lambda path: selected_adapter.validate_input(  # noqa: E731
+                    path,
+                    scenario=Scenario.HARNESS.value,
+                    artifact_type=None,
+                )
+            try:
+                materialization = self.harness_materializer.materialize(
+                    task_id,
+                    input_file,
+                    source_harness,
+                    model_refs={
+                        "optimizer": optimizer,
+                        "tester": str(model_refs.get("tester") or ""),
+                    },
+                    model_resolver=self.model_resolver,
+                    validator=validator,
+                )
+            except Exception:
+                # Materialization happens before task.json is committed.  Do
+                # not leave private model/config files behind on a rejected
+                # create request.
+                _remove_uncommitted_task_dir(self.store.tasks_root, task_id)
+                raise
+            input_file = str(materialization.dataset["path"])
+            harness_refs_path = str(materialization.harness["path"])
+        elif scenario is Scenario.HARNESS and self.harness_refs_provider is not None:
+            # Preserve the pre-materialization/mock contract: a lightweight
+            # provider may expose the active refs path directly.  Production
+            # mode takes the branch above and wraps the source into a task
+            # private single-ref file before persisting the task.
+            harness_refs_path = self._resolve_harness_source(params)
         config: dict[str, Any] = {
             "harness_refs_path": harness_refs_path,
             "artifact_path": artifact_path,
             "optimization_instruction": optimization_instruction,
             "artifact_type": artifact_type.value if artifact_type else None,
             "results": {},
-            "active_ref_released": False,
+            # A materialized Harness refs file is an immutable task-private
+            # input, not a published/active artifact.  It must not block
+            # deleting a terminal task (the task directory is the cleanup
+            # boundary for all private model/config files).
+            "active_ref_released": materialization is not None,
         }
+        if materialization is not None:
+            manifest = materialization.to_manifest()
+            config.update(
+                {
+                    "orchestrator_config_path": materialization.profile["path"],
+                    "dataset_id": "single_harness_benchmark",
+                    "rsi_materials": manifest,
+                }
+            )
         # The browser WebSocket session is transport metadata, but it must
         # survive task creation so asynchronous Provider events can be routed
         # back to the page that created the task.
@@ -180,6 +265,32 @@ class RsiTaskService:
         self.store.create(task)
         # 进度树根注册（拉取 I4/tree + 推送 P2/P3 同源；基线缺省 None）
         return {"task_id": task_id, "status": TaskStatus.CREATED.value}
+
+    @property
+    def _harness_materialization_enabled(self) -> bool:
+        return self.harness_materializer is not None and self.model_resolver is not None
+
+    def _resolve_harness_source(self, params: dict[str, Any]) -> str | None:
+        """Resolve a trusted active Harness source for a new task.
+
+        ``harness_path`` is accepted only as an AgentServer-side escape hatch
+        for controlled callers/tests; the normal browser path uses the
+        composition-root provider and never exposes this field.
+        """
+
+        explicit = str(params.get("harness_path") or "").strip()
+        if explicit:
+            return explicit
+        provider = self.harness_refs_provider
+        if provider is None:
+            return None
+        try:
+            value = provider(params)
+        except TypeError:
+            value = provider()
+        if isinstance(value, Mapping):
+            value = value.get("config_path") or value.get("harness_path")
+        return str(value or "").strip() or None
 
     def _resolve_adapter(self, scenario: Scenario | None, artifact_type: ArtifactType | None) -> Any:
         if self.adapter_resolver is not None:
@@ -321,7 +432,11 @@ class RsiDatasetService:
 
     def validate(self, params: dict[str, Any], *, adapter: Any = None) -> dict[str, Any]:
         """web §5.1 出参：{valid, sample_count, errors[]}。"""
-        input_file = str(params.get("input_file") or "").strip()
+        # ``input_file`` is the v0.3 wire name; ``dataset_path`` is accepted
+        # as the product-facing alias used by task creation and older clients.
+        input_file = str(
+            params.get("input_file") or params.get("dataset_path") or ""
+        ).strip()
         if not input_file:
             raise RsiBadRequest("input_file 必填")
         scenario = str(params.get("scenario") or "").strip().upper()

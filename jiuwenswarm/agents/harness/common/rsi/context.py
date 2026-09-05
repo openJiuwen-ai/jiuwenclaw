@@ -6,11 +6,16 @@ AgentServer 侧用 ``build_rsi_service_context(tasks_root)`` 一次性构建，
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Any, Callable
 
 from jiuwenswarm.agents.harness.common.rsi.artifact_service import RsiArtifactService
 from jiuwenswarm.agents.harness.common.rsi.artifact_files_service import RsiArtifactFilesService
+from jiuwenswarm.agents.harness.common.rsi.harness_activation import (
+    RsiHarnessActivationStore,
+    RsiHarnessInstaller,
+)
 from jiuwenswarm.agents.harness.common.rsi.projector import RsiProjector
 from jiuwenswarm.agents.harness.common.rsi.services import (
     RsiArtifactDownloadService,
@@ -34,9 +39,28 @@ class RsiServiceContext:
         *,
         worker_push_callbacks: dict[str, Any] | None = None,
         adapters: dict[str, Any] | None = None,
+        harness_materializer: Any = None,
+        model_resolver: Any = None,
+        agent_manager: Any = None,
+        harness_activation_store: RsiHarnessActivationStore | None = None,
+        harness_installer: Any = None,
     ) -> None:
         self.tasks_root = Path(tasks_root)
+        # Keep the production materialization dependencies on the context so
+        # the composition root can inject the exact same instances into the
+        # Provider and TaskService.  They remain ``None`` for mock/test roots.
+        self.harness_materializer = harness_materializer
+        self.model_resolver = model_resolver
         self.store = RsiTaskStore(self.tasks_root)
+        self.harness_activation_store = harness_activation_store or RsiHarnessActivationStore(
+            self.tasks_root.expanduser().resolve().parent / "harness"
+        )
+        self.harness_installer = harness_installer or RsiHarnessInstaller(
+            self.store,
+            self.adapter_for_task,
+            agent_manager,
+            activation_store=self.harness_activation_store,
+        )
         self.usage_recorder = RsiUsageRecorder()
         self.projector = RsiProjector(self.tasks_root)
         self.artifact_service = RsiArtifactService(self.tasks_root)
@@ -52,7 +76,12 @@ class RsiServiceContext:
         if adapters:
             self.register_adapters(adapters)
         # 薄服务
-        self.task_service = RsiTaskService(self.store, adapter_resolver=self.adapter_for)
+        self.task_service = RsiTaskService(
+            self.store,
+            adapter_resolver=self.adapter_for,
+            harness_materializer=harness_materializer,
+            model_resolver=model_resolver,
+        )
         self.dataset_service = RsiDatasetService(adapter_resolver=self.adapter_for)
         self.tree_service = RsiTreeService(
             self.projector,
@@ -78,13 +107,29 @@ class RsiServiceContext:
         )
         self.artifact_files_service = RsiArtifactFilesService(self.store)
 
-    def bind_task_service(self, *, adapter: Any = None, harness_refs_provider: Callable[[], str | None] | None = None) -> None:
+    def bind_task_service(
+        self,
+        *,
+        adapter: Any = None,
+        harness_refs_provider: Callable[[], str | None] | None = None,
+        harness_materializer: Any = None,
+        model_resolver: Any = None,
+    ) -> None:
         self.task_service.adapter = adapter
         self.task_service.harness_refs_provider = harness_refs_provider
+        if harness_materializer is not None:
+            self.task_service.harness_materializer = harness_materializer
+        if model_resolver is not None:
+            self.task_service.model_resolver = model_resolver
         if adapter is not None:
             # Backward-compatible harness adapter injection.  Artifact
             # adapters should use ``register_adapters`` with an explicit type.
             self.register_adapters({"HARNESS": adapter})
+
+    def bind_harness_installer(self, agent_manager: Any) -> None:
+        """Bind the AgentServer manager used by the RSI install operation."""
+
+        self.harness_installer.agent_manager = agent_manager
 
     def bind_dataset_service(self, adapter: Any) -> None:
         self.dataset_service.adapter = adapter
@@ -204,10 +249,56 @@ def build_rsi_service_context(
     tasks_root: Any,
     *,
     adapters: dict[str, Any] | None = None,
+    harness_materializer: Any = None,
+    model_resolver: Any = None,
+    enable_harness_materialization: bool | None = None,
+    agent_manager: Any = None,
+    harness_activation_store: RsiHarnessActivationStore | None = None,
+    harness_installer: Any = None,
 ) -> RsiServiceContext:
     """默认组合根（tasks_root 缺省取 ``workspace/rsi/tasks``）。"""
+    use_production_harness = enable_harness_materialization
     if tasks_root is None:
         from jiuwenswarm.common.utils import get_user_workspace_dir
 
         tasks_root = get_user_workspace_dir() / "rsi" / "tasks"
-    return RsiServiceContext(Path(tasks_root), adapters=adapters)
+        if use_production_harness is None:
+            use_production_harness = True
+    if use_production_harness:
+        if harness_materializer is None:
+            from jiuwenswarm.agents.harness.common.rsi.materializer import (
+                RsiTaskMaterializer,
+            )
+
+            harness_materializer = RsiTaskMaterializer(
+                Path(tasks_root),
+                dataset_root=_configured_root("RSI_DATASET_ROOT"),
+                harness_root=_configured_root("RSI_HARNESS_ROOT"),
+            )
+        if model_resolver is None:
+            from jiuwenswarm.agents.harness.common.rsi.model_resolver import (
+                RsiModelConfigResolver,
+            )
+
+            model_resolver = RsiModelConfigResolver()
+    return RsiServiceContext(
+        Path(tasks_root),
+        adapters=adapters,
+        harness_materializer=harness_materializer,
+        model_resolver=model_resolver,
+        agent_manager=agent_manager,
+        harness_activation_store=harness_activation_store,
+        harness_installer=harness_installer,
+    )
+
+
+def _configured_root(name: str) -> Path | None:
+    """Read an optional trusted input root without making env mandatory.
+
+    Deployments that expose browser-selected local files should set these
+    roots explicitly.  Leaving a root unset preserves compatibility for
+    callers that already perform their own trust checks (notably unit tests).
+    """
+
+    value = os.environ.get(name, "").strip()
+    return Path(value).expanduser().resolve() if value else None
