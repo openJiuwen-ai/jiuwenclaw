@@ -510,6 +510,44 @@ from jiuwenswarm.server.runtime.skill_turbo.permission_bridge import (
     load_resume_ctx as _skill_turbo_load_resume_ctx,
     set_skill_turbo_id as _skill_turbo_set_agent_id,
 )
+# 中断恢复体系（从 enterprise_dev 全量迁移，已剥离 QA）
+from jiuwenswarm.server.runtime.agent_adapter.interrupt_resume_helpers import (
+    prepare_interrupt_resume_for_request,
+    set_todo_resume_snapshot_pending,
+)
+from jiuwenswarm.server.runtime.agent_adapter.stale_todo_cleanup_helpers import (
+    prepare_stale_todo_cleanup_for_request,
+)
+from jiuwenswarm.server.runtime.agent_adapter.plan_pause_helpers import (
+    build_paused_plan_decision_prompt_from_session_snapshot,
+    cancel_pending_todos_on_tool,
+    clear_interrupt_artifacts_file,
+    clear_interrupt_artifacts_summary_from_session,
+    clear_interrupt_recovery_injected,
+    clear_plan_pause_file,
+    clear_plan_pause_on_session,
+    clear_session_interrupt_state,
+    clear_task_plan_on_state,
+    is_interrupt_recovery_injected,
+    mark_interrupt_recovery_injected,
+    merge_supplementary_into_request_params,
+    persist_checkpoint_for_session,
+    post_agent_execute_for_session,
+    read_interrupt_artifacts_from_file,
+    read_interrupt_artifacts_summary_from_session,
+    read_plan_pause_from_file,
+    read_plan_pause_from_session,
+    repair_task_plan_after_pause,
+    resolve_context_engine,
+    write_interrupt_artifacts_summary_to_session,
+    write_plan_pause_to_session,
+    build_interrupt_artifacts_resume_prompt,
+    write_interrupt_artifacts_to_file,
+    snapshot_and_isolate_unfinished_todos,
+    write_plan_pause_to_file,
+    INTERRUPT_ARTIFACTS_SUMMARY_KEY,
+    _resolve_session_for_checkpoint,
+)
 from jiuwenswarm.server.runtime.skill_turbo.plan_node import AbortError as _SkillTurboAbortError
 from jiuwenswarm.gateway.cron import CronTargetChannel
 from jiuwenswarm.common.schema.agent import AgentRequest, AgentResponse, AgentResponseChunk
@@ -1984,6 +2022,22 @@ def _agent_ras_kwargs_from_config(config_base: dict[str, Any] | None) -> dict[st
     if raw.get("enabled", True) is not True:
         return {"agent_ras": False}
     return {"agent_ras": copy.deepcopy(raw)}
+
+
+class OfficeClawMcpBuiltinNameConflict(RuntimeError):
+    """A request-scoped connector tool's short name collides with a *built-in*
+    agent tool (not a foreign request-scoped tool).
+
+    Unlike a foreign short-name conflict (which must fail closed to prevent a
+    concurrent request from stealing the mapping), colliding with a built-in
+    tool is benign: the connector tool simply cannot claim that short name, so
+    the caller downgrades by skipping just that tool instead of rolling back
+    the whole registration. Carries ``existing_id`` for diagnostics.
+    """
+
+    def __init__(self, message: str, *, existing_id: str = "") -> None:
+        super().__init__(message)
+        self.existing_id = existing_id
 
 
 class JiuWenSwarmDeepAdapter:
@@ -4067,7 +4121,43 @@ class JiuWenSwarmDeepAdapter:
                         tool_ids.append(tool_id)
                         tool_names.append(tool_name)
                         registered_tools.append(tool)
-                        self._install_office_claw_ability_card(card)
+                        try:
+                            self._install_office_claw_ability_card(card)
+                        except OfficeClawMcpBuiltinNameConflict as exc:
+                            # 与内置工具撞名（如 filesystem 连接器的 read_file 撞内置
+                            # read_file）：仅跳过该工具，不回滚整次注册——否则已注册好
+                            # 的同连接器/其他连接器工具会被一并清掉，导致 tools_search 0命中
+                            # 注意：仅对“内置撞名”降级，对外部短名冲突（foreign request-scoped）仍 raise
+                            # RuntimeError 走外层 fail-closed 回滚。
+                            try:
+                                tool_ids.pop()
+                                tool_names.pop()
+                                registered_tools.pop()
+                            except IndexError:
+                                pass
+                            try:
+                                Runner.resource_mgr.remove_tool(tool_id)
+                            except Exception as cleanup_exc:
+                                logger.warning(
+                                    "[JiuWenSwarmDeepAdapter] request-scoped MCP connector '%s' "
+                                    "tool '%s' shadow-skip resource cleanup failed: "
+                                    "request_id=%s error=%s",
+                                    server_name,
+                                    tool_name,
+                                    request.request_id,
+                                    cleanup_exc,
+                                )
+                            logger.warning(
+                                "[JiuWenSwarmDeepAdapter] request-scoped MCP connector '%s' "
+                                "tool '%s' shadows a built-in tool, skipped: "
+                                "request_id=%s existing_id=%s new_id=%s",
+                                server_name,
+                                tool_name,
+                                request.request_id,
+                                exc.existing_id,
+                                tool_id,
+                            )
+                            continue
                         _connector_registered += 1
                         if (
                             server_name == "office-claw"
@@ -4221,10 +4311,26 @@ class JiuWenSwarmDeepAdapter:
                         existing_id,
                         exc,
                     )
-            else:
+            elif existing_id.startswith("office-claw-request-"):
+                # Foreign request-scoped tool (different request scope) owns the
+                # short name. Fail closed so a concurrent request cannot silently
+                # steal the mapping.
                 raise RuntimeError(
                     f"OfficeClaw MCP tool name conflicts with an existing tool: {tool_name} "
                     f"(existing_id={existing_id}, new_id={tool_id})"
+                )
+            else:
+                # The existing mapping points at a *built-in* agent tool (id does
+                # not carry the request-scoped prefix). A connector tool merely
+                # shadows a built-in short name — benign and common (e.g. a
+                # ``filesystem`` connector exposing ``read_file``). Downgrade by
+                # skipping just this tool so the rest of the connector and other
+                # connectors still register, instead of rolling back the whole
+                # request-scoped registration.
+                raise OfficeClawMcpBuiltinNameConflict(
+                    f"OfficeClaw MCP connector tool '{tool_name}' shadows a built-in tool; "
+                    f"skipping (existing_id={existing_id}, new_id={tool_id})",
+                    existing_id=existing_id,
                 )
 
         ability_result = ability_manager.add(card)
@@ -4239,8 +4345,14 @@ class JiuWenSwarmDeepAdapter:
                 ability_result = ability_manager.add(card)
                 added = getattr(ability_result, "added", None) if ability_result is not None else None
             if added is False:
-                raise RuntimeError(
-                    f"OfficeClaw MCP tool name conflicts with an existing tool: {tool_name}"
+                if existing_id and existing_id.startswith("office-claw-request-"):
+                    raise RuntimeError(
+                        f"OfficeClaw MCP tool name conflicts with an existing tool: {tool_name}"
+                    )
+                raise OfficeClawMcpBuiltinNameConflict(
+                    f"OfficeClaw MCP connector tool '{tool_name}' shadows a built-in tool; "
+                    f"skipping (existing_id={existing_id or '-'}, new_id={tool_id})",
+                    existing_id=existing_id or "",
                 )
 
         # Legacy AbilityManager.add() returns None and may overwrite by name.
@@ -4249,9 +4361,19 @@ class JiuWenSwarmDeepAdapter:
         installed = getter(tool_name) if callable(getter) else None
         installed_id = str(getattr(installed, "id", "") or "") if installed is not None else ""
         if installed_id != tool_id:
-            raise RuntimeError(
-                f"OfficeClaw MCP tool name conflicts with an existing tool: {tool_name} "
-                f"(existing_id={installed_id or '-'}, new_id={tool_id})"
+            if installed_id and installed_id.startswith("office-claw-request-"):
+                # Foreign request-scoped tool stole the short name: fail closed.
+                raise RuntimeError(
+                    f"OfficeClaw MCP tool name conflicts with an existing tool: {tool_name} "
+                    f"(existing_id={installed_id or '-'}, new_id={tool_id})"
+                )
+            # Otherwise the mapping points at a built-in tool: downgrade by
+            # skipping this connector tool rather than rolling back the whole
+            # registration.
+            raise OfficeClawMcpBuiltinNameConflict(
+                f"OfficeClaw MCP connector tool '{tool_name}' shadows a built-in tool; "
+                f"skipping (existing_id={installed_id or '-'}, new_id={tool_id})",
+                existing_id=installed_id or "",
             )
 
     async def cleanup_request_scoped_office_claw_mcp(
@@ -10820,21 +10942,287 @@ class JiuWenSwarmDeepAdapter:
 
         return restore
 
+    @staticmethod
+    def _has_uploaded_file(params: dict) -> bool:
+        """Whether the request params carry a user-uploaded file (new content)."""
+        try:
+            files = params.get("files") or params.get("files_updated_by_user")
+            if not files:
+                return False
+            import json as _json
+            if isinstance(files, str):
+                files = _json.loads(files)
+            if isinstance(files, list):
+                return len(files) > 0
+            if isinstance(files, dict):
+                return bool(files.get("files"))
+        except Exception:
+            pass
+        return False
+
+    async def prepare_plan_pause_for_request(self, request: AgentRequest) -> None:
+        """On next agent.plan message after cancel: clear task_plan, inject decision prompt, clear flag."""
+        if self._instance is None:
+            logger.info(
+                "[JiuWenClaw][DIAG] prepare_plan_pause: EARLY RETURN (adapter._instance is None) "
+                "request_id=%s session_id=%s",
+                getattr(request, "request_id", ""), getattr(request, "session_id", ""),
+            )
+            return
+
+        session_id = str(request.session_id or "").strip()
+        if not session_id:
+            logger.info(
+                "[JiuWenClaw][DIAG] prepare_plan_pause: EARLY RETURN (no session_id) request_id=%s",
+                getattr(request, "request_id", ""),
+            )
+            return
+
+        params = request.params if isinstance(getattr(request, "params", None), dict) else None
+        if params is None:
+            logger.info(
+                "[JiuWenClaw][DIAG] prepare_plan_pause: EARLY RETURN (no params) request_id=%s session_id=%s",
+                getattr(request, "request_id", ""), session_id,
+            )
+            return
+
+        mode = str(params.get("mode", "agent.plan") or "agent.plan").strip()
+        if mode not in ("agent", "agent.plan"):
+            logger.info(
+                "[JiuWenClaw][DIAG] prepare_plan_pause: EARLY RETURN (mode=%s not in agent/agent.plan) "
+                "request_id=%s session_id=%s",
+                mode, getattr(request, "request_id", ""), session_id,
+            )
+            return
+        logger.info(
+            "[JiuWenClaw][DIAG] prepare_plan_pause: proceeding mode=%s session_id=%s",
+            mode, session_id,
+        )
+
+        # _interaction_session 是 before_invoke 实际读取的运行时 session，
+        # 透传让哨兵标志落在 before_invoke 看得到的地方。
+        runtime_session = getattr(self._instance, "_interaction_session", None)
+        from openjiuwen.core.session.agent import create_agent_session
+        session = create_agent_session(session_id=session_id, card=self._instance.card)
+        await session.pre_run(inputs=None)
+        try:
+            # 哨兵：已有其他恢复机制注入则跳过。同时查临时 session（磁盘态）
+            # 与运行时 session（in-memory 态），避免同一请求周期内
+            # interrupt_resume 先跑标到 runtime_session 而临时 session 读不到。
+            if is_interrupt_recovery_injected(session) or (  # pylint: disable=too-many-boolean-expressions
+                runtime_session is not None
+                and runtime_session is not session
+                and is_interrupt_recovery_injected(runtime_session)
+            ):
+                return
+
+            paused, snapshot = read_plan_pause_from_session(session)
+            # CP may have been overwritten by the aborted stream; fall back to disk.
+            if not paused:
+                try:
+                    paused, snapshot = read_plan_pause_from_file(
+                        Path(self._workspace_dir), session_id
+                    )
+                except Exception as file_exc:
+                    logger.debug(
+                        "[JiuWenSwarmDeepAdapter] read plan pause file failed session=%s: %s",
+                        session_id,
+                        file_exc,
+                    )
+            if not paused:
+                return
+
+            state = self._instance.load_state(session)
+            if clear_task_plan_on_state(state):
+                self._instance.save_state(session, state)
+
+            has_new_file = self._has_uploaded_file(params)
+            decision = build_paused_plan_decision_prompt_from_session_snapshot(
+                self._resolve_runtime_language(),
+                snapshot,
+                has_new_file=has_new_file,
+            )
+            merge_supplementary_into_request_params(params, decision)
+            clear_plan_pause_on_session(session)
+            try:
+                clear_plan_pause_file(Path(self._workspace_dir), session_id)
+            except Exception as file_exc:
+                logger.debug(
+                    "[JiuWenSwarmDeepAdapter] clear plan pause file failed session=%s: %s",
+                    session_id,
+                    file_exc,
+                )
+            # 哨兵同时标临时 session（落盘兜底）与运行时 session（before_invoke 看得见）
+            mark_interrupt_recovery_injected(session)
+            if runtime_session is not None and runtime_session is not session:
+                mark_interrupt_recovery_injected(runtime_session)
+            await post_agent_execute_for_session(session, self._checkpointer)
+
+            logger.info(
+                "[JiuWenSwarmDeepAdapter] plan pause decision prompt injected session=%s",
+                session_id,
+            )
+        except Exception as exc:
+            logger.warning(
+                "[JiuWenSwarmDeepAdapter] prepare_plan_pause_for_request failed session_id=%s: %s",
+                session_id,
+                exc,
+                exc_info=True,
+            )
+        finally:
+            await session.post_run()
+
+    async def prepare_interrupt_resume_for_request(self, request: AgentRequest) -> None:
+        """On agent.plan continue/resume: inject todo resume guidance when active todos exist."""
+        if self._instance is None:
+            logger.info(
+                "[JiuWenClaw][DIAG] prepare_interrupt_resume (adapter): EARLY RETURN "
+                "(adapter._instance is None) request_id=%s session_id=%s",
+                getattr(request, "request_id", ""), getattr(request, "session_id", ""),
+            )
+            return
+        # _interaction_session 是 before_invoke 实际读取的运行时 session，
+        # 透传让哨兵标志落在 before_invoke 看得到的地方。
+        runtime_session = getattr(self._instance, "_interaction_session", None)
+        await prepare_interrupt_resume_for_request(
+            self, request, runtime_session=runtime_session
+        )
+
+    async def prepare_stale_todo_cleanup_for_new_request(self, request: AgentRequest) -> bool:
+        """Cancel orphaned active todos before a fresh non-resume user turn."""
+        if self._instance is None:
+            logger.info(
+                "[JiuWenClaw][DIAG] prepare_stale_todo_cleanup (adapter): EARLY RETURN "
+                "(adapter._instance is None) request_id=%s session_id=%s",
+                getattr(request, "request_id", ""), getattr(request, "session_id", ""),
+            )
+            return False
+        # _interaction_session 是 before_invoke 实际读取的运行时 session。
+        # 把它透传给清理逻辑，让 skip 标志落在 before_invoke 看得到的地方。
+        runtime_session = getattr(self._instance, "_interaction_session", None)
+        return await prepare_stale_todo_cleanup_for_request(
+            request,
+            agent_card=self._instance.card,
+            get_todo_modify_tool=self._get_todo_modify_tool,
+            runtime_session=runtime_session,
+        )
+
+    async def _freeze_checkpoint_before_abort(
+        self,
+        session_id: str,
+        *,
+        reason: str,
+        persist_checkpoint: bool = False,
+    ) -> None:
+        """Persist in-progress context before interrupt abort (plan mode only)."""
+        if not session_id or self._instance is None:
+            return
+        if self._task_planning_rail is None:
+            return
+
+        sid, aid = self._env_ns_ids()
+        ns_token = None
+        overlay_token = None
+        try:
+            try:
+                ns_token = bind_agent_env_ns(sid, aid)
+                overlay = build_effective_env_overlay(service_id=sid, agent_id=aid)
+                overlay_token = bind_task_env_overlay(overlay)
+            except Exception as exc:
+                logger.warning(
+                    "[JiuWenSwarmDeepAdapter] checkpoint %s env overlay bind failed "
+                    "session_id=%s: %s (skipping freeze to allow interrupt abort)",
+                    reason,
+                    session_id,
+                    exc,
+                    exc_info=True,
+                )
+                return
+
+            freeze_session = None
+            freeze_owned = False
+            try:
+                freeze_session, freeze_owned = await _resolve_session_for_checkpoint(
+                    self._instance,
+                    session_id,
+                    card=self._instance.card,
+                )
+                if freeze_owned:
+                    await freeze_session.pre_run(inputs=None)
+                context_engine = resolve_context_engine(self._instance)
+                if context_engine is not None and freeze_session is not None:
+                    actual_session = getattr(freeze_session, "_parent", freeze_session) or freeze_session
+                    await context_engine.save_contexts(actual_session)
+                    await post_agent_execute_for_session(freeze_session, self._checkpointer)
+            except Exception as exc:
+                logger.warning(
+                    "[JiuWenSwarmDeepAdapter] checkpoint %s freeze failed session_id=%s: %s",
+                    reason,
+                    session_id,
+                    exc,
+                    exc_info=True,
+                )
+        finally:
+            if overlay_token is not None:
+                reset_task_env_overlay(overlay_token)
+            if ns_token is not None:
+                reset_agent_env_ns(ns_token)
+
+    async def _clear_session_persisted_interrupt_state(
+        self,
+        session_id: str | None,
+        *,
+        reason: str,
+        clear_todo_resume_snapshot_pending: bool = False,
+    ) -> None:
+        if not session_id:
+            return
+        if self._instance is None:
+            return
+
+        try:
+            from openjiuwen.core.session.agent import create_agent_session
+            session = create_agent_session(session_id=session_id, card=self._instance.card)
+            await session.pre_run(inputs=None)
+            clear_session_interrupt_state(session)
+            clear_interrupt_recovery_injected(session)
+            if clear_todo_resume_snapshot_pending:
+                set_todo_resume_snapshot_pending(session, pending=False)
+            await post_agent_execute_for_session(session, self._checkpointer)
+            # 同时清理 SkillTurbo 自己的 resume 上下文，避免下次 plain chat 时
+            # 误命中"resume 路径"。
+            try:
+                await _skill_turbo_clear_resume_ctx(session)
+            except Exception:
+                logger.debug(
+                    "[JiuWenSwarmDeepAdapter] clear skill_turbo resume ctx failed",
+                    exc_info=True,
+                )
+            await session.post_run()
+            logger.info(
+                "[JiuWenSwarmDeepAdapter] %s: cleared persisted interrupt state session_id=%s",
+                reason,
+                session_id,
+            )
+        except Exception as exc:
+            logger.warning(
+                "[JiuWenSwarmDeepAdapter] %s: clear persisted interrupt state failed session_id=%s error=%s",
+                reason,
+                session_id,
+                exc,
+            )
+
     async def prepare_interrupt_artifacts_for_request(
         self, request: AgentRequest
     ) -> None:
         """兜底：中断后下一轮请求注入 SkillTurbo 节点产物摘要到 supplementary_info。
 
-        dev-stable 没有 enterprise_dev 的 plan_pause / interrupt_resume prepare hook 链
-        （依赖 openjiuwen.harness.tools.todo_resume，dev-stable 分支无此模块），
-        所以这里只做最小子集：读取上一轮 SkillTurbo 中断时保存的节点产物，
-        格式化成摘要，注入 request.params['supplementary_info']，让 LLM 知道
-        「已完成的工作」而非盲目从头重跑。
-
-        无 plan_pause / interrupt_resume 哨兵机制：dev-stable 不存在那两条路径，
-        不会并发注入，故无需去重哨兵。若后续补齐 enterprise_dev 的完整 prepare
-        hook 链，应在此处开头加 is_interrupt_recovery_injected(session) 早返回，
-        避免重复注入。
+        prepare hook 链的第 3 步（前两步 plan_pause / interrupt_resume 若已注入
+        恢复决策，_arm_skill_turbo_interrupt_recovery_for_card 内经
+        is_interrupt_recovery_injected 哨兵跳过，不重复注入）。
+        读取上一轮 SkillTurbo 中断时保存的节点产物，格式化成摘要，注入
+        request.params['supplementary_info']，让 LLM 知道「已完成的工作」
+        而非盲目从头重跑。
 
         根 adapter 按设计不持有 ``_instance``（``_skip_own_instance_build``，
         officeclaw/tenant-pool 等部署的每个 turn 都跑在 per-session 子 adapter 上），
@@ -10844,6 +11232,11 @@ class JiuWenSwarmDeepAdapter:
         """
         session_id = str(request.session_id or "").strip()
         if not session_id:
+            logger.info(
+                "[JiuWenClaw][DIAG] prepare_interrupt_artifacts: EARLY RETURN (no session_id) "
+                "request_id=%s",
+                getattr(request, "request_id", ""),
+            )
             return
 
         params = (
@@ -10852,6 +11245,11 @@ class JiuWenSwarmDeepAdapter:
             else None
         )
         if params is None:
+            logger.info(
+                "[JiuWenClaw][DIAG] prepare_interrupt_artifacts: EARLY RETURN (no params) "
+                "request_id=%s session_id=%s",
+                getattr(request, "request_id", ""), session_id,
+            )
             return
 
         instance = self._instance
@@ -10859,7 +11257,17 @@ class JiuWenSwarmDeepAdapter:
             cached_adapter = self._get_cached_session_adapter(session_id)
             instance = getattr(cached_adapter, "_instance", None) if cached_adapter else None
         if instance is None:
+            logger.info(
+                "[JiuWenClaw][DIAG] prepare_interrupt_artifacts: EARLY RETURN "
+                "(no instance and no cached session adapter) session_id=%s",
+                session_id,
+            )
             return
+
+        logger.info(
+            "[JiuWenClaw][DIAG] prepare_interrupt_artifacts: proceeding session_id=%s",
+            session_id,
+        )
 
         summary = await self._arm_skill_turbo_interrupt_recovery_for_card(
             request, session_id=session_id, card=instance.card
@@ -10936,8 +11344,47 @@ class JiuWenSwarmDeepAdapter:
         session_id: str,
         card: Any,
     ) -> str | None:
-        """加载节点产物 → 挂一次性 hint → 清空存储；返回摘要文本（无产物返回 None）。"""
+        """加载节点产物 → 清空存储 → 挂一次性 hint；返回摘要文本（无产物返回 None）。"""
         from openjiuwen.core.session.agent import create_agent_session
+
+        # 哨兵：若 prepare_plan_pause / prepare_interrupt_resume 已注入恢复决策，
+        # 不再重复注入 artifacts 摘要（避免并发注入覆盖）。哨兵标志落在普通
+        # agent session（磁盘态）与 runtime session（in-memory 态）上，而本方法
+        # 的产物读写走 __skill_turbo 隔离 session（checkpointer entity 不同，
+        # 读不到那边标的标志），需另开普通 session 检查（用后即弃，无产物读写，
+        # pre_run/post_run 包裹避免 checkpointer 状态泄漏）。
+        sentinel_session = create_agent_session(
+            session_id=session_id, card=card,
+        )
+        await sentinel_session.pre_run(inputs=None)
+        try:
+            runtime_session = (
+                getattr(self._instance, "_interaction_session", None)
+                if self._instance is not None
+                else None
+            )
+            if (is_interrupt_recovery_injected(sentinel_session)  # pylint: disable=too-many-boolean-expressions
+                or (
+                    runtime_session is not None
+                    and runtime_session is not sentinel_session
+                    and is_interrupt_recovery_injected(runtime_session)
+                )
+            ):
+                logger.info(
+                    "[JiuWenClaw][DIAG] arm skill_turbo interrupt recovery: "
+                    "SKIP (interrupt recovery already injected by plan_pause/"
+                    "interrupt_resume) session_id=%s",
+                    session_id,
+                )
+                return None
+        finally:
+            try:
+                await sentinel_session.post_run()
+            except Exception:
+                logger.debug(
+                    "[JiuWenSwarmDeepAdapter] sentinel session post_run failed",
+                    exc_info=True,
+                )
 
         # SkillTurbo 节点产物存在独立 __skill_turbo checkpointer key 下，
         # 需用单独的 session 读写（与 _try_skill_turbo_resume 同一套 id 机制）。
@@ -12484,6 +12931,18 @@ class JiuWenSwarmDeepAdapter:
 
         elif intent == "supplement":
             # supplement: 停止当前执行，但保留 todo（新任务会根据 todo 待办继续执行）
+            session_id = str(request.session_id or "").strip()
+            if session_id and self._instance is not None and self._task_planning_rail is not None:
+                try:
+                    await self._freeze_checkpoint_before_abort(
+                        session_id, reason="supplement", persist_checkpoint=True
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "[JiuWenSwarmDeepAdapter] interrupt(supplement): checkpoint freeze failed "
+                        "session_id=%s: %s (continuing abort)",
+                        session_id, exc, exc_info=True,
+                    )
             cancelled_tool_results = await self._stop_session_interrupt_work(
                 request.session_id,
                 intent="supplement",
@@ -12496,6 +12955,12 @@ class JiuWenSwarmDeepAdapter:
             self._revoke_main_skill_authorization(
                 request.session_id,
                 reason="task_supplemented",
+            )
+            # 清理持久化的中断状态（哨兵 / SkillTurbo resume ctx），但保留 todo
+            await self._clear_session_persisted_interrupt_state(
+                request.session_id,
+                reason="interrupt(supplement)",
+                clear_todo_resume_snapshot_pending=True,
             )
             # 不清理 todo — 保留给新任务继续
             logger.info(
@@ -12510,6 +12975,20 @@ class JiuWenSwarmDeepAdapter:
             # DeepAgent 的 _run_task_loop_stream 后台 Task 不会停止
             # （stream_task.cancel() 只取消了 chunk 转发 Task，不影响 _stream_process）。
             # SessionManager.cancel_session_task 仅管理非流式队列 Task，对流式后台 Task 无效。
+            session_id = str(request.session_id or "").strip()
+            is_plan_mode = self._task_planning_rail is not None
+            # plan 模式：abort 前 freeze + 落盘，保留 cancel 前 tool/assistant 上下文
+            if is_plan_mode and session_id and self._instance is not None:
+                try:
+                    await self._freeze_checkpoint_before_abort(
+                        session_id, reason="cancel", persist_checkpoint=True
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "[JiuWenSwarmDeepAdapter] interrupt(cancel): checkpoint freeze failed "
+                        "session_id=%s: %s (continuing abort)",
+                        session_id, exc, exc_info=True,
+                    )
             cancelled_tool_results = await self._stop_session_interrupt_work(
                 request.session_id,
                 intent="cancel",
@@ -12534,6 +13013,13 @@ class JiuWenSwarmDeepAdapter:
                     updated_todos = await self._cancel_pending_todos(request.session_id)
                 except Exception as exc:
                     logger.warning("[JiuWenSwarmDeepAdapter] 标记 todo cancelled 失败: %s", exc)
+
+                # 清理持久化的中断状态（哨兵 / plan_pause / SkillTurbo resume ctx）
+                await self._clear_session_persisted_interrupt_state(
+                    request.session_id,
+                    reason="interrupt(cancel)",
+                    clear_todo_resume_snapshot_pending=True,
+                )
 
                 # Cancel auto_harness active run if exists
                 try:
@@ -14263,6 +14749,36 @@ class JiuWenSwarmDeepAdapter:
             action="set", objective=objective, session_id=session_id
         )
 
+    def _get_todo_modify_tool(self, session_id: str) -> TodoModifyTool | None:
+        """Return a session-scoped TodoModifyTool, or None if DeepAgent unavailable.
+
+        从 ability_manager 取已注册的 todo_modify 工具；取不到则按 deep_config
+        构造一个临时 TodoModifyTool。供中断恢复 / stale todo 清理复用。
+        """
+        if self._instance is None:
+            return None
+
+        modify_tool: TodoModifyTool | None = None
+        ability_manager = getattr(self._instance, "ability_manager", None)
+        if ability_manager is not None:
+            try:
+                tool_card = ability_manager.get("todo_modify")
+                registered_tool = Runner.resource_mgr.get_tool(tool_card.id)
+                if registered_tool is not None:
+                    modify_tool = registered_tool
+            except Exception:
+                pass
+
+        if modify_tool is None:
+            deep_config = self._instance.deep_config
+            modify_tool = TodoModifyTool(
+                operation=deep_config.sys_operation,
+                workspace=str(deep_config.workspace.get_node_path(WorkspaceNode.TODO)),
+                language=self._resolve_runtime_language(),
+            )
+
+        return modify_tool
+
     async def _cancel_pending_todos(self, session_id: str) -> list[dict] | None:
         """将未完成的 todo 项标记为 cancelled.
 
@@ -14273,22 +14789,7 @@ class JiuWenSwarmDeepAdapter:
         if self._instance is None:
             return None
 
-        modify_tool = None
-        try:
-            tool_card = self._instance.ability_manager.get("todo_modify")
-            registered_tool = Runner.resource_mgr.get_tool(tool_card.id)
-            if registered_tool is not None:
-                modify_tool = registered_tool
-        except Exception:
-            pass
-
-        if modify_tool is None:
-            deep_config = self._instance.deep_config
-            modify_tool = TodoModifyTool(
-                operation=deep_config.sys_operation,
-                workspace=str(deep_config.workspace.get_node_path(WorkspaceNode.TODO)),
-                language=self._resolve_runtime_language(),
-            )
+        modify_tool = self._get_todo_modify_tool(session_id)
 
         try:
             todos = await modify_tool.load_todos(session_id)
@@ -14306,7 +14807,7 @@ class JiuWenSwarmDeepAdapter:
                     ids_to_cancel.append(todo.id)
 
             if ids_to_cancel:
-                await modify_tool._cancel_todos(ids_to_cancel, todos)
+                await modify_tool._cancel_todos(session_id, ids_to_cancel, todos)  # pylint: disable=protected-access
                 logger.info(
                     "[JiuWenSwarmDeepAdapter] 已将 session %s 的未完成任务标记为 cancelled",
                     session_id,

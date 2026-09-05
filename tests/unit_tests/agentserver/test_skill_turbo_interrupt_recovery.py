@@ -29,10 +29,32 @@ from jiuwenswarm.server.runtime.skill_turbo.permission_bridge import (
 _RECOVERY_HINT_KEY = "skill_turbo_interrupt_recovery"
 
 
+def _mock_session_pair() -> tuple[MagicMock, MagicMock, MagicMock]:
+    """构造 (哨兵 session, 产物 session, create_agent_session mock)。
+
+    _arm_skill_turbo_interrupt_recovery_for_card 会开两个 session：先普通命名空间
+    session 读 is_interrupt_recovery_injected 哨兵，后 __skill_turbo 隔离 session
+    读写节点产物。真实空 session 的 get_state 返回 None；MagicMock 默认返回
+    truthy mock 会让哨兵误判「已注入」。
+    """
+    def _make() -> MagicMock:
+        session = MagicMock()
+        session.pre_run = AsyncMock()
+        session.post_run = AsyncMock()
+        session.get_state = MagicMock(return_value=None)
+        return session
+
+    sentinel_session, artifact_session = _make(), _make()
+    create_session = MagicMock(side_effect=[sentinel_session, artifact_session])
+    return sentinel_session, artifact_session, create_session
+
+
 def _make_adapter(**state: object) -> JiuWenSwarmDeepAdapter:
     adapter = object.__new__(JiuWenSwarmDeepAdapter)
     adapter._is_session_scoped_adapter = True
     adapter._parent_session_id = None
+    # process_interrupt（merge 自 e9013de6f）读取该属性，__init__ 跳过时须显式给值
+    adapter._task_planning_rail = None
     for name, value in state.items():
         setattr(adapter, name, value)
     return adapter
@@ -56,12 +78,9 @@ async def test_prepare_interrupt_artifacts_injects_hint_and_clears_once(
     adapter = _make_adapter(_instance=SimpleNamespace(card=card))
     monkeypatch.setattr(adapter, "_resolve_runtime_language", lambda: "zh")
 
-    skill_turbo_session = MagicMock()
-    skill_turbo_session.pre_run = AsyncMock()
-    skill_turbo_session.post_run = AsyncMock()
+    _sentinel_session, skill_turbo_session, create_session = _mock_session_pair()
     monkeypatch.setattr(
-        "openjiuwen.core.session.agent.create_agent_session",
-        MagicMock(return_value=skill_turbo_session),
+        "openjiuwen.core.session.agent.create_agent_session", create_session,
     )
     monkeypatch.setattr(
         type(adapter), "_read_skill_turbo_node_artifacts_summary",
@@ -104,12 +123,9 @@ async def test_prepare_interrupt_artifacts_noop_without_records(
     adapter = _make_adapter(_instance=SimpleNamespace(card=card))
     monkeypatch.setattr(adapter, "_resolve_runtime_language", lambda: "zh")
 
-    skill_turbo_session = MagicMock()
-    skill_turbo_session.pre_run = AsyncMock()
-    skill_turbo_session.post_run = AsyncMock()
+    _sentinel_session, skill_turbo_session, create_session = _mock_session_pair()
     monkeypatch.setattr(
-        "openjiuwen.core.session.agent.create_agent_session",
-        MagicMock(return_value=skill_turbo_session),
+        "openjiuwen.core.session.agent.create_agent_session", create_session,
     )
     monkeypatch.setattr(
         type(adapter), "_read_skill_turbo_node_artifacts_summary",
@@ -153,12 +169,9 @@ async def test_root_prepare_uses_cached_session_adapter_when_instance_missing(
     )
     monkeypatch.setattr(root_adapter, "_resolve_runtime_language", lambda: "zh")
 
-    skill_turbo_session = MagicMock()
-    skill_turbo_session.pre_run = AsyncMock()
-    skill_turbo_session.post_run = AsyncMock()
+    _sentinel_session, skill_turbo_session, create_session = _mock_session_pair()
     monkeypatch.setattr(
-        "openjiuwen.core.session.agent.create_agent_session",
-        MagicMock(return_value=skill_turbo_session),
+        "openjiuwen.core.session.agent.create_agent_session", create_session,
     )
     monkeypatch.setattr(
         type(root_adapter), "_read_skill_turbo_node_artifacts_summary",
@@ -192,12 +205,9 @@ async def test_arm_hint_in_session_trunk_uses_own_instance(
     card = MagicMock()
     adapter = _make_adapter(_instance=SimpleNamespace(card=card))
 
-    skill_turbo_session = MagicMock()
-    skill_turbo_session.pre_run = AsyncMock()
-    skill_turbo_session.post_run = AsyncMock()
+    _sentinel_session, skill_turbo_session, create_session = _mock_session_pair()
     monkeypatch.setattr(
-        "openjiuwen.core.session.agent.create_agent_session",
-        MagicMock(return_value=skill_turbo_session),
+        "openjiuwen.core.session.agent.create_agent_session", create_session,
     )
     monkeypatch.setattr(
         type(adapter), "_read_skill_turbo_node_artifacts_summary",
@@ -237,12 +247,9 @@ async def test_arm_hint_not_set_when_clear_fails(
     card = MagicMock()
     adapter = _make_adapter(_instance=SimpleNamespace(card=card))
 
-    skill_turbo_session = MagicMock()
-    skill_turbo_session.pre_run = AsyncMock()
-    skill_turbo_session.post_run = AsyncMock()
+    _sentinel_session, skill_turbo_session, create_session = _mock_session_pair()
     monkeypatch.setattr(
-        "openjiuwen.core.session.agent.create_agent_session",
-        MagicMock(return_value=skill_turbo_session),
+        "openjiuwen.core.session.agent.create_agent_session", create_session,
     )
     monkeypatch.setattr(
         type(adapter), "_read_skill_turbo_node_artifacts_summary",
@@ -292,12 +299,9 @@ async def test_arm_hint_is_noop_without_instance_or_artifacts(
 
     # 有 instance 但无产物
     adapter2 = _make_adapter(_instance=SimpleNamespace(card=MagicMock()))
-    skill_turbo_session = MagicMock()
-    skill_turbo_session.pre_run = AsyncMock()
-    skill_turbo_session.post_run = AsyncMock()
+    _s2, _a2, create_session2 = _mock_session_pair()
     monkeypatch.setattr(
-        "openjiuwen.core.session.agent.create_agent_session",
-        MagicMock(return_value=skill_turbo_session),
+        "openjiuwen.core.session.agent.create_agent_session", create_session2,
     )
     monkeypatch.setattr(
         type(adapter2), "_read_skill_turbo_node_artifacts_summary",
@@ -425,6 +429,9 @@ async def test_interaction_cancel_clears_pending_skill_turbo_hitl_state(
     skill_turbo_session = MagicMock()
     skill_turbo_session.pre_run = AsyncMock()
     skill_turbo_session.post_run = AsyncMock()
+    # 真实空 session 的 get_state 返回 None；MagicMock 默认返回 truthy mock
+    # 会让 is_interrupt_recovery_injected 哨兵误判「已注入」
+    skill_turbo_session.get_state = MagicMock(return_value=None)
     monkeypatch.setattr(
         "openjiuwen.core.session.agent.create_agent_session",
         MagicMock(return_value=skill_turbo_session),
@@ -484,6 +491,9 @@ async def test_interaction_supplement_clears_pending_skill_turbo_hitl_state(
     skill_turbo_session = MagicMock()
     skill_turbo_session.pre_run = AsyncMock()
     skill_turbo_session.post_run = AsyncMock()
+    # 真实空 session 的 get_state 返回 None；MagicMock 默认返回 truthy mock
+    # 会让 is_interrupt_recovery_injected 哨兵误判「已注入」
+    skill_turbo_session.get_state = MagicMock(return_value=None)
     monkeypatch.setattr(
         "openjiuwen.core.session.agent.create_agent_session",
         MagicMock(return_value=skill_turbo_session),
@@ -543,6 +553,9 @@ async def test_noninteraction_cancel_clears_hitl_after_teardown(
     skill_turbo_session = MagicMock()
     skill_turbo_session.pre_run = AsyncMock()
     skill_turbo_session.post_run = AsyncMock()
+    # 真实空 session 的 get_state 返回 None；MagicMock 默认返回 truthy mock
+    # 会让 is_interrupt_recovery_injected 哨兵误判「已注入」
+    skill_turbo_session.get_state = MagicMock(return_value=None)
     monkeypatch.setattr(
         "openjiuwen.core.session.agent.create_agent_session",
         MagicMock(return_value=skill_turbo_session),
