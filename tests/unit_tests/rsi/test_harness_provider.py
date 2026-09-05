@@ -283,3 +283,19 @@ def test_materialized_request_is_validated_against_task_snapshots(tmp_path: Path
         asyncio.run(provider.run(request))
     with pytest.raises(RsiResumeInputChanged):
         asyncio.run(provider.resume(request))
+
+
+def test_analysis_reuses_optimizer_model() -> None:
+    from openjiuwen.rsi import AutoCoordinatingHarnessConfig
+
+    config = HarnessProvider._apply_model_refs(
+        AutoCoordinatingHarnessConfig(),
+        {"optimizer": "optimizer.yaml", "tester": "tester.yaml"},
+    )
+
+    assert config.model_configs.evaluation == "tester.yaml"
+    assert config.evaluator.model_config_ref == "tester.yaml"
+    assert config.model_configs.analysis == "optimizer.yaml"
+    assert config.evaluation_result_analyzer.model_config_ref == "optimizer.yaml"
+    assert config.model_configs.member_optimization == "optimizer.yaml"
+    assert config.member_optimizer.model_config_ref == "optimizer.yaml"

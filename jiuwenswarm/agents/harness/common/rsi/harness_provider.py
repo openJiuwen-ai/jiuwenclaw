@@ -353,7 +353,7 @@ class HarnessProvider:
 
         model_configs = ModelConfigs(
             evaluation=refs.get("tester") or config.model_configs.evaluation,
-            analysis=refs.get("tester") or config.model_configs.analysis,
+            analysis=refs.get("optimizer") or config.model_configs.analysis,
             member_optimization=refs.get("optimizer") or config.model_configs.member_optimization,
         )
         return replace(

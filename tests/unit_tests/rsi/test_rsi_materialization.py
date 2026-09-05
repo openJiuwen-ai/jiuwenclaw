@@ -183,7 +183,7 @@ def test_task_service_materializes_private_validation_inputs_and_keeps_manifest_
 
     resolver = RsiModelConfigResolver(
         config_loader=lambda: {},
-        defaults_loader=lambda _: [_entry("optimizer", is_default=True)],
+        defaults_loader=lambda _: [_entry("optimizer", is_default=True), _entry("tester")],
         zen_loader=lambda: [],
         model_builder=build_model,
     )
@@ -202,7 +202,7 @@ def test_task_service_materializes_private_validation_inputs_and_keeps_manifest_
             "scenario": "HARNESS",
             "name": "validation",
             "dataset_path": str(source_dataset),
-            "model_refs": {"optimizer": "optimizer", "tester": "optimizer"},
+            "model_refs": {"optimizer": "optimizer", "tester": "tester"},
         }
     )
     task = context.store.get(result["task_id"])
@@ -215,6 +215,13 @@ def test_task_service_materializes_private_validation_inputs_and_keeps_manifest_
     assert (task_root / "models" / "evaluation.yaml").is_file()
     assert (task_root / "models" / "analysis.yaml").is_file()
     assert (task_root / "models" / "member_optimization.yaml").is_file()
+    for role, expected_model in {
+        "evaluation": "tester",
+        "analysis": "optimizer",
+        "member_optimization": "optimizer",
+    }.items():
+        payload = yaml.safe_load((task_root / "models" / f"{role}.yaml").read_text(encoding="utf-8"))
+        assert payload["model_request_config"]["model"] == expected_model
     assert task.config["active_ref_released"] is True
 
     context.store.update_status(

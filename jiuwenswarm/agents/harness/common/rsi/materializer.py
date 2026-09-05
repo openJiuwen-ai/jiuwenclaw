@@ -273,7 +273,7 @@ class RsiTaskMaterializer:
         tester_ref = str(model_refs.get("tester") or "").strip()
         models = {
             "evaluation": model_resolver.resolve_to_file(tester_ref, "evaluation", models_dir),
-            "analysis": model_resolver.resolve_to_file(tester_ref, "analysis", models_dir),
+            "analysis": model_resolver.resolve_to_file(optimizer_ref, "analysis", models_dir),
             "member_optimization": model_resolver.resolve_to_file(
                 optimizer_ref, "member_optimization", models_dir
             ),
