@@ -13,6 +13,11 @@ from zoneinfo import ZoneInfo
 
 from jiuwenswarm.gateway.routing.agent_client import AgentServerClient
 from jiuwenswarm.gateway.routing.session_index import is_remote_storage
+from jiuwenswarm.gateway.cron.calc import (
+    cron_next_push_dt as _cron_next_push_dt,
+    cron_prev_push_dt,
+    is_croniter_no_next_date,
+)
 from jiuwenswarm.gateway.cron.dingtalk_routing import (
     is_usable_dingtalk_staff_id,
     resolve_dingtalk_push_metadata,
@@ -247,25 +252,6 @@ def _format_cron_broadcast_text(*, job_name: str, text: str, is_placeholder: boo
     # Result body, in-progress placeholders, and [cron] status text are all
     # delivered as-is — no job-name prefix is prepended.
     return str(text or "").strip()
-
-
-def _cron_next_push_dt(cron_expr: str, base_dt: datetime) -> datetime:
-    # Lazy import so the rest of the system can still run without cron enabled.
-    from croniter import croniter  # type: ignore
-
-    # Support Quartz 7-field format: second minute hour day month dow year
-    # croniter default is minute hour day month dow second year
-    field_count = len(cron_expr.strip().split())
-    second_at_beginning = field_count == 7
-
-    it = croniter(cron_expr, base_dt, second_at_beginning=second_at_beginning)
-    nxt = it.get_next(datetime)
-    if not isinstance(nxt, datetime):
-        raise RuntimeError("croniter returned invalid datetime")
-    if nxt.tzinfo is None:
-        # Keep tz-consistent; base_dt is tz-aware in our usage.
-        return nxt.replace(tzinfo=base_dt.tzinfo)
-    return nxt
 
 
 @dataclass(frozen=True, order=True)
@@ -898,24 +884,15 @@ class CronSchedulerService:
         except Exception as original_exc:
             if not self._is_croniter_no_next_date(original_exc):
                 raise original_exc
-            from croniter import croniter
-            field_count = len(job.cron_expr.strip().split())
-            second_at_beginning = field_count == 7
-            it = croniter(job.cron_expr, base, second_at_beginning=second_at_beginning)
-            prev_dt = it.get_prev(datetime)
-            if prev_dt is not None and isinstance(prev_dt, datetime):
-                if prev_dt.tzinfo is None:
-                    prev_dt = prev_dt.replace(tzinfo=tz)
-                elapsed = (base.timestamp() - prev_dt.timestamp())
-                if elapsed <= self._MISSED_TRIGGER_WINDOW_SECONDS:
-                    logger.info(
-                        "[Cron] one-shot job=%s missed trigger by %.1fs (within %ss window), "
-                        "scheduling immediate execution instead of marking expired",
-                        job.id, elapsed, self._MISSED_TRIGGER_WINDOW_SECONDS,
-                    )
-                    push_dt = prev_dt
-                else:
-                    raise original_exc
+            prev_dt = cron_prev_push_dt(job.cron_expr, base)
+            elapsed = (base.timestamp() - prev_dt.timestamp())
+            if elapsed <= self._MISSED_TRIGGER_WINDOW_SECONDS:
+                logger.info(
+                    "[Cron] one-shot job=%s missed trigger by %.1fs (within %ss window), "
+                    "scheduling immediate execution instead of marking expired",
+                    job.id, elapsed, self._MISSED_TRIGGER_WINDOW_SECONDS,
+                )
+                push_dt = prev_dt
             else:
                 raise original_exc
         # proactive.tick 无视 wake_offset——到点就执行，不提前 wake。
@@ -932,10 +909,7 @@ class CronSchedulerService:
     @staticmethod
     def _is_croniter_no_next_date(exc: Exception) -> bool:
         """croniter 找不到下一次日期（通常为单次 year 固定为过去）时视为过期。"""
-        return (
-            exc.__class__.__name__ == "CroniterBadDateError"
-            or "failed to find next date" in str(exc)
-        )
+        return is_croniter_no_next_date(exc)
 
     @staticmethod
     def _use_db_schedule() -> bool:
