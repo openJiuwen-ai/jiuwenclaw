@@ -203,11 +203,12 @@ export function McpDetailPage({ name, onBack, onUse, onUseExample, onEdit }: Mcp
   }
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col">
+    <div className="flex min-h-0 flex-1 flex-col" data-testid="connector-market-mcp-detail">
       <button
         type="button"
         onClick={onBack}
         className="detail-back mb-[35px]"
+        data-testid="connector-market-mcp-detail-back"
       >
         <BackIcon aria-hidden="true" />
         {t('connectorMarket.common.back')}
