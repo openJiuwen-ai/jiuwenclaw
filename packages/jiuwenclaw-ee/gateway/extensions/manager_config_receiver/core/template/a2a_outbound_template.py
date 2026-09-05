@@ -21,7 +21,21 @@ from ...schemas.template_schemas import (
 )
 
 _TABLE = A2A_OUTBOUND_TEMPLATE_TABLE_DEF.table_name
+_USER_STATE_TABLE = "a2a_outbound_user_state"
+_RUNTIME_STATE_TABLE = "a2a_outbound_runtime_state"
 logger = logging.getLogger(__name__)
+
+
+def _row_for_restore(
+    row: dict[str, Any] | None, *datetime_fields: str
+) -> dict[str, Any] | None:
+    if row is None:
+        return None
+    values = {key: value for key, value in row.items() if key != "id"}
+    for field in datetime_fields:
+        if field in values:
+            values[field] = parse_iso_datetime(values[field])
+    return values
 
 
 def _template_id(value: Any) -> str:
@@ -133,20 +147,47 @@ class A2AOutboundTemplateService:
     async def delete(self, template_id: str) -> None:
         tid = _template_id(template_id)
         repo = require_enterprise_repository(_TABLE)
+        user_states = require_enterprise_repository(_USER_STATE_TABLE)
+        runtime_states = require_enterprise_repository(_RUNTIME_STATE_TABLE)
         existing = await repo.get(template_id=tid)
+        old_user_state = await user_states.get(template_id=tid)
+        old_runtime_state = await runtime_states.get(template_id=tid)
         credential_ref = (
             str(existing.get("credential_ref") or "")
             if existing
             else self._credentials.reference_for(tid)
         )
         old_secret = self._credentials.get(credential_ref)
-        self._credentials.delete(credential_ref)
         try:
+            self._credentials.delete(credential_ref)
             if existing is not None:
                 await repo.delete(template_id=tid)
+            await user_states.delete(template_id=tid)
+            await runtime_states.delete(template_id=tid)
         except Exception:
-            if old_secret:
-                self._credentials.set_for_agent(tid, old_secret)
+            try:
+                projection = _row_for_restore(existing, "created_at", "updated_at")
+                if projection is not None:
+                    await repo.upsert(projection)
+                user_state = _row_for_restore(old_user_state, "updated_at")
+                if user_state is not None:
+                    await user_states.upsert(user_state)
+                runtime_state = _row_for_restore(
+                    old_runtime_state,
+                    "last_checked_at",
+                    "last_success_at",
+                    "updated_at",
+                )
+                if runtime_state is not None:
+                    await runtime_states.upsert(runtime_state)
+                if old_secret:
+                    self._credentials.set_for_agent(tid, old_secret)
+            except Exception:
+                logger.exception(
+                    "[ManagerConfigReceiver] a2a outbound delete rollback failed "
+                    "template_id=%s",
+                    tid,
+                )
             raise
         logger.info(
             "[ManagerConfigReceiver] a2a_outbound_templates delete template_id=%s",

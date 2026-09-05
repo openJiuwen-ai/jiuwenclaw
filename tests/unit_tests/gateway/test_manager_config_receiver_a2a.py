@@ -7,10 +7,12 @@ from __future__ import annotations
 import logging
 import sys
 from collections.abc import Iterator
+from datetime import datetime, timezone
 from types import ModuleType
 from typing import Any
 
 import pytest
+from a2a.types import Message, Part, Role, StreamResponse
 from fastapi.testclient import TestClient
 
 
@@ -54,6 +56,17 @@ def _install_runtime_db_stubs() -> None:
 _install_runtime_db_stubs()
 
 from jiuwenswarm.common.secrets import SecretStore
+from jiuwenswarm.gateway.a2a_manager.outbound import (
+    A2AOutboundAvailability,
+    A2AOutboundDispatch,
+    A2AOutboundDispatcher,
+    A2AOutboundDispatchMode,
+    A2AOutboundDispatchStatus,
+    A2AOutboundError,
+    A2AOutboundErrorCode,
+    A2AOutboundRegistry,
+    EnterpriseA2AProjection,
+)
 from jiuwenswarm.gateway.config.enterprise import (
     clear_enterprise_record_repositories,
     set_enterprise_record_repositories,
@@ -65,6 +78,7 @@ from jiuwenswarm.gateway.storage.backends.memory_persistent import (
     InMemoryPersistentBackend,
 )
 from jiuwenswarm.gateway.storage_assembly.setup import (
+    create_a2a_outbound_repository,
     create_enterprise_record_repositories,
 )
 from jiuwenswarm.infrastructure.module_importer import (
@@ -85,6 +99,29 @@ class _Secrets:
 
     def delete(self, key: str) -> None:
         self.values.pop(key, None)
+
+
+class _CompletedClient:
+    async def send_message(self, request: Any, *, context: Any = None):
+        del request, context
+        yield StreamResponse(
+            message=Message(
+                message_id="remote-message",
+                role=Role.ROLE_AGENT,
+                parts=[Part(text="done")],
+            )
+        )
+
+    async def close(self) -> None:
+        return None
+
+
+class _UnreachableClient(_CompletedClient):
+    async def send_message(self, request: Any, *, context: Any = None):
+        del request, context
+        if False:
+            yield None
+        raise OSError("connection refused")
 
 
 def _outbound_payload(
@@ -115,6 +152,14 @@ def _outbound_payload(
         "data": {},
         "updated_at": "2026-09-05T00:00:00Z",
     }
+
+
+def _projection_record() -> dict[str, Any]:
+    payload = _outbound_payload(operation="clear", value=None)
+    payload.pop("credential")
+    payload["credential_ref"] = None
+    payload["created_at"] = "2026-09-05T00:00:00Z"
+    return payload
 
 
 @pytest.fixture
@@ -189,7 +234,43 @@ def test_a2a_outbound_receiver_crud_and_secret_store(
     assert projection["credential_ref"] is None
     assert credential_ref not in secrets.values
 
+    user_states = repos["a2a_outbound_user_state"]
+    runtime_states = repos["a2a_outbound_runtime_state"]
+    dispatches = repos["a2a_outbound_dispatch"]
+    client.portal.call(
+        lambda: user_states.create(
+            {
+                "template_id": "a2a-weather",
+                "user_enabled": False,
+                "updated_at": "2026-09-05T00:00:00Z",
+            }
+        )
+    )
+    client.portal.call(
+        lambda: runtime_states.create(
+            {
+                "template_id": "a2a-weather",
+                "availability": "available",
+                "updated_at": "2026-09-05T00:00:00Z",
+            }
+        )
+    )
+    client.portal.call(
+        lambda: dispatches.create(
+            {"dispatch_id": "dispatch-history", "agent_id": "a2a-weather"}
+        )
+    )
+
     assert client.request("DELETE", f"{path}/a2a-weather", json={}).status_code == 200
+    assert client.portal.call(
+        lambda: user_states.get(template_id="a2a-weather")
+    ) is None
+    assert client.portal.call(
+        lambda: runtime_states.get(template_id="a2a-weather")
+    ) is None
+    assert client.portal.call(
+        lambda: dispatches.get(dispatch_id="dispatch-history")
+    ) is not None
     assert client.request("DELETE", f"{path}/a2a-weather", json={}).status_code == 200
 
 
@@ -356,16 +437,25 @@ def test_a2a_outbound_purge_removes_projection_and_secret(
     assert secrets.values == {}
     assert "a2a_outbound_template" in lifecycle.INSTANCE_PURGE_TABLES
     assert "a2a_access_policy_template" in lifecycle.INSTANCE_PURGE_TABLES
+    assert "a2a_outbound_user_state" in lifecycle.INSTANCE_PURGE_TABLES
+    assert "a2a_outbound_runtime_state" in lifecycle.INSTANCE_PURGE_TABLES
+    assert "a2a_outbound_dispatch" in lifecycle.INSTANCE_PURGE_TABLES
 
 
 def test_a2a_tables_are_in_enterprise_init_and_catalog() -> None:
     table_names = {definition.table_name for definition in ALL_TABLE_DEFINITIONS}
     assert "a2a_outbound_template" in table_names
     assert "a2a_access_policy_template" in table_names
+    assert "a2a_outbound_user_state" in table_names
+    assert "a2a_outbound_runtime_state" in table_names
+    assert "a2a_outbound_dispatch" in table_names
 
     repos = create_enterprise_record_repositories(InMemoryPersistentBackend())
     assert "a2a_outbound_template" in repos
     assert "a2a_access_policy_template" in repos
+    assert "a2a_outbound_user_state" in repos
+    assert "a2a_outbound_runtime_state" in repos
+    assert "a2a_outbound_dispatch" in repos
 
 
 def test_manager_config_public_endpoint_can_advertise_https() -> None:
@@ -381,3 +471,267 @@ def test_manager_config_public_endpoint_can_advertise_https() -> None:
     assert public_endpoint.resolve_public_endpoint(settings) == (
         "https://gateway.test:443"
     )
+
+
+@pytest.mark.asyncio
+async def test_enterprise_projection_merges_manager_user_and_runtime_state() -> None:
+    store = InMemoryPersistentBackend()
+    repos = create_enterprise_record_repositories(store)
+    await repos["a2a_outbound_template"].create(_projection_record())
+    projection = EnterpriseA2AProjection(
+        store,
+        templates=repos["a2a_outbound_template"],
+        user_states=repos["a2a_outbound_user_state"],
+        runtime_states=repos["a2a_outbound_runtime_state"],
+    )
+    registry = A2AOutboundRegistry(projection)
+
+    initial = await projection.get_projected_agent("a2a-weather")
+    assert initial is not None
+    assert initial.manager_enabled is True
+    assert initial.user_enabled is True
+    assert initial.effective_enabled is True
+    assert initial.agent.enabled is True
+
+    disabled = await projection.set_user_enabled("a2a-weather", False)
+    assert disabled.manager_enabled is True
+    assert disabled.user_enabled is False
+    assert disabled.effective_enabled is False
+    user_row = await store.get(
+        "a2a_outbound_user_state", {"template_id": "a2a-weather"}
+    )
+    assert isinstance(user_row["updated_at"], datetime)
+    with pytest.raises(A2AOutboundError) as exc_info:
+        await projection.set_user_enabled("missing-agent", True)
+    assert exc_info.value.code is A2AOutboundErrorCode.AGENT_NOT_REGISTERED
+    await repos["a2a_outbound_template"].update(
+        {"template_id": "a2a-weather"},
+        {"template_name": "Weather Agent v2", "card_revision": 2},
+    )
+    persisted = await projection.get_projected_agent("a2a-weather")
+    assert persisted is not None and persisted.user_enabled is False
+
+    await projection.set_user_enabled("a2a-weather", True)
+    await repos["a2a_outbound_template"].update(
+        {"template_id": "a2a-weather"}, {"enabled": False}
+    )
+    manager_disabled = await projection.get_projected_agent("a2a-weather")
+    assert manager_disabled is not None
+    assert manager_disabled.manager_enabled is False
+    assert manager_disabled.user_enabled is True
+    assert manager_disabled.effective_enabled is False
+    assert manager_disabled.agent.enabled is False
+
+    await projection.update_runtime_state(
+        "a2a-weather",
+        A2AOutboundAvailability.UNREACHABLE,
+        error_code=A2AOutboundErrorCode.CARD_FETCH_FAILED.value,
+    )
+    runtime_failed = await projection.get_projected_agent("a2a-weather")
+    assert runtime_failed is not None
+    assert runtime_failed.agent.availability is A2AOutboundAvailability.UNREACHABLE
+    assert runtime_failed.agent.last_error_summary == "无法获取第三方 Agent Card。"
+    runtime_row = await store.get(
+        "a2a_outbound_runtime_state", {"template_id": "a2a-weather"}
+    )
+    assert isinstance(runtime_row["updated_at"], datetime)
+    assert isinstance(runtime_row["last_checked_at"], datetime)
+
+    listed = await registry.list_agents()
+    assert listed["items"][0]["manager_enabled"] is False
+    assert listed["items"][0]["user_enabled"] is True
+    assert listed["items"][0]["effective_enabled"] is False
+    with pytest.raises(A2AOutboundError) as exc_info:
+        await registry.edit_agent("a2a-weather")
+    assert exc_info.value.code is A2AOutboundErrorCode.STORE_INVALID
+
+
+@pytest.mark.asyncio
+async def test_enterprise_projection_reuses_dispatch_repository() -> None:
+    store = InMemoryPersistentBackend()
+    repos = create_enterprise_record_repositories(store)
+    await repos["a2a_outbound_template"].create(_projection_record())
+    projection = EnterpriseA2AProjection(
+        store,
+        templates=repos["a2a_outbound_template"],
+        user_states=repos["a2a_outbound_user_state"],
+        runtime_states=repos["a2a_outbound_runtime_state"],
+    )
+    dispatch = A2AOutboundDispatch(
+        dispatch_id="dispatch-1",
+        agent_id="a2a-weather",
+        agent_name="Weather Agent",
+        agent_revision=1,
+        mode=A2AOutboundDispatchMode.ASYNC,
+        status=A2AOutboundDispatchStatus.CREATED,
+        request_message_id="message-1",
+        source_session_id="session-1",
+        source_resource_id="resource-1",
+        created_at="2026-09-05T00:00:00Z",
+        updated_at="2026-09-05T00:00:00Z",
+    )
+
+    await projection.create_dispatch(dispatch)
+    await projection.transition_dispatch(
+        "dispatch-1",
+        A2AOutboundDispatchStatus.COMPLETED,
+        accepted_at="2026-09-05T00:00:01Z",
+    )
+    restored = await projection.get_dispatch("dispatch-1")
+    assert restored is not None
+    assert restored.status is A2AOutboundDispatchStatus.COMPLETED
+    assert restored.agent_name == "Weather Agent"
+    assert restored.source_resource_id == "resource-1"
+    dispatch_row = await store.get(
+        "a2a_outbound_dispatch", {"dispatch_id": "dispatch-1"}
+    )
+    assert isinstance(dispatch_row["created_at"], datetime)
+    assert isinstance(dispatch_row["updated_at"], datetime)
+    assert isinstance(dispatch_row["accepted_at"], datetime)
+    assert isinstance(dispatch_row["finished_at"], datetime)
+
+
+@pytest.mark.asyncio
+async def test_enterprise_dispatch_updates_shared_runtime_state() -> None:
+    store = InMemoryPersistentBackend()
+    repos = create_enterprise_record_repositories(store)
+    await repos["a2a_outbound_template"].create(_projection_record())
+    projection = EnterpriseA2AProjection(
+        store,
+        templates=repos["a2a_outbound_template"],
+        user_states=repos["a2a_outbound_user_state"],
+        runtime_states=repos["a2a_outbound_runtime_state"],
+    )
+
+    async def build_client(agent: Any, credential: str) -> _CompletedClient:
+        del agent, credential
+        return _CompletedClient()
+
+    dispatcher = A2AOutboundDispatcher(projection, client_builder=build_client)
+    result = await dispatcher.dispatch(
+        agent_id="a2a-weather",
+        task="weather",
+        mode="sync",
+        source_session_id="session-1",
+    )
+
+    assert result["status"] == A2AOutboundDispatchStatus.COMPLETED.value
+    runtime_row = await store.get(
+        "a2a_outbound_runtime_state", {"template_id": "a2a-weather"}
+    )
+    assert runtime_row["availability"] == A2AOutboundAvailability.AVAILABLE.value
+    assert isinstance(runtime_row["last_success_at"], datetime)
+
+
+@pytest.mark.asyncio
+async def test_enterprise_dispatch_records_unreachable_runtime_state() -> None:
+    store = InMemoryPersistentBackend()
+    repos = create_enterprise_record_repositories(store)
+    await repos["a2a_outbound_template"].create(_projection_record())
+    projection = EnterpriseA2AProjection(
+        store,
+        templates=repos["a2a_outbound_template"],
+        user_states=repos["a2a_outbound_user_state"],
+        runtime_states=repos["a2a_outbound_runtime_state"],
+    )
+
+    async def build_client(agent: Any, credential: str) -> _UnreachableClient:
+        del agent, credential
+        return _UnreachableClient()
+
+    dispatcher = A2AOutboundDispatcher(projection, client_builder=build_client)
+    result = await dispatcher.dispatch(
+        agent_id="a2a-weather",
+        task="weather",
+        mode="sync",
+        source_session_id="session-1",
+    )
+
+    assert result["status"] == A2AOutboundDispatchStatus.DISPATCH_FAILED.value
+    runtime_row = await store.get(
+        "a2a_outbound_runtime_state", {"template_id": "a2a-weather"}
+    )
+    assert runtime_row["availability"] == A2AOutboundAvailability.UNREACHABLE.value
+    assert (
+        runtime_row["last_error_code"] == A2AOutboundErrorCode.AGENT_UNAVAILABLE.value
+    )
+
+
+def test_a2a_delete_restores_projection_and_local_state_on_cleanup_failure(
+    a2a_receiver: tuple[TestClient, dict[str, Any], _Secrets],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, repos, secrets = a2a_receiver
+    path = "/api/v1/a2a-outbound-templates"
+    credential_ref = "a2a/outbound/a2a-weather.api_key"
+    assert client.post(path, json=_outbound_payload()).status_code == 200
+    user_states = repos["a2a_outbound_user_state"]
+    runtime_states = repos["a2a_outbound_runtime_state"]
+    client.portal.call(
+        lambda: user_states.create(
+            {
+                "template_id": "a2a-weather",
+                "user_enabled": False,
+                "updated_at": datetime.now(timezone.utc),
+            }
+        )
+    )
+    client.portal.call(
+        lambda: runtime_states.create(
+            {
+                "template_id": "a2a-weather",
+                "availability": A2AOutboundAvailability.UNREACHABLE.value,
+                "updated_at": datetime.now(timezone.utc),
+            }
+        )
+    )
+    original_delete = runtime_states.delete
+
+    async def fail_delete(*args: Any, **kwargs: Any) -> bool:
+        del args, kwargs
+        raise RuntimeError("runtime state delete failed")
+
+    monkeypatch.setattr(runtime_states, "delete", fail_delete)
+    template_module = import_manager_config_receiver_module(
+        "core.template.a2a_outbound_template"
+    )
+    service = template_module.A2AOutboundTemplateService()
+    with pytest.raises(RuntimeError, match="runtime state delete failed"):
+        client.portal.call(lambda: service.delete("a2a-weather"))
+
+    assert (
+        client.portal.call(
+            lambda: repos["a2a_outbound_template"].get(template_id="a2a-weather")
+        )
+        is not None
+    )
+    assert (
+        client.portal.call(lambda: user_states.get(template_id="a2a-weather"))[
+            "user_enabled"
+        ]
+        is False
+    )
+    assert client.portal.call(
+        lambda: runtime_states.get(template_id="a2a-weather")
+    )["availability"] == A2AOutboundAvailability.UNREACHABLE.value
+    assert secrets.values[credential_ref] == "secret"
+
+    monkeypatch.setattr(runtime_states, "delete", original_delete)
+    client.portal.call(lambda: service.delete("a2a-weather"))
+    assert (
+        client.portal.call(lambda: user_states.get(template_id="a2a-weather")) is None
+    )
+
+
+@pytest.mark.asyncio
+async def test_repository_factory_creates_enterprise_projection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("JIUWENSWARM_EDITION", "enterprise")
+    store = InMemoryPersistentBackend()
+    repos = create_enterprise_record_repositories(store)
+    await repos["a2a_outbound_template"].create(_projection_record())
+    repository = create_a2a_outbound_repository(store)
+    assert isinstance(repository, EnterpriseA2AProjection)
+    projected = await repository.get_agent("a2a-weather")
+    assert projected is not None and projected.display_name == "Weather Agent"
