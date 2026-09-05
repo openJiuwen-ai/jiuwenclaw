@@ -93,6 +93,24 @@ def _permission_response_key(request: AgentRequest) -> str | None:
     return request_id or None
 
 
+def _is_pause_for_user_input(payload: dict | Any) -> bool:
+    """流事件是否为 HITL 暂停（审批/追问等用户输入）。
+
+    - ``chat.invocation_paused``：adapter 终态显式标记 awaiting_user_input；
+    - ``chat.ask_user_question``：审批卡/追问事件（interface_deep 的
+      hitl_pending_stream 即以此为判据，见 _should_pause_for_user_input）。
+    命中任一即视为"轮次未结束"，池化 MCP worker 保持存活。
+    """
+    if not isinstance(payload, dict):
+        return False
+    et = payload.get("event_type")
+    if et == "chat.invocation_paused":
+        return True
+    if et == "chat.ask_user_question":
+        return True
+    return False
+
+
 from jiuwenclaw.agentserver.session_history import append_history_record
 from jiuwenclaw.agentserver.session_manager import SessionManager
 from jiuwenclaw.agentserver.session_metadata import (
@@ -288,6 +306,13 @@ class JiuWenClaw:
         self._storage = None
         self._tool_manager = None
         self._session_id: str | None = None
+        # 池化 MCP worker 的 session 键成分（create_instance 时填充）。
+        self._channel_id: str = ""
+        self._mode: str = ""
+        # 本实例是否注册过请求级 MCP（close-on-final 的触发依据；不能用
+        # ToolManager._request_registrations 判——stream finally 里先执行
+        # unregister_request_scoped_mcp 会把它 pop 空，导致释放被跳过）。
+        self._used_request_scoped_mcp: bool = False
         self._inflight_stream_count: int = 0
 
     def _acquire_inflight_stream(self) -> None:
@@ -378,8 +403,17 @@ class JiuWenClaw:
             self._tool_manager = ToolManager(
                 get_agent=lambda: self.get_instance(),
                 get_tools_dir=lambda: Path(self._workspace_dir) / "tools",
+                get_session_key=lambda: self._session_key(),
             )
         return self._tool_manager
+
+    def _session_key(self) -> str:
+        """池化 MCP worker 的 session 键（channel::mode::session_id）。
+
+        每个 session 一个 JiuWenClaw 实例（AgentManager.get_agent 粒度），
+        实例属性即可唯一定位；_session_id 在请求处理入口刷新。
+        """
+        return f"{self._channel_id or 'default'}::{self._mode or 'agent'}::{self._session_id or 'default'}"
 
     def _session_project_dir_get(self, session_id: str) -> str | None:
         d = self._session_project_dir
@@ -529,6 +563,12 @@ class JiuWenClaw:
         """
         if session_id is not None:
             self._session_id = session_id.strip() or None
+        # 池化 MCP worker 的 session 键成分：本实例由 AgentManager 按
+        # (channel, mode, session) 粒度创建，create_instance 是拿全三元组的
+        # 唯一入口（config["agent_name"] 里也编码了同样信息）。
+        cfg = config if isinstance(config, dict) else {}
+        self._channel_id = str(cfg.get("channel_id") or self._channel_id or "")
+        self._mode = str(mode or self._mode or "agent")
         adapter = await self._ensure_adapter()
         await adapter.create_instance(
             config,
@@ -1420,6 +1460,9 @@ class JiuWenClaw:
             reason=reason,
         )
         await self._session_manager.cancel_all_session_tasks(reason)
+        # 用户主动 cancel：本轮已无续跑预期，释放池化 MCP worker
+        # （stdio 子进程/浏览器随取消关闭；双触发无害——release 幂等）。
+        await self._release_session_scoped_mcp_workers()
         return response
 
     async def process_message(self, request: AgentRequest) -> AgentResponse:
@@ -1536,6 +1579,7 @@ class JiuWenClaw:
                         await self._get_tool_manager().register_request_scoped_mcp(
                             mcp_payload, request_id=request.request_id
                         )
+                        self._used_request_scoped_mcp = True
                     except Exception as exc:
                         logger.warning(
                             "[JiuWenClaw] request_mcp_servers 注册失败: %s",
@@ -1626,6 +1670,11 @@ class JiuWenClaw:
             return result
         finally:
             await self._cleanup_request_scoped_mcp(request.request_id)
+            # 非流式路径 close-on-final：无 pause 概念，但 HITL 审批拆出的
+            # 非流式 resume 请求结束时可能仍有审批卡待用户（如工具审批链中
+            # 的追问），此时保活 worker，与流式路径同一判据。
+            if not self._has_pending_permission(session_id):
+                await self._release_session_scoped_mcp_workers()
             self._reset_tenant_request_context(tenant_tokens, mem_token)
 
     async def process_message_stream(
@@ -1806,6 +1855,10 @@ class JiuWenClaw:
             await self._try_apply_adapter_pending_reload()
 
             self._acquire_inflight_stream()
+            # 池化 MCP worker 的轮次终态：HITL 审批暂停（chat.invocation_paused /
+            # chat.ask_user_question）期间保活 worker（浏览器不闪退），仅在本轮
+            # 正常结束时 close-on-final。用户 cancel 走 _process_interrupt 单独释放。
+            stream_paused_for_user = False
             try:
                 stream_queue = asyncio.Queue()
                 stream_done = asyncio.Event()
@@ -1823,6 +1876,7 @@ class JiuWenClaw:
                                 await self._get_tool_manager().register_request_scoped_mcp(
                                     mcp_payload, request_id=request.request_id
                                 )
+                                self._used_request_scoped_mcp = True
                             except Exception as exc:
                                 logger.warning(
                                     "[JiuWenClaw] request_mcp_servers 注册失败: request_id=%s error=%s",
@@ -1928,6 +1982,8 @@ class JiuWenClaw:
                                     and str(data.payload.get("event_type")) in _E2A_SUPPRESSED_EVENT_TYPES
                                 )
                                 if isinstance(data.payload, dict) and isinstance(data.payload.get("event_type"), str):
+                                    if _is_pause_for_user_input(data.payload):
+                                        stream_paused_for_user = True
                                     et = str(data.payload.get("event_type"))
                                     should_record = et.startswith("chat.") or et.startswith("task.")
                                     if not should_record and et == EventType.TEAM_MESSAGE.value:
@@ -1973,6 +2029,8 @@ class JiuWenClaw:
                                     yield data
                             elif isinstance(data, dict) and isinstance(data.get("event_type"), str):
                                 et = str(data.get("event_type"))
+                                if _is_pause_for_user_input(data):
+                                    stream_paused_for_user = True
                                 should_suppress = et in _E2A_SUPPRESSED_EVENT_TYPES
                                 should_record = et.startswith("chat.") or et.startswith("task.")
                                 if not should_record and et == EventType.TEAM_MESSAGE.value:
@@ -2107,6 +2165,16 @@ class JiuWenClaw:
                 await self._try_apply_adapter_pending_reload()
         finally:
             await self._cleanup_request_scoped_mcp(request.request_id)
+            # 池化 MCP worker 的 close-on-final：本轮正常结束（未暂停等审批）
+            # 时释放 session 名下的 stdio 进程/浏览器；HITL 暂停时保活，
+            # resume 请求按同 session 键复用。异常/取消路径也在此兜底释放
+            # （用户 cancel 另有 _process_interrupt 主动释放，双触发无害）。
+            # 暂停判据双保险：事件流标志（chat.invocation_paused /
+            # chat.ask_user_question）+ PermissionRail 待审批状态——工具审批
+            # 卡经 TOOL_PERMISSION_CHANNEL_ID 直发，不走本消费循环，纯事件
+            # 检测会漏（2026-09-04 full.log 全程 0 次 invocation_paused 实证）。
+            if not stream_paused_for_user and not self._has_pending_permission(session_id):
+                await self._release_session_scoped_mcp_workers()
 
     @staticmethod
     def _extract_request_mcp_payload(request) -> dict | None:
@@ -2128,6 +2196,49 @@ class JiuWenClaw:
             await tm.unregister_request_scoped_mcp(request_id)
         except Exception:
             logger.exception("[JiuWenClaw] request-scoped MCP 清理失败: %s", request_id)
+
+    @staticmethod
+    def _has_pending_permission(session_id: str | None) -> bool:
+        """该 session 是否有审批卡等待用户（HITL 暂停保活的判据）。
+
+        PermissionRail 的工具审批经 TOOL_PERMISSION_CHANNEL_ID 直发前端，
+        不经事件流，因此 close-on-final 除事件流标志外必须查此状态。
+        """
+        if not session_id:
+            return False
+        try:
+            from jiuwenclaw.agentserver.deep_agent.rails.permission_rail import (
+                has_pending_permission_for_session,
+            )
+            return has_pending_permission_for_session(session_id)
+        except Exception:
+            return False
+
+    async def _release_session_scoped_mcp_workers(self) -> None:
+        """释放本 session 名下全部池化 MCP worker（close-on-final / cancel）。
+
+        worker 键控在 session 粒度（HITL 审批拆请求时跨请求复用），因此
+        释放也必须以 session 为单位。判据用实例级 _used_request_scoped_mcp
+        标志而非 ToolManager._request_registrations——后者在 stream finally
+        更早的 _cleanup_request_scoped_mcp 里已被 pop 空。
+        """
+        tm = self._tool_manager
+        if tm is None:
+            return
+        # 本会话从未注册过请求级 MCP 则直接跳过（普通请求零开销）。
+        if not self._used_request_scoped_mcp:
+            return
+        try:
+            await tm.release_session_scoped_mcp(self._session_key())
+            logger.info(
+                "[JiuWenClaw] 已释放 session 级 MCP worker: session_key=%s",
+                self._session_key(),
+            )
+        except Exception:
+            logger.exception(
+                "[JiuWenClaw] session 级 MCP worker 释放失败: session_key=%s",
+                self._session_key(),
+            )
 
     async def _try_apply_adapter_pending_reload(self) -> None:
         """Apply adapter deferred config reload at a harness-idle boundary."""

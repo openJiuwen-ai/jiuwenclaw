@@ -23,11 +23,18 @@ from openjiuwen.core.runner import Runner
 from jiuwenclaw.utils import get_agent_tools_dir, logger
 
 from jiuwenclaw.agentserver.tools.ephemeral_stdio_mcp_tool import (
-    EphemeralStdioMcpTool,
-    list_stdio_mcp_tool_defs,
+    EphemeralStdioMcpTool,  # noqa: F401 (保留旧引用/patch 路径)
     stdio_params_from_mcp_config,
 )
 from jiuwenclaw.agentserver.tools.mcp_toolkits import _normalize_stdio_command_kind, create_mcp_tool
+from jiuwenclaw.agentserver.tools.request_scoped_mcp_sessions import (
+    PooledRequestMcpTool,
+    build_remote_connect_params,
+    discover_remote_mcp_tools,
+    discover_stdio_mcp_tools,
+    release_request_scoped_mcp_sessions,
+    release_session_mcp_workers,
+)
 
 _OFFICE_CLAW_SERVER_NAME_PREFIX = "office-claw"
 
@@ -470,14 +477,20 @@ class ToolManager:
             get_agent: Callable[[], Any] | None = None,
             *,
             get_tools_dir: Callable[[], Path] | None = None,
+            get_session_key: Callable[[], str] | None = None,
     ) -> None:
         """get_agent: 返回当前底层 Agent，用于 ``Runner.resource_mgr`` / ``ability_manager``。
 
         get_tools_dir: 可选；返回 MCP 配置落盘目录。多租户下由 ``JiuWenClaw`` 传入
         ``jiuwenclaw_workspace/tools``；缺省回退 ``utils.get_agent_tools_dir()``。
+
+        get_session_key: 可选；返回当前 session 的池化键（channel::mode::session_id）。
+        请求级 MCP worker 按 (session_key, server, params 指纹) 池化，
+        HITL 审批拆出的多个请求复用同一 worker，浏览器不再随请求闪退。
         """
         self._get_agent = get_agent
         self._get_tools_dir = get_tools_dir
+        self._get_session_key = get_session_key
         self._request_registrations: dict[str, list[dict[str, Any]]] = {}
         self._request_registrations_lock = asyncio.Lock()
 
@@ -485,6 +498,19 @@ class ToolManager:
         if self._get_tools_dir is not None:
             return self._get_tools_dir()
         return get_agent_tools_dir()
+
+    def _resolve_session_key(self) -> str:
+        """解析当前请求所属 session 的池化键（channel::mode::session_id）。
+
+        get_session_key 回调由 JiuWenClaw 注入（per-session agent 实例粒度）；
+        缺回调（测试/legacy 路径）回退 request_id，保持请求粒度旧行为。
+        """
+        if self._get_session_key is not None:
+            try:
+                return str(self._get_session_key() or "")
+            except Exception:
+                logger.exception("[ToolManager] 解析 session_key 失败，回退 request_id 粒度")
+        return ""
 
     @staticmethod
     def find_host_project_mcp_json() -> Path | None:
@@ -639,6 +665,15 @@ class ToolManager:
         }
 
     async def register_request_scoped_mcp(self, payload: dict[str, Any], *, request_id: str) -> dict[str, Any]:
+        """注册请求级 MCP（stdio / sse / streamable-http），全部走长生命周期 session 池。
+
+        - 每个连接器（server）独立 try/except，单连接器失败（发现失败/工具全部
+          注册失败）只 skip 该连接器并记入 failed，不中断同请求其它连接器的注册；
+        - 跨连接器 seen_names 去重：重名/非法工具名仅跳过该工具，不中断整次注册；
+        - stdio 与 remote 统一由 request_scoped_mcp_sessions 池化：worker 按
+          (session_key, server, params 指纹) 键控，同会话跨请求复用（HITL 审批
+          拆请求时浏览器不闪退），轮次正常结束/取消/空闲超时时销毁。
+        """
         if not isinstance(payload, dict):
             raise ValueError("request_mcp_servers 必须是对象")
 
@@ -652,6 +687,12 @@ class ToolManager:
 
         registered: list[dict[str, str]] = []
         failed: list[dict[str, str]] = []
+        # 跨连接器去重（qualified name 粒度，含 server 前缀天然隔离不同连接器；
+        # 同一连接器重复上报同名工具时此处兜底）。
+        seen_names: set[str] = set()
+        # 池化键：worker 生命周期挂在 session 上（HITL 审批拆出的请求复用），
+        # 注册表仍按 request_id 记录（每请求重注册/重摘除工具卡片）。
+        session_key = self._resolve_session_key()
 
         for tool_name, cfg in servers.items():
             if not isinstance(tool_name, str) or not tool_name.strip():
@@ -661,136 +702,139 @@ class ToolManager:
 
             record = {"name": tool_name, **cfg}
             single_json = json.dumps(record, ensure_ascii=False)
-            mcp_cfg = create_mcp_tool(single_json)
+            # 安全层：危险参数过滤 / stdio 命令类型校验 / url 提取。
+            # 单个连接器配置非法只 skip 该连接器（对齐 dev-stable per-connector 隔离），
+            # 不中断同请求其它连接器的注册。
+            try:
+                mcp_cfg = create_mcp_tool(single_json)
+            except ValueError as exc:
+                logger.error(
+                    "[ToolManager] 请求级 MCP 连接器配置非法，跳过: name=%s error=%s "
+                    "request_id=%s",
+                    tool_name, exc, request_id,
+                )
+                failed.append({"name": tool_name, "error": str(exc)})
+                continue
+
             server_name = mcp_cfg.server_name
+            client_type = str(getattr(mcp_cfg, "client_type", "") or "").lower()
             request_scoped_server_id = f"{server_name}::{request_id}"
 
-            if getattr(mcp_cfg, "client_type", "") == "stdio":
+            if client_type == "stdio":
+                # 单个 stdio 连接器失败不中断整次注册（per-connector 隔离）。
                 try:
                     _validate_cat_cafe_request_scoped_stdio(mcp_cfg.params or {})
                 except ValueError as exc:
-                    raise RuntimeError(str(exc)) from exc
+                    logger.error(
+                        "[ToolManager] 请求级 stdio MCP 校验失败，跳过: name=%s error=%s",
+                        server_name, exc,
+                    )
+                    failed.append({"name": server_name, "error": str(exc)})
+                    continue
 
                 stdio_sp = stdio_params_from_mcp_config(mcp_cfg.params or {})
                 params_map = dict(_REQUEST_STDIO_PARAMS.get() or {})
                 params_map[server_name] = stdio_sp
                 _REQUEST_STDIO_PARAMS.set(params_map)
 
-                try:
-                    tool_defs = await list_stdio_mcp_tool_defs(mcp_cfg.params or {})
-                except Exception as exc:
-                    raise RuntimeError(f"列举 stdio MCP 工具失败: {exc}") from exc
-
-                tool_ids: list[str] = []
-                tool_names: list[str] = []
-                getter = _make_stdio_params_getter(server_name)
-                for td in tool_defs:
-                    tname = td["name"]
-                    # 不同连接器下可能存在同名工具（如多个 Supabase MCP 共享 execute_sql）；
-                    # 在 LLM 可见名上叠加 server 前缀做命名空间隔离，避免 ability_manager._tools
-                    # 后注册覆盖前注册。资源侧的 full id 不变，仍由 server_id 唯一定位。
-                    qualified_name = f"{server_name}__{tname}"
-                    tool_id = f"{request_scoped_server_id}.{server_name}.{tname}"
-                    card = ToolCard(
-                        id=tool_id,
-                        name=qualified_name,
-                        description=td.get("description") or "",
-                        input_params=td.get("input_params") or {},
+                tool_defs = await discover_stdio_mcp_tools(mcp_cfg.params or {}, server_name=server_name)
+                if not tool_defs:
+                    logger.error(
+                        "[ToolManager] 请求级 stdio MCP 未发现任何工具，跳过: "
+                        "request_id=%s name=%s",
+                        request_id, server_name,
                     )
-                    ephemeral = EphemeralStdioMcpTool(card, getter, raw_tool_name=tname)
-                    add_res = Runner.resource_mgr.add_tool(ephemeral, tag=server_name)
-                    if add_res is not None and hasattr(add_res, "is_ok") and not add_res.is_ok():
-                        err = _mcp_add_result_error_text(add_res)
-                        if "already exist" not in err.lower():
-                            raise RuntimeError(f"注册 ephemeral 工具失败 {tname}: {err}")
-                    agent.ability_manager.add(card)
-                    tool_ids.append(tool_id)
-                    tool_names.append(qualified_name)
+                    failed.append({"name": server_name, "error": "stdio MCP 未发现工具（发现失败或超时）"})
+                    continue
 
-                reg = {
-                    "kind": "stdio",
-                    "server_name": server_name,
-                    "server_id": request_scoped_server_id,
-                    "tool_ids": tool_ids,
-                    "tool_names": tool_names,
-                }
-                async with self._request_registrations_lock:
-                    self._request_registrations.setdefault(request_id, []).append(reg)
+                # stdio 连接参数（含 _mcp_client_type 标记，供 worker 分派）。
+                pool_params = dict(stdio_sp)
+                pool_params["_mcp_client_type"] = "stdio"
+
+                connector_tool_names = await self._register_pooled_mcp_tools(
+                    agent,
+                    request_id=request_id,
+                    server_name=server_name,
+                    request_scoped_server_id=request_scoped_server_id,
+                    tool_defs=tool_defs,
+                    get_params=_make_stdio_params_getter(server_name),
+                    pool_params=pool_params,
+                    seen_names=seen_names,
+                    kind="stdio",
+                    session_key=session_key,
+                )
+                if not connector_tool_names:
+                    failed.append({"name": server_name, "error": "该 stdio 连接器的工具全部注册失败（重名或 add_tool 错误）"})
+                    continue
+
                 registered.append({"name": server_name, "server_id": request_scoped_server_id, "kind": "stdio"})
                 logger.info(
                     "[ToolManager] 已注册请求级 MCP（stdio）request_id=%s name=%s tools=%s",
-                    request_id, server_name, tool_names,
+                    request_id, server_name, connector_tool_names,
                 )
-            else:
+            elif client_type in ("sse", "streamable-http"):
                 try:
                     _validate_request_scoped_remote_mcp(tool_name, cfg)
                 except ValueError as exc:
-                    raise RuntimeError(str(exc)) from exc
-                mcp_cfg = copy.copy(mcp_cfg)
-                mcp_cfg.server_id = request_scoped_server_id
+                    logger.error(
+                        "[ToolManager] 请求级 remote MCP 校验失败，跳过: name=%s error=%s",
+                        server_name, exc,
+                    )
+                    failed.append({"name": server_name, "error": str(exc)})
+                    continue
+
                 logger.info(
                     "[ToolManager][AUDIT] 请求级 MCP 注册 request_id=%s kind=%s name=%s "
                     "url=%s has_auth=%s",
-                    request_id, mcp_cfg.client_type, server_name,
+                    request_id, client_type, server_name,
                     cfg.get("url", ""),
                     bool(cfg.get("auth_headers") or cfg.get("auth_query_params")),
                 )
-                # 远程 MCP 连接失败时跳过该 server，不中断同请求内其它 MCP。
-                #
-                # anyio TaskGroup 在 MCP 连接失败时会通过 cancel()+uncancel() 取消宿主
-                # task，产生的 CancelledError 不属于 Exception（Python 3.8+），无法被
-                # 下方 except Exception 捕获。add_mcp_server 的隔离逻辑依赖
-                # connect_task.cancelled() 判断，但 anyio 的 uncancel() 会使该值返回
-                # False，导致隔离失效、CancelledError 泄漏到 run_stream_task。
-                #
-                # 此处增加 except asyncio.CancelledError 兜底：用 outer_cancelling
-                # （当前 task 的 cancelling() 计数）区分内外取消：
-                #   - outer_cancelling=0 → anyio 内部取消（uncancel 已归零）→ 隔离，跳过
-                #   - outer_cancelling>0 → 外层真取消（用户 interrupt / WS 断连）→ 重新抛出
-                try:
-                    await _add_mcp_server_and_ability(agent, mcp_cfg, tag=server_name)
-                except asyncio.CancelledError:
-                    _current = asyncio.current_task()
-                    _outer_cancelling = bool(_current and _current.cancelling())
-                    if _outer_cancelling:
-                        # 外层真取消，必须继续上浮
-                        raise
-                    # anyio 内部取消（MCP 连接失败触发），转为 Error 隔离
-                    logger.warning(
-                        "[ToolManager] MCP 服务器注册被取消（anyio 内部），跳过: "
-                        "name=%s url=%s",
-                        server_name,
-                        cfg.get("url", "?"),
-                    )
-                    failed.append({
-                        "name": server_name,
-                        "error": "MCP 连接被取消（anyio TaskGroup 内部取消）",
-                    })
-                    continue
-                except Exception as e:
+                # remote 发现（connect/list_tools/disconnect，带超时）：
+                # 单个连接器发现失败只 skip，不中断其它连接器。
+                tool_defs = await discover_remote_mcp_tools(server_name, mcp_cfg, client_type)
+                if not tool_defs:
                     logger.error(
-                        "[ToolManager] MCP 服务器注册失败，跳过: name=%s error=%s",
-                        server_name,
-                        e,
+                        "[ToolManager] 请求级 remote MCP 未发现任何工具，跳过: "
+                        "request_id=%s name=%s url=%s",
+                        request_id, server_name, cfg.get("url", "?"),
                     )
-                    failed.append({"name": server_name, "error": str(e)})
+                    failed.append({"name": server_name, "error": f"{client_type} MCP 未发现工具（连接失败或超时）"})
                     continue
-                reg = {
-                    "kind": "shared",
-                    "server_name": server_name,
-                    "server_id": request_scoped_server_id,
-                }
-                async with self._request_registrations_lock:
-                    self._request_registrations.setdefault(request_id, []).append(reg)
+
+                connector_tool_names = await self._register_pooled_mcp_tools(
+                    agent,
+                    request_id=request_id,
+                    server_name=server_name,
+                    request_scoped_server_id=request_scoped_server_id,
+                    tool_defs=tool_defs,
+                    get_params=lambda _cfg=mcp_cfg, _n=server_name: build_remote_connect_params(_n, _cfg),
+                    pool_params=build_remote_connect_params(server_name, mcp_cfg),
+                    seen_names=seen_names,
+                    kind=client_type,
+                    session_key=session_key,
+                )
+                if not connector_tool_names:
+                    failed.append({"name": server_name, "error": "该 remote 连接器的工具全部注册失败（重名或 add_tool 错误）"})
+                    continue
+
                 registered.append({
                     "name": server_name,
                     "server_id": request_scoped_server_id,
-                    "kind": mcp_cfg.client_type,
+                    "kind": client_type,
                 })
                 logger.info(
-                    "[ToolManager] 已注册请求级 MCP（%s）request_id=%s name=%s",
-                    mcp_cfg.client_type, request_id, server_name,
+                    "[ToolManager] 已注册请求级 MCP（%s）request_id=%s name=%s tools=%s",
+                    client_type, request_id, server_name, connector_tool_names,
                 )
+            else:
+                # 不支持的 transport（playwright/openapi 等）：保持跳过并记录。
+                logger.warning(
+                    "[ToolManager] 请求级 MCP transport '%s' 不支持，跳过: name=%s",
+                    client_type or "unknown", server_name,
+                )
+                failed.append({"name": server_name, "error": f"unsupported transport: {client_type or 'unknown'}"})
+                continue
 
         return {
             "registered": True,
@@ -798,6 +842,91 @@ class ToolManager:
             "tools": registered,
             "failed": failed,
         }
+
+    async def _register_pooled_mcp_tools(
+        self,
+        agent: Any,
+        *,
+        request_id: str,
+        server_name: str,
+        request_scoped_server_id: str,
+        tool_defs: list[dict[str, Any]],
+        get_params: Any,
+        pool_params: dict[str, Any],
+        seen_names: set[str],
+        kind: str,
+        session_key: str = "",
+    ) -> list[str]:
+        """把单个连接器的工具定义注册为池化工具（PooledRequestMcpTool）。
+
+        返回成功注册的 qualified name 列表；重名/非法名仅跳过该工具。
+        单个工具 add_tool 失败只 warning + skip（对齐 dev-stable 的
+        per-tool 语义），不再 raise 中断整次注册。
+        """
+        tool_ids: list[str] = []
+        tool_names: list[str] = []
+        for td in tool_defs:
+            tname = str(td.get("name") or "").strip()
+            if not tname:
+                logger.warning(
+                    "[ToolManager] 请求级 MCP 连接器 '%s' 存在空工具名，跳过",
+                    server_name,
+                )
+                continue
+            # 不同连接器下可能存在同名工具（如多个 Supabase MCP 共享 execute_sql）；
+            # 在 LLM 可见名上叠加 server 前缀做命名空间隔离，避免 ability_manager._tools
+            # 后注册覆盖前注册。资源侧的 full id 不变，仍由 server_id 唯一定位。
+            qualified_name = f"{server_name}__{tname}"
+            if qualified_name in seen_names:
+                logger.warning(
+                    "[ToolManager] 请求级 MCP 工具名重复，跳过: name=%s "
+                    "(已被先前连接器/office-claw 注册): request_id=%s",
+                    qualified_name, request_id,
+                )
+                continue
+            seen_names.add(qualified_name)
+
+            tool_id = f"{request_scoped_server_id}.{server_name}.{tname}"
+            card = ToolCard(
+                id=tool_id,
+                name=qualified_name,
+                description=str(td.get("description") or ""),
+                input_params=td.get("input_params") or {},
+            )
+            pooled = PooledRequestMcpTool(
+                card,
+                get_params,
+                raw_tool_name=tname,
+                request_id=request_id,
+                server_name=server_name,
+                session_key=session_key,
+            )
+            add_res = Runner.resource_mgr.add_tool(pooled, tag=server_name)
+            if add_res is not None and hasattr(add_res, "is_ok") and not add_res.is_ok():
+                err = _mcp_add_result_error_text(add_res)
+                if "already exist" not in err.lower():
+                    logger.warning(
+                        "[ToolManager] 请求级 MCP 工具 add_tool 失败，跳过: "
+                        "name=%s tool=%s error=%s: request_id=%s",
+                        server_name, tname, err, request_id,
+                    )
+                    continue
+            agent.ability_manager.add(card)
+            tool_ids.append(tool_id)
+            tool_names.append(qualified_name)
+
+        if tool_ids:
+            reg = {
+                "kind": kind,
+                "server_name": server_name,
+                "server_id": request_scoped_server_id,
+                "tool_ids": tool_ids,
+                "tool_names": tool_names,
+                "pool_params": pool_params,
+            }
+            async with self._request_registrations_lock:
+                self._request_registrations.setdefault(request_id, []).append(reg)
+        return tool_names
 
     async def unregister_request_scoped_mcp(self, request_id: str) -> None:
         async with self._request_registrations_lock:
@@ -856,6 +985,42 @@ class ToolManager:
         if has_stdio:
             _REQUEST_STDIO_PARAMS.set(None)
 
+        # 长生命周期 worker 不再随请求销毁（session 级池化：HITL 审批拆出的
+        # 后续请求复用同一 stdio 进程/浏览器）。仅回收"只被本请求用过且不再
+        # 被复用"的孤儿（如参数漂移后遗留的旧指纹 worker）——正常路径由
+        # interface 层的 close-on-final / cancel / session 逐出 / 空闲 TTL
+        # sweep 驱动释放。best-effort，不阻塞清理。
+        try:
+            await release_request_scoped_mcp_sessions(request_id)
+        except Exception as exc:
+            logger.warning(
+                "[ToolManager] 请求级 MCP 孤儿 worker 回收失败: request_id=%s error=%s",
+                request_id, exc,
+            )
+
+    async def release_session_scoped_mcp(self, session_key: str) -> None:
+        """释放该 session 名下全部池化 MCP worker（关闭 stdio 子进程/浏览器、
+        remote 长连接）。
+
+        触发点（interface 层驱动）：
+        - 用户轮次正常结束（close-on-final：流终态非 paused）；
+        - 用户主动 cancel（chat.interrupt intent=cancel）；
+        - session 逐出 / Agent 销毁（cleanup）。
+        """
+        if not session_key:
+            return
+        try:
+            await release_session_mcp_workers(session_key)
+            logger.info(
+                "[ToolManager] 已释放 session 级 MCP worker: session_key=%s",
+                session_key,
+            )
+        except Exception as exc:
+            logger.warning(
+                "[ToolManager] session 级 MCP worker 释放失败: session_key=%s error=%s",
+                session_key, exc,
+            )
+
     async def unregister_all_request_scoped_mcp(self) -> None:
         request_ids = list(self._request_registrations.keys())
         for request_id in request_ids:
@@ -863,6 +1028,18 @@ class ToolManager:
                 await self.unregister_request_scoped_mcp(request_id)
             except Exception as exc:
                 logger.warning("[ToolManager] 兜底清理失败 request_id=%s: %s", request_id, exc)
+        # 兜底：Agent 销毁时释放本 session 名下全部残留池化 worker（stdio
+        # 子进程/浏览器），防其活过 Agent 生命周期。池是进程级全局，其它
+        # session 的 worker 不在此清（各自 Agent 实例的 cleanup 负责）。
+        session_key = self._resolve_session_key()
+        if session_key:
+            try:
+                await release_session_mcp_workers(session_key)
+            except Exception as exc:
+                logger.warning(
+                    "[ToolManager] 池化 worker session 级兜底清理失败: session_key=%s error=%s",
+                    session_key, exc,
+                )
 
     async def register_request_scoped_office_claw_mcp(self, cfg: dict[str, Any]) -> dict[str, Any]:
         from uuid import uuid4

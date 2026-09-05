@@ -68,6 +68,87 @@ def should_detect_artifacts(tool_name: str | None) -> bool:
     return (tool_name or "").strip() in ARTIFACT_DETECTION_ALLOWED_TOOLS
 
 
+INVOKE_TOOL_NAMES = frozenset({"invoke_tool"})
+
+# invoke_tool 解包后的只读查询类内部工具（不产文件）跳过产物检测：
+# 其大文本结果（如浏览器自动化 evaluate_script ~800K HTML）会触发正文
+# 正则 findall 爆炸 + 逐条 stat()，阻塞事件循环数百秒（dev-stable 实测
+# 633s → WS 1006）。
+READONLY_INNER_TOOLS = frozenset({
+    # chrome-devtools / 浏览器自动化只读查询
+    "evaluate_script", "list_pages", "get_page_content", "get_page_text",
+    "snapshot", "take_snapshot", "get_console_logs", "get_cookies",
+    "get_network_log", "screenshot",  # 截图产物由调用方另行处理
+    # 通用只读探查
+    "search_skill", "tools_search",
+})
+
+
+def _parse_tool_args_payload(tool_args: Any) -> dict[str, Any]:
+    """把 tool_args 规整为 dict（兼容 JSON 字符串 / None / 对象）。"""
+    if isinstance(tool_args, dict):
+        return tool_args
+    if isinstance(tool_args, str):
+        try:
+            parsed = json.loads(tool_args)
+        except (json.JSONDecodeError, TypeError):
+            return {}
+        if isinstance(parsed, dict):
+            return parsed
+    return {}
+
+
+def _unwrap_invoke_tool(
+    tool_args: Any, tool_result: Any
+) -> tuple[str | None, Any]:
+    """解包 invoke_tool 的内部工具名和结果。
+
+    invoke_tool 的 tool_args 形如 {"tool_name": "evaluate_script",
+    "arguments": {...}}，tool_result 形如 {"result": "..."} 或字符串。
+
+    返回 (inner_tool_name, inner_result)。无法解包时返回 (None, None)。
+    """
+    args = _parse_tool_args_payload(tool_args)
+    inner_name = args.get("tool_name")
+    if not isinstance(inner_name, str) or not inner_name.strip():
+        inner_name = None
+    else:
+        inner_name = inner_name.strip()
+
+    if isinstance(tool_result, dict):
+        inner_result = tool_result.get("result")
+        if inner_name is None:
+            rn = tool_result.get("tool_name")
+            if isinstance(rn, str) and rn.strip():
+                inner_name = rn.strip()
+    elif isinstance(tool_result, str):
+        inner_result = tool_result
+    else:
+        data = getattr(tool_result, "data", None)
+        if isinstance(data, dict):
+            inner_result = data.get("result")
+            if inner_name is None:
+                rn = data.get("tool_name")
+                if isinstance(rn, str) and rn.strip():
+                    inner_name = rn.strip()
+        else:
+            inner_result = tool_result
+
+    if inner_name is None:
+        return None, None
+    return inner_name, inner_result
+
+
+def _is_readonly_inner_tool(inner_name: str) -> bool:
+    """解包出的内部工具是否为只读查询类（不产文件）。
+
+    本分支请求级 MCP 工具的 LLM 可见名带 server 前缀 qualified name
+    （server__tool），需剥离前缀后匹配（兼容裸名）。
+    """
+    bare = inner_name.split("__", 1)[1] if "__" in inner_name else inner_name
+    return bare in READONLY_INNER_TOOLS
+
+
 def _coerce_send_file_path_list(raw: Any) -> list[str]:
     """Normalize abs_file_path_list from tool_args (detection-only, not shared with send_file)."""
     if isinstance(raw, str):
@@ -352,6 +433,35 @@ async def emit_artifact_generated(ctx: ArtifactEmitContext) -> bool:
     )
 
     tool_name = (ctx.tool_name or "").strip()
+
+    # invoke_tool：解包内部工具名和结果，按内部工具类型分提取策略。
+    # 只读内部工具不产文件，短路避免大文本结果触发 stat 风暴
+    # （见 READONLY_INNER_TOOLS）；内部工具在白名单内则继续检测。
+    if tool_name in INVOKE_TOOL_NAMES:
+        inner_name, inner_result = _unwrap_invoke_tool(ctx.tool_args, ctx.tool_result)
+        if inner_name is None:
+            logger.info(
+                "%s Skip artifact detection: tool=%s cannot unwrap inner tool",
+                ctx.log_prefix,
+                tool_name,
+            )
+            return False
+        if _is_readonly_inner_tool(inner_name):
+            logger.info(
+                "%s Skip artifact detection: tool=%s inner=%s is read-only query",
+                ctx.log_prefix,
+                tool_name,
+                inner_name,
+            )
+            return False
+        # 内部工具参数位于 invoke_tool 的 arguments 字段中。
+        inner_args = _parse_tool_args_payload(ctx.tool_args).get("arguments")
+        ctx.tool_name = inner_name
+        ctx.tool_result = inner_result
+        if inner_args is not None:
+            ctx.tool_args = inner_args
+        tool_name = inner_name
+
     if not should_detect_artifacts(tool_name):
         logger.info(
             "%s Skip artifact detection: tool=%s not in whitelist",

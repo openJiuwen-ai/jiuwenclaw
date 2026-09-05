@@ -123,9 +123,11 @@ async def test_1mb_body_scan_completes_without_blocking_event_loop() -> None:
     candidates, matches, scanned, skipped = scan_result
     assert elapsed < 15.0
     assert len(ticks) >= 10
-    assert scanned + skipped > 0
-    assert isinstance(candidates, list)
-    assert isinstance(matches, int)
+    # 64KB 上限：超大正文整体跳过，无候选、无行扫描
+    assert candidates == []
+    assert matches == 0
+    assert scanned == 0
+    assert isinstance(skipped, int)
 
 
 @pytest.mark.asyncio
