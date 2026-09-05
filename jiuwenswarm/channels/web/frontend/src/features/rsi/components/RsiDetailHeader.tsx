@@ -4,6 +4,7 @@
 import { useCallback, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { executeDesktopSave, type DesktopSaveApiResult } from '../../../utils/desktopSave';
+import { pluginPackagesApi } from '../../../services/pluginPackagesApi';
 import completeIcon from '../../../assets/rsi/rsi-complete.svg';
 import deleteIcon from '../../../assets/rsi/rsi-delete.svg';
 import pauseIcon from '../../../assets/rsi/rsi-pause.svg';
@@ -26,7 +27,6 @@ import {
   rsiTrainingResume,
   rsiArtifactDownload,
   rsiArtifactDownloadUrl,
-  rsiHarnessInstall,
 } from '../rsiApi';
 
 type DownloadCapableWindow = Window & {
@@ -87,7 +87,9 @@ export function RsiDetailHeader({ task, report, liveCost, createdAt, onOpenConfi
           }
         } else if (action === 'install') {
           const artifactId = report?.metrics.best_artifact_id ?? task.best_artifact?.artifact_id ?? undefined;
-          await rsiHarnessInstall(task.task_id, artifactId);
+          const artifact = await rsiArtifactDownload(task.task_id, artifactId);
+          const imported = await pluginPackagesApi.importLocal({ path: artifact.path });
+          await pluginPackagesApi.install(imported.id);
           markTaskInstalled(task.task_id);
         }
       } catch (e) {

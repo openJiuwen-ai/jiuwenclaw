@@ -828,11 +828,12 @@
   max-height: none;
   padding: 24px;
   box-sizing: border-box;
-  background: linear-gradient(160deg, 
-    #ffffff 0%, 
-    #ffffff 65%,    /* 到50%位置都是纯白 */
-    #d2efff 100%    /* 50%-100% 渐变到蓝色 */
-  );
+  background-image: url("../../../assets/rsi/rsi-background2.svg");
+  background-repeat: no-repeat;
+  background-position: center;
+  background-origin: border-box;
+  background-clip: border-box;
+  background-size: 100% 100%;
 
   display: flex;
   flex-direction: column;
