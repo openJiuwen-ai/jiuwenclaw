@@ -14,11 +14,29 @@ from jiuwenswarm.agents.harness.common.rsi.errors import (
     RsiBadRequest,
     RsiDatasetInvalid,
     RsiError,
+    RsiInvalidHarness,
+    RsiHarnessInstallConflict,
+    RsiHarnessInstallFailed,
+    RsiHarnessInvalid,
+    RsiHarnessNotPublished,
+    RsiHarnessNotReady,
+    RsiModelConfigInvalid,
+    RsiModelNotFound,
     RsiPathInvalid,
+    RsiPathNotAllowed,
     RsiResumeMismatch,
+    RsiResumeInputChanged,
     RsiScenarioNotSupported,
     RsiTaskNotFound,
     RsiTaskStateConflict,
+    RsiUnsupportedParameter,
+)
+from jiuwenswarm.agents.harness.common.rsi.harness_activation import (
+    PublishedHarnessRef,
+    RsiHarnessActivationStore,
+    RsiHarnessInstaller,
+    hash_harness_package,
+    parse_published_harness_refs,
 )
 from jiuwenswarm.agents.harness.common.rsi.events import EngineEvent
 from jiuwenswarm.agents.harness.common.rsi.harness_adapter import (
@@ -27,6 +45,16 @@ from jiuwenswarm.agents.harness.common.rsi.harness_adapter import (
     HarnessProviderContract,
 )
 from jiuwenswarm.agents.harness.common.rsi.mock_harness_provider import MockHarnessProvider
+from jiuwenswarm.agents.harness.common.rsi.materializer import (
+    RsiTaskMaterialization,
+    RsiTaskMaterializer,
+    VALIDATION_PROFILE_NAME,
+)
+from jiuwenswarm.agents.harness.common.rsi.model_resolver import (
+    ResolvedRsiModel,
+    RsiModelConfigResolver,
+    select_rsi_model_entry,
+)
 from jiuwenswarm.agents.harness.common.rsi.models import RsiTask, RsiTaskView, TaskStatus
 from jiuwenswarm.agents.harness.common.rsi.provider_factory import (
     build_mock_rsi_adapters,
@@ -46,14 +74,36 @@ __all__ = [
     "RsiEngineAdapter",
     "RsiError",
     "RsiEventSink",
+    "RsiInvalidHarness",
+    "RsiHarnessActivationStore",
+    "RsiHarnessInstallConflict",
+    "RsiHarnessInstallFailed",
+    "RsiHarnessInstaller",
+    "RsiHarnessInvalid",
+    "RsiHarnessNotPublished",
+    "RsiHarnessNotReady",
+    "RsiModelConfigInvalid",
+    "RsiModelNotFound",
     "RsiPathInvalid",
+    "RsiPathNotAllowed",
     "RsiResumeMismatch",
+    "RsiResumeInputChanged",
     "RsiScenarioNotSupported",
     "RsiServiceContext",
     "RsiTask",
     "RsiTaskNotFound",
     "RsiTaskStateConflict",
     "RsiTaskView",
+    "RsiTaskMaterialization",
+    "RsiTaskMaterializer",
+    "RsiUnsupportedParameter",
+    "PublishedHarnessRef",
+    "hash_harness_package",
+    "parse_published_harness_refs",
+    "ResolvedRsiModel",
+    "RsiModelConfigResolver",
+    "select_rsi_model_entry",
+    "VALIDATION_PROFILE_NAME",
     "TaskStatus",
     "build_mock_rsi_adapters",
     "build_rsi_adapters",

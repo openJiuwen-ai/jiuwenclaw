@@ -3914,6 +3914,27 @@ class JiuWenSwarm:
             return
         await method(operation, config_path)
 
+    async def apply_rsi_harness_install(
+        self,
+        operation: str,
+        *,
+        config_path: str,
+        installation_id: str,
+    ) -> dict[str, Any]:
+        """Apply an RSI-published Harness through the adapter-owned LoadRecord."""
+
+        adapter = self._adapter
+        if adapter is None:
+            return {"status": "SKIPPED", "resources": []}
+        method = getattr(adapter, "apply_rsi_harness_install", None)
+        if method is None:
+            return {"status": "SKIPPED", "resources": []}
+        return await method(
+            operation,
+            config_path=config_path,
+            installation_id=installation_id,
+        )
+
     async def _unload_live_equipment(self, kind: str, package_id: str) -> None:
         """Unload a catalog package from live session adapters before delete.
 

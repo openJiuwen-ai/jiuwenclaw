@@ -113,6 +113,7 @@ from openjiuwen.harness.schema.interaction import (
     InputDispatchMode,
     SendInputRequest,
 )
+from jiuwenswarm.agents.harness.common.rsi.errors import RsiHarnessInstallConflict
 
 GOAL_UPDATED_EVENT_TYPE = InteractionEventType.GOAL_UPDATED.value
 _ERROR_EVENT = getattr(InteractionEventType, "EXECUTION_ERROR", None)
@@ -1656,6 +1657,12 @@ class JiuWenSwarmDeepAdapter:
         self._loaded_agent_template: tuple[str, Any, str] | None = None
         # name → (load_record, manifest.version)
         self._loaded_plugins: dict[str, tuple[Any, str]] = {}
+        # RSI Harness activation is deliberately independent from the legacy
+        # AutoHarness package ledger above.  LoadRecord is process-local and is
+        # recreated from activation.json after a restart.
+        self._rsi_harness_install_id: str | None = None
+        self._rsi_harness_config_path: str | None = None
+        self._rsi_harness_load_record: Any | None = None
 
     def set_heartbeat_service(self, service: Any | None) -> None:
         """Bind the one process-level Heartbeat runtime used by this rail."""
@@ -6260,6 +6267,171 @@ class JiuWenSwarmDeepAdapter:
 
         return loaded
 
+    async def _load_rsi_active_harness(self) -> dict[str, Any] | None:
+        """Restore the RSI active version through DeepAgent.load_plugin."""
+
+        instance = getattr(self, "_instance", None)
+        if instance is None:
+            return None
+        try:
+            from jiuwenswarm.agents.harness.common.rsi.harness_activation import (
+                RsiHarnessActivationStore,
+            )
+            from jiuwenswarm.common.utils import get_user_workspace_dir
+
+            store = RsiHarnessActivationStore(get_user_workspace_dir() / "rsi" / "harness")
+            active = store.get_active()
+        except Exception as exc:  # noqa: BLE001 - startup must remain available
+            logger.warning("[JiuWenSwarmDeepAdapter] RSI Harness state unavailable: %s", exc)
+            return None
+        if not active:
+            return None
+        installation_id = str(active.get("installation_id") or "").strip()
+        config_path = str(active.get("runtime_path") or "").strip()
+        if not installation_id or not config_path:
+            return None
+        if (
+            getattr(self, "_rsi_harness_install_id", None) == installation_id
+            and getattr(self, "_rsi_harness_load_record", None) is not None
+        ):
+            return {"status": "ACTIVE", "installation_id": installation_id, "already_active": True}
+        try:
+            old_record = getattr(self, "_rsi_harness_load_record", None)
+            if old_record is not None:
+                await instance.unload_extension(old_record)
+            record = await instance.load_plugin(config_path)
+        except Exception as exc:  # noqa: BLE001 - a bad active package must not kill startup
+            logger.error(
+                "[JiuWenSwarmDeepAdapter] Failed to restore RSI Harness %s: %s: %r",
+                config_path,
+                exc.__class__.__name__,
+                exc,
+            )
+            return None
+        self._rsi_harness_install_id = installation_id
+        self._rsi_harness_config_path = config_path
+        self._rsi_harness_load_record = record
+        return {"status": "ACTIVE", "installation_id": installation_id, "resources": getattr(record, "refs", []) or []}
+
+    async def _apply_rsi_harness_install_local(
+        self,
+        operation: str,
+        *,
+        config_path: str,
+        installation_id: str,
+    ) -> dict[str, Any]:
+        """Apply an RSI version to this adapter only (no session fanout)."""
+
+        instance = getattr(self, "_instance", None)
+        if instance is None:
+            return {"status": "SKIPPED", "resources": []}
+        if operation == "deactivate":
+            record = getattr(self, "_rsi_harness_load_record", None)
+            if record is None:
+                return {"status": "SKIPPED", "resources": []}
+            resources = await instance.unload_extension(record)
+            self._rsi_harness_load_record = None
+            self._rsi_harness_install_id = None
+            self._rsi_harness_config_path = None
+            return {"status": "INACTIVE", "resources": resources or []}
+        if operation != "activate":
+            raise ValueError(f"unsupported RSI Harness operation: {operation}")
+        current_id = getattr(self, "_rsi_harness_install_id", None)
+        current_path = getattr(self, "_rsi_harness_config_path", None)
+        if current_id == installation_id and current_path == config_path:
+            return {"status": "ACTIVE", "installation_id": installation_id, "already_active": True, "resources": []}
+        old_path = current_path
+        old_id = current_id
+        old_record = getattr(self, "_rsi_harness_load_record", None)
+        if old_record is not None:
+            await instance.unload_extension(old_record)
+            self._rsi_harness_load_record = None
+            self._rsi_harness_install_id = None
+            self._rsi_harness_config_path = None
+        try:
+            record = await instance.load_plugin(config_path)
+        except Exception as exc:
+            if old_path:
+                try:
+                    restored = await instance.load_plugin(old_path)
+                except Exception as restore_exc:
+                    raise RsiHarnessInstallConflict(
+                        f"RSI Harness {installation_id} 加载失败且旧版本恢复失败"
+                    ) from restore_exc
+                self._rsi_harness_load_record = restored
+                self._rsi_harness_install_id = old_id
+                self._rsi_harness_config_path = old_path
+            raise exc
+        self._rsi_harness_load_record = record
+        self._rsi_harness_install_id = installation_id
+        self._rsi_harness_config_path = config_path
+        return {
+            "status": "ACTIVE",
+            "installation_id": installation_id,
+            "resources": getattr(record, "refs", []) or [],
+        }
+
+    async def apply_rsi_harness_install(
+        self,
+        operation: str,
+        *,
+        config_path: str,
+        installation_id: str,
+    ) -> dict[str, Any]:
+        """Load/unload an RSI Harness using DeepAgent LoadRecord ownership."""
+
+        targets = [self]
+        if not getattr(self, "_is_session_scoped_adapter", False):
+            targets.extend(
+                child
+                for child in list(getattr(self, "_session_adapters", {}).values())
+                if child is not self
+            )
+        snapshots = [
+            (
+                target,
+                getattr(target, "_rsi_harness_install_id", None),
+                getattr(target, "_rsi_harness_config_path", None),
+            )
+            for target in targets
+        ]
+        applied: list[Any] = []
+        resources: list[Any] = []
+        try:
+            for target in targets:
+                result = await target._apply_rsi_harness_install_local(
+                    operation,
+                    config_path=config_path,
+                    installation_id=installation_id,
+                )
+                applied.append(target)
+                resources.extend(result.get("resources") or [])
+        except Exception:
+            for target, old_id, old_path in reversed(snapshots):
+                try:
+                    if old_id and old_path:
+                        await target._apply_rsi_harness_install_local(
+                            "activate",
+                            config_path=old_path,
+                            installation_id=old_id,
+                        )
+                    else:
+                        await target._apply_rsi_harness_install_local(
+                            "deactivate",
+                            config_path="",
+                            installation_id="",
+                        )
+                except Exception:
+                    continue
+            raise
+        return {
+            "status": "ACTIVE" if operation == "activate" else "INACTIVE",
+            "installation_id": installation_id,
+            "resources": resources,
+            "attempted": len(targets),
+            "succeeded": len(applied),
+        }
+
     async def apply_package_change(
         self, operation: str, config_path: str
     ) -> list[str] | None:
@@ -8045,6 +8217,7 @@ class JiuWenSwarmDeepAdapter:
 
         # 加载已激活的 packages（skills, rails, tools）
         await self._load_active_packages()
+        await self._load_rsi_active_harness()
         await asyncio.sleep(0)
 
         # 动态加载用户自定义的 Rail 扩展
@@ -8333,6 +8506,7 @@ class JiuWenSwarmDeepAdapter:
         # deep_config.tools, not the config.yaml-driven tool_cards) as stale;
         # re-bind so MCP/model/config saves don't strip harness tools.
         await self._load_active_packages()
+        await self._load_rsi_active_harness()
 
         await self._fan_out_reload_to_session_adapters(
             config_base,

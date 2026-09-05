@@ -1,4 +1,4 @@
-"""AgentServer RSI 分发层：13 个 ``_handle_rsi_*`` 的统一接线面（B2）。
+"""AgentServer RSI 分发层：16 个 ``_handle_rsi_*`` 的统一接线面（B2）。
 
 - ``RsiAgentServerHandlers`` 聚合服务域（``RsiServiceContext``）+ 推送发送器，
   ``handle(request)`` 按 ``req_method`` 分发；
@@ -14,7 +14,7 @@ import inspect
 import logging
 from typing import Any, Callable
 
-from jiuwenswarm.agents.harness.common.rsi.errors import RsiError
+from jiuwenswarm.agents.harness.common.rsi.errors import RsiBadRequest, RsiError, RsiNotReady
 
 logger = logging.getLogger(__name__)
 
@@ -23,7 +23,7 @@ RSI_PUSH_STATUS_CHANGED = "rsi.training.status.changed"
 RSI_PUSH_PROGRESS = "rsi.training.progress"
 RSI_PUSH_TREE_DELTA = "rsi.training.tree.delta"
 
-#: 13 个 web method → 服务域方法名（I1–I13 全覆盖；中优先级 pause/resume/terminate 亦接入）
+#: 16 个 web method → 服务域方法名（I1–I13 + control/artifact/tree + Harness install）
 _METHOD_DISPATCH: dict[str, str] = {
     "rsi.dataset.validate": "dataset_validate",
     "rsi.task.create": "task_create",
@@ -40,6 +40,7 @@ _METHOD_DISPATCH: dict[str, str] = {
     "rsi.artifact.files.list": "artifact_files_list",
     "rsi.artifact.files.get": "artifact_files_get",
     "rsi.tree.get": "tree_get",
+    "rsi.harness.install": "harness_install",
 }
 
 
@@ -96,7 +97,41 @@ class RsiAgentServerHandlers:
             logger.exception("[RSI] %s failed: %s", method, exc)
             return {"ok": False, "error": str(exc), "code": "INTERNAL_ERROR"}
 
-    # -- I1–I13 --
+    async def handle_async(self, request: Any) -> dict[str, Any]:
+        """Asynchronously dispatch RSI methods that may return coroutines.
+
+        Existing service methods are synchronous and continue to use
+        :meth:`handle`.  The Harness installation path must await the
+        AgentManager/DeepAgent hot-load chain, so AgentServer uses this entry
+        point to preserve the same error normalization after awaiting.
+        """
+        req_method = getattr(request, "req_method", None)
+        method = getattr(req_method, "value", None) if req_method is not None else None
+        handler_name = _METHOD_DISPATCH.get(method)
+        if handler_name is None:
+            return {"ok": False, "error": f"unsupported rsi method: {method}", "code": "BAD_REQUEST"}
+        handler = getattr(self, f"_do_{handler_name}", None)
+        if handler is None:
+            return {"ok": False, "error": f"handler not implemented: {method}", "code": "INTERNAL_ERROR"}
+        raw_params = request.params if isinstance(request.params, dict) else {}
+        params = dict(raw_params)
+        request_session_id = str(getattr(request, "session_id", None) or "").strip()
+        if request_session_id:
+            params.setdefault("_rsi_session_id", request_session_id)
+        try:
+            payload = handler(params)
+            if inspect.isawaitable(payload):
+                payload = await payload
+            return {"ok": True, "payload": payload}
+        except RsiError as exc:
+            return {"ok": False, "error": exc.message, "code": exc.code}
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - 统一 INTERNAL_ERROR 语义
+            logger.exception("[RSI] %s failed: %s", method, exc)
+            return {"ok": False, "error": str(exc), "code": "INTERNAL_ERROR"}
+
+    # -- I1–I13 + Harness install --
 
     def _do_dataset_validate(self, params: dict[str, Any]) -> dict[str, Any]:
         return self.context.dataset_service.validate(
@@ -168,6 +203,15 @@ class RsiAgentServerHandlers:
             params,
             adapter=self.context.adapter_for_task(params.get("task_id")),
         )
+
+    def _do_harness_install(self, params: dict[str, Any]) -> Any:
+        task_id = str(params.get("task_id") or "").strip()
+        if not task_id:
+            raise RsiBadRequest("task_id 必填")
+        installer = getattr(self.context, "harness_installer", None)
+        if installer is None:
+            raise RsiNotReady("RSI Harness installer 未装配")
+        return installer.install(task_id)
 
     # -- 推送 --
 

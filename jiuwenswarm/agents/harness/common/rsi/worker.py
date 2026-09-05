@@ -139,7 +139,7 @@ class RsiWorker:
         self._conflict(task_id, f"未知 mode: {mode}")
 
     def resume(self, task_id: str, fingerprint_check: bool = True) -> str:
-        """``resume``：校验 + 入队，引擎 fingerprint 校验留给 resume 执行路径（⚠️外部 C2）。"""
+        """``resume``：校验 + 入队，材料与引擎 fingerprint 由执行路径确认。"""
         task = self.store.get(task_id)
         if task.status != TaskStatus.PAUSED.value:
             self._conflict(task_id, "仅 PAUSED 可 resume")
@@ -149,9 +149,10 @@ class RsiWorker:
         ):
             raise RsiScenarioNotSupported("当前产物场景不支持 resume")
         if fingerprint_check:
-            # 引擎侧 fingerprint 校验由 HarnessEngineAdapter.resume 落地（C2 ⚠️外部）；
-            # 当前无引擎态 → 日志提示，不误报成功（真实校验在 resume 执行路径）
-            logger.warning("[RSI] resume fingerprint 校验未装配（C2 ⚠️外部），task=%s", task_id)
+            # HarnessProvider.resume 在真正调用引擎前校验任务材料；
+            # openjiuwen 再按其持久化状态校验 engine fingerprint。
+            # worker 只负责入队，避免在此处重复读取或伪造校验结果。
+            logger.debug("[RSI] resume fingerprint 将由 Provider/引擎执行路径校验: task=%s", task_id)
         self.store.update_status(task_id, [TaskStatus.PAUSED.value], TaskStatus.QUEUED.value, cause="resume")
         self._resume_task_ids.add(task_id)
         self._last_enqueued = task_id
@@ -435,6 +436,26 @@ class RsiWorker:
                 value = getattr(result, key, None)
                 if value is not None:
                     results[key] = str(value) if not isinstance(value, float) else value
+            # ``EngineResult`` in openjiuwen intentionally keeps a small
+            # common shape; the publication paths live in the raw persisted
+            # state.  Capture them when the concrete Harness adapter exposes
+            # that read-only seam so the task record remains self-describing.
+            if "published_harness_refs_path" not in results:
+                task = self.store.get(task_id)
+                adapter = self._adapter_for(task.scenario, task.artifact_type)
+                reader = getattr(adapter, "read_publication_state", None)
+                if callable(reader):
+                    state = reader(task_id)
+                    if isinstance(state, dict):
+                        for key in (
+                            "current_harness_refs_path",
+                            "best_harness_refs_path",
+                            "published_harness_refs_path",
+                            "publication_status",
+                        ):
+                            value = state.get(key)
+                            if value is not None:
+                                results[key] = str(value)
             self.store.merge_results(task_id, results)
         except Exception:  # noqa: BLE001
             logger.exception("[RSI] 持久化引擎结果失败 task=%s", task_id)

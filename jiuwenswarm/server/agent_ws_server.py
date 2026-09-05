@@ -2170,7 +2170,7 @@ class AgentWebSocketServer:
             if request.req_method == ReqMethod.HARNESS_PACKAGES_DELETE:
                 await self._handle_harness_packages_delete(ws, request, send_lock)
                 return
-            # RSI 优化平台：13 个 rsi.* web method 统一分发（B2）
+            # RSI 优化平台：16 个 rsi.* web method 统一分发（B2）
             if (request.req_method.value or "").startswith("rsi."):
                 await self._handle_rsi_request(ws, request, send_lock)
                 return
@@ -10526,16 +10526,26 @@ class AgentWebSocketServer:
     async def _handle_rsi_request(
         self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock
     ) -> None:
-        """Handle any rsi.* unary method (13 branches in one dispatch).
+        """Handle any rsi.* unary method (including Harness installation).
 
         Builds the RSI service context lazily (one per server process) and
         wires:
-        - harness_refs 快照提供方 = 当前激活 harness 包的 runtime path（AutoHarnessService）;
+        - harness_refs 快照提供方 = RSI active version, then controlled generic fallback;
         - send_push 包装 = ``self.send_push``（E2A server_push，零改动）。
         """
         try:
             handlers = self._get_rsi_handlers()
-            result = handlers.handle(request)
+            # Production handlers expose ``handle_async`` because Harness
+            # installation awaits the DeepAgent load chain.  Keep a small
+            # compatibility fallback for injected/test handler objects that
+            # only implement the original synchronous ``handle`` method.
+            handle_async = getattr(handlers, "handle_async", None)
+            if callable(handle_async):
+                result = handle_async(request)
+            else:
+                result = handlers.handle(request)
+            if inspect.isawaitable(result):
+                result = await result
             if result.get("ok"):
                 resp = AgentResponse(
                     request_id=request.request_id,
@@ -10573,11 +10583,6 @@ class AgentWebSocketServer:
         from jiuwenswarm.agents.harness.common.rsi import build_rsi_service_context
         from jiuwenswarm.server.rsi import RsiAgentServerHandlers
 
-        context = build_rsi_service_context(None)
-        # Provider selection is deliberately kept at this composition root.
-        # ``HarnessProvider`` will be injected here when the production
-        # implementation is ready; mock mode closes all three RSI execution
-        # paths without requiring model credentials.
         provider_mode = os.environ.get("RSI_PROVIDER_MODE", "").strip().lower()
         if not provider_mode:
             provider_mode = (
@@ -10585,6 +10590,13 @@ class AgentWebSocketServer:
                 if os.environ.get("RSI_USE_MOCK_PROVIDER", "").strip().lower() == "true"
                 else "real"
             )
+        # Production context owns the task-private materializer and strict
+        # models.list resolver.  Mock mode intentionally keeps the old loose
+        # test semantics (no credentials, arbitrary fixture paths).
+        context = build_rsi_service_context(
+            None,
+            enable_harness_materialization=(provider_mode != "mock"),
+        )
         if provider_mode == "mock":
             from jiuwenswarm.agents.harness.common.rsi.provider_factory import build_rsi_adapters
 
@@ -10595,9 +10607,18 @@ class AgentWebSocketServer:
                     model_resolver=self._resolve_model,
                 )
             )
-        harness_provider = getattr(self, "_rsi_harness_provider", None)
-        if harness_provider is not None:
+        else:
+            harness_provider = getattr(self, "_rsi_harness_provider", None)
+            if harness_provider is None:
+                from jiuwenswarm.agents.harness.common.rsi.harness_provider import HarnessProvider
+
+                harness_provider = HarnessProvider(
+                    context.tasks_root,
+                    model_resolver=context.model_resolver,
+                )
+                self._rsi_harness_provider = harness_provider
             context.register_harness_provider(harness_provider)
+        context.bind_harness_installer(self._agent_manager)
         handlers = RsiAgentServerHandlers(
             context,
             send_push=self.send_push,
@@ -10607,10 +10628,27 @@ class AgentWebSocketServer:
         self._rsi_handlers = handlers
         return handlers
 
-    @staticmethod
-    def _rsi_harness_refs_provider() -> str | None:
-        """当前激活 harness 包定位（内部 v3 §7 复用 AutoHarnessService 基建）。"""
+    def _rsi_harness_refs_provider(self, params: dict[str, Any] | None = None) -> str | None:
+        """Locate RSI active Harness first, then use controlled generic fallback.
+
+        Browser callers normally omit ``harness_id`` and get the active package.
+        A trusted product integration may provide an installed ``harness_id`` /
+        ``package_id``; arbitrary paths are intentionally not resolved here.
+        """
         import json
+        from jiuwenswarm.agents.harness.common.rsi.harness_activation import (
+            RsiHarnessActivationStore,
+        )
+        from jiuwenswarm.common.utils import get_user_workspace_dir
+
+        try:
+            active = RsiHarnessActivationStore(
+                get_user_workspace_dir() / "rsi" / "harness"
+            ).resolve_active_runtime_path()
+            if active:
+                return active
+        except Exception as exc:
+            logger.warning("[RSI] active Harness 定位失败，回退 generic registry: %s", exc)
         from jiuwenswarm.agents.harness.common.auto_harness.service import (
             _HARNESS_PACKAGES_FILE,
         )
@@ -10622,16 +10660,25 @@ class AgentWebSocketServer:
             active_ids = data.get("active_package_ids") or []
             packages = data.get("packages") or []
             by_id = {str(p.get("id")): p for p in packages if isinstance(p, dict)}
-            for package_id in active_ids:
+            requested_id = str(
+                (params or {}).get("harness_id")
+                or (params or {}).get("package_id")
+                or ""
+            ).strip()
+            package_ids = [requested_id] if requested_id else active_ids
+            for package_id in package_ids:
                 package = by_id.get(str(package_id))
                 if not package:
                     continue
-                config_path = str(package.get("config_path") or "")
-                if config_path:
-                    return config_path
                 runtime_path = str(package.get("runtime_path") or "")
-                if runtime_path:
-                    return str(Path(runtime_path) / "harness_config.yaml")
+                if runtime_path and Path(runtime_path).expanduser().is_dir():
+                    # openjiuwen's epoch checkpoint composes retained changes
+                    # by copying the referenced role directory.  Prefer the
+                    # package root; load_plugin also accepts this directory.
+                    return str(Path(runtime_path).expanduser().resolve())
+                config_path = str(package.get("config_path") or "")
+                if config_path and Path(config_path).expanduser().is_file():
+                    return str(Path(config_path).expanduser().resolve())
         except Exception as exc:
             logger.warning("[RSI] harness refs 定位失败: %s", exc)
         return None

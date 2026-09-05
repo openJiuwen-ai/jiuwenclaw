@@ -1,10 +1,10 @@
 """Harness Provider adapter owned by the JiuwenSwarm RSI service.
 
 The artifact RSI integration already has a Provider boundary in
-``artifact_adapter.py``.  Harness RSI currently exposes an orchestrator from
-agent-core rather than a resumable Provider contract, so this module defines
+``artifact_adapter.py``.  Harness RSI exposes an orchestrator from agent-core
+rather than the service's resumable Provider contract, so this module defines
 the small, stable request shape that the service uses for both the mock
-Provider and the eventual ``HarnessProvider`` implementation.
+Provider and the production ``HarnessProvider`` implementation.
 """
 
 from __future__ import annotations
@@ -43,6 +43,7 @@ class HarnessEngineRequest:
     model_refs: dict[str, Any]
     optimization_instruction: str | None = None
     resume: bool = False
+    orchestrator_config_path: str | None = None
 
 
 class HarnessProviderContract(Protocol):
@@ -62,6 +63,8 @@ class HarnessProviderContract(Protocol):
     async def terminate(self, task_id: str) -> Any: ...
 
     def read_state(self, task_id: str) -> Any: ...
+
+    def read_publication_state(self, task_id: str) -> dict[str, Any]: ...
 
     def read_report(self, task_id: str) -> Any: ...
 
@@ -86,17 +89,22 @@ class HarnessEngineAdapter:
 
         config = task.config if isinstance(task.config, dict) else {}
         refs_path = str(config.get("harness_refs_path") or "").strip()
+        orchestrator_config_path = str(
+            config.get("orchestrator_config_path") or ""
+        ).strip() or None
+        dataset_id = str(config.get("dataset_id") or f"{task.task_id}:dataset")
         return HarnessEngineRequest(
             task_id=task.task_id,
             dataset_files=(str(task.input_file),),
             harness_refs_path=refs_path,
             output_dir=task.run_dir,
-            dataset_id=f"{task.task_id}:dataset",
+            dataset_id=dataset_id,
             max_iterations=max(1, int(task.max_iterations or 1)),
             search_width=max(1, int(task.search_width or 1)),
             model_refs=dict(task.model_refs or {}),
             optimization_instruction=task.optimization_instruction,
             resume=resume,
+            orchestrator_config_path=orchestrator_config_path,
         )
 
     def validate_input(
@@ -129,6 +137,15 @@ class HarnessEngineAdapter:
 
     def read_state(self, task_id: str) -> Any:
         return self.provider.read_state(task_id)
+
+    def read_publication_state(self, task_id: str) -> dict[str, Any]:
+        reader = getattr(self.provider, "read_publication_state", None)
+        if callable(reader):
+            value = reader(task_id)
+            return value if isinstance(value, dict) else {}
+        # Older/mock providers do not expose the raw state; the installer will
+        # fall back to the canonical task run state file.
+        return {}
 
     def read_report(self, task_id: str) -> Any:
         return self.provider.read_report(task_id)
