@@ -41,6 +41,11 @@ from jiuwenclaw.agentserver.permissions.models import (
     PermissionResult,
     SubcommandPermissionResult,
 )
+from jiuwenclaw.agentserver.permissions.security_guard import (
+    check_kia_file,
+    detect_rms_file,
+    extract_file_path_from_tool_args,
+)
 from jiuwenclaw.agentserver.permissions.shell_tools import is_shell_permission_tool
 from jiuwenclaw.agentserver.permissions.tiered_policy import (
     evaluate_tiered_policy_detailed,
@@ -386,6 +391,59 @@ class PermissionEngine:
             permission = PermissionLevel.ASK
             matched_rule = matched_rule or "tiered_policy:fallback(no_baseline)"
 
+        # ── Security gate: KIA + RMS check for file-read tools ──
+        # Runs on any non-DENY result (ALLOW or ASK), so workspace-external
+        # paths that trigger ASK still go through KIA+RMS before the user
+        # can approve. Closing the gap where read_file (FileSystemRail)
+        # bypasses the guards in acp_output_tools.read_text_file.
+        # Order: KIA first (ICPM), then RMS (local byte check) — same as all
+        # other scenarios (upload, RAG index, read_text_file).
+        #
+        # Extended to check bash commands: LLMs often use bash to read files
+        # directly (e.g., `python -c "open('E:\\123\\file.pptx').read()"`).
+        # extra_intents contains file paths extracted from shell commands via
+        # CommandIntent parsing (L1+L3-Cmd).
+        if permission != PermissionLevel.DENY:
+            # Collect all file paths to check:
+            # 1. Direct tool args (read_file, read_text_file)
+            # 2. Paths from bash/shell commands (via extra_intents)
+            file_paths_to_check: list[str] = []
+
+            direct_path = extract_file_path_from_tool_args(tool_name, tool_args)
+            if direct_path:
+                file_paths_to_check.append(direct_path)
+
+            # Extract paths from bash command intents
+            if extra_intents:
+                for intent in extra_intents:
+                    action = getattr(intent, "action", None)
+                    if action not in ("read", "write", "exec"):
+                        continue
+                    intent_paths = getattr(intent, "paths", None)
+                    if intent_paths:
+                        for p in intent_paths:
+                            if isinstance(p, str) and p.strip():
+                                file_paths_to_check.append(p.strip())
+
+            # Check each path: KIA first, then RMS
+            for file_path in file_paths_to_check:
+                # KIA: ICPM path-based check (degrade-to-allow on error)
+                try:
+                    if await check_kia_file(file_path):
+                        permission = PermissionLevel.DENY
+                        matched_rule = "security_guard:kia"
+                        break  # Stop checking on first DENY
+                except Exception:
+                    pass  # ICPM error — degrade to allow
+
+                # RMS: local byte detection (only if KIA didn't deny)
+                if permission != PermissionLevel.DENY:
+                    rms_reason = detect_rms_file(file_path)
+                    if rms_reason:
+                        permission = PermissionLevel.DENY
+                        matched_rule = "security_guard:rms"
+                        break  # Stop checking on first DENY
+
         external_paths = [op.path for op in file_operations] if file_operations else None
 
         logger.info(
@@ -449,6 +507,10 @@ class PermissionEngine:
         if permission == PermissionLevel.ALLOW:
             return f"Allowed by rule: {matched_rule}"
         if permission == PermissionLevel.DENY:
+            if matched_rule == "security_guard:kia":
+                return "文件包含涉密内容(KIA)，禁止读取"
+            if matched_rule == "security_guard:rms":
+                return "文件为RMS加密文档，禁止读取"
             builtin_reason = PermissionEngine._format_builtin_deny_reason(matched_rule)
             if builtin_reason is not None:
                 return builtin_reason

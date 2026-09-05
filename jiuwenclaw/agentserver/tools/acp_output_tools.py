@@ -253,6 +253,19 @@ class AcpOutputError(Exception):
 # ============================================================================
 # ACP 工具函数
 # ============================================================================
+# ── KIA + RMS security guards for LLM tool file reads ──
+# Four scenarios all need both checks:
+#   1. User upload (TypeScript parse-multipart.ts)
+#   2. RAG index (TypeScript IndexBuilder.ts)
+#   3. LLM tool: read_text_file (this module — Python sidecar)
+#   4. LLM tool: read_file (PermissionEngine.check_permission in core.py)
+# KIA/RMS detection logic is centralised in permissions/security_guard.py.
+# ============================================================================
+
+from jiuwenclaw.agentserver.permissions.security_guard import (
+    detect_rms_file as _detect_rms_file,
+    check_kia_file as _check_kia_file,
+)
 
 
 async def read_text_file(
@@ -263,6 +276,23 @@ async def read_text_file(
     session_id: str | None = None,
 ) -> dict[str, Any]:
     """读取文件内容。"""
+    # ── Security gate: KIA + RMS check before file content reaches LLM ──
+    # Layer 1: KIA classification check via ICPM
+    if await _check_kia_file(path):
+        raise AcpOutputError(
+            method="fs/read_text_file",
+            code=-32001,
+            message="文件包含涉密内容(KIA)，禁止读取",
+        )
+    # Layer 4: RMS encryption detection (local byte check)
+    rms_reason = _detect_rms_file(path)
+    if rms_reason:
+        raise AcpOutputError(
+            method="fs/read_text_file",
+            code=-32002,
+            message=f"文件为RMS加密文档({rms_reason})，禁止读取",
+        )
+
     mgr = get_acp_output_manager()
     params: dict[str, Any] = {"path": path}
     if offset is not None:
