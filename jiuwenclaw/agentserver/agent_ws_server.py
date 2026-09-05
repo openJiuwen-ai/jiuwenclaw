@@ -10,6 +10,7 @@ import logging
 import math
 import os
 import re
+import time
 from pathlib import Path
 from typing import Any, ClassVar
 
@@ -710,7 +711,12 @@ class AgentWebSocketServer:
             params=params,
         )
 
+        t_hook0 = time.monotonic()
         await ExtensionRegistry.get_instance().trigger(AgentServerHookEvents.BEFORE_CHAT_REQUEST, ctx)
+        logger.info(
+            "[AgentPerf] before_chat hook: request_id=%s elapsed_ms=%.1f",
+            request.request_id, (time.monotonic() - t_hook0) * 1000,
+        )
 
     async def _handle_unary(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
         """非流式处理：调用 process_message，返回一条 E2AResponse 线 JSON。"""

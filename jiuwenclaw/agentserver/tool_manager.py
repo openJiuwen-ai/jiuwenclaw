@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
 from contextvars import ContextVar
 from pathlib import Path
 from typing import Any, Callable
@@ -199,14 +200,18 @@ class ToolManager:
             get_agent: Callable[[], Any] | None = None,
             *,
             get_tools_dir: Callable[[], Path] | None = None,
+            log_tag: str = "",
     ) -> None:
         """get_agent: 返回当前底层 Agent，用于 ``Runner.resource_mgr`` / ``ability_manager``。
 
         get_tools_dir: 可选；返回 MCP 配置落盘目录。多租户下由 ``JiuWenClaw`` 传入
         ``jiuwenclaw_workspace/tools``；缺省回退 ``utils.get_agent_tools_dir()``。
+
+        log_tag: 可选；日志关联标识（agent 名，含 session_id），打印在 [AgentPerf] 日志中。
         """
         self._get_agent = get_agent
         self._get_tools_dir = get_tools_dir
+        self._log_tag = log_tag
         # (tool_id, tool_name)，请求级 Cat Cafe stdio 走 ephemeral 注册时用于下次替换前卸载
         self._cat_cafe_ephemeral_tools: list[tuple[str, str]] = []
 
@@ -318,7 +323,16 @@ class ToolManager:
         errors: list[dict[str, str]] = []
         skipped_names = {name for name in (skip_server_names or set()) if isinstance(name, str) and name}
 
-        for path in sorted(tools_dir.glob("*.json")):
+        t_total0 = time.monotonic()
+        t_scan0 = time.monotonic()
+        disk_paths = sorted(tools_dir.glob("*.json"))
+        logger.info(
+            "[AgentPerf] tools scan: tag=%s dir=%s files=%d scan_ms=%.1f",
+            self._log_tag, tools_dir, len(disk_paths), (time.monotonic() - t_scan0) * 1000,
+        )
+
+        for path in disk_paths:
+            t_tool0 = time.monotonic()
             try:
                 with open(path, encoding="utf-8") as f:
                     record = json.load(f)
@@ -338,7 +352,15 @@ class ToolManager:
             try:
                 single_json = json.dumps(record, ensure_ascii=False)
                 mcp_cfg = create_mcp_tool(single_json)
+                t_cfg = time.monotonic()
                 await _add_mcp_server_and_ability(agent, mcp_cfg, tag=mcp_cfg.server_name)
+                logger.info(
+                    "[AgentPerf] tool registered: tag=%s name=%s total_ms=%.1f add_mcp_ms=%.1f cfg_ms=%.1f",
+                    self._log_tag, mcp_cfg.server_name,
+                    (time.monotonic() - t_tool0) * 1000,
+                    (time.monotonic() - t_cfg) * 1000,
+                    (t_cfg - t_tool0) * 1000,
+                )
             except Exception as exc:
                 logger.error("[ToolManager] 启动加载工具失败 %s (%s): %s", path, name_hint, exc)
                 errors.append({"path": str(path), "error": str(exc)})
@@ -352,6 +374,10 @@ class ToolManager:
                 path,
             )
 
+        logger.info(
+            "[AgentPerf] load_tools_from_disk done: tag=%s dir=%s registered=%d errors=%d total_ms=%.1f",
+            self._log_tag, tools_dir, len(registered), len(errors), (time.monotonic() - t_total0) * 1000,
+        )
         return {
             "tools_dir": str(tools_dir.resolve()),
             "registered_tools": registered,

@@ -262,6 +262,7 @@ class JiuWenClaw:
             self._tool_manager = ToolManager(
                 get_agent=lambda: self.get_instance(),
                 get_tools_dir=lambda: Path(self._workspace_dir) / "tools",
+                log_tag=getattr(self, "_agent_name", ""),
             )
         return self._tool_manager
 
@@ -391,10 +392,15 @@ class JiuWenClaw:
             config: 可选配置，透传给底层 adapter.
             mode: 实例化模式，"claw"（默认）或 "code"，透传给底层 adapter.
         """
+        t0 = time.monotonic()
+        _rid = getattr((config or {}).get("request"), "request_id", "") or "?"
         adapter = await self._ensure_adapter()
+        t_adapter = time.monotonic()
         await adapter.create_instance(config, mode=mode)
+        t_inst = time.monotonic()
         logger.info("[JiuWenClaw] Agent instance created: sdk=%s", self._sdk_name)
 
+        t_host_mcp0 = time.monotonic()
         project_mcp_names: set[str] = set()
         host_project_mcp_path = self._get_tool_manager().find_host_project_mcp_json()
         try:
@@ -420,10 +426,26 @@ class JiuWenClaw:
             logger.warning("[JiuWenClaw] 从宿主项目 .mcp.json 导入 MCP 工具失败: %s", exc)
 
         try:
+            t_tools0 = time.monotonic()
             await self._get_tool_manager().load_tools_from_disk(skip_server_names=project_mcp_names)
+            logger.info(
+                "[AgentPerf] tools_from_disk: request_id=%s agent=%s elapsed_ms=%.1f",
+                _rid, getattr(self, "_agent_name", "?"), (time.monotonic() - t_tools0) * 1000,
+            )
         except Exception as exc:
             logger.warning("[JiuWenClaw] 从 agent/tools 加载落盘 MCP 工具失败: %s", exc)
+        t_tools = time.monotonic()
         self._register_extension_tools()
+        logger.info(
+            "[AgentPerf] create_instance done: request_id=%s agent=%s total_ms=%.1f ensure_adapter_ms=%.1f "
+            "adapter_create_ms=%.1f host_mcp_ms=%.1f ext_tools_ms=%.1f",
+            _rid, getattr(self, "_agent_name", "?"),
+            (time.monotonic() - t0) * 1000,
+            (t_adapter - t0) * 1000,
+            (t_inst - t_adapter) * 1000,
+            (t_tools - t_host_mcp0) * 1000,
+            (time.monotonic() - t_tools) * 1000,
+        )
 
     async def refresh_enabled_skills_from_db(self) -> None:
         """企业账本变更后轻量刷新启用集（直读 DB + 重建 SkillUseRail）。

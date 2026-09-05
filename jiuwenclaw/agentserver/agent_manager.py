@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 import uuid
 from pathlib import Path
 from typing import Any, TYPE_CHECKING
@@ -125,6 +126,8 @@ class AgentManager:
         """
         from jiuwenclaw.agentserver.interface import JiuWenClaw
 
+        t_create0 = time.monotonic()
+
         for env_key, env_value in self._latest_env_overrides.items():
             key = str(env_key)
             if env_value is None:
@@ -157,6 +160,11 @@ class AgentManager:
                 logger.warning("[AgentManager] Replay reload_agent_config failed: %s", e)
 
         logger.info("[AgentManager] %s agent created for tenant %s (session=%s)", agent_key, self.agent_id, session_id)
+        _rid = getattr((config or {}).get("request"), "request_id", "") or ""
+        logger.info(
+            "[AgentPerf] agent created: request_id=%s channel=%s mode=%s session=%s total_ms=%.1f",
+            _rid, agent_key, mode, session_id, (time.monotonic() - t_create0) * 1000,
+        )
         return agent
 
     async def initialize(
@@ -269,6 +277,11 @@ class AgentManager:
 
         if channel_id in self.agents and mode in self.agents[channel_id]:
             if effective_session_id in self.agents[channel_id][mode]:
+                logger.info(
+                    "[AgentPerf] get_agent cache hit: request_id=%s channel=%s mode=%s session=%s",
+                    getattr(request, "request_id", "") if request is not None else "",
+                    channel_id, mode, effective_session_id,
+                )
                 return self.agents[channel_id][mode][effective_session_id]
 
         config = {"workspace_dir": workspace_dir} if workspace_dir else {}
@@ -279,6 +292,11 @@ class AgentManager:
             }
         if request is not None:
             config = {**config, "request": request}
+        logger.info(
+            "[AgentPerf] get_agent miss, 将创建新实例: request_id=%s channel=%s mode=%s session=%s",
+            getattr(request, "request_id", "") if request is not None else "",
+            channel_id, mode, effective_session_id,
+        )
         await self._create_agent(channel_id, mode, effective_session_id, config)
         return self.agents.get(channel_id, {}).get(mode, {}).get(effective_session_id)
 

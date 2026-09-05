@@ -1605,6 +1605,10 @@ class AsyncLRUCache:
 
             value, timestamp = self._cache[key]
             if time.time() - timestamp > self._ttl:
+                logger.info(
+                    "[AgentPerf] LRU evict(ttl): key=%s idle_s=%.1f",
+                    key, time.time() - timestamp,
+                )
                 self._cache.pop(key, None)
                 return None
 
@@ -1619,7 +1623,11 @@ class AsyncLRUCache:
                 self._cache.pop(key)
             elif len(self._cache) >= self._max_size:
                 # 淘汰最久未使用的（头部）
-                self._cache.popitem(last=False)
+                evicted_key, _ = self._cache.popitem(last=False)
+                logger.info(
+                    "[AgentPerf] LRU evict(capacity): key=%s max_size=%d",
+                    evicted_key, self._max_size,
+                )
 
             self._cache[key] = (value, time.time())
 
