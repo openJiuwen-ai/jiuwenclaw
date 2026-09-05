@@ -177,8 +177,9 @@ def build_permission_rail(
                     on_disk_perms = {}
 
                 # Overlay path-related deltas + approval_overrides;
-                # keep on-disk tools/defaults/rules to avoid restoring
-                # entries the user already deleted via webui.
+                # keep on-disk rules to avoid restoring entries the user
+                # already deleted via webui.  tools and defaults are merged
+                # so that "永久记住" permissions (e.g. bash: allow) are persisted.
                 merged = dict(on_disk_perms)
                 overrides_new = permissions.get("approval_overrides")
                 if overrides_new is not None:
@@ -190,6 +191,13 @@ def build_permission_rail(
                 ext_dir_new = permissions.get("external_directory")
                 if ext_dir_new is not None:
                     merged["external_directory"] = ext_dir_new
+                # 持久化 tools 与 defaults 变更（"永久记住" 会修改 tools 段）
+                tools_new = permissions.get("tools")
+                if isinstance(tools_new, dict):
+                    merged.setdefault("tools", {}).update(tools_new)
+                defaults_new = permissions.get("defaults")
+                if isinstance(defaults_new, dict):
+                    merged["defaults"] = defaults_new
 
                 data["permissions"] = merged
                 _dump_yaml_round_trip(yaml_path, data)
