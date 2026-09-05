@@ -128,6 +128,25 @@ def test_reset_external_cli_agents_does_not_write_when_config_is_absent(
     reset_external_cli_agents_in_config()
 
 
+def test_config_migration_preserves_explicit_image_policy(tmp_path: Path) -> None:
+    template_path = (
+        Path(__file__).resolve().parents[2]
+        / "jiuwenswarm"
+        / "resources"
+        / "config.yaml"
+    )
+    user_config_path = tmp_path / "config.yaml"
+    user_config_path.write_text(
+        "react:\n  enable_read_image_multimodal: false\n",
+        encoding="utf-8",
+    )
+
+    assert migrate_config_from_template(template_path, user_config_path) is True
+
+    migrated = yaml.safe_load(user_config_path.read_text(encoding="utf-8"))
+    assert migrated["react"]["enable_read_image_multimodal"] is False
+
+
 class TestResolveEnvVars:
     """Test environment variable resolution in config."""
 
@@ -618,6 +637,50 @@ react:
         assert migrated["react"]["subagent_runtime"]["enabled"] is True
 
         assert ensure_config_migrated_from_template(workspace_dir) is False
+
+    @staticmethod
+    def test_migrate_config_moves_kv_cache_switch_to_application_scope(tmp_path: Path):
+        template_path = tmp_path / "template.yaml"
+        user_config_path = tmp_path / "config.yaml"
+        template_path.write_text(
+            "kv_cache_affinity_config:\n"
+            "  enable_kv_cache_affinity: false\n"
+            "react:\n"
+            "  answer_chunk_size: 500\n",
+            encoding="utf-8",
+        )
+        user_config_path.write_text(
+            "react:\n"
+            "  answer_chunk_size: 300\n"
+            "  kv_cache_affinity_config:\n"
+            "    enable_kv_cache_affinity: true\n",
+            encoding="utf-8",
+        )
+
+        assert migrate_config_from_template(template_path, user_config_path) is True
+
+        migrated = yaml.safe_load(user_config_path.read_text(encoding="utf-8"))
+        assert migrated["kv_cache_affinity_config"]["enable_kv_cache_affinity"] is True
+        assert "kv_cache_affinity_config" not in migrated["react"]
+
+    @staticmethod
+    def test_update_kv_cache_switch_writes_only_application_scope(
+        monkeypatch: pytest.MonkeyPatch,
+        temp_config_file: Path,
+    ):
+        temp_config_file.write_text(
+            "react:\n"
+            "  kv_cache_affinity_config:\n"
+            "    enable_kv_cache_affinity: true\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(config_module, "CONFIG_YAML_PATH", temp_config_file)
+
+        config_module.update_kv_cache_affinity_enabled_in_config(False)
+
+        updated = yaml.safe_load(temp_config_file.read_text(encoding="utf-8"))
+        assert updated["kv_cache_affinity_config"]["enable_kv_cache_affinity"] is False
+        assert "kv_cache_affinity_config" not in updated["react"]
 
     @staticmethod
     def test_update_skill_retrieval_preserves_existing_hidden_config(

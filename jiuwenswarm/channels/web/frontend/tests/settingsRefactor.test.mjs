@@ -21,6 +21,7 @@ import {
   buildSettingsPageDefinition,
   restrictSettingsAccess,
 } from '../node_modules/.cache/settings-refactor/registry/buildSettingsPageDefinition.js';
+import { openSourceSettingsAccessPolicy } from '../node_modules/.cache/settings-refactor/registry/accessPolicy.js';
 import {
   isMediaCapabilityConfigured,
   mediaCapabilityModalities,
@@ -545,6 +546,24 @@ test('open-source Settings composition preserves the registered modules and edit
         overlays: [{ id: 'not-allowed' }],
       }),
     /require extended composition/,
+  );
+});
+
+test('KV Cache affinity remains registered but hidden until product release', () => {
+  const context = { compositionMode: 'base' };
+  assert.deepEqual(
+    openSourceSettingsAccessPolicy.evaluate(
+      { kind: 'section', moduleId: 'experimental', sectionId: 'kv-cache-affinity' },
+      context,
+    ),
+    { level: 'hidden' },
+  );
+  assert.deepEqual(
+    openSourceSettingsAccessPolicy.evaluate(
+      { kind: 'section', moduleId: 'experimental', sectionId: 'trajectory-ui' },
+      context,
+    ),
+    { level: 'editable' },
   );
 });
 
@@ -1074,6 +1093,7 @@ test('every visible Settings control maps to an exact persistence field or RPC',
     [...contractByCategory('models')].filter((key) => !key.startsWith('embed_')),
   );
   assert.deepEqual(findSettingDefinitionKeys(parseTsx('src/features/settings/modules/experimental/definition.ts')), [
+    'kv_cache_affinity_enabled',
     'proactive_recommendation_enabled',
   ]);
   assert.deepEqual([...contractByCategory('experimental')].sort(), [
@@ -1084,6 +1104,7 @@ test('every visible Settings control maps to an exact persistence field or RPC',
     'external_cli_agent_codex_cli_path',
     'external_cli_agent_codex_enabled',
     'external_cli_agent_codex_use_builtin',
+    'kv_cache_affinity_enabled',
     'proactive_recommendation_enabled',
     'proactive_recommendation_max_recommend_per_day',
     'proactive_recommendation_max_rounds_per_tick',

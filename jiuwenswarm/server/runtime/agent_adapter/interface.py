@@ -54,6 +54,15 @@ from jiuwenswarm.agents.harness.code.prompt.plan_approval import (
     PLAN_SKIP_OPTION_VALUES,
     plan_skip_feedback,
 )
+from jiuwenswarm.agents.harness.common.rails.interrupt.permission_options import (
+    ALLOW_ONCE,
+    ALWAYS_ALLOW,
+    REJECT,
+    SESSION_ALLOW,
+    is_keep_planning_value,
+    normalize_option_value,
+    resolve_permission_action,
+)
 from jiuwenswarm.common.mode_matrix import (
     canonicalize_mode_text,
     is_code_profile_mode,
@@ -175,6 +184,38 @@ def _history_user_content(params: Any, query: Any) -> Any:
     if isinstance(content, str):
         return collapse_file_content_blocks(content)
     return content
+
+
+def _warn_unrecognised_approval_option(
+    branch: str,
+    source: Any,
+    request_id: Any,
+    value: Any,
+    outcome: str,
+) -> None:
+    """审批选项没认出来时留一条告警，然后才按拒绝兜底。
+
+    兜底成拒绝是对的：认不出来就不该放行。但在此之前它是静默的——用户点了同意，
+    工具被拒，现场只剩一句用户看不到的 feedback，排查时无从下手。选项文案是跨端
+    约定，任何一端改了字面量都会以"用户拒绝"的形式出现，因此这条告警要带上原始
+    取值和落到哪个分支。
+
+    取值为空是渲染端的"取消"（TUI 无拒绝项时按 Esc 即回传空串），属于正常路径，
+    不是解析失败，不告警。
+    """
+    if not normalize_option_value(value):
+        return
+    logger.warning(
+        "[JiuWenSwarm] %s unrecognised approval option: source=%s request_id=%s "
+        "value=%r outcome=%s. The answer is refused because it could not be decoded, "
+        "not because the user declined; check that the option vocabulary in "
+        "permission_options matches what the channel sends.",
+        branch,
+        source,
+        request_id,
+        value,
+        outcome,
+    )
 
 
 def _should_record_user_history(params: Any) -> bool:
@@ -1558,6 +1599,9 @@ class JiuWenSwarm:
             }
             action = action_by_value.get(value)
             if action is None:
+                _warn_unrecognised_approval_option(
+                    "SkillEvolutionApproval", source, request_id, value, "rejected_as_unknown_option"
+                )
                 action = "reject"
             payload = {"action": action}
             if custom_input:
@@ -1581,22 +1625,20 @@ class JiuWenSwarm:
 
         value = selected_options[0] if selected_options else ""
 
-        if value in ("approve", "本次允许", "Approve", "Proceed", "批准", "开始执行"):
+        # 选项字符串来自各渲染端：web / CLI 回传 ``value``，TUI 回传 ``label``。
+        # 统一走 ``permission_options`` 的词表解析，别在这里再维护一份字面量元组。
+        action = resolve_permission_action(value)
+
+        if action == ALLOW_ONCE:
             confirm_payload = {"approved": True, "auto_confirm": False, "feedback": ""}
-        elif value in ("session_allow", "会话内记住", "Session Allow"):
+        elif action == SESSION_ALLOW:
             confirm_payload = {
                 "approved": True,
                 "auto_confirm": True,
                 "persist_allow": False,
                 "feedback": "",
             }
-        elif value in (
-            "always_allow",
-            "allow_always",
-            "永久记住",
-            "总是允许",
-            "Always Allow",
-        ):
+        elif action == ALWAYS_ALLOW:
             confirm_payload = {
                 "approved": True,
                 "auto_confirm": True,
@@ -1634,14 +1676,22 @@ class JiuWenSwarm:
                 "feedback": custom_input or "用户希望继续规划",
                 "plan_revise": True,
             }
-        elif value in ("reject", "拒绝", "Reject", "继续规划", "其他意见"):
+        elif action == REJECT:
             feedback = custom_input or (
-                "用户希望继续规划" if value in ("Keep planning", "继续规划", "其他意见") else "用户拒绝"
+                "用户希望继续规划" if is_keep_planning_value(value) else "用户拒绝"
             )
             confirm_payload = {"approved": False, "auto_confirm": False, "feedback": feedback}
         elif custom_input:
+            # 选项没认出来，但用户填了自由文本，就用文本当反馈继续拒绝。取值仍然
+            # 是没解出来的，同样要告警。
+            _warn_unrecognised_approval_option(
+                "PermissionRail", source, request_id, value, "rejected_with_custom_input"
+            )
             confirm_payload = {"approved": False, "auto_confirm": False, "feedback": custom_input}
         else:
+            _warn_unrecognised_approval_option(
+                "PermissionRail", source, request_id, value, "rejected_as_unknown_option"
+            )
             confirm_payload = {"approved": False, "auto_confirm": False, "feedback": f"未知选项: {value}"}
 
         interactive_input.update(request_id, confirm_payload)

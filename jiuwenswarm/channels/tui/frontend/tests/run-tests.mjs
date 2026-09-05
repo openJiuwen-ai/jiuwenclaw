@@ -378,6 +378,88 @@ const teamLayoutOptions = {
   overlayTranscriptLines: [],
 };
 const stripAnsi = (value) => value.replace(/\u001b\[[0-9;]*m/g, "");
+
+// /resume should spend its limited primary-column width on the human-readable
+// title before the opaque session id.
+const resumeSessionIds = ["tui_sameprefix_A_common_abcd", "tui_sameprefix_B_common_abcd"];
+const resumeSessionTitle = "这是一个用于验证恢复列表展示完整性的很长会话名称";
+async function openResumeScreen(sessions) {
+  const screen = Object.create(AppScreen.prototype);
+  Object.assign(screen, {
+    resumeSessionList: null,
+    state: {
+      getSnapshot: () => ({ sessionId: "current-session" }),
+      request: async (method, params) => {
+        assert.equal(method, "session.list");
+        assert.deepEqual(params, { all_projects: false });
+        return {
+          sessions,
+          total: sessions.length,
+          current_branch: "HEAD",
+        };
+      },
+      addItem: () => undefined,
+    },
+    tui: { terminal: { rows: 40 }, requestRender: () => undefined },
+  });
+  await screen.openResumeSessionList(false);
+  return screen;
+}
+
+const resumeSessions = resumeSessionIds.map((sessionId) => ({
+  session_id: sessionId,
+  title: resumeSessionTitle,
+  last_message_at: Date.now() / 1000,
+  message_count: 3,
+}));
+const resumeScreen = await openResumeScreen(resumeSessions);
+const resumeItem = resumeScreen.resumeSessionList.list.getSelectedItem();
+assert.equal(resumeItem?.value, resumeSessionIds[0]);
+for (const width of [80, 60, 40]) {
+  const resumeLines = resumeScreen.resumeSessionList.list.render(width).map(stripAnsi);
+  const resumeRows = resumeLines.map((line) => line.replace(/^[→ ]+/, ""));
+  assert.equal(resumeLines.length, resumeSessionIds.length);
+  assert.ok(resumeLines.every((line) => visibleWidth(line) <= width));
+  assert.ok(resumeRows.every((line) => line.startsWith(resumeSessionTitle.slice(0, 12))));
+  assert.ok(resumeRows.every((line, index) => line.includes(`#${index + 1}:abcd`)));
+  assert.notEqual(resumeLines[0], resumeLines[1]);
+  if (width === 80) {
+    assert.ok(resumeRows.every((line, index) => line.includes(resumeSessionIds[index])));
+  }
+}
+resumeScreen.updateResumeSearchQuery("B_common");
+assert.equal(resumeScreen.resumeSessionList.list.getSelectedItem()?.value, resumeSessionIds[1]);
+
+const uniqueResumeScreen = await openResumeScreen([resumeSessions[0]]);
+const uniqueResumeLine = stripAnsi(uniqueResumeScreen.resumeSessionList.list.render(80)[0] ?? "");
+assert.ok(uniqueResumeLine.includes(resumeSessionTitle.slice(0, 18)));
+assert.equal(uniqueResumeLine.includes("#1:"), false);
+
+const activeResumeScreen = await openResumeScreen([
+  { ...resumeSessions[0], active_in_window: true },
+]);
+const activeResumeLine = stripAnsi(activeResumeScreen.resumeSessionList.list.render(80)[0] ?? "");
+assert.ok(activeResumeLine.includes("in another window"));
+assert.ok(activeResumeLine.includes(resumeSessionIds[0].slice(0, 10)));
+
+const untitledSessionId = "tui_untitled_session";
+const untitledResumeScreen = await openResumeScreen([{ session_id: untitledSessionId }]);
+const untitledResumeLine = stripAnsi(
+  untitledResumeScreen.resumeSessionList.list.render(40)[0] ?? "",
+);
+assert.ok(untitledResumeLine.includes(untitledSessionId));
+
+const longPreviewSessionId = `tui_${"a".repeat(120)}`;
+const resumePreviewLines = activeResumeScreen.buildResumeSessionPreviewLines(
+  80,
+  { ...resumeSessions[0], session_id: longPreviewSessionId },
+  [],
+).map(stripAnsi);
+const compactResumePreview = resumePreviewLines.join("").replace(/\s/g, "");
+assert.ok(resumePreviewLines.every((line) => visibleWidth(line) <= 80));
+assert.ok(compactResumePreview.includes(resumeSessionTitle));
+assert.ok(compactResumePreview.includes(`Session:${longPreviewSessionId}`));
+
 const collapsedTeamLines = buildAppScreenLines(teamSnapshot, teamLayoutOptions);
 assert.equal(collapsedTeamLines.some((line) => line.includes("teammate")), false);
 assert.equal(collapsedTeamLines.some((line) => line.includes("Member 1")), false);
