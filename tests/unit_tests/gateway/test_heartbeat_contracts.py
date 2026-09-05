@@ -103,18 +103,17 @@ async def test_agent_tools_call_agentserver_local_service() -> None:
     create = next(tool for tool in tools if tool.card.name == "heartbeat_create_job")
     assert "active_count, not len(jobs)" in list_jobs.card.description
     assert "authoritative active-job limit check" in create.card.description
+    assert "delete_after_run" not in create.card.input_params["properties"]
     result = await create._func(
         name="follow up",
         prompt="continue",
         schedule={"type": "interval", "interval_seconds": 120},
         max_runs=None,
-        delete_after_run=None,
     )
     assert result == {"ok": True}
     action, data, context = calls[-1]
     assert action == "create"
     assert "max_runs" not in data
-    assert "delete_after_run" not in data
     assert context == {
         "channel_id": "web",
         "session_id": "session-1",
