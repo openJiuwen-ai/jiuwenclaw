@@ -113,7 +113,7 @@ class TestDispatch:
         task_id = result["payload"]["task_id"]
 
         result = h.handle(FakeRequest(ReqMethod.RSI_TASK_LIST, {}))
-        assert result["ok"] and len(result["payload"]) == 1
+        assert result["ok"] and len(result["payload"]["tasks"]) == 1
 
         result = h.handle(FakeRequest(ReqMethod.RSI_TASK_DELETE, {"task_id": task_id}))
         assert result["ok"]

@@ -30,7 +30,6 @@ from jiuwenswarm.agents.harness.common.rsi.errors import (
     RsiInvalidHarness,
     RsiNotReady,
     RsiPathInvalid,
-    RsiUnsupportedParameter,
     RsiTaskNotFound,
 )
 from jiuwenswarm.agents.harness.common.rsi.models import (
@@ -163,18 +162,6 @@ class RsiTaskService:
         harness_refs_path: str | None = None
         materialization = None
         if scenario is Scenario.HARNESS and self._harness_materialization_enabled:
-            # The public contract retains these legacy fields for generic RSI
-            # clients, but current openjiuwen Validation has fixed values for
-            # them.  Reject non-default overrides instead of silently ignoring
-            # what the frontend believes it configured.
-            if max_iterations != 1:
-                raise RsiUnsupportedParameter(
-                    "HARNESS Validation 不支持调整 max_iterations；请使用默认值 1"
-                )
-            if search_width != 1:
-                raise RsiUnsupportedParameter(
-                    "HARNESS Validation 不支持调整 search_width；请使用默认值 1"
-                )
             source_harness = self._resolve_harness_source(params)
             if not source_harness:
                 raise RsiInvalidHarness("当前没有可用的活动 Harness 配置")
@@ -197,6 +184,8 @@ class RsiTaskService:
                     },
                     model_resolver=self.model_resolver,
                     validator=validator,
+                    max_iterations=max_iterations,
+                    search_width=search_width,
                 )
             except Exception:
                 # Materialization happens before task.json is committed.  Do

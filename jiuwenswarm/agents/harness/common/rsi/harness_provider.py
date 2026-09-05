@@ -16,8 +16,10 @@
 from __future__ import annotations
 
 import inspect
+import json
 import logging
 import hashlib
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -40,6 +42,7 @@ from openjiuwen.rsi.schema import (
 
 from jiuwenswarm.agents.harness.common.rsi.errors import (
     RsiBadRequest,
+    RsiDatasetInvalid,
     RsiPathNotAllowed,
     RsiNotReady,
     RsiPathInvalid,
@@ -47,6 +50,9 @@ from jiuwenswarm.agents.harness.common.rsi.errors import (
     RsiResumeMismatch,
 )
 from jiuwenswarm.agents.harness.common.rsi.harness_adapter import HarnessEngineRequest
+from jiuwenswarm.agents.harness.common.rsi.validation_dataset import (
+    normalize_validation_suite,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -66,8 +72,30 @@ def engine_validate_input(dataset_path: str | None) -> Any:
             "errors": [{"code": "DATASET_REQUIRED", "message": "input_file is required"}],
         }
     path = Path(str(dataset_path)).expanduser()
+    if not path.is_file():
+        return {
+            "valid": False,
+            "sample_count": None,
+            "errors": [{"code": "PATH_INVALID", "message": f"Dataset not found: {path}"}],
+        }
     try:
-        cases = _engine_load_cases([str(path.resolve())])
+        normalized = normalize_validation_suite(path)
+        if normalized is None:
+            cases = _engine_load_cases([str(path.resolve())])
+        else:
+            with tempfile.TemporaryDirectory(prefix="rsi-dataset-") as temp_dir:
+                normalized_path = Path(temp_dir) / "cases.json"
+                normalized_path.write_text(
+                    json.dumps(normalized, ensure_ascii=False) + "\n",
+                    encoding="utf-8",
+                )
+                cases = _engine_load_cases([str(normalized_path)])
+    except RsiDatasetInvalid as exc:
+        return {
+            "valid": False,
+            "sample_count": None,
+            "errors": [{"code": "DATASET_INVALID", "message": str(exc)}],
+        }
     except FileNotFoundError as exc:
         return {
             "valid": False,
@@ -161,14 +189,16 @@ class HarnessProvider:
         self._validate_materialized_paths(request)
         self._verify_task_materials(request, resume=resume)
         orchestrator = self._resolve_orchestrator(request)
-        engine_request = IterativeSingleHarnessRequest(
-            dataset_files=[str(item) for item in request.dataset_files],
-            harness_refs_path=request.harness_refs_path,
-            output_dir=str(Path(request.output_dir).expanduser()),
-            dataset_id=request.dataset_id or "single_harness_benchmark",
-            resume=resume,
-            task_id=request.task_id,
-        )
+        engine_request_kwargs: dict[str, Any] = {
+            "dataset_files": [str(item) for item in request.dataset_files],
+            "harness_refs_path": request.harness_refs_path,
+            "output_dir": str(Path(request.output_dir).expanduser()),
+            "dataset_id": request.dataset_id or "single_harness_benchmark",
+            "resume": resume,
+        }
+        if "task_id" in inspect.signature(IterativeSingleHarnessRequest).parameters:
+            engine_request_kwargs["task_id"] = request.task_id
+        engine_request = IterativeSingleHarnessRequest(**engine_request_kwargs)
         kwargs: dict[str, Any] = {}
         if on_event is not None and _run_accepts_on_event(orchestrator):
             kwargs["on_event"] = on_event
@@ -197,6 +227,7 @@ class HarnessProvider:
         best = _best_gate(gates)
         status = str(state.get("status") or "created").lower()
         iteration = len(gates)
+        baseline = self._baseline_score(task_id, state)
         return EngineState(
             task_id=task_id,
             status=status,
@@ -204,7 +235,7 @@ class HarnessProvider:
             total_iterations=max(1, iteration),
             best_node_id=_gate_node_id(best),
             score=_number(state.get("best_score")),
-            baseline=_number(state.get("baseline_score")),
+            baseline=baseline,
             usage=None,
             updated_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
             error_code=None,
@@ -233,7 +264,23 @@ class HarnessProvider:
     def get_tree(self, task_id: str) -> TreeResponse:
         state = self._load_yaml(task_id, _STATE_FILE) or {}
         gates = _gates(state)
-        nodes: list[RsiTreeNode] = []
+        baseline = self._baseline_score(task_id, state)
+        nodes: list[RsiTreeNode] = [
+            RsiTreeNode(
+                node_id="ROOT",
+                iteration=0,
+                parent_id=None,
+                type="ROOT",
+                adopted=True,
+                score=baseline,
+                summary="基线",
+                snapshot_artifact_id=None,
+                reason=None,
+                failure_class=None,
+                changes=[],
+                extra={},
+            )
+        ]
         refs_to_node: dict[str, str] = {}
         for index, gate in enumerate(gates, start=1):
             node_id = _gate_node_id(gate) or f"G{index:03d}"
@@ -241,7 +288,7 @@ class HarnessProvider:
             candidate_refs = str(gate.get("candidate_harness_refs_path", "") or "")
             if candidate_refs:
                 refs_to_node.setdefault(candidate_refs, node_id)
-            parent_id = refs_to_node.get(before_refs) if before_refs else None
+            parent_id = refs_to_node.get(before_refs, "ROOT") if before_refs else "ROOT"
             if parent_id == node_id:
                 parent_id = None
             gate_status = str(gate.get("status") or "rejected").lower()
@@ -266,8 +313,11 @@ class HarnessProvider:
                 )
             )
         depth = 0
-        depths: dict[str | None, int] = {None: 0}
+        depths: dict[str | None, int] = {None: 0, "ROOT": 0}
         for node in nodes:
+            if node.node_id == "ROOT":
+                depths[node.node_id] = 0
+                continue
             parent_depth = depths.get(node.parent_id)
             if parent_depth is None:
                 # 乱序/孤儿 gate：保守按前序最大深度挂载，避免崩溃。
@@ -279,7 +329,7 @@ class HarnessProvider:
         return TreeResponse(
             nodes=nodes,
             depth=depth,
-            iteration=len(nodes),
+            iteration=len(gates),
         )
 
     def locate_artifact(self, task_id: str, artifact_id: str | None = None) -> ArtifactRef:
@@ -462,9 +512,20 @@ class HarnessProvider:
                     and not source_path.is_dir()
                 ) or _path_sha256(source_path) != source_hash:
                     self._raise_material_error(resume, "harness 源配置已变化")
+            expected_target = source_path if source_hash else None
+            target_hash = str(harness_snapshot.get("target_sha256") or "").strip()
+            target_path = Path(
+                str(harness_snapshot.get("package_path") or "")).expanduser()
+            if target_hash:
+                if (
+                    not target_path.is_file()
+                    and not target_path.is_dir()
+                ) or _path_sha256(target_path) != target_hash:
+                    self._raise_material_error(resume, "harness 目标配置已变化")
+                expected_target = target_path
             self._verify_harness_refs_target(
                 Path(actual_paths["harness"]).expanduser(),
-                expected_source=source_path if source_hash else None,
+                expected_source=expected_target,
                 resume=resume,
             )
         model_manifests = materials.get("models") or {}
@@ -524,6 +585,36 @@ class HarnessProvider:
 
     def _read_state_dict(self, task_id: str) -> dict[str, Any]:
         return self._load_yaml(task_id, _STATE_FILE) or {}
+
+    def _baseline_score(self, task_id: str, state: dict[str, Any]) -> float | None:
+        baseline = _number(state.get("baseline_score"))
+        if baseline is not None:
+            return baseline
+        dataset = state.get("dataset")
+        expected_cases = dataset.get("cases") if isinstance(dataset, dict) else None
+        if expected_cases is None:
+            return None
+        summary_path = (
+            Path(self._tasks_root)
+            / task_id
+            / _RUN_DIR
+            / "evaluations"
+            / "e001"
+            / "b001"
+            / "source"
+            / "summary.json"
+        )
+        if not summary_path.is_file():
+            return None
+        try:
+            summary = json.loads(summary_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            return None
+        if not isinstance(summary, dict):
+            return None
+        if _number(summary.get("total_cases")) != _number(expected_cases):
+            return None
+        return _number(summary.get("average_score"))
 
     def _load_yaml(self, task_id: str, name: str) -> dict[str, Any] | None:
         path = Path(self._tasks_root) / task_id / _RUN_DIR / name

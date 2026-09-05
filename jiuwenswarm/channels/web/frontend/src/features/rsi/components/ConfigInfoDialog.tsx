@@ -26,6 +26,8 @@ export function ConfigInfoDialog({ open, task, onClose }: ConfigInfoDialogProps)
   if (!task) return null;
 
   const cfg = task.config;
+  const isArtifact = task.scenario === 'ARTIFACT';
+  const isPaper = isArtifact && task.artifact_type === 'PAPER';
   const isProgram = task.scenario === 'ARTIFACT' && task.artifact_type === 'PROGRAM';
   const rows: Array<{ label: string; value: string }> = [
     { label: t('rsi.createDialog.nameLabel'), value: task.name },
@@ -38,10 +40,13 @@ export function ConfigInfoDialog({ open, task, onClose }: ConfigInfoDialogProps)
   if (task.scenario === 'HARNESS' && cfg.model.tester) {
     rows.push({ label: t('rsi.createDialog.testerModelLabel'), value: cfg.model.tester });
   }
-  if (cfg.optimization_instruction) {
+  if (task.scenario === 'HARNESS' && cfg.input_file) {
+    rows.push({ label: t('rsi.createDialog.datasetLabel'), value: cfg.input_file });
+  }
+  if (isPaper && cfg.optimization_instruction) {
     rows.push({ label: t('rsi.createDialog.optimizationInstructionLabel'), value: cfg.optimization_instruction });
   }
-  if (cfg.artifact_path) {
+  if (isArtifact && cfg.artifact_path) {
     rows.push({
       label: task.artifact_type === 'PROGRAM' ? t('rsi.createDialog.programLabel') : t('rsi.createDialog.paperLabel'),
       value: cfg.artifact_path,
@@ -49,11 +54,21 @@ export function ConfigInfoDialog({ open, task, onClose }: ConfigInfoDialogProps)
   }
   if (!isProgram) {
     rows.push({ label: t('rsi.createDialog.maxIterationsLabel'), value: String(cfg.max_iterations) });
+  }
+  if (task.scenario === 'HARNESS') {
     rows.push({ label: t('rsi.createDialog.searchWidthLabel'), value: String(cfg.search_width) });
   }
 
   return (
-    <dialog ref={ref} className="rsi-config-dialog" aria-labelledby="rsi-config-title" data-testid="rsi-config-dialog">
+    <dialog
+      ref={ref}
+      className="rsi-config-dialog"
+      aria-labelledby="rsi-config-title"
+      data-testid="rsi-config-dialog"
+      onClick={(event) => {
+        if (event.target === ref.current) onClose();
+      }}
+    >
       <div className="rsi-config-dialog__inner">
         <div className="rsi-config-dialog__header">
           <h2 id="rsi-config-title">{t('rsi.configDialog.title')}</h2>

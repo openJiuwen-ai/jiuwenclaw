@@ -56,8 +56,6 @@ const METHOD = {
   artifactDownload: 'rsi.artifact.download',
   artifactFilesList: 'rsi.artifact.files.list',
   artifactFilesGet: 'rsi.artifact.files.get',
-  harnessImport: 'harness.import',
-  harnessActivate: 'harness.activate',
   treeGet: 'rsi.tree.get',
 } as const;
 
@@ -296,6 +294,7 @@ function normalizeTask(value: unknown): RsiTaskGetResult {
         optimizer: asString(model.optimizer),
         tester: asNullableString(model.tester),
       },
+      input_file: asNullableString(config.input_file),
       max_iterations: asNumber(config.max_iterations, 1),
       search_width: asNumber(config.search_width, 1),
       optimization_instruction: asNullableString(config.optimization_instruction),
@@ -304,6 +303,7 @@ function normalizeTask(value: unknown): RsiTaskGetResult {
     progress,
     best_artifact: normalizeBestArtifact(raw.best_artifact),
     usage: normalizeUsage(raw.usage),
+    failure_reason: asNullableString(raw.failure_reason),
   };
 }
 
@@ -503,22 +503,25 @@ export function rsiTaskCreate(params: RsiTaskCreateParams): Promise<RsiTaskCreat
   });
 }
 
+const normalizeTaskListPayload = (value: unknown): RsiTaskListItem[] => {
+  const tasks = asRecord(value)?.tasks;
+  return (Array.isArray(tasks) ? tasks : []).flatMap((item) => {
+    const normalized = normalizeTaskListItem(item);
+    return normalized ? [normalized] : [];
+  });
+};
+
 export function rsiTaskList(params: RsiTaskListParams = {}): Promise<RsiTaskListItem[]> {
   if (isMockEnabled()) {
     let list = [...rsiMock.tasks];
     if (params.scenario) list = list.filter((item) => item.scenario === params.scenario);
     if (params.artifact_type) list = list.filter((item) => item.artifact_type === params.artifact_type);
-    return rsiMock.delay(list);
+    return rsiMock.delay({ tasks: list }).then(normalizeTaskListPayload);
   }
   const wire: Record<string, unknown> = {};
   if (params.scenario) wire.scenario = toWireScenario(params.scenario);
   if (params.artifact_type) wire.artifact_type = toWireArtifactType(params.artifact_type);
-  return webRequest<unknown>(METHOD.taskList, withRsiSession(wire)).then((value) =>
-    (Array.isArray(value) ? value : []).flatMap((item) => {
-      const normalized = normalizeTaskListItem(item);
-      return normalized ? [normalized] : [];
-    }),
-  );
+  return webRequest<unknown>(METHOD.taskList, withRsiSession(wire)).then(normalizeTaskListPayload);
 }
 
 export function rsiTaskGet(taskId: string): Promise<RsiTaskGetResult> {
@@ -605,48 +608,6 @@ export function rsiArtifactDownload(taskId: string, artifactId?: string): Promis
 
 export function rsiArtifactDownloadUrl(result: RsiArtifactDownloadResult): string | null {
   return result.download_url ?? null;
-}
-
-function arrayBufferToBase64(buffer: ArrayBuffer): string {
-  const bytes = new Uint8Array(buffer);
-  let binary = '';
-  const chunkSize = 0x8000;
-  for (let offset = 0; offset < bytes.length; offset += chunkSize) {
-    binary += String.fromCharCode(...bytes.subarray(offset, offset + chunkSize));
-  }
-  return btoa(binary);
-}
-
-function normalizeHarnessPackageId(value: unknown): string {
-  const raw = asRecord(value) ?? {};
-  const importedPackage = asRecord(raw.package);
-  const packageId = asNullableString(raw.id ?? raw.package_id ?? importedPackage?.id);
-  if (!packageId) throw new Error('Harness 插件导入结果缺少 package id');
-  return packageId;
-}
-
-export async function rsiHarnessInstall(taskId: string, artifactId?: string): Promise<void> {
-  const artifact = await rsiArtifactDownload(taskId, artifactId);
-  if (artifact.kind !== 'harness_plugin') {
-    throw new Error('当前产物不是 Harness 插件');
-  }
-  if (!artifact.download_url) {
-    throw new Error('Harness 插件下载链接不可用');
-  }
-
-  const response = await fetch(artifact.download_url);
-  if (!response.ok) {
-    throw new Error(`Harness 插件下载失败: HTTP ${response.status}`);
-  }
-  const archive = await response.arrayBuffer();
-  const imported = await webRequest<unknown>(METHOD.harnessImport, {
-    file_content: arrayBufferToBase64(archive),
-  });
-  const packageId = normalizeHarnessPackageId(imported);
-  await webRequest<unknown>(METHOD.harnessActivate, {
-    package_id: packageId,
-    session_id: getRsiSessionId(),
-  });
 }
 
 export function rsiArtifactFilesList(taskId: string, path: string): Promise<RsiArtifactFilesListResult> {

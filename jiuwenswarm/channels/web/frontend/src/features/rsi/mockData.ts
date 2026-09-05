@@ -200,6 +200,7 @@ const mockTaskGet: Record<string, RsiTaskGetResult> = {
     status: 'RUNNING',
     config: {
       model: { optimizer: 'model-qwen-max', tester: 'model-qwen-plus' },
+      input_file: 'C:/data/dataset.json',
       max_iterations: 5,
       search_width: 3,
       optimization_instruction: null,
@@ -221,6 +222,7 @@ const mockTaskGet: Record<string, RsiTaskGetResult> = {
     status: 'COMPLETED',
     config: {
       model: { optimizer: 'model-deepseek-v3', tester: null },
+      input_file: null,
       max_iterations: 5,
       search_width: 2,
       optimization_instruction: '增强逻辑连贯性与术语一致性',
@@ -242,6 +244,7 @@ const mockTaskGet: Record<string, RsiTaskGetResult> = {
     status: 'PAUSED',
     config: {
       model: { optimizer: 'model-glm-4', tester: null },
+      input_file: null,
       max_iterations: 3,
       search_width: 2,
       optimization_instruction: null,
@@ -263,6 +266,7 @@ const mockTaskGet: Record<string, RsiTaskGetResult> = {
     status: 'QUEUED',
     config: {
       model: { optimizer: 'model-qwen-max', tester: 'model-qwen-plus' },
+      input_file: 'C:/data/dataset.json',
       max_iterations: 5,
       search_width: 3,
       optimization_instruction: null,

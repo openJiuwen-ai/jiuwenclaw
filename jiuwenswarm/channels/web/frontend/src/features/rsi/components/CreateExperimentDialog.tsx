@@ -1,7 +1,7 @@
 /**
  * RSI 创建实验弹窗（三分支：Harness 优化 / 产物优化·论文 / 产物优化·程序）。
  * 字段对齐契约 §6.1 task.create 入参。数据集走 rsi.dataset.validate，
- * 路径选择统一复用 path.select_directory（文件夹路径），模型复用 models.list。
+ * 数据集路径复用 path.select_files（单文件），产物路径沿用 path.select_directory。
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
 import clsx from 'clsx';
@@ -9,6 +9,7 @@ import { useTranslation } from 'react-i18next';
 import { rsiDatasetValidate, rsiTaskCreate, rsiTaskList, rsiTrainingStart } from '../rsiApi';
 import type { RsiArtifactType, RsiScenario, RsiTaskCreateParams, RsiTaskListItem, RsiTaskStatus } from '../types';
 import { selectProjectDirectory } from '../../../features/workspace/projectDirectoryPicker';
+import { selectLocalFiles } from '../../../features/workspace/localFilePicker';
 import { useSessionStore } from '../../../stores/sessionStore';
 import { ModelProviderIcon } from '../../../components/ModelProviderIcon';
 import TipIcon from '../../../assets/tip.svg?react';
@@ -130,14 +131,16 @@ export function CreateExperimentDialog({ open, onClose, onCreated }: CreateExper
 
   const pickPath = useCallback(
     async (target: 'dataset' | 'artifact') => {
-      const result = await selectProjectDirectory();
-      if (!result.ok || !result.path) return;
-      const path = result.path;
       if (target === 'dataset') {
-        update('datasetFile', path);
+        const fileResult = await selectLocalFiles(false);
+        const file = fileResult.ok ? fileResult.files[0] : undefined;
+        if (!file?.path) return;
+        update('datasetFile', file.path);
         setDatasetValid(null);
       } else {
-        update('artifactPath', path);
+        const result = await selectProjectDirectory();
+        if (!result.ok || !result.path) return;
+        update('artifactPath', result.path);
       }
     },
     [update],
@@ -185,8 +188,7 @@ export function CreateExperimentDialog({ open, onClose, onCreated }: CreateExper
               model_refs: {
                 optimizer: form.optimizer,
               },
-              max_iterations: form.maxIterations,
-              ...(branch === 'PAPER' && form.searchWidth ? { search_width: form.searchWidth } : {}),
+              ...(branch !== 'PROGRAM' ? { max_iterations: form.maxIterations } : {}),
               ...(form.optimizationInstruction ? { optimization_instruction: form.optimizationInstruction } : {}),
               ...(form.artifactPath ? { artifact_path: form.artifactPath } : {}),
             };
@@ -243,6 +245,9 @@ export function CreateExperimentDialog({ open, onClose, onCreated }: CreateExper
       className="rsi-config-dialog rsi-create-drawer"
       aria-labelledby="rsi-create-title"
       data-testid="rsi-create-dialog"
+      onClick={(event) => {
+        if (event.target === dialogRef.current) onClose();
+      }}
     >
       <div className="rsi-create-dialog__inner">
         <div className="rsi-create-dialog__header">
@@ -251,10 +256,9 @@ export function CreateExperimentDialog({ open, onClose, onCreated }: CreateExper
           </h2>
           <button
             type="button"
-            className="rsi-btn rsi-btn--ghost"
+            className="rsi-create-dialog__close"
             onClick={onClose}
             aria-label="close"
-            style={{ height: 28, width: 28, padding: 0 }}
           >
             ×
           </button>
@@ -321,11 +325,15 @@ export function CreateExperimentDialog({ open, onClose, onCreated }: CreateExper
         )}
 
         {branch === 'HARNESS' && (
-          <Field label={t('rsi.createDialog.datasetLabel')}>
+          <Field
+            label={t('rsi.createDialog.datasetLabel')}
+            tip={t('rsi.createDialog.datasetTip')}
+          >
             <PathInput
               value={form.datasetFile}
               placeholder={t('rsi.createDialog.datasetPlaceholder')}
               onPick={() => pickPath('dataset')}
+              icon="file"
             />
             {datasetValid && (
               <div className="rsi-create-dialog__dataset-result">
@@ -408,11 +416,26 @@ export function CreateExperimentDialog({ open, onClose, onCreated }: CreateExper
   );
 }
 
-function Field({ label, children }: { label: string; children: React.ReactNode }) {
+function Field({
+  label,
+  tip,
+  children,
+}: {
+  label: string;
+  tip?: string;
+  children: React.ReactNode;
+}) {
   return (
     <div style={{ marginBottom: 14 }}>
       <label style={{ display: 'block', fontSize: 13, marginBottom: 6, color: 'var(--color-text-primary)' }}>
-        {label}
+        <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+          {label}
+          {tip && (
+            <span className="rsi-create-dialog__label-tip" title={tip} aria-label={tip}>
+              <TipIcon className="w-3.5 h-3.5 shrink-0" />
+            </span>
+          )}
+        </span>
       </label>
       {children}
     </div>
@@ -435,26 +458,55 @@ function BranchButton({ active, onClick, label }: { active: boolean; onClick: ()
   );
 }
 
-function PathInput({ value, placeholder, onPick }: { value: string; placeholder: string; onPick: () => void }) {
+function PathInput({
+  value,
+  placeholder,
+  onPick,
+  icon = 'folder',
+}: {
+  value: string;
+  placeholder: string;
+  onPick: () => void;
+  icon?: 'file' | 'folder';
+}) {
   return (
     <div className="rsi-create-dialog__path-input">
       <input className="rsi-input" value={value} readOnly placeholder={placeholder} />
       <button type="button" className="rsi-create-dialog__path-btn" onClick={onPick} aria-label="browse">
-        <svg
-          viewBox="0 0 24 24"
-          width="16"
-          height="16"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth={1.5}
-          aria-hidden="true"
-        >
-          <path
-            strokeLinecap="round"
-            strokeLinejoin="round"
-            d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7z"
-          />
-        </svg>
+        {icon === 'file' ? (
+          <svg
+            viewBox="0 0 24 24"
+            width="16"
+            height="16"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth={1.5}
+            aria-hidden="true"
+          >
+            <path
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              d="M15.5 3H8a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2V7.5L15.5 3z"
+            />
+            <path strokeLinecap="round" strokeLinejoin="round" d="M15 3v5h5" />
+          </svg>
+        ) : (
+          <svg
+            viewBox="0 0 24 24"
+            width="16"
+            height="16"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth={1.5}
+            aria-hidden="true"
+          >
+            <path
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7z"
+            />
+          </svg>
+        )}
       </button>
     </div>
   );
@@ -565,8 +617,8 @@ function ModelSelect({ value, onChange }: { value: string; onChange: (v: string)
             <div className="model-select__section-header">{t('rsi.createDialog.modelPlaceholder')}</div>
           ) : (
             <>
-              {renderGroup(t('chat.modelSelector.free'), freeModels)}
               {renderGroup(t('chat.modelSelector.configured'), configuredModels)}
+              {renderGroup(t('chat.modelSelector.free'), freeModels)}
             </>
           )}
         </div>

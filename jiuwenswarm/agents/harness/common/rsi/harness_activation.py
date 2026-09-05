@@ -34,6 +34,7 @@ logger = logging.getLogger(__name__)
 
 _MANIFEST_NAMES = ("manifest.json", "harness_config.yaml", "expert_harness.yaml", "harness.yaml")
 _ACTIVATION_SCHEMA_VERSION = 1
+_NATIVE_HARNESS_BASELINE_CONFIG = Path(__file__).with_name("harness_config.yaml")
 
 
 @dataclass(frozen=True, slots=True)
@@ -148,6 +149,18 @@ def _validate_engine_manifest(package: Path) -> Path:
         except Exception as exc:  # noqa: BLE001 - normalize security errors
             raise _invalid(f"Harness 配置安全校验失败: {manifest}") from exc
     return manifest
+
+
+def resolve_native_harness_baseline() -> Path | None:
+    """Return the module-local no-capability baseline used without a plugin."""
+
+    if not _NATIVE_HARNESS_BASELINE_CONFIG.is_file():
+        return None
+    try:
+        _validate_engine_manifest(_NATIVE_HARNESS_BASELINE_CONFIG.parent)
+    except RsiHarnessInvalid:
+        return None
+    return _NATIVE_HARNESS_BASELINE_CONFIG.resolve()
 
 
 def _load_refs(refs_path: Path) -> dict[str, Any]:
@@ -762,4 +775,5 @@ __all__ = [
     "RsiHarnessInstaller",
     "hash_harness_package",
     "parse_published_harness_refs",
+    "resolve_native_harness_baseline",
 ]

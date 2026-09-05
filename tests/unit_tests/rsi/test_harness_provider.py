@@ -16,6 +16,7 @@ from jiuwenswarm.agents.harness.common.rsi.errors import (
     RsiResumeMismatch,
 )
 from jiuwenswarm.agents.harness.common.rsi.harness_adapter import HarnessEngineRequest
+from jiuwenswarm.agents.harness.common.rsi.materializer import RsiTaskMaterializer
 from jiuwenswarm.agents.harness.common.rsi.harness_provider import HarnessProvider
 
 
@@ -56,6 +57,25 @@ def _write_state(tasks_root: Path, task_id: str, state: dict[str, Any]) -> None:
     task_dir.mkdir(parents=True, exist_ok=True)
     with open(task_dir / "single_harness_state.yaml", "w", encoding="utf-8") as fh:
         yaml.safe_dump(state, fh, allow_unicode=True)
+
+
+def _write_baseline_summary(
+    tasks_root: Path,
+    task_id: str,
+    summary: dict[str, Any],
+) -> None:
+    summary_path = (
+        tasks_root
+        / task_id
+        / "run"
+        / "evaluations"
+        / "e001"
+        / "b001"
+        / "source"
+        / "summary.json"
+    )
+    summary_path.parent.mkdir(parents=True, exist_ok=True)
+    summary_path.write_text(json.dumps(summary), encoding="utf-8")
 
 
 def _state_dict() -> dict[str, Any]:
@@ -203,11 +223,95 @@ def test_get_tree_derives_parent_by_refs_reversal(tmp_path: Path) -> None:
     _write_state(tmp_path, "rsi-test0001", state)
     tree = HarnessProvider(tmp_path).get_tree("rsi-test0001")
     node_ids = [node.node_id for node in tree.nodes]
-    assert node_ids == ["C1", "C2"]
+    assert node_ids == ["ROOT", "C1", "C2"]
     assert tree.nodes[0].parent_id is None
-    assert tree.nodes[1].parent_id == "C1"
-    assert tree.nodes[0].adopted is True
-    assert tree.nodes[1].adopted is False
+    assert tree.nodes[0].score == pytest.approx(0.5)
+    assert tree.nodes[1].parent_id == "ROOT"
+    assert tree.nodes[2].parent_id == "C1"
+    assert tree.nodes[1].adopted is True
+    assert tree.nodes[2].adopted is False
+
+
+def test_get_tree_includes_root_before_first_gate(tmp_path: Path) -> None:
+    _write_state(
+        tmp_path,
+        "rsi-test0001",
+        {"status": "running", "baseline_score": None, "candidate_gates": []},
+    )
+    tree = HarnessProvider(tmp_path).get_tree("rsi-test0001")
+    assert [node.node_id for node in tree.nodes] == ["ROOT"]
+    assert tree.nodes[0].type == "ROOT"
+    assert tree.nodes[0].summary == "基线"
+    assert tree.depth == 0
+    assert tree.iteration == 0
+
+
+def test_baseline_score_falls_back_to_full_source_summary(tmp_path: Path) -> None:
+    _write_state(
+        tmp_path,
+        "rsi-test0001",
+        {
+            "status": "running",
+            "baseline_score": None,
+            "dataset": {"cases": 3},
+            "candidate_gates": [],
+        },
+    )
+    _write_baseline_summary(
+        tmp_path,
+        "rsi-test0001",
+        {"total_cases": 3, "average_score": 0.6666666666666666},
+    )
+
+    provider = HarnessProvider(tmp_path)
+    assert (
+        provider.read_state("rsi-test0001").baseline
+        == pytest.approx(0.6666666666666666)
+    )
+    assert (
+        provider.get_tree("rsi-test0001").nodes[0].score
+        == pytest.approx(0.6666666666666666)
+    )
+
+
+def test_baseline_score_prefers_existing_state_value(tmp_path: Path) -> None:
+    _write_state(
+        tmp_path,
+        "rsi-test0001",
+        {
+            "status": "running",
+            "baseline_score": 0.5,
+            "dataset": {"cases": 3},
+            "candidate_gates": [],
+        },
+    )
+    _write_baseline_summary(
+        tmp_path,
+        "rsi-test0001",
+        {"total_cases": 3, "average_score": 0.9},
+    )
+
+    assert HarnessProvider(tmp_path).read_state("rsi-test0001").baseline == pytest.approx(0.5)
+
+
+def test_baseline_score_ignores_partial_batch_summary(tmp_path: Path) -> None:
+    _write_state(
+        tmp_path,
+        "rsi-test0001",
+        {
+            "status": "running",
+            "baseline_score": None,
+            "dataset": {"cases": 3},
+            "candidate_gates": [],
+        },
+    )
+    _write_baseline_summary(
+        tmp_path,
+        "rsi-test0001",
+        {"total_cases": 2, "average_score": 0.9},
+    )
+
+    assert HarnessProvider(tmp_path).read_state("rsi-test0001").baseline is None
 
 
 def test_locate_artifact_by_gate_id(tmp_path: Path) -> None:
@@ -230,11 +334,11 @@ def test_materialized_request_is_validated_against_task_snapshots(tmp_path: Path
     dataset.write_text('[{"case_id": "a"}]', encoding="utf-8")
     source_harness = tmp_path / "source_harness.yaml"
     source_harness.write_text("name: demo\n", encoding="utf-8")
-    refs = harness_dir / "harness_refs.yaml"
-    refs.write_text(
-        yaml.safe_dump({"harness_refs": {"validation_harness": str(source_harness.resolve())}}),
-        encoding="utf-8",
+    harness_material = RsiTaskMaterializer(tmp_path).materialize_harness_refs(
+        task_id,
+        source_harness,
     )
+    refs = Path(harness_material["path"])
     profile = config_dir / "harness_orchestrator.yaml"
     profile.write_text("workspace_dir: %s\n" % run_dir, encoding="utf-8")
     model_dir = task_root / "models"
@@ -252,6 +356,8 @@ def test_materialized_request_is_validated_against_task_snapshots(tmp_path: Path
             "sha256": digest(refs),
             "source_path": str(source_harness.resolve()),
             "source_sha256": digest(source_harness),
+            "package_path": harness_material["package_path"],
+            "target_sha256": harness_material["target_sha256"],
         },
         "profile": {"sha256": digest(profile)},
         "models": {"evaluation": {"path": str(model), "config_sha256": digest(model)}},

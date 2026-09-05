@@ -117,6 +117,7 @@ class RsiTask:
     config: dict[str, Any] = field(default_factory=dict)
     run_dir: str = ""
     updated_at: str | None = None
+    status_history: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -129,6 +130,7 @@ class RsiTask:
                 "task_id", "name", "scenario", "status", "created_at", "artifact_type",
                 "input_file", "model_refs", "max_iterations", "search_width",
                 "optimization_instruction", "artifact_path", "config", "run_dir", "updated_at",
+                "status_history",
             )
         }
         return cls(**{k: v for k, v in data.items() if k in known})
@@ -158,6 +160,7 @@ class RsiTask:
                 "optimizer": (self.model_refs or {}).get("optimizer"),
                 "tester": (self.model_refs or {}).get("tester"),
             },
+            "input_file": self.input_file,
             "max_iterations": self.max_iterations,
             "search_width": self.search_width,
             "optimization_instruction": self.optimization_instruction,
@@ -175,6 +178,14 @@ class RsiTask:
         }
         if usage is not None:
             payload["usage"] = usage
+        if self.status == TaskStatus.FAILED.value:
+            for item in reversed(self.status_history):
+                if item.get("to") != TaskStatus.FAILED.value:
+                    continue
+                reason = str(item.get("cause") or "").strip()
+                if reason:
+                    payload["failure_reason"] = reason
+                break
         return payload
 
     def to_taskview(self) -> "RsiTaskView":

@@ -107,6 +107,7 @@ export interface RsiTaskGetResult {
   status: RsiTaskStatus;
   config: {
     model: { optimizer: string; tester: string | null };
+    input_file: string | null;
     max_iterations: number;
     search_width: number;
     optimization_instruction: string | null;
@@ -120,6 +121,7 @@ export interface RsiTaskGetResult {
   } | null;
   best_artifact: RsiBestArtifact | null;
   usage?: RsiUsage | null;
+  failure_reason?: string | null;
 }
 
 // §7 训练控制（start/pause/resume/terminate 统一入参 task_id）
