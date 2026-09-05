@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Optional
+from typing import Literal, Optional
 from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -67,10 +67,14 @@ class Settings(BaseSettings):
         default=8775,
         validation_alias="GATEWAY_CONFIG_HTTP_PORT",
     )
-    # 对外可被 Manager 访问的主机名（端口用 HTTP_PORT）
+    # 对外可被 Manager 访问的地址；HTTPS 通常由反向代理终止。
     gateway_config_public_host: str = Field(
         default="",
         validation_alias="GATEWAY_CONFIG_PUBLIC_HOST",
+    )
+    gateway_config_public_scheme: Literal["http", "https"] = Field(
+        default="http",
+        validation_alias="GATEWAY_CONFIG_PUBLIC_SCHEME",
     )
     # Gateway 管理面 REST Base（可选；身份绑定后一般不再主动调用 Manager）
     gateway_manager_http_url: str = Field(
