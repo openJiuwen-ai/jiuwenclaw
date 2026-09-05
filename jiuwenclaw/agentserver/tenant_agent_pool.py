@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from typing import Any, ClassVar
 
 from jiuwenclaw.schema.agent import AgentRequest, AgentResponse, AgentResponseChunk
@@ -223,6 +224,7 @@ class TenantAgentPool:
             )
 
             try:
+                t_am0 = time.monotonic()
                 # 工作目录仅由 workspace_key 决定：workspace_{key}/
                 agent_dir_path = get_multi_tenant_user_workspace_dir(workspace_key)
 
@@ -252,6 +254,10 @@ class TenantAgentPool:
                     service_id,
                     workspace_key,
                     agent_dir_path,
+                )
+                logger.info(
+                    "[AgentPerf] agent_manager created: key=%s elapsed_ms=%.1f",
+                    cache_key, (time.monotonic() - t_am0) * 1000,
                 )
                 return agent_manager
             except Exception as e:
@@ -296,6 +302,12 @@ class TenantAgentPool:
     ):
         """处理流式请求."""
         agent_id, service_id, workspace_key = self.extract_ids(request)
+        logger.info(
+            "[AgentPerf] tenant resolve: request_id=%s channel=%s session_id=%s "
+            "agent_id=%s service_id=%s workspace_key=%s",
+            getattr(request, "request_id", ""), getattr(request, "channel_id", ""),
+            getattr(request, "session_id", ""), agent_id, service_id, workspace_key,
+        )
         agent_manager = await self._ensure_agent_manager(agent_id, service_id, workspace_key)
         async for chunk in agent_manager.process_message_stream(request):
             yield chunk
