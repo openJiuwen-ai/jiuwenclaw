@@ -3033,6 +3033,124 @@ class JiuWenSwarmDeepAdapter:
         )
         return True
 
+    async def _clear_pending_skill_turbo_hitl(self, session_id: str | None) -> bool:
+        """cancel/supplement 的 SkillTurbo HITL 终止语义：清掉 pending 的断点状态。
+
+        中断（cancel）只杀 round 不清状态时，残留的 ``ToolInterruptionState`` 会让
+        ``react_agent._inner_invoke`` 把下一条纯文本消息当 resume 输入重放
+        ``skill_acceleration_exec``（问题 2：rail 无法解析 → re-interrupt 同 tcid
+        重发问卷被前端 dedup 吞卡 → UI 卡死）。本方法在 cancel/supplement 时：
+
+        1. 校验 loop session 匹配目标 session 且 pending interrupt 含
+           ``skill_acceleration_exec``；
+        2. 从上下文尾部弹掉待回答的 tool_call（不留悬挂调用）；
+        3. 清空 ``INTERRUPTION_KEY``——下一条消息进入全新 invocation 做意图判断，
+           由 LLM 决定 skillTurbo（全新任务）还是非 skillTurbo（基于产物继续）；
+        4. 经 ``{card.id}__skill_turbo`` 隔离键清 ``__skill_turbo_resume_ctx__``
+           （loop_session 命中的是 DeepAgent 键，清不到）；
+        5. ``__skill_turbo_node_artifacts__`` 保留——供
+           ``prepare_interrupt_artifacts_for_request`` 注入摘要引导继续执行。
+
+        Returns:
+            True 表示找到并清掉了 skill_acceleration_exec 的 pending 状态。
+        """
+        instance = getattr(self, "_instance", None)
+        loop_session = getattr(instance, "_loop_session", None)
+        loop_sid = self._deep_agent_loop_session_id()
+        target_sid = self._resolve_interrupt_session_id(session_id)
+        if loop_session is None or loop_sid != target_sid:
+            return False
+
+        try:
+            state = loop_session.get_state(INTERRUPTION_KEY)
+            interrupted_tools = getattr(state, "interrupted_tools", None)
+            if not isinstance(interrupted_tools, dict) or not interrupted_tools:
+                return False
+            if not any(
+                getattr(getattr(entry, "tool_call", None), "name", None)
+                == "skill_acceleration_exec"
+                for entry in interrupted_tools.values()
+            ):
+                return False
+
+            ai_message = getattr(state, "ai_message", None)
+            pending_calls = list(getattr(ai_message, "tool_calls", None) or [])
+            if not pending_calls:
+                return False
+
+            react_agent = getattr(instance, "react_agent", None)
+            context_engine = getattr(react_agent, "context_engine", None)
+            context = (
+                context_engine.get_context(session_id=target_sid)
+                if context_engine is not None
+                else None
+            )
+            messages = list(context.get_messages() or []) if context is not None else []
+            last_calls = list(getattr(messages[-1], "tool_calls", None) or []) if messages else []
+            pending_signature = [
+                (getattr(tool_call, "id", None), getattr(tool_call, "name", None))
+                for tool_call in pending_calls
+            ]
+            last_signature = [
+                (getattr(tool_call, "id", None), getattr(tool_call, "name", None))
+                for tool_call in last_calls
+            ]
+            if last_signature == pending_signature:
+                # 上下文尾部仍是该未完成 tool_call：弹出，不留悬挂调用
+                context.pop_messages(1, with_history=True)
+            loop_session.update_state({INTERRUPTION_KEY: None})
+            await self._clear_skill_turbo_resume_ctx_via_isolated_session(target_sid)
+            if context_engine is not None:
+                await context_engine.save_contexts(loop_session)
+        except Exception:
+            logger.warning(
+                "[JiuWenSwarmDeepAdapter] interrupt: failed to clear pending "
+                "skill_turbo HITL state session=%s",
+                target_sid,
+                exc_info=True,
+            )
+            return False
+
+        logger.info(
+            "[JiuWenSwarmDeepAdapter] interrupt: cleared pending skill_turbo "
+            "HITL state (interrupt cleared, artifacts kept) session=%s",
+            target_sid,
+        )
+        return True
+
+    async def _clear_skill_turbo_resume_ctx_via_isolated_session(
+        self, session_id: str
+    ) -> None:
+        """经 ``{card.id}__skill_turbo`` 隔离键清除 ``__skill_turbo_resume_ctx__``。
+
+        resume_ctx 由 executor 以 ``set_skill_turbo_id`` 的独立 session 落盘，
+        直接用 loop_session 清（DeepAgent 键）命不中存储位置。此处按
+        ``prepare_interrupt_artifacts_for_request`` 同一套 session 形态清理。
+        """
+        card = getattr(getattr(self, "_instance", None), "card", None)
+        if card is None:
+            return
+        from openjiuwen.core.session.agent import create_agent_session
+        from jiuwenswarm.server.runtime.skill_turbo.permission_bridge import (
+            clear_resume_ctx,
+            set_skill_turbo_id,
+        )
+
+        session = create_agent_session(session_id=session_id, card=card)
+        set_skill_turbo_id(session, card)
+        try:
+            await session.pre_run(inputs=None)
+            await clear_resume_ctx(session)
+        finally:
+            try:
+                await session.post_run()
+            except Exception:
+                logger.debug(
+                    "[JiuWenSwarmDeepAdapter] skill_turbo resume ctx clear "
+                    "post_run failed",
+                    exc_info=True,
+                )
+
     def _is_deep_agent_executing_for_session(self, session_id: str) -> bool:
         """True when the shared DeepAgent still runs stream/task-loop work for *session_id*."""
         instance = getattr(self, "_instance", None)
@@ -10717,10 +10835,13 @@ class JiuWenSwarmDeepAdapter:
         不会并发注入，故无需去重哨兵。若后续补齐 enterprise_dev 的完整 prepare
         hook 链，应在此处开头加 is_interrupt_recovery_injected(session) 早返回，
         避免重复注入。
-        """
-        if self._instance is None:
-            return
 
+        根 adapter 按设计不持有 ``_instance``（``_skip_own_instance_build``，
+        officeclaw/tenant-pool 等部署的每个 turn 都跑在 per-session 子 adapter 上），
+        此处通过缓存的 session adapter 兜底解析 card；两者都拿不到时降级为
+        不注入（hint 武装由 ``_arm_skill_turbo_interrupt_recovery_hint`` 在
+        session trunk 内兜底，见 process_message_stream_impl）。
+        """
         session_id = str(request.session_id or "").strip()
         if not session_id:
             return
@@ -10733,83 +10854,139 @@ class JiuWenSwarmDeepAdapter:
         if params is None:
             return
 
+        instance = self._instance
+        if instance is None:
+            cached_adapter = self._get_cached_session_adapter(session_id)
+            instance = getattr(cached_adapter, "_instance", None) if cached_adapter else None
+        if instance is None:
+            return
+
+        summary = await self._arm_skill_turbo_interrupt_recovery_for_card(
+            request, session_id=session_id, card=instance.card
+        )
+        if not summary:
+            return
+
+        # 构建中断恢复提示词（内联，避免依赖 plan_pause_helpers）。
+        language = self._resolve_runtime_language()
+        template = (
+            "[Interrupt recovery hint]\n"
+            "The previous task was interrupted and cancelled. "
+            "Here is a summary of completed work artifacts before the interruption:\n\n"
+            "{summary}\n\n"
+            "Based on this, judge the current task state:\n"
+            "- If artifacts show the target file already exists with substantial content, "
+            "read_file first before deciding to supplement or rebuild from scratch\n"
+            "- If artifacts show the target file was not created or has minimal content, "
+            "you may create it anew\n"
+            "- Do not blindly write_file to rebuild a file that already exists and is complete"
+        ) if language in ("en", "english") else (
+            "【中断恢复提示】之前的任务被中断取消。"
+            "以下是中断前已完成的工作产物摘要：\n\n"
+            "{summary}\n\n"
+            "请据此判断当前任务状态：\n"
+            "- 如果产物显示目标文件已存在且内容较完整，请先 read_file 查看当前状态，"
+            "再决定是补充完善还是从头重建\n"
+            "- 如果产物显示目标文件尚未创建或内容很少，可以重新创建\n"
+            "- 不要盲目从头 write_file 重建一个已存在的完整文件"
+        )
+        prompt = template.format(summary=summary.strip() or "(empty)")
+
+        # 注入到 supplementary_info（与 enterprise_dev merge_supplementary_into_request_params
+        # 行为一致：已存在则追加，不存在则设置）。
+        supplementary = prompt.strip()
+        if not supplementary:
+            return
+        existing = params.get("supplementary_info")
+        if isinstance(existing, str) and existing.strip():
+            params["supplementary_info"] = f"{existing.strip()}\n\n{supplementary}"
+        else:
+            params["supplementary_info"] = supplementary
+
+        logger.info(
+            "[JiuWenSwarmDeepAdapter] SkillTurbo interrupt artifacts summary "
+            "injected session=%s",
+            session_id,
+        )
+
+    async def _arm_skill_turbo_interrupt_recovery_hint(self, request: AgentRequest) -> None:
+        """session trunk 内武装 SkillTurbo 一次性中断恢复 hint。
+
+        根层 ``prepare_interrupt_artifacts_for_request`` 在根 adapter（无
+        ``_instance``）或 session adapter 被驱逐时拿不到 card；本方法在
+        ``process_message_stream_impl`` 的 session-scoped 主干调用（此时
+        ``self._instance`` 必然存在），加载 ``__skill_turbo_node_artifacts__``，
+        挂 ``request.metadata`` hint 供 skill_acceleration_exec 工具守卫读取，
+        并清空产物存储（一次性）。若根层已注入过（产物已清空），此处为 no-op。
+        supplementary_info 注入时机在 _build_inputs 之前，仍由根层 prepare 负责。
+        """
+        if self._instance is None:
+            return
+        session_id = str(request.session_id or "").strip()
+        if not session_id:
+            return
+        await self._arm_skill_turbo_interrupt_recovery_for_card(
+            request, session_id=session_id, card=self._instance.card
+        )
+
+    async def _arm_skill_turbo_interrupt_recovery_for_card(
+        self,
+        request: AgentRequest,
+        *,
+        session_id: str,
+        card: Any,
+    ) -> str | None:
+        """加载节点产物 → 挂一次性 hint → 清空存储；返回摘要文本（无产物返回 None）。"""
         from openjiuwen.core.session.agent import create_agent_session
 
         # SkillTurbo 节点产物存在独立 __skill_turbo checkpointer key 下，
         # 需用单独的 session 读写（与 _try_skill_turbo_resume 同一套 id 机制）。
         skill_turbo_session = create_agent_session(
-            session_id=session_id, card=self._instance.card,
+            session_id=session_id, card=card,
         )
-        _skill_turbo_set_agent_id(skill_turbo_session, self._instance.card)
+        _skill_turbo_set_agent_id(skill_turbo_session, card)
         # pre_run 在 try 内部：失败时直接 return，但仍走 finally 的 post_run，
         # 避免 checkpointer 状态泄漏（与 load_resume_ctx 的 pre_run 包裹策略一致）。
         try:
             await skill_turbo_session.pre_run(inputs=None)
             summary = await self._read_skill_turbo_node_artifacts_summary(skill_turbo_session)
             if not summary:
-                return
+                return None
 
-            # 构建中断恢复提示词（内联，避免依赖 plan_pause_helpers）。
-            language = self._resolve_runtime_language()
-            template = (
-                "[Interrupt recovery hint]\n"
-                "The previous task was interrupted and cancelled. "
-                "Here is a summary of completed work artifacts before the interruption:\n\n"
-                "{summary}\n\n"
-                "Based on this, judge the current task state:\n"
-                "- If artifacts show the target file already exists with substantial content, "
-                "read_file first before deciding to supplement or rebuild from scratch\n"
-                "- If artifacts show the target file was not created or has minimal content, "
-                "you may create it anew\n"
-                "- Do not blindly write_file to rebuild a file that already exists and is complete"
-            ) if language in ("en", "english") else (
-                "【中断恢复提示】之前的任务被中断取消。"
-                "以下是中断前已完成的工作产物摘要：\n\n"
-                "{summary}\n\n"
-                "请据此判断当前任务状态：\n"
-                "- 如果产物显示目标文件已存在且内容较完整，请先 read_file 查看当前状态，"
-                "再决定是补充完善还是从头重建\n"
-                "- 如果产物显示目标文件尚未创建或内容很少，可以重新创建\n"
-                "- 不要盲目从头 write_file 重建一个已存在的完整文件"
-            )
-            prompt = template.format(summary=summary.strip() or "(empty)")
-
-            # 注入到 supplementary_info（与 enterprise_dev merge_supplementary_into_request_params
-            # 行为一致：已存在则追加，不存在则设置）。
-            supplementary = prompt.strip()
-            if not supplementary:
-                return
-            existing = params.get("supplementary_info")
-            if isinstance(existing, str) and existing.strip():
-                params["supplementary_info"] = f"{existing.strip()}\n\n{supplementary}"
-            else:
-                params["supplementary_info"] = supplementary
-
-            # 一次性使用：注入后清除 SkillTurbo 节点产物记录，避免下一轮再次注入。
+            # 一次性使用：先清空 SkillTurbo 节点产物记录，成功后再挂 hint——
+            # 保证 hint（消费标记）与产物清除原子：clear 失败时 hint 不设置，
+            # 下一请求可重新尝试完整的"加载产物 → 清除 → 挂 hint"流程，
+            # 避免 clear 持续失败时 guard 反复拦截 fresh 调用。
             from jiuwenswarm.server.runtime.skill_turbo.node_artifact_store import (
                 clear_node_artifacts,
             )
             await clear_node_artifacts(skill_turbo_session)
 
-            logger.info(
-                "[JiuWenSwarmDeepAdapter] SkillTurbo interrupt artifacts summary "
-                "injected session=%s",
-                session_id,
+            # 同请求一次性 hint：挂到 request.metadata（经 _update_runtime_config
+            # 浅拷贝进 rail metadata 传到 skill_acceleration_exec 工具执行上下文）。
+            # 工具层 fresh 调用守卫据此先拒绝一次并附产物摘要，阻止新 executor
+            # 从 p0 清盘重跑；LLM 明确重试（全新任务）时 hint 已消费，放行。
+            from jiuwenswarm.server.runtime.skill_turbo.skill_turbo_tools import (
+                set_interrupt_recovery_hint,
             )
+
+            set_interrupt_recovery_hint(request, summary=summary)
+            return summary
         except Exception as exc:
             logger.warning(
-                "[JiuWenSwarmDeepAdapter] prepare_interrupt_artifacts_for_request failed "
+                "[JiuWenSwarmDeepAdapter] arm skill_turbo interrupt recovery failed "
                 "session_id=%s: %s",
                 session_id,
                 exc,
                 exc_info=True,
             )
+            return None
         finally:
             try:
                 await skill_turbo_session.post_run()
             except Exception:
                 logger.debug(
-                    "[JiuWenSwarmDeepAdapter] prepare_interrupt_artifacts post_run failed",
+                    "[JiuWenSwarmDeepAdapter] interrupt recovery post_run failed",
                     exc_info=True,
                 )
 
@@ -12382,6 +12559,15 @@ class JiuWenSwarmDeepAdapter:
             else:
                 message = "任务已取消"
 
+        # SkillTurbo HITL 终止语义：cancel/supplement 在终止 executor
+        # （_stop_session_interrupt_work + _abort_shared_agent_if_safe）之后
+        # 再清 pending 的 skill_acceleration_exec interrupt 状态（产物保留）。
+        # 顺序不能反：fresh 执行中被 cancel 时 executor 可能在退出前落盘
+        # resume_ctx（HITL 中断点写入），先清会被覆盖，下一条消息仍命中
+        # 残留断点重放被取消任务。
+        if intent in ("cancel", "supplement"):
+            await self._clear_pending_skill_turbo_hitl(request.session_id)
+
         payload = {
             "event_type": "chat.interrupt_result",
             "intent": intent,
@@ -12476,6 +12662,12 @@ class JiuWenSwarmDeepAdapter:
         )
         if intent == "supplement" and isinstance(new_input, str) and new_input.strip():
             await self._clear_pending_ask_user_interrupt_for_supplement(request.session_id)
+        # SkillTurbo HITL 终止语义：cancel_round 终止 round 之后再清 pending 的
+        # skill_acceleration_exec interrupt 状态（产物保留）。顺序不能反：
+        # fresh 执行中被 cancel 时 executor 可能在退出前落盘 resume_ctx
+        # （HITL 中断点写入），先清会被覆盖，下一条消息仍命中残留断点重放
+        # 被取消任务。
+        await self._clear_pending_skill_turbo_hitl(request.session_id)
         message = "任务已切换" if intent == "supplement" else "任务已取消"
 
         payload: dict[str, Any] = {
@@ -15790,6 +15982,20 @@ class JiuWenSwarmDeepAdapter:
             async for chunk in skill_turbo_resume_stream:
                 yield chunk
             return
+
+        # SkillTurbo 中断恢复 hint 武装（session-scoped 主干，self._instance 必然存在）：
+        # 根层 prepare 在根 adapter（无 _instance）/session adapter 被驱逐时拿不到 card，
+        # 此处兜底加载产物 → 挂 request.metadata hint → 清空存储。必须在
+        # _update_runtime_config 之前执行（metadata 在那里被浅拷贝进 rail metadata）。
+        try:
+            await self._arm_skill_turbo_interrupt_recovery_hint(request)
+        except Exception:
+            logger.warning(
+                "[JiuWenSwarmDeepAdapter] arm skill_turbo interrupt recovery hint "
+                "failed session_id=%s",
+                request.session_id,
+                exc_info=True,
+            )
 
         session_id = request.session_id or "default"
         rid = request.request_id
