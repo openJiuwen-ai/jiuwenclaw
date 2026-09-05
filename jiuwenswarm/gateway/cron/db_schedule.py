@@ -9,6 +9,10 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from jiuwenswarm.gateway.cron.models import CronJob
+from jiuwenswarm.gateway.cron.calc import (
+    cron_next_push_dt,
+    is_croniter_no_next_date,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -35,17 +39,19 @@ def is_oneshot_job(job: CronJob) -> bool:
 
 
 def compute_next_push_dt(cron_expr: str, timezone: str, *, base: datetime | None = None) -> datetime:
-    from jiuwenswarm.gateway.cron.scheduler import _cron_next_push_dt
-
     tz = ZoneInfo(timezone or "Asia/Shanghai")
     base_dt = base if base is not None else datetime.now(tz=tz)
     if base_dt.tzinfo is None:
         base_dt = base_dt.replace(tzinfo=tz)
-    return _cron_next_push_dt(cron_expr, base_dt)
+    return cron_next_push_dt(cron_expr, base_dt)
 
 
 def compute_next_push_after_fire(job: CronJob, fire_at: datetime) -> datetime | None:
-    """由本趟 push 时刻推算下一趟；无下一趟（一次性 cron）返回 None。"""
+    """由本趟 push 时刻推算下一趟；无下一趟（一次性 cron）返回 None。
+
+    防积压（存储语义，留在隔离层）：``next_run_at`` 是持久化状态，停机后会
+    过期；若 fire_at 已晚于 now，则从 now 起算下一趟，跳过中间所有过期趟。
+    """
     tz = ZoneInfo(job.timezone or "Asia/Shanghai")
     if fire_at.tzinfo is None:
         fire_at = fire_at.replace(tzinfo=tz)
@@ -60,16 +66,9 @@ def compute_next_push_after_fire(job: CronJob, fire_at: datetime) -> datetime | 
             base=base,
         )
     except Exception as exc:
-        if _is_croniter_no_next_date(exc):
+        if is_croniter_no_next_date(exc):
             return None
         raise
-
-
-def _is_croniter_no_next_date(exc: Exception) -> bool:
-    return (
-        exc.__class__.__name__ == "CroniterBadDateError"
-        or "failed to find next date" in str(exc)
-    )
 
 
 def next_run_at_to_datetime(job: CronJob) -> datetime | None:
