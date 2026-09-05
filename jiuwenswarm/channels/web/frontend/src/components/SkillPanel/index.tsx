@@ -466,7 +466,7 @@ function HubSkillCard({
   const avatar = getSkillAvatar(skill.name);
   const displayName = skill.display_name || skill.name;
   return (
-    <div onClick={onSelect} className={CARD_CLASS} data-testid="skill-card">
+    <div onClick={onSelect} className={CARD_CLASS} data-testid="skill-card" data-variant={skill.asset_id}>
       <div className="flex items-center gap-3 flex-shrink-0">
         <div
           className={`w-12 h-12 rounded-lg ${avatar.color} flex items-center justify-center flex-shrink-0 text-text-inverse font-semibold text-sm`}
@@ -475,7 +475,9 @@ function HubSkillCard({
         </div>
         <div className="min-w-0 flex-1 h-full flex flex-col justify-between">
           <div className="flex items-center gap-1.5">
-            <span className="text-sm font-semibold text-text-strong truncate leading-5">{displayName}</span>
+            <span className="text-sm font-semibold text-text-strong truncate leading-5" data-testid="skill-card-name">
+              {displayName}
+            </span>
           </div>
           {skill.tags && skill.tags.length > 0 && (
             <div className="mt-1 flex items-center gap-1.5 flex-wrap">
@@ -2161,6 +2163,8 @@ export function SkillPanel({
         <div
           className="fixed top-4 right-4 z-[9999] rounded-[4px] text-sm text-text shadow-lg flex items-center gap-3 px-4"
           style={{ backgroundColor: 'var(--color-feedback-success-toast)', width: '564px', height: '40px' }}
+          data-testid="skill-panel-toast"
+          data-variant="success"
         >
           <span className="w-4 h-4 rounded-full bg-[var(--color-feedback-success-indicator)] flex items-center justify-center flex-shrink-0">
             <svg className="w-3 h-3 text-text-inverse" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -2172,6 +2176,7 @@ export function SkillPanel({
             type="button"
             onClick={() => setMessage(null)}
             className="ml-auto w-5 h-5 flex items-center justify-center hover:bg-card/30 rounded-full "
+            data-testid="skill-panel-toast-close-btn"
           >
             <svg className="w-4 h-4 text-text-muted" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
@@ -2183,6 +2188,8 @@ export function SkillPanel({
         <div
           className="fixed top-4 right-4 z-[9999] rounded-[4px] text-sm text-text shadow-lg flex items-center gap-3 px-4 bg-card border border-border"
           style={{ width: '564px', height: '40px' }}
+          data-testid="skill-panel-toast"
+          data-variant="loading"
         >
           <span className="w-4 h-4 border-2 border-accent border-t-transparent rounded-full animate-spin flex-shrink-0" />
           {cleanMessage}
@@ -2197,6 +2204,7 @@ export function SkillPanel({
                   <button
                     onClick={() => setSourceModalOpen(true)}
                     className="flex items-center gap-1.5 px-1 py-1.5 rounded-lg text-sm text-text-muted hover:text-text hover:bg-secondary/50 "
+                    data-testid="skill-panel-source-manager-btn"
                   >
                     <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
                       <path
@@ -2225,6 +2233,7 @@ export function SkillPanel({
                         : 'hover:text-text hover:bg-secondary/50'
                     }`}
                     disabled={activeTab === 'graph' && graphReading}
+                    data-testid="skill-panel-refresh-btn"
                   >
                     <svg
                       className={`w-4 h-4 ${activeTab === 'graph' && graphReading ? 'animate-spin' : ''}`}
@@ -2248,6 +2257,8 @@ export function SkillPanel({
                       type="button"
                       onClick={() => setActiveTab('marketplace')}
                       className={activeTab === 'marketplace' ? 'is-active' : ''}
+                      data-testid="skill-panel-tab"
+                      data-variant="marketplace"
                     >
                       {t('skills.tabs.marketplace')}
                     </button>
@@ -2255,6 +2266,8 @@ export function SkillPanel({
                       type="button"
                       onClick={() => setActiveTab('my')}
                       className={activeTab === 'my' ? 'is-active' : ''}
+                      data-testid="skill-panel-tab"
+                      data-variant="my"
                     >
                       {t('skills.tabs.mySkills')}
                     </button>
@@ -2262,6 +2275,8 @@ export function SkillPanel({
                       type="button"
                       onClick={() => setActiveTab('graph')}
                       className={activeTab === 'graph' ? 'is-active' : ''}
+                      data-testid="skill-panel-tab"
+                      data-variant="graph"
                     >
                       {t('skills.tabs.skillGraph')}
                     </button>
@@ -2316,6 +2331,7 @@ export function SkillPanel({
                         value={search}
                         onChange={(e) => setSearch(e.target.value)}
                         placeholder={t('skills.searchPlaceholder')}
+                        inputTestId="skill-panel-search-input"
                       />
                     )}
                     {activeTab === 'my' && (
@@ -2323,6 +2339,7 @@ export function SkillPanel({
                         <button
                           onClick={() => setCreateMenuOpen((v) => !v)}
                           className="flex items-center justify-center gap-1 h-8 w-[96px] rounded-[16px] text-sm text-text-inverse bg-control-emphasis hover:opacity-80"
+                          data-testid="skill-panel-create-btn"
                         >
                           {t('skills.actions.create')}
                           <svg
@@ -2346,6 +2363,8 @@ export function SkillPanel({
                                 }}
                                 disabled={actionTarget === 'import_local'}
                                 className="flex items-center w-full px-3 py-2 text-sm text-left text-text hover:bg-secondary disabled:opacity-60 disabled:cursor-not-allowed"
+                                data-testid="skill-panel-create-menu-item"
+                                data-variant="upload-local"
                               >
                                 {t('skills.actions.uploadLocalSkill')}
                               </button>
@@ -2355,6 +2374,8 @@ export function SkillPanel({
                                   setDocToSkillModalOpen(true);
                                 }}
                                 className="flex items-center w-full px-3 py-2 text-sm text-left text-text hover:bg-secondary"
+                                data-testid="skill-panel-create-menu-item"
+                                data-variant="doc-to-skill"
                               >
                                 {t('skills.actions.documentToSkill')}
                               </button>
@@ -2364,6 +2385,8 @@ export function SkillPanel({
                                   handleCreateViaChat();
                                 }}
                                 className="flex items-center w-full px-3 py-2 text-sm text-left text-text hover:bg-secondary"
+                                data-testid="skill-panel-create-menu-item"
+                                data-variant="via-chat"
                               >
                                 {t('skills.actions.createViaChat')}
                               </button>
@@ -2468,18 +2491,23 @@ export function SkillPanel({
             <>
               {marketplaceSubView === 'detail' && selectedHubSkill ? (
                 /* 广场技能详情页 */
-                <div className="flex-1 flex flex-col min-h-0">
+                <div className="flex-1 flex flex-col min-h-0" data-testid="skill-panel-hub-detail">
                   {hubDetailState === 'loading' && (
-                    <div className="text-sm text-text-muted mb-3">{t('skills.detailLoading')}</div>
+                    <div className="text-sm text-text-muted mb-3" data-testid="skill-panel-hub-detail-state" data-variant="loading">
+                      {t('skills.detailLoading')}
+                    </div>
                   )}
                   {hubDetailState === 'error' && (
-                    <div className="text-sm text-text-muted mb-3">{t('skills.detailError')}</div>
+                    <div className="text-sm text-text-muted mb-3" data-testid="skill-panel-hub-detail-state" data-variant="error">
+                      {t('skills.detailError')}
+                    </div>
                   )}
 
                   {/* 返回按钮 */}
                   <button
                     type="button"
                     className="detail-back mb-[35px]"
+                    data-testid="skill-panel-hub-detail-back-btn"
                     onClick={() => {
                       setMarketplaceSubView('list');
                       setSelectedHubSkill(null);
@@ -2501,7 +2529,7 @@ export function SkillPanel({
                         {getSkillAvatar(selectedHubSkill.name).firstChar}
                       </div>
                       <div className="min-w-0">
-                        <span className="text-lg font-semibold text-text-strong truncate">
+                        <span className="text-lg font-semibold text-text-strong truncate" data-testid="skill-panel-hub-detail-name">
                           {selectedHubSkill.display_name || selectedHubSkill.name}
                         </span>
                       </div>
@@ -2522,6 +2550,7 @@ export function SkillPanel({
                               }
                               className="flex items-center justify-center rounded-[16px] text-sm text-control-emphasis bg-card border border-control-emphasis hover:bg-secondary/30 whitespace-nowrap"
                               style={{ height: '32px', padding: '0 24px' }}
+                              data-testid="skill-panel-hub-detail-go-try-btn"
                             >
                               {t('skills.actions.goTry')}
                             </button>
@@ -2535,6 +2564,7 @@ export function SkillPanel({
                             }
                             className="flex items-center justify-center rounded-[16px] text-sm text-text-inverse bg-control-emphasis hover:bg-control-emphasis-hover-strong whitespace-nowrap disabled:opacity-50"
                             style={{ width: '96px', height: '32px' }}
+                            data-testid="skill-panel-hub-detail-install-btn"
                           >
                             {actionTarget === `install:${selectedHubSkill.identifier || selectedHubSkill.asset_id}`
                               ? t('common.processing')
@@ -2546,7 +2576,7 @@ export function SkillPanel({
                   </div>
 
                   {/* 基本信息 */}
-                  <div className="mb-6">
+                  <div className="mb-6" data-testid="skill-panel-hub-detail-basic-info">
                     <div className="text-sm font-semibold text-text mb-2">{t('skills.detail.basicInfo')}</div>
                     <div className="text-sm text-text-muted">
                       {hubDetail?.data?.short_desc || selectedHubSkill.short_desc || t('skills.noDescription')}
@@ -2557,14 +2587,18 @@ export function SkillPanel({
                   <div className="flex-1 flex flex-col min-h-0">
                     <div className="flex items-center mb-4 flex-shrink-0">
                       <div className="flex items-center gap-8 flex-1 border-b border-border">
-                        <button className="pb-2 text-sm text-text font-semibold border-b-2 border-text">
+                        <button
+                          className="pb-2 text-sm text-text font-semibold border-b-2 border-text"
+                          data-testid="skill-panel-hub-detail-tab"
+                          data-variant="content"
+                        >
                           {t('skills.detail.tabs.contentDetail')}
                         </button>
                       </div>
                     </div>
 
                     {/* 内容详情 */}
-                    <div className="flex-1 min-h-[150px] overflow-y-auto text-sm text-text bg-secondary border border-border rounded-md p-3">
+                    <div className="flex-1 min-h-[150px] overflow-y-auto text-sm text-text bg-secondary border border-border rounded-md p-3" data-testid="skill-panel-hub-detail-content">
                       {hubDetail?.data?.detail_desc ? (
                         <MarkdownRenderer content={hubDetail.data.detail_desc} className="chat-text chat-markdown" />
                       ) : (
@@ -2576,11 +2610,12 @@ export function SkillPanel({
                 </div>
               ) : marketplaceSubView === 'team' ? (
                 /* 精选团队技能专页 */
-                <div className="mt-4 flex-1 flex flex-col min-h-0">
+                <div className="mt-4 flex-1 flex flex-col min-h-0" data-testid="skill-panel-team-skills-page">
                   {/* 返回按钮 */}
                   <button
                     type="button"
                     className="detail-back mb-[35px]"
+                    data-testid="skill-panel-team-skills-back-btn"
                     onClick={() => setMarketplaceSubView('list')}
                   >
                     <BackIcon aria-hidden="true" />
@@ -2589,7 +2624,7 @@ export function SkillPanel({
 
                   <div className="skill-list-scroll flex-1 min-h-0 overflow-y-auto">
                     <div className="flex items-center justify-between mb-3">
-                      <span className="font-bold text-text-strong" style={{ fontSize: '16px' }}>
+                      <span className="font-bold text-text-strong" style={{ fontSize: '16px' }} data-testid="skill-panel-team-skills-title">
                         {t('skills.featuredTeamSkills')}
                       </span>
                     </div>
@@ -2621,9 +2656,13 @@ export function SkillPanel({
                   />
 
                   {hubLoading ? (
-                    <div className="mt-4 text-sm text-text-muted">{t('common.loading')}</div>
+                    <div className="mt-4 text-sm text-text-muted" data-testid="skill-panel-hub-list-loading">
+                      {t('common.loading')}
+                    </div>
                   ) : hubSkills.length === 0 ? (
-                    <div className="mt-4 text-sm text-text-muted">{t('skills.noMatches')}</div>
+                    <div className="mt-4 text-sm text-text-muted" data-testid="skill-panel-hub-list-empty">
+                      {t('skills.noMatches')}
+                    </div>
                   ) : search.trim() ? (
                     /* 搜索结果：全部罗列 */
                     <div className="skill-list-scroll card-grid-auto mt-4 flex-1 min-h-0 overflow-y-auto">
@@ -2653,6 +2692,7 @@ export function SkillPanel({
                               <button
                                 onClick={() => setMarketplaceSubView('team')}
                                 className="flex items-center gap-0.5 text-sm text-text"
+                                data-testid="skill-panel-team-skills-more-btn"
                               >
                                 {t('nav.more')}
                                 <svg
@@ -2689,7 +2729,7 @@ export function SkillPanel({
                       {featuredSkills.length > 0 && (
                         <>
                           <div className="flex items-center justify-between mb-3">
-                            <span className="font-bold text-text-strong" style={{ fontSize: '16px' }}>
+                            <span className="font-bold text-text-strong" style={{ fontSize: '16px' }} data-testid="skill-panel-featured-skills-title">
                               {t('skills.featuredSkills')}
                             </span>
                           </div>
@@ -2718,20 +2758,31 @@ export function SkillPanel({
           {activeTab === 'my' ? (
             <>
               {message && messageType === 'error' && (
-                <div className="mt-3 px-3 py-2 rounded-md bg-secondary text-sm text-danger">{message}</div>
+                <div className="mt-3 px-3 py-2 rounded-md bg-secondary text-sm text-danger" data-testid="skill-panel-my-error">
+                  {message}
+                </div>
               )}
               {selectedSkill ? (
-                <div className="flex-1 flex flex-col min-h-0">
+                <div className="flex-1 flex flex-col min-h-0" data-testid="skill-panel-my-detail">
                   {/* 加载/错误状态 */}
                   {detailState === 'loading' && (
-                    <div className="text-sm text-text-muted mb-3">{t('skills.detailLoading')}</div>
+                    <div className="text-sm text-text-muted mb-3" data-testid="skill-panel-my-detail-state" data-variant="loading">
+                      {t('skills.detailLoading')}
+                    </div>
                   )}
                   {detailState === 'error' && (
-                    <div className="text-sm text-text-muted mb-3">{t('skills.detailError')}</div>
+                    <div className="text-sm text-text-muted mb-3" data-testid="skill-panel-my-detail-state" data-variant="error">
+                      {t('skills.detailError')}
+                    </div>
                   )}
 
                   {/* 返回按钮 */}
-                  <button type="button" className="detail-back mb-[35px]" onClick={handleBackToList}>
+                  <button
+                    type="button"
+                    className="detail-back mb-[35px]"
+                    data-testid="skill-panel-my-detail-back-btn"
+                    onClick={handleBackToList}
+                  >
                     <BackIcon aria-hidden="true" />
                     {t('agentManagement.actions.back')}
                   </button>
@@ -2747,7 +2798,7 @@ export function SkillPanel({
                       </div>
                       <div className="min-w-0">
                         <div className="flex items-center gap-1.5">
-                          <span className="text-lg font-semibold text-text-strong truncate">
+                          <span className="text-lg font-semibold text-text-strong truncate" data-testid="skill-panel-my-detail-name">
                             {selectedSkill.display_name || selectedSkill.name}
                           </span>
                           {selectedSkill.has_evolutions ? (
@@ -2758,6 +2809,7 @@ export function SkillPanel({
                               }}
                               className="relative shrink-0 w-5 h-5 flex items-center justify-center text-text-muted hover:text-text"
                               title={t('skills.actions.viewEvolution')}
+                              data-testid="skill-panel-my-detail-evolution-btn"
                             >
                               <svg
                                 xmlns="http://www.w3.org/2000/svg"
@@ -2791,6 +2843,7 @@ export function SkillPanel({
                           type="button"
                           onClick={() => setDetailMenuOpen((v) => !v)}
                           className="w-7 h-7 flex items-center justify-center rounded-md hover:bg-secondary text-text-muted hover:text-text"
+                          data-testid="skill-panel-my-detail-menu"
                         >
                           <MoreIcon aria-hidden />
                         </button>
@@ -2809,6 +2862,7 @@ export function SkillPanel({
                                 }
                                 disabled={selectedSkill.enabled === false}
                                 className="flex items-center w-full px-3 py-2 text-sm text-left text-text hover:bg-secondary disabled:opacity-40 disabled:cursor-not-allowed"
+                                data-testid="skill-panel-my-detail-menu-edit"
                               >
                                 {t('skills.actions.edit')}
                               </button>
@@ -2819,6 +2873,7 @@ export function SkillPanel({
                                   handleUninstall(plugin?.plugin_name || selectedSkill.name);
                                 }}
                                 className="flex items-center w-full px-3 py-2 text-sm text-left text-text hover:bg-secondary"
+                                data-testid="skill-panel-my-detail-menu-uninstall"
                               >
                                 {t('skills.actions.uninstall')}
                               </button>
@@ -2833,7 +2888,11 @@ export function SkillPanel({
                           onChange={() => toggleSkillDisabled(selectedSkill.name)}
                           disabled={actionTarget === `toggle:${selectedSkill.name}`}
                         />
-                        <span className="text-sm text-text-muted whitespace-nowrap">
+                        <span
+                          className="text-sm text-text-muted whitespace-nowrap"
+                          data-testid="skill-panel-my-detail-enable-label"
+                          data-variant={selectedSkill.enabled !== false ? 'enabled' : 'disabled'}
+                        >
                           {selectedSkill.enabled !== false ? t('skills.enable') : t('skills.disable')}
                         </span>
                       </div>
@@ -2847,6 +2906,7 @@ export function SkillPanel({
                         disabled={selectedSkill.enabled === false}
                         className="flex items-center justify-center rounded-[16px] text-sm text-control-emphasis bg-card border border-control-emphasis hover:bg-secondary/30 whitespace-nowrap disabled:opacity-40 disabled:cursor-not-allowed"
                         style={{ height: '32px', padding: '0 24px' }}
+                        data-testid="skill-panel-my-detail-go-try-btn"
                       >
                         {t('skills.actions.goTry')}
                       </button>
@@ -2865,6 +2925,7 @@ export function SkillPanel({
                         }}
                         className="flex items-center justify-center rounded-[16px] text-sm text-control-emphasis bg-card border border-control-emphasis hover:bg-secondary/30 whitespace-nowrap"
                         style={{ height: '32px', padding: '0 24px' }}
+                        data-testid="skill-panel-my-detail-publish-btn"
                       >
                         {t('skills.actions.publish')}
                       </button>
@@ -2872,7 +2933,7 @@ export function SkillPanel({
                   </div>
 
                   {/* 基本信息 */}
-                  <div className="mb-6">
+                  <div className="mb-6" data-testid="skill-panel-my-detail-basic-info">
                     <div className="text-sm font-semibold text-text mb-2">{t('skills.detail.basicInfo')}</div>
                     <div className="text-sm text-text-muted">
                       {selectedSkill.description || t('skills.noDescription')}
@@ -2888,6 +2949,7 @@ export function SkillPanel({
                         disabled={versionsLoadState === 'loading'}
                         className="flex items-center justify-center w-5 h-5 text-text-muted hover:text-text disabled:opacity-50"
                         title={t('common.refresh')}
+                        data-testid="skill-panel-my-detail-versions-refresh-btn"
                       >
                         <svg
                           className={`w-4 h-4 ${versionsLoadState === 'loading' ? 'animate-spin' : ''}`}
@@ -2905,11 +2967,15 @@ export function SkillPanel({
                       </button>
                     </div>
                     {versionsLoadState === 'loading' ? (
-                      <div className="text-sm text-text-muted">{t('common.loading')}</div>
+                      <div className="text-sm text-text-muted" data-testid="skill-panel-my-detail-versions-state" data-variant="loading">
+                        {t('common.loading')}
+                      </div>
                     ) : versionsLoadState === 'error' ? (
-                      <div className="text-sm text-text-muted">{t('skills.detail.versionsLoadFailed')}</div>
+                      <div className="text-sm text-text-muted" data-testid="skill-panel-my-detail-versions-state" data-variant="error">
+                        {t('skills.detail.versionsLoadFailed')}
+                      </div>
                     ) : skillVersions.length === 0 ? (
-                      <div className="text-sm text-text-muted">
+                      <div className="text-sm text-text-muted" data-testid="skill-panel-my-detail-versions-state" data-variant="empty">
                         {selectedSkill.version ? `v${selectedSkill.version}` : t('skills.detail.noVersions')}
                       </div>
                     ) : (
@@ -2922,6 +2988,7 @@ export function SkillPanel({
                           }}
                           className="appearance-none rounded-[6px] border border-border bg-panel text-sm text-text outline-none focus:outline-none focus:ring-0 focus:border-border"
                           style={{ width: '360px', height: '28px', paddingLeft: '12px', paddingRight: '12px' }}
+                          data-testid="skill-panel-my-detail-versions-select"
                         >
                           {buildSkillVersionOptions(skillVersions, {
                             defaultSuffix: ` (${t('skills.detail.defaultVersion')})`,
@@ -2957,6 +3024,8 @@ export function SkillPanel({
                               ? 'text-text font-semibold border-b-2 border-text'
                               : 'text-text-muted hover:text-text'
                           }`}
+                          data-testid="skill-panel-my-detail-tab"
+                          data-variant="content"
                         >
                           {t('skills.detail.tabs.contentDetail')}
                         </button>
@@ -2970,6 +3039,8 @@ export function SkillPanel({
                               ? 'text-text font-semibold border-b-2 border-text'
                               : 'text-text-muted hover:text-text'
                           }`}
+                          data-testid="skill-panel-my-detail-tab"
+                          data-variant="files"
                         >
                           {t('skills.detail.tabs.filePreview')}
                         </button>
@@ -2981,6 +3052,8 @@ export function SkillPanel({
                                 ? 'text-text font-semibold border-b-2 border-text'
                                 : 'text-text-muted hover:text-text'
                             }`}
+                            data-testid="skill-panel-my-detail-tab"
+                            data-variant="experience"
                           >
                             {t('skills.detail.tabs.skillExperience')}
                           </button>
@@ -3246,12 +3319,14 @@ export function SkillPanel({
                       style={{ paddingTop: '16px' }}
                     >
                       {listState === 'loading' && (
-                        <div className="col-span-3 flex items-center justify-center h-full text-text-muted">
+                        <div className="col-span-3 flex items-center justify-center h-full text-text-muted" data-testid="skill-panel-my-list-loading">
                           {t('common.loading')}
                         </div>
                       )}
                       {listState === 'error' && (
-                        <div className="col-span-3 text-sm text-text-muted">{t('skills.listError')}</div>
+                        <div className="col-span-3 text-sm text-text-muted" data-testid="skill-panel-my-list-error">
+                          {t('skills.listError')}
+                        </div>
                       )}
                       {listState === 'success' &&
                         mySkillsFiltered.map((skill) => {
@@ -3268,6 +3343,7 @@ export function SkillPanel({
                               onClick={() => handleOpenSkill(skill.name)}
                               className={CARD_CLASS}
                               data-testid="skill-card"
+                              data-variant={listKey}
                             >
                               {/* 上盒子：头像 + 名称/演进 + 来源 + 悬浮按钮 */}
                               <div className="flex items-center gap-3 min-w-0">
@@ -3278,7 +3354,7 @@ export function SkillPanel({
                                 </div>
                                 <div className="min-w-0 flex-1 h-full flex flex-col justify-between">
                                   <div className="flex items-center gap-1.5">
-                                    <span className="text-sm font-semibold text-text-strong truncate leading-5">
+                                    <span className="text-sm font-semibold text-text-strong truncate leading-5" data-testid="skill-card-name">
                                       {displayName}
                                     </span>
                                     {skill.has_evolutions ? (
@@ -3290,6 +3366,7 @@ export function SkillPanel({
                                         }}
                                         className="relative shrink-0 w-5 h-5 flex items-center justify-center text-text-muted hover:text-text"
                                         title={t('skills.actions.viewEvolution')}
+                                        data-testid="skill-panel-my-skill-card-evolution-btn"
                                       >
                                         <svg
                                           xmlns="http://www.w3.org/2000/svg"
@@ -3333,6 +3410,7 @@ export function SkillPanel({
                                           setOpenMenuSkillName(isMenuOpen ? null : skill.name);
                                         }}
                                         className="w-7 h-7 flex items-center justify-center rounded-md hover:bg-secondary text-text-muted hover:text-text"
+                                        data-testid="skill-panel-my-skill-card-menu"
                                       >
                                         <MoreIcon aria-hidden />
                                       </button>
@@ -3359,6 +3437,7 @@ export function SkillPanel({
                                                 }
                                                 disabled={isDisabled}
                                                 className="flex items-center w-full px-3 py-2 text-sm text-left text-text hover:bg-secondary disabled:opacity-40 disabled:cursor-not-allowed"
+                                                data-testid="skill-panel-my-skill-card-menu-edit"
                                               >
                                                 {t('skills.actions.edit')}
                                               </button>
@@ -3371,6 +3450,7 @@ export function SkillPanel({
                                                 handleUninstall(plugin?.plugin_name || skill.name);
                                               }}
                                               className="flex items-center w-full px-3 py-2 text-sm text-left text-text hover:bg-secondary"
+                                              data-testid="skill-panel-my-skill-card-menu-uninstall"
                                             >
                                               {t('skills.actions.uninstall')}
                                             </button>
@@ -3394,9 +3474,10 @@ export function SkillPanel({
                                         const rect = e.currentTarget.getBoundingClientRect();
                                         setGoTryTooltip({ left: rect.left + rect.width / 2, top: rect.top });
                                       }}
-                                      onMouseLeave={() => setGoTryTooltip(null)}
-                                      className="w-7 h-7 flex items-center justify-center rounded-md hover:bg-secondary text-text-muted hover:text-text disabled:opacity-40 disabled:cursor-not-allowed"
-                                    >
+                                       onMouseLeave={() => setGoTryTooltip(null)}
+                                       className="w-7 h-7 flex items-center justify-center rounded-md hover:bg-secondary text-text-muted hover:text-text disabled:opacity-40 disabled:cursor-not-allowed"
+                                       data-testid="skill-panel-my-skill-card-go-try-btn"
+                                     >
                                       <NewConversationIcon aria-hidden width="16" height="16" />
                                     </button>
                                   </div>
@@ -3479,10 +3560,13 @@ export function SkillPanel({
             <div
               className="relative overflow-hidden rounded-[8px] border border-border bg-card shadow-2xl animate-rise flex flex-col"
               style={{ width: '550px' }}
+              data-testid="skill-panel-upload-skill-modal"
             >
               {/* 头部 */}
               <div className="flex items-center justify-between gap-3 px-5 py-3 bg-panel">
-                <span className="text-lg font-semibold text-text-strong">{t('skills.uploadSkillModal.title')}</span>
+                <span className="text-lg font-semibold text-text-strong" data-testid="skill-panel-upload-skill-modal-title">
+                  {t('skills.uploadSkillModal.title')}
+                </span>
                 <ModalCloseButton
                   onClick={() => {
                     setUploadSkillModalOpen(false);
@@ -3490,6 +3574,7 @@ export function SkillPanel({
                     setUploadSkillFile(null);
                   }}
                   label={t('skills.uploadSkillModal.cancel')}
+                  testId="skill-panel-upload-skill-modal-close-btn"
                 />
               </div>
               {/* 提示行 */}
@@ -3781,13 +3866,17 @@ export function SkillPanel({
                 <div
                   className="fixed top-0 right-0 bottom-0 z-[9999] bg-panel border-l border-border shadow-2xl flex flex-col"
                   style={{ width: '550px' }}
+                  data-testid="skill-panel-publish-drawer"
                 >
                   {/* 头部（无分割线） */}
                   <div className="flex items-center justify-between px-6 pt-4 pb-2 flex-shrink-0">
-                    <span className="text-base font-semibold text-text-strong">{t('skills.publishForm.title')}</span>
+                    <span className="text-base font-semibold text-text-strong" data-testid="skill-panel-publish-drawer-title">
+                      {t('skills.publishForm.title')}
+                    </span>
                     <ModalCloseButton
                       onClick={() => setPublishDrawerOpen(false)}
                       label={t('skills.publishForm.cancel')}
+                      testId="skill-panel-publish-drawer-close-btn"
                     />
                   </div>
                   {/* 提示行（标题下方，可关闭） */}
@@ -3997,11 +4086,18 @@ export function SkillPanel({
             <div
               className="fixed left-1/2 top-1/2 z-[9999] -translate-x-1/2 -translate-y-1/2 bg-panel rounded-[16px] shadow-2xl border border-border flex flex-col"
               style={{ width: '420px' }}
+              data-testid="skill-panel-oauth-login-modal"
             >
               {/* 头部 */}
               <div className="flex items-center justify-between px-6 pt-5 pb-3">
-                <span className="text-base font-semibold text-text-strong">{t('skills.oauthLogin.title')}</span>
-                <ModalCloseButton onClick={() => setOauthLoginOpen(false)} label={t('skills.oauthLogin.title')} />
+                <span className="text-base font-semibold text-text-strong" data-testid="skill-panel-oauth-login-title">
+                  {t('skills.oauthLogin.title')}
+                </span>
+                <ModalCloseButton
+                  onClick={() => setOauthLoginOpen(false)}
+                  label={t('skills.oauthLogin.title')}
+                  testId="skill-panel-oauth-login-close-btn"
+                />
               </div>
               {/* 内容 */}
               <div className="px-6 pb-6 flex flex-col items-center">
@@ -4013,6 +4109,8 @@ export function SkillPanel({
                   disabled={oauthLoadingProvider === 'gitcode'}
                   className="flex items-center justify-center gap-2 rounded-[16px] text-sm whitespace-nowrap transition-colors w-full mb-3 bg-control-emphasis text-control-emphasis-foreground disabled:cursor-not-allowed disabled:opacity-60"
                   style={{ height: '40px' }}
+                  data-testid="skill-panel-oauth-login-btn"
+                  data-variant="gitcode"
                 >
                   {oauthLoadingProvider === 'gitcode' ? (
                     <div className="w-4 h-4 border-2 border-control-emphasis-foreground/30 border-t-control-emphasis-foreground rounded-full animate-spin" />
@@ -4030,6 +4128,8 @@ export function SkillPanel({
                   disabled={oauthLoadingProvider === 'github'}
                   className="flex items-center justify-center gap-2 rounded-[16px] text-sm whitespace-nowrap transition-colors w-full bg-card text-control-emphasis border border-control-emphasis disabled:cursor-not-allowed disabled:opacity-60"
                   style={{ height: '40px' }}
+                  data-testid="skill-panel-oauth-login-btn"
+                  data-variant="github"
                 >
                   {oauthLoadingProvider === 'github' ? (
                     <div className="w-4 h-4 border-2 border-control-emphasis/30 border-t-control-emphasis rounded-full animate-spin" />
@@ -4040,7 +4140,12 @@ export function SkillPanel({
                     ? t('skills.oauthLogin.loading')
                     : t('skills.oauthLogin.githubLogin')}
                 </button>
-                <p className="mt-4 text-xs text-text-muted text-center">{t('skills.oauthLogin.callbackHint')}</p>
+                <p
+                  className="mt-4 text-xs text-text-muted text-center"
+                  data-testid="skill-panel-oauth-login-callback-hint"
+                >
+                  {t('skills.oauthLogin.callbackHint')}
+                </p>
                 {oauthError && (
                   <p className="mt-4 text-xs text-[var(--color-feedback-error)] text-center">{oauthError}</p>
                 )}

@@ -2954,6 +2954,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                   role="menuitem"
                   aria-haspopup="menu"
                   aria-expanded={agentPickerOpen}
+                  data-testid="chat-panel-input-attach-menu-agent"
                   onClick={() => {
                     setAgentPickerOpen((open) => !open);
                     setExtensionPanelOpen(false);
@@ -2973,6 +2974,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                     className="chat-agent-picker"
                     direction={attachMenuDirection}
                     ariaLabel={t('chat.agent')}
+                    testId="chat-panel-agent-picker-panel"
                     onMouseEnter={() => setAgentPickerOpen(true)}
                     rowHeight={AGENT_PICKER_ROW_HEIGHT}
                     itemCount={filteredAgentOptions.length}
@@ -2990,6 +2992,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                             value={agentPickerQuery}
                             onChange={(event) => setAgentPickerQuery(event.target.value)}
                             placeholder={t('chat.agentSearchPlaceholder')}
+                            data-testid="chat-panel-agent-picker-search-input"
                           />
                         </div>
                       </label>
@@ -3003,11 +3006,11 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                     }}
                   >
                     {agentOptionsStatus === 'loading' ? (
-                      <div className="chat-agent-picker__state">{t('common.loading')}</div>
+                      <div className="chat-agent-picker__state" data-testid="chat-panel-agent-picker-state" data-variant="loading">{t('common.loading')}</div>
                     ) : agentOptionsStatus === 'error' ? (
-                      <div className="chat-agent-picker__state">{t('agentManagement.states.loadError')}</div>
+                      <div className="chat-agent-picker__state" data-testid="chat-panel-agent-picker-state" data-variant="error">{t('agentManagement.states.loadError')}</div>
                     ) : filteredAgentOptions.length === 0 ? (
-                      <div className="chat-agent-picker__state">
+                      <div className="chat-agent-picker__state" data-testid="chat-panel-agent-picker-state" data-variant={installedAgentOptions.length === 0 ? 'no-installed' : 'no-matches'}>
                         {installedAgentOptions.length === 0 ? t('chat.agentNoInstalled') : t('chat.agentNoMatches')}
                       </div>
                     ) : (
@@ -3021,6 +3024,8 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                             className={clsx('chat-agent-picker__item', isSelected && 'is-selected')}
                             role="menuitemradio"
                             aria-checked={isSelected}
+                            data-testid="chat-panel-agent-picker-item"
+                            data-variant={item.id}
                             data-tooltip={item.description || undefined}
                             {...agentTooltipHandlers}
                             onClick={() => {
@@ -3063,6 +3068,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                   role="menuitem"
                   aria-haspopup="menu"
                   aria-expanded={skillPanelOpen}
+                  data-testid="chat-panel-input-attach-menu-skill"
                   onClick={() => {
                     setSkillPanelOpen((open) => !open);
                     setAgentPickerOpen(false);
@@ -3100,6 +3106,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                     role="menuitem"
                     aria-haspopup="menu"
                     aria-expanded={extensionPanelOpen}
+                    data-testid="chat-panel-input-attach-menu-extension"
                     onClick={() => {
                       setExtensionPanelOpen((open) => !open);
                       setAgentPickerOpen(false);
