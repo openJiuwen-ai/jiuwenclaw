@@ -109,8 +109,8 @@ function StatusBadge({ icon }: { icon: NodeIconKind }) {
   );
 }
 
-function CostIcon() {
-  return <img className="rsi-canvas-statusbar__icon" src={costIcon} alt="" aria-hidden />;
+function CostIcon({ title }: { title: string }) {
+  return <img className="rsi-canvas-statusbar__icon" src={costIcon} alt="" title={title} aria-hidden />;
 }
 
 interface RsiCanvasStatusBarProps {
@@ -120,6 +120,7 @@ interface RsiCanvasStatusBarProps {
   cost: number | null;
   progressPct: number;
   queued: boolean;
+  failureReason: string | null;
   onBack?: () => void;
 }
 
@@ -130,9 +131,14 @@ function RsiCanvasStatusBar({
   cost,
   progressPct,
   queued,
+  failureReason,
   onBack,
 }: RsiCanvasStatusBarProps) {
   const { t } = useTranslation();
+  const statusTitle = [statusText, failureReason ?? candidate]
+    .filter(Boolean)
+    .join('：');
+  const costTitle = t('rsi.detail.estimatedCost', { cost: formatCost(cost) });
   return (
     <div
       className={'rsi-canvas-statusbar' + (onBack ? ' rsi-canvas-statusbar--fullscreen' : '')}
@@ -156,13 +162,13 @@ function RsiCanvasStatusBar({
         )}
         <div className="rsi-canvas-statusbar__left">
           <span className="rsi-canvas-statusbar__item">
-            <TaskStatusIcon kind={statusKind} />
+            <TaskStatusIcon kind={statusKind} title={statusTitle} />
             <span className="rsi-canvas-statusbar__strong">{statusText}</span>
             {candidate && <span className="rsi-canvas-statusbar__weak">{candidate}</span>}
           </span>
           <span className="rsi-canvas-statusbar__divider" />
           <span className="rsi-canvas-statusbar__item">
-            <CostIcon />
+            <CostIcon title={costTitle} />
             <span className="rsi-canvas-statusbar__weak">
               {t('rsi.detail.estimatedCost', { cost: formatCost(cost) })}
             </span>
@@ -197,13 +203,20 @@ const CANVAS_STATUS_ICON_SRCS: Partial<Record<StatusBadgeKind, string>> = {
   installed: bestIcon,
 };
 
-function TaskStatusIcon({ kind }: { kind: StatusBadgeKind }) {
+function TaskStatusIcon({ kind, title }: { kind: StatusBadgeKind; title: string }) {
   const iconSrc = CANVAS_STATUS_ICON_SRCS[kind];
   if (iconSrc) {
-    return <img className="rsi-canvas-statusbar__running" src={iconSrc} alt="" aria-hidden />;
+    return <img className="rsi-canvas-statusbar__running" src={iconSrc} alt="" title={title} aria-hidden />;
   }
   return (
-    <svg className="rsi-canvas-statusbar__running" viewBox="0 0 24 24" fill="none" aria-hidden>
+    <svg
+      className="rsi-canvas-statusbar__running"
+      viewBox="0 0 24 24"
+      fill="none"
+      role="img"
+      aria-label={title}
+    >
+      <title>{title}</title>
       <circle cx="12" cy="12" r="11" fill="rgb(239,68,68)" />
       <path
         d="M12 7C11.4 7 11 7.4 11 8V12.5C11 13.1 11.4 13.5 12 13.5C12.6 13.5 13 13.1 13 12.5V8C13 7.4 12.6 7 12 7Z"
@@ -663,6 +676,7 @@ export function RsiCanvasArea({ task, tree }: RsiCanvasAreaProps) {
           cost={cost}
           progressPct={progressPct}
           queued={queued}
+          failureReason={task.failure_reason ?? null}
         />
         {queued ? (
           <div className="rsi-canvas-queued">
@@ -780,6 +794,7 @@ export function RsiCanvasArea({ task, tree }: RsiCanvasAreaProps) {
             cost={cost}
             progressPct={progressPct}
             queued={queued}
+            failureReason={task.failure_reason ?? null}
             onBack={() => setFullscreen(false)}
           />
           <div className="rsi-fullscreen-canvas__content">

@@ -10638,6 +10638,7 @@ class AgentWebSocketServer:
         import json
         from jiuwenswarm.agents.harness.common.rsi.harness_activation import (
             RsiHarnessActivationStore,
+            resolve_native_harness_baseline,
         )
         from jiuwenswarm.common.utils import get_user_workspace_dir
 
@@ -10681,6 +10682,10 @@ class AgentWebSocketServer:
                     return str(Path(config_path).expanduser().resolve())
         except Exception as exc:
             logger.warning("[RSI] harness refs 定位失败: %s", exc)
+        baseline = resolve_native_harness_baseline()
+        if baseline is not None:
+            logger.info("[RSI] No active Harness found; using native Agent baseline")
+            return str(baseline)
         return None
 
 

@@ -123,7 +123,54 @@ class TestTaskGet:
         assert data["status"] == "CREATED"
         assert data["config"]["model"]["optimizer"] == "opt-model"
         assert data["config"]["model"]["tester"] == "tst-model"
+        assert data["config"]["input_file"] == "C:/data/dataset.json"
+        assert data["config"]["max_iterations"] == 3
+        assert data["config"]["search_width"] == 2
         assert data["progress"]["iteration"] == 0
+
+    def test_artifact_config_projection(self, ctx, tmp_path: Path):
+        program_path = tmp_path / "program"
+        program_path.mkdir()
+        paper_path = tmp_path / "paper.zip"
+        paper_path.write_bytes(b"paper")
+
+        program_id = ctx.task_service.create({
+            "scenario": "ARTIFACT",
+            "artifact_type": "PROGRAM",
+            "name": "program-task",
+            "model_refs": {"optimizer": "opt-model"},
+            "artifact_path": str(program_path),
+        })["task_id"]
+        paper_id = ctx.task_service.create({
+            "scenario": "ARTIFACT",
+            "artifact_type": "PAPER",
+            "name": "paper-task",
+            "model_refs": {"optimizer": "opt-model"},
+            "artifact_path": str(paper_path),
+            "optimization_instruction": "improve abstract",
+            "max_iterations": 2,
+        })["task_id"]
+
+        program = ctx.task_service.get(
+            {"task_id": program_id},
+            projector=ctx.projector,
+            usage_recorder=ctx.usage_recorder,
+            artifact_service=ctx.artifact_service,
+        )
+        paper = ctx.task_service.get(
+            {"task_id": paper_id},
+            projector=ctx.projector,
+            usage_recorder=ctx.usage_recorder,
+            artifact_service=ctx.artifact_service,
+        )
+        assert program["config"]["input_file"] is None
+        assert program["config"]["artifact_path"] == str(program_path)
+        assert program["config"]["max_iterations"] == 1
+        assert paper["config"]["input_file"] is None
+        assert paper["config"]["artifact_path"] == str(paper_path)
+        assert paper["config"]["optimization_instruction"] == "improve abstract"
+        assert paper["config"]["max_iterations"] == 2
+        assert paper["config"]["search_width"] == 1
 
 
 class TestTaskDelete:

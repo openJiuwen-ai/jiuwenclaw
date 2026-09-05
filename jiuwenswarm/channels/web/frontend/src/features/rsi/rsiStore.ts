@@ -193,6 +193,12 @@ export const useRsiStore = create<RsiState>((set, get) => ({
 
   applyStatusChanged: (payload) => {
     get().patchTaskStatus(payload.task_id, payload.status);
+    if (
+      get().selectedTaskId === payload.task_id &&
+      (payload.status === 'COMPLETED' || payload.status === 'FAILED' || payload.status === 'TERMINATED')
+    ) {
+      void get().refreshDetail(payload.task_id);
+    }
   },
 
   markTaskInstalled: (taskId) => {

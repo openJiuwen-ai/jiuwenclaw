@@ -177,6 +177,20 @@
   gap: 10px;
   flex-shrink: 0;
 }
+.rsi-detail__header-actions {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 8px;
+  flex-shrink: 0;
+}
+.rsi-detail__action-error {
+  max-width: 420px;
+  font-size: 12px;
+  line-height: 18px;
+  color: #d92d20;
+  text-align: right;
+}
 .rsi-detail__actions .rsi-btn {
   width: 96px;
   height: 32px;
@@ -421,12 +435,14 @@
   width: 16px;
   height: 16px;
   flex-shrink: 0;
+  cursor: pointer;
 }
 .rsi-canvas-statusbar__running {
   display: block;
   width: 24px;
   height: 24px;
   flex-shrink: 0;
+  cursor: pointer;
 }
 .rsi-canvas-statusbar__strong {
   font-weight: 600;
@@ -1473,6 +1489,24 @@ dialog.rsi-config-dialog.rsi-create-drawer::backdrop {
   align-items: center;
   margin-bottom: 12px;
 }
+.rsi-create-dialog__close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: none;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--color-text-primary);
+  font-size: 20px;
+  line-height: 1;
+  cursor: pointer;
+}
+.rsi-create-dialog__close:hover {
+  background: var(--color-rsi-rail-selected);
+}
 .rsi-create-dialog__info-bar {
   display: flex;
   align-items: flex-start;
@@ -1483,6 +1517,9 @@ dialog.rsi-config-dialog.rsi-create-drawer::backdrop {
   font-size: 12px;
   margin-bottom: 16px;
   color: var(--color-text-secondary);
+}
+.rsi-create-dialog__info-bar span {
+  color: #191919; /* 替换为你想要的颜色值 */
 }
 /* 底部按钮：两个都圆角 999px、宽 84px */
 .rsi-create-dialog__actions .rsi-btn {
@@ -1614,6 +1651,14 @@ dialog.rsi-config-dialog.rsi-create-drawer::backdrop {
 }
 .rsi-create-dialog__path-btn:hover {
   color: #1476ff;
+}
+
+.rsi-create-dialog__label-tip {
+  display: inline-flex;
+  align-items: center;
+  color: var(--color-rsi-text-muted);
+  line-height: 0;
+  cursor: pointer;
 }
 
 /* 数据集校验结果 */

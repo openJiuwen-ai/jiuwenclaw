@@ -294,6 +294,7 @@ function normalizeTask(value: unknown): RsiTaskGetResult {
         optimizer: asString(model.optimizer),
         tester: asNullableString(model.tester),
       },
+      input_file: asNullableString(config.input_file),
       max_iterations: asNumber(config.max_iterations, 1),
       search_width: asNumber(config.search_width, 1),
       optimization_instruction: asNullableString(config.optimization_instruction),
@@ -302,6 +303,7 @@ function normalizeTask(value: unknown): RsiTaskGetResult {
     progress,
     best_artifact: normalizeBestArtifact(raw.best_artifact),
     usage: normalizeUsage(raw.usage),
+    failure_reason: asNullableString(raw.failure_reason),
   };
 }
 
@@ -501,22 +503,25 @@ export function rsiTaskCreate(params: RsiTaskCreateParams): Promise<RsiTaskCreat
   });
 }
 
+const normalizeTaskListPayload = (value: unknown): RsiTaskListItem[] => {
+  const tasks = asRecord(value)?.tasks;
+  return (Array.isArray(tasks) ? tasks : []).flatMap((item) => {
+    const normalized = normalizeTaskListItem(item);
+    return normalized ? [normalized] : [];
+  });
+};
+
 export function rsiTaskList(params: RsiTaskListParams = {}): Promise<RsiTaskListItem[]> {
   if (isMockEnabled()) {
     let list = [...rsiMock.tasks];
     if (params.scenario) list = list.filter((item) => item.scenario === params.scenario);
     if (params.artifact_type) list = list.filter((item) => item.artifact_type === params.artifact_type);
-    return rsiMock.delay(list);
+    return rsiMock.delay({ tasks: list }).then(normalizeTaskListPayload);
   }
   const wire: Record<string, unknown> = {};
   if (params.scenario) wire.scenario = toWireScenario(params.scenario);
   if (params.artifact_type) wire.artifact_type = toWireArtifactType(params.artifact_type);
-  return webRequest<unknown>(METHOD.taskList, withRsiSession(wire)).then((value) =>
-    (Array.isArray(value) ? value : []).flatMap((item) => {
-      const normalized = normalizeTaskListItem(item);
-      return normalized ? [normalized] : [];
-    }),
-  );
+  return webRequest<unknown>(METHOD.taskList, withRsiSession(wire)).then(normalizeTaskListPayload);
 }
 
 export function rsiTaskGet(taskId: string): Promise<RsiTaskGetResult> {

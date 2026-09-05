@@ -30,7 +30,7 @@ export function RsiDetail() {
     if (status !== 'CREATED' && status !== 'QUEUED' && status !== 'RUNNING') return;
     const timer = window.setInterval(() => {
       void refreshDetail(selectedTaskId);
-    }, 800);
+    }, 3000);
     return () => window.clearInterval(timer);
   }, [selectedTaskId, detail?.task?.status, refreshDetail]);
 

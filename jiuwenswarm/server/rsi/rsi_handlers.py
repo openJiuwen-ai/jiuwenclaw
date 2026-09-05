@@ -147,8 +147,8 @@ class RsiAgentServerHandlers:
         self.context.ensure_root(task_id)
         return result
 
-    def _do_task_list(self, params: dict[str, Any]) -> list[dict[str, Any]]:
-        return self.context.task_service.list(params)
+    def _do_task_list(self, params: dict[str, Any]) -> dict[str, Any]:
+        return {"tasks": self.context.task_service.list(params)}
 
     def _do_task_get(self, params: dict[str, Any]) -> dict[str, Any]:
         return self.context.task_service.get(

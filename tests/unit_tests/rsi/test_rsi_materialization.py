@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -12,15 +13,26 @@ import yaml
 from jiuwenswarm.agents.harness.common.rsi.errors import (
     RsiDatasetInvalid,
     RsiModelNotFound,
-    RsiUnsupportedParameter,
 )
 from jiuwenswarm.agents.harness.common.rsi import build_rsi_service_context
-from jiuwenswarm.agents.harness.common.rsi.harness_provider import HarnessProvider
+from jiuwenswarm.agents.harness.common.rsi.harness_activation import (
+    resolve_native_harness_baseline,
+)
+from jiuwenswarm.agents.harness.common.rsi.harness_provider import (
+    HarnessProvider,
+    engine_validate_input,
+)
 from jiuwenswarm.agents.harness.common.rsi.materializer import RsiTaskMaterializer
 from jiuwenswarm.agents.harness.common.rsi.model_resolver import RsiModelConfigResolver
 
 
-def _entry(name: str, *, alias: str = "", is_default: bool = False, api_base: str = "https://example.test/v1"):
+def _entry(
+    name: str,
+    *,
+    alias: str = "",
+    is_default: bool = False,
+    api_base: str = "https://example.test/v1",
+):
     return {
         "model_client_config": {
             "model_name": name,
@@ -85,7 +97,9 @@ def test_model_resolver_uses_models_list_global_origin_index(tmp_path: Path) -> 
     assert payload["model_client_config"]["api_key"] == "secret-same"
 
 
-def test_model_resolver_rejects_unknown_reference_without_default_fallback(tmp_path: Path) -> None:
+def test_model_resolver_rejects_unknown_reference_without_default_fallback(
+    tmp_path: Path,
+) -> None:
     resolver = RsiModelConfigResolver(
         config_loader=lambda: {},
         defaults_loader=lambda _: [_entry("configured", is_default=True)],
@@ -100,7 +114,76 @@ def test_model_resolver_rejects_unknown_reference_without_default_fallback(tmp_p
         resolver.resolve_to_file("missing", "tester", tmp_path)
 
 
-def test_materializer_copies_dataset_wraps_single_harness_and_writes_validation_profile(tmp_path: Path) -> None:
+def test_native_harness_baseline_is_capability_free_and_materializable(
+    tmp_path: Path,
+) -> None:
+    baseline = resolve_native_harness_baseline()
+
+    assert baseline is not None
+    payload = yaml.safe_load(baseline.read_text(encoding="utf-8"))
+    assert payload["id"] == "rsi-native-agent-baseline"
+    for capability in ("tools", "rails", "skills", "prompt_sections"):
+        assert payload.get(capability, []) == []
+
+    result = RsiTaskMaterializer(tmp_path / "tasks").materialize_harness_refs(
+        "rsi-native-baseline",
+        baseline,
+    )
+    refs = yaml.safe_load(Path(result["path"]).read_text(encoding="utf-8"))
+    package = Path(refs["harness_refs"]["validation_harness"])
+
+    assert package.is_dir()
+    assert package == tmp_path / "tasks" / "rsi-native-baseline" / "harness" / "rsi"
+    assert (package / "harness_config.yaml").read_text(
+        encoding="utf-8"
+    ) == baseline.read_text(encoding="utf-8")
+    assert result["package_path"] == str(package.resolve())
+    assert result["source_config_path"] == str(baseline)
+
+
+def test_gdpval_validation_suite_is_normalized(tmp_path: Path) -> None:
+    source = tmp_path / "train_suite.json"
+    source.write_text(
+        json.dumps(
+            {
+                "validation": [
+                    {
+                        "id": "gdpval-case-1",
+                        "domain": "office",
+                        "prompt": "Prepare the report.",
+                        "metadata": {"task_type": "spreadsheet"},
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    validation = engine_validate_input(str(source))
+    materialized = RsiTaskMaterializer(tmp_path / "tasks").materialize_dataset(
+        "rsi-gdpval-suite",
+        source,
+    )
+    payload = json.loads(Path(materialized["path"]).read_text(encoding="utf-8"))
+
+    assert validation == {"valid": True, "sample_count": 1, "errors": []}
+    assert payload["dataset_id"] == "evobench_local_no_key_validation"
+    assert payload["cases"] == [
+        {
+            "case_id": "gdpval-case-1",
+            "task_id": "gdpval-case-1",
+            "input": "Prepare the report.",
+            "domain": "office",
+            "source": "gdpval",
+            "task_type": "spreadsheet",
+        }
+    ]
+
+
+def test_materializer_copies_dataset_wraps_single_harness_and_writes_validation_profile(
+    tmp_path: Path,
+) -> None:
     source_dataset = tmp_path / "source" / "validation.json"
     source_dataset.parent.mkdir()
     source_dataset.write_text('{"cases": [{"case_id": "a"}]}', encoding="utf-8")
@@ -124,6 +207,8 @@ def test_materializer_copies_dataset_wraps_single_harness_and_writes_validation_
     profile = materializer.materialize_validation_profile(
         task_id,
         model_paths,
+        max_iterations=4,
+        search_width=3,
     )
 
     dataset_path = Path(dataset["path"])
@@ -131,27 +216,42 @@ def test_materializer_copies_dataset_wraps_single_harness_and_writes_validation_
     profile_path = Path(profile["path"])
     refs_payload = yaml.safe_load(refs_path.read_text(encoding="utf-8"))
     profile_payload = yaml.safe_load(profile_path.read_text(encoding="utf-8"))
+    materialized_package = Path(refs_payload["harness_refs"]["validation_harness"])
 
     assert dataset_path.is_file()
-    assert dataset_path.read_text(encoding="utf-8") == source_dataset.read_text(encoding="utf-8")
+    assert dataset_path.read_text(encoding="utf-8") == source_dataset.read_text(
+        encoding="utf-8"
+    )
     assert dataset["sha256"] == hashlib.sha256(dataset_path.read_bytes()).hexdigest()
-    assert refs_payload["harness_refs"] == {"validation_harness": str(source_harness.resolve())}
-    assert profile_payload["max_epochs"] == 1
+    assert refs_payload["harness_refs"] == {
+        "validation_harness": str(materialized_package.resolve())
+    }
+    assert (materialized_package / "harness_config.yaml").read_text(
+        encoding="utf-8"
+    ) == source_harness.read_text(encoding="utf-8")
+    assert profile_payload["max_epochs"] == 4
     assert profile_payload["data_loader"]["batch_size"] == 8
-    assert profile_payload["member_optimizer"]["sibling_candidate_count"] == 2
+    assert profile_payload["member_optimizer"]["sibling_candidate_count"] == 3
     assert profile_payload["member_optimizer"]["max_issue_attempts_per_batch"] == 8
     assert profile_payload["member_optimizer"]["max_repair_rounds_per_batch"] == 1
-    assert profile_payload["evaluation_result_analyzer"]["diagnosis_agent_max_concurrency"] == 5
+    assert (
+        profile_payload["evaluation_result_analyzer"]["diagnosis_agent_max_concurrency"]
+        == 5
+    )
     assert profile["sha256"] == hashlib.sha256(profile_path.read_bytes()).hexdigest()
 
 
-def test_materializer_preserves_harness_package_directory_for_engine_checkpoints(tmp_path: Path) -> None:
+def test_materializer_preserves_harness_package_directory_for_engine_checkpoints(
+    tmp_path: Path,
+) -> None:
     package = tmp_path / "harness" / "demo"
     package.mkdir(parents=True)
     config = package / "harness_config.yaml"
     config.write_text("name: demo\n", encoding="utf-8")
     (package / "prompt_sections").mkdir()
-    (package / "prompt_sections" / "sections.yaml").write_text("sections: []\n", encoding="utf-8")
+    (package / "prompt_sections" / "sections.yaml").write_text(
+        "sections: []\n", encoding="utf-8"
+    )
 
     result = RsiTaskMaterializer(tmp_path / "tasks").materialize_harness_refs(
         "rsi-package",
@@ -163,6 +263,135 @@ def test_materializer_preserves_harness_package_directory_for_engine_checkpoints
     assert result["source_path"] == str(package.resolve())
     assert result["source_config_path"] == str(config.resolve())
     assert result["source_sha256"] == _tree_digest(package)
+
+
+def test_materializer_accepts_manifest_json_harness_directory(tmp_path: Path) -> None:
+    package = tmp_path / "harness" / "modern"
+    package.mkdir(parents=True)
+    manifest = package / "manifest.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "package_type": "plugin",
+                "id": "modern-harness",
+                "name": "Modern Harness",
+                "description": "Modern package",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = RsiTaskMaterializer(tmp_path / "tasks").materialize_harness_refs(
+        "rsi-modern-package",
+        package,
+    )
+
+    refs = yaml.safe_load(Path(result["path"]).read_text(encoding="utf-8"))
+    assert refs["harness_refs"]["validation_harness"] == str(package.resolve())
+    assert result["source_config_path"] == str(manifest.resolve())
+    assert result["package_path"] == str(package.resolve())
+
+
+def test_materializer_copies_single_file_harness_dependencies(tmp_path: Path) -> None:
+    source_root = tmp_path / "bundle"
+    source = source_root / "harness_config.yaml"
+    source_root.mkdir()
+    source.write_text(
+        yaml.safe_dump(
+            {
+                "schema_version": "expert_harness.v1",
+                "id": "single-file-bundle",
+                "name": "single-file-bundle",
+                "skills": [{"dir": "skills/demo"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    tool_list = source_root / "tools" / "tools.yaml"
+    tool_list.parent.mkdir()
+    tool_list.write_text(
+        yaml.safe_dump(
+            [
+                {
+                    "type": "harness.tool.file",
+                    "params": {
+                        "file_path": "shared/demo_tool.py",
+                        "class_name": "DemoTool",
+                    },
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+    tool = source_root / "shared" / "demo_tool.py"
+    tool.parent.mkdir()
+    tool.write_text("class DemoTool:\n    pass\n", encoding="utf-8")
+    skill = source_root / "skills" / "demo" / "SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_text("# Demo\n", encoding="utf-8")
+
+    result = RsiTaskMaterializer(tmp_path / "tasks").materialize_harness_refs(
+        "rsi-single-file",
+        source,
+    )
+    refs = yaml.safe_load(Path(result["path"]).read_text(encoding="utf-8"))
+    package = Path(refs["harness_refs"]["validation_harness"])
+
+    assert package.is_dir()
+    assert package.name == "bundle"
+    assert package != source_root
+    assert (package / "tools" / "tools.yaml").read_text(
+        encoding="utf-8"
+    ) == tool_list.read_text(encoding="utf-8")
+    assert (package / "shared" / "demo_tool.py").read_text(
+        encoding="utf-8"
+    ) == tool.read_text(encoding="utf-8")
+    assert (package / "skills" / "demo" / "SKILL.md").read_text(
+        encoding="utf-8"
+    ) == skill.read_text(encoding="utf-8")
+    assert result["source_path"] == str(source.resolve())
+    assert result["package_path"] == str(package.resolve())
+    assert result["target_sha256"] == _tree_digest(package)
+
+
+def test_materializer_copies_manifest_json_file_dependencies(tmp_path: Path) -> None:
+    source_root = tmp_path / "modern-file"
+    manifest = source_root / "manifest.json"
+    source_root.mkdir()
+    manifest.write_text(
+        json.dumps(
+            {
+                "package_type": "plugin",
+                "id": "modern-file",
+                "name": "Modern File",
+                "description": "Modern file package",
+                "tools": [{"file": "shared/demo_tool.py", "class": "DemoTool"}],
+                "skills": [{"dir": "skills/demo"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    tool = source_root / "shared" / "demo_tool.py"
+    tool.parent.mkdir()
+    tool.write_text("class DemoTool:\n    pass\n", encoding="utf-8")
+    skill = source_root / "skills" / "demo" / "SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_text("# Demo\n", encoding="utf-8")
+
+    result = RsiTaskMaterializer(tmp_path / "tasks").materialize_harness_refs(
+        "rsi-modern-file",
+        manifest,
+    )
+    refs = yaml.safe_load(Path(result["path"]).read_text(encoding="utf-8"))
+    package = Path(refs["harness_refs"]["validation_harness"])
+
+    assert package.is_dir()
+    assert package.name == "modern-file"
+    assert (package / "manifest.json").read_text(
+        encoding="utf-8"
+    ) == manifest.read_text(encoding="utf-8")
+    assert (package / "shared" / "demo_tool.py").is_file()
+    assert (package / "skills" / "demo" / "SKILL.md").is_file()
 
 
 def test_task_service_materializes_private_validation_inputs_and_keeps_manifest_non_secret(
@@ -183,7 +412,10 @@ def test_task_service_materializes_private_validation_inputs_and_keeps_manifest_
 
     resolver = RsiModelConfigResolver(
         config_loader=lambda: {},
-        defaults_loader=lambda _: [_entry("optimizer", is_default=True), _entry("tester")],
+        defaults_loader=lambda _: [
+            _entry("optimizer", is_default=True),
+            _entry("tester"),
+        ],
         zen_loader=lambda: [],
         model_builder=build_model,
     )
@@ -203,6 +435,8 @@ def test_task_service_materializes_private_validation_inputs_and_keeps_manifest_
             "name": "validation",
             "dataset_path": str(source_dataset),
             "model_refs": {"optimizer": "optimizer", "tester": "tester"},
+            "max_iterations": 5,
+            "search_width": 4,
         }
     )
     task = context.store.get(result["task_id"])
@@ -210,6 +444,11 @@ def test_task_service_materializes_private_validation_inputs_and_keeps_manifest_
     assert Path(task.input_file).parent == task_root / "input"
     assert Path(task.config["harness_refs_path"]).parent == task_root / "harness"
     assert Path(task.config["orchestrator_config_path"]).parent == task_root / "config"
+    profile = yaml.safe_load(
+        Path(task.config["orchestrator_config_path"]).read_text(encoding="utf-8")
+    )
+    assert profile["max_epochs"] == 5
+    assert profile["member_optimizer"]["sibling_candidate_count"] == 4
     assert task.config["dataset_id"] == "single_harness_benchmark"
     assert "api_key" not in (task_root / "task.json").read_text(encoding="utf-8")
     assert (task_root / "models" / "evaluation.yaml").is_file()
@@ -220,7 +459,9 @@ def test_task_service_materializes_private_validation_inputs_and_keeps_manifest_
         "analysis": "optimizer",
         "member_optimization": "optimizer",
     }.items():
-        payload = yaml.safe_load((task_root / "models" / f"{role}.yaml").read_text(encoding="utf-8"))
+        payload = yaml.safe_load(
+            (task_root / "models" / f"{role}.yaml").read_text(encoding="utf-8")
+        )
         assert payload["model_request_config"]["model"] == expected_model
     assert task.config["active_ref_released"] is True
 
@@ -234,28 +475,9 @@ def test_task_service_materializes_private_validation_inputs_and_keeps_manifest_
     assert not task_root.exists()
 
 
-def test_task_service_rejects_non_default_validation_search_controls(tmp_path: Path) -> None:
-    tasks_root = tmp_path / "tasks"
-    materializer = RsiTaskMaterializer(tasks_root)
-    context = build_rsi_service_context(
-        tasks_root,
-        enable_harness_materialization=True,
-        harness_materializer=materializer,
-        model_resolver=object(),
-    )
-    with pytest.raises(RsiUnsupportedParameter):
-        context.task_service.create(
-            {
-                "scenario": "HARNESS",
-                "name": "validation",
-                "input_file": str(tmp_path / "missing.json"),
-                "model_refs": {"optimizer": "optimizer", "tester": "optimizer"},
-                "max_iterations": 2,
-            }
-        )
-
-
-def test_task_service_rejects_invalid_dataset_before_writing_task_materials(tmp_path: Path) -> None:
+def test_task_service_rejects_invalid_dataset_before_writing_task_materials(
+    tmp_path: Path,
+) -> None:
     source_dataset = tmp_path / "source" / "duplicate.json"
     source_dataset.parent.mkdir()
     source_dataset.write_text(
