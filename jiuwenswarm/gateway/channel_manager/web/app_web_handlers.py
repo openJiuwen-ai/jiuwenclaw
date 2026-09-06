@@ -90,6 +90,7 @@ from jiuwenswarm.common.kv_cache_affinity_config import (
     parse_bool as parse_kvc_bool,
     set_default_model_provider_in_entries,
 )
+from jiuwenswarm.common.model_catalog import ModelCatalog
 from jiuwenswarm.server.runtime.a2ui.integration import (
     get_a2ui_config_payload,
     get_default_a2ui_config_payload,
@@ -3679,9 +3680,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             active_model = result[0]["model_name"] if result else ""
             await channel.send_response(ws, req_id, ok=True, payload={
                 "models": result,
-                "model_groups": __import__(
-                    "jiuwenswarm.common.model_catalog", fromlist=["ModelCatalog"]
-                ).ModelCatalog(config).list_public_groups(),
+                "model_groups": ModelCatalog(config).list_public_groups(),
                 "active_model": active_model,
             })
         except Exception as exc:  # noqa: BLE001

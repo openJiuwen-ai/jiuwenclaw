@@ -51,7 +51,7 @@ def migrate_legacy_model_selections() -> dict[str, int]:
                 data["model_selection"] = {"type": "model", "id": model_id}
                 _write(path, data)
                 report["sessions"] += 1
-            except (OSError, ValueError, json.JSONDecodeError):
+            except (OSError, ValueError):
                 continue
     cron_path = get_cron_jobs_path()
     if cron_path.is_file():

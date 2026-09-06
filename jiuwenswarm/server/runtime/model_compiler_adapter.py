@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from jiuwenswarm.common.model_errors import MODEL_RUNTIME_UNAVAILABLE, ModelSelectionError
-from jiuwenswarm.common.model_selection import ResolvedModel, ResolvedModelGroup, ResolvedSelection
+from jiuwenswarm.common.model_selection import ResolvedModel, ResolvedSelection
 
 
 def compile_model_selection(resolved: ResolvedSelection) -> tuple[Any, Any]:
@@ -14,8 +14,11 @@ def compile_model_selection(resolved: ResolvedSelection) -> tuple[Any, Any]:
         from openjiuwen.core.foundation.llm.routing.schema import ResolvedModel as CoreModel
         from openjiuwen.core.foundation.llm.routing.schema import ResolvedModelGroup as CoreGroup
         from openjiuwen.core.foundation.llm.routing.schema import ResolvedRoute as CoreRoute
-    except (ImportError, ModuleNotFoundError) as exc:
-        raise ModelSelectionError(MODEL_RUNTIME_UNAVAILABLE, "agent-core model-selection compiler is unavailable") from exc
+    except ImportError as exc:
+        raise ModelSelectionError(
+            MODEL_RUNTIME_UNAVAILABLE,
+            "agent-core model-selection compiler is unavailable",
+        ) from exc
     if isinstance(resolved, ResolvedModel):
         core = CoreModel(**resolved.model_dump())
     else:

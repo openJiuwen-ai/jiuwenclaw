@@ -3,12 +3,44 @@
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from jiuwenswarm.common.config import get_config, load_models_config
 from jiuwenswarm.common.model_errors import MODEL_SELECTION_NOT_FOUND, ModelSelectionError
 from jiuwenswarm.common.model_selection import ModelSelection
+
+logger = logging.getLogger(__name__)
+
+_PUBLIC_GROUP_KEYS = (
+    "model_group_id",
+    "display_name",
+    "enabled",
+    "is_default",
+    "routes",
+    "request_config",
+    "routing",
+)
+
+
+def _read_session_selection(path: Path) -> dict[str, Any] | None:
+    try:
+        metadata = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        logger.warning("Failed to read session model selection from %s", path, exc_info=True)
+        return None
+    value = metadata.get("model_selection")
+    return value if isinstance(value, dict) else None
+
+
+def _matches(selection: ModelSelection, value: Any) -> bool:
+    return (
+        isinstance(value, dict)
+        and value.get("type") == selection.type
+        and value.get("id") == selection.id
+    )
 
 
 @dataclass(frozen=True)
@@ -45,22 +77,21 @@ class ModelCatalog:
         }
 
     def list_public_models(self) -> list[dict[str, Any]]:
-        return [
-            self._safe_model(entry, source)
-            for source in ("defaults", "agentos")
-            for entry in self.snapshot[source]
-            if isinstance(entry, dict) and entry.get("model_id")
-        ]
+        result = []
+        for source in ("defaults", "agentos"):
+            for entry in self.snapshot[source]:
+                if isinstance(entry, dict) and entry.get("model_id"):
+                    result.append(self._safe_model(entry, source))
+        return result
 
     def list_public_groups(self) -> list[dict[str, Any]]:
         result = []
         for group in self.snapshot["groups"]:
             if not isinstance(group, dict):
                 continue
-            public = {k: group.get(k) for k in (
-                "model_group_id", "display_name", "enabled", "is_default",
-                "routes", "request_config", "routing",
-            )}
+            public = {}
+            for key in _PUBLIC_GROUP_KEYS:
+                public[key] = group.get(key)
             result.append(public)
         return result
 
@@ -68,7 +99,8 @@ class ModelCatalog:
         refs: list[SelectionReference] = []
         if selection.type == "model":
             for group in self.snapshot["groups"]:
-                if any(isinstance(r, dict) and r.get("model_id") == selection.id for r in group.get("routes") or []):
+                routes = group.get("routes") or []
+                if any(isinstance(route, dict) and route.get("model_id") == selection.id for route in routes):
                     refs.append(SelectionReference("model_group", str(group.get("model_group_id") or "")))
         try:
             from jiuwenswarm.common.utils import get_agent_sessions_dir
@@ -78,14 +110,11 @@ class ModelCatalog:
                     path = directory / "metadata.json"
                     if not path.is_file():
                         continue
-                    try:
-                        value = json.loads(path.read_text(encoding="utf-8")).get("model_selection")
-                    except Exception:
-                        continue
-                    if isinstance(value, dict) and value.get("type") == selection.type and value.get("id") == selection.id:
+                    value = _read_session_selection(path)
+                    if _matches(selection, value):
                         refs.append(SelectionReference("session", directory.name))
-        except Exception:
-            pass
+        except (OSError, RuntimeError):
+            logger.warning("Failed to scan session model references", exc_info=True)
         try:
             from jiuwenswarm.common.utils import get_cron_jobs_path
             path = get_cron_jobs_path()
@@ -93,8 +122,8 @@ class ModelCatalog:
             items = data.get("jobs", []) if isinstance(data, dict) else data
             for item in items if isinstance(items, list) else []:
                 value = item.get("model_selection") if isinstance(item, dict) else None
-                if isinstance(value, dict) and value.get("type") == selection.type and value.get("id") == selection.id:
+                if _matches(selection, value):
                     refs.append(SelectionReference("cron", str(item.get("id") or "")))
-        except Exception:
-            pass
+        except (OSError, ValueError):
+            logger.warning("Failed to scan cron model references", exc_info=True)
         return refs

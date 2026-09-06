@@ -34,7 +34,7 @@ def get_session_model_selection(session_id: str) -> ModelSelection | None:
     try:
         raw = json.loads(path.read_text(encoding="utf-8")).get("model_selection")
         return ModelSelection.model_validate(raw) if isinstance(raw, dict) else None
-    except (OSError, ValueError, json.JSONDecodeError):
+    except (OSError, ValueError):
         return None
 
 
