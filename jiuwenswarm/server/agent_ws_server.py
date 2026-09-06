@@ -10590,12 +10590,13 @@ class AgentWebSocketServer:
                 if os.environ.get("RSI_USE_MOCK_PROVIDER", "").strip().lower() == "true"
                 else "real"
             )
-        # Production context owns the task-private materializer and strict
-        # models.list resolver.  Mock mode intentionally keeps the old loose
-        # test semantics (no credentials, arbitrary fixture paths).
+        # Both modes materialize task-private datasets, model configs, and the
+        # Validation profile. Mock mode alone may omit a source Harness because
+        # its provider does not execute or publish a real Harness package.
         context = build_rsi_service_context(
             None,
-            enable_harness_materialization=(provider_mode != "mock"),
+            enable_harness_materialization=True,
+            allow_missing_harness=(provider_mode == "mock"),
         )
         if provider_mode == "mock":
             from jiuwenswarm.agents.harness.common.rsi.provider_factory import build_rsi_adapters
@@ -10622,7 +10623,9 @@ class AgentWebSocketServer:
         handlers = RsiAgentServerHandlers(
             context,
             send_push=self.send_push,
-            harness_refs_provider=self._rsi_harness_refs_provider,
+            harness_refs_provider=(
+                None if provider_mode == "mock" else self._rsi_harness_refs_provider
+            ),
             default_channel_id="web",
         )
         self._rsi_handlers = handlers
@@ -10640,16 +10643,26 @@ class AgentWebSocketServer:
             RsiHarnessActivationStore,
             resolve_native_harness_baseline,
         )
+        from jiuwenswarm.agents.harness.common.rsi.context import get_rsi_workspace_root
         from jiuwenswarm.common.utils import get_user_workspace_dir
-
         try:
-            active = RsiHarnessActivationStore(
-                get_user_workspace_dir() / "rsi" / "harness"
-            ).resolve_active_runtime_path()
+            active = RsiHarnessActivationStore(get_rsi_workspace_root()).resolve_active_runtime_path()
             if active:
                 return active
         except Exception as exc:
             logger.warning("[RSI] active Harness 定位失败，回退 generic registry: %s", exc)
+        configured_harness_root = os.environ.get("RSI_HARNESS_ROOT", "").strip()
+        harness_root = (
+            Path(configured_harness_root).expanduser().resolve()
+            if configured_harness_root
+            else (Path(get_user_workspace_dir()) / "rsi" / "harness").resolve()
+        )
+        initial_refs = harness_root / "initial_harness_refs.yaml"
+        if initial_refs.is_file():
+            # This is a trusted baseline input.  RsiTaskMaterializer copies
+            # the selected package/ref into the task directory before the
+            # engine sees it, so the external seed is never task output.
+            return str(initial_refs)
         from jiuwenswarm.agents.harness.common.auto_harness.service import (
             _HARNESS_PACKAGES_FILE,
         )

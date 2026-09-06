@@ -4,7 +4,6 @@
 import { useCallback, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { executeDesktopSave, type DesktopSaveApiResult } from '../../../utils/desktopSave';
-import { pluginPackagesApi } from '../../../services/pluginPackagesApi';
 import completeIcon from '../../../assets/rsi/rsi-complete.svg';
 import deleteIcon from '../../../assets/rsi/rsi-delete.svg';
 import pauseIcon from '../../../assets/rsi/rsi-pause.svg';
@@ -27,6 +26,7 @@ import {
   rsiTrainingResume,
   rsiArtifactDownload,
   rsiArtifactDownloadUrl,
+  rsiHarnessInstall,
 } from '../rsiApi';
 
 type DownloadCapableWindow = Window & {
@@ -88,10 +88,7 @@ export function RsiDetailHeader({ task, report, liveCost, createdAt, onOpenConfi
             window.open(downloadUrl, '_blank', 'noopener,noreferrer');
           }
         } else if (action === 'install') {
-          const artifactId = report?.metrics.best_artifact_id ?? task.best_artifact?.artifact_id ?? undefined;
-          const artifact = await rsiArtifactDownload(task.task_id, artifactId);
-          const imported = await pluginPackagesApi.importLocal({ path: artifact.path });
-          await pluginPackagesApi.install(imported.id);
+          await rsiHarnessInstall(task.task_id);
           markTaskInstalled(task.task_id);
         }
       } catch (e) {
@@ -102,15 +99,7 @@ export function RsiDetailHeader({ task, report, liveCost, createdAt, onOpenConfi
         setBusy(false);
       }
     },
-    [
-      task.task_id,
-      task.best_artifact,
-      report,
-      patchTaskStatus,
-      removeListItem,
-      markTaskInstalled,
-      onOpenConfig,
-    ],
+    [task.task_id, report, patchTaskStatus, removeListItem, markTaskInstalled, onOpenConfig],
   );
 
   const handleAction = useCallback(
@@ -168,9 +157,7 @@ export function RsiDetailHeader({ task, report, liveCost, createdAt, onOpenConfi
               {t('rsi.detail.' + badge.labelKey)}
             </span>
           ) : (
-            <span className="rsi-detail__tag rsi-detail__tag--status">
-              {t('rsi.detail.' + badge.labelKey)}
-            </span>
+            <span className="rsi-detail__tag rsi-detail__tag--status">{t('rsi.detail.' + badge.labelKey)}</span>
           )}
           <span className="rsi-detail__divider" />
           <span className="rsi-detail__tag rsi-detail__tag--meta">
@@ -210,16 +197,16 @@ export function RsiDetailHeader({ task, report, liveCost, createdAt, onOpenConfi
                 ? 'rsi-btn rsi-detail__action--delete'
                 : `rsi-btn ${action === 'config' ? 'rsi-btn--ghost' : 'rsi-btn--primary'}`;
             return (
-            <button
-              key={action}
-              type="button"
-              className={className}
-              onClick={() => handleAction(action)}
-              disabled={busy || (action === 'pause' && harnessRunning)}
-              aria-label={action === 'delete' ? actionLabel.delete : undefined}
-              title={action === 'pause' && harnessRunning ? t('rsi.detail.pauseUnsupported') : undefined}
-              data-testid={`rsi-action-${action}`}
-            >
+              <button
+                key={action}
+                type="button"
+                className={className}
+                onClick={() => handleAction(action)}
+                disabled={busy || (action === 'pause' && harnessRunning)}
+                aria-label={action === 'delete' ? actionLabel.delete : undefined}
+                title={action === 'pause' && harnessRunning ? t('rsi.detail.pauseUnsupported') : undefined}
+                data-testid={`rsi-action-${action}`}
+              >
                 {action === 'delete' && (
                   <img className="rsi-detail__action-icon" src={deleteIcon} alt={actionLabel.delete} />
                 )}

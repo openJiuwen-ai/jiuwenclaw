@@ -30,11 +30,13 @@ RSI_METHOD_NAMES = {
     "rsi.artifact.files.get",
     "rsi.tree.get",
     "rsi.harness.install",
+    "rsi.harness.versions.list",
+    "rsi.harness.rollback",
 }
 
 
 class TestReqMethod:
-    def test_16_rsi_methods_registered(self):
+    def test_18_rsi_methods_registered(self):
         present = {m.value for m in ReqMethod if m.value.startswith("rsi.")}
         assert present == RSI_METHOD_NAMES
 
@@ -77,6 +79,43 @@ class TestDispatch:
             "payload": {"task_id": "rsi-ready", "status": "ACTIVE"},
         }
         assert calls == ["rsi-ready"]
+
+    def test_harness_versions_list_dispatches_to_context_installer(self, handlers):
+        h, ctx, _ = handlers
+
+        class Installer:
+            def list_versions(self):
+                return {"active_installation_id": "rsi-harness-a", "versions": []}
+
+        ctx.harness_installer = Installer()
+        result = h.handle(FakeRequest(ReqMethod.RSI_HARNESS_VERSIONS_LIST))
+
+        assert result == {
+            "ok": True,
+            "payload": {"active_installation_id": "rsi-harness-a", "versions": []},
+        }
+
+    @pytest.mark.asyncio
+    async def test_harness_rollback_dispatches_to_context_installer(self, handlers):
+        h, ctx, _ = handlers
+
+        class Installer:
+            async def rollback(self, installation_id):
+                assert installation_id == "rsi-harness-first"
+                return {"installation_id": installation_id, "status": "ACTIVE"}
+
+        ctx.harness_installer = Installer()
+        result = await h.handle_async(
+            FakeRequest(
+                ReqMethod.RSI_HARNESS_ROLLBACK,
+                {"installation_id": "rsi-harness-first"},
+            )
+        )
+
+        assert result == {
+            "ok": True,
+            "payload": {"installation_id": "rsi-harness-first", "status": "ACTIVE"},
+        }
 
     @pytest.mark.asyncio
     async def test_async_harness_install_awaits_and_maps_rsi_error(self, handlers):

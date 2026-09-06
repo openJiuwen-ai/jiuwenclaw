@@ -394,6 +394,8 @@ class ReqMethod(Enum):
     RSI_ARTIFACT_FILES_GET = "rsi.artifact.files.get"
     RSI_TREE_GET = "rsi.tree.get"
     RSI_HARNESS_INSTALL = "rsi.harness.install"
+    RSI_HARNESS_VERSIONS_LIST = "rsi.harness.versions.list"
+    RSI_HARNESS_ROLLBACK = "rsi.harness.rollback"
 
     # Schedule task management
     SCHEDULE_CHECK_CONFIG = "schedule.check_config"

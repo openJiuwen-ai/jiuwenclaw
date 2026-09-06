@@ -17,6 +17,7 @@ import logging
 from collections.abc import Awaitable, Callable
 from typing import Any
 
+from jiuwenswarm.agents.harness.common.rsi.event_journal import RsiEventJournal
 from jiuwenswarm.agents.harness.common.rsi.events import EngineEvent
 
 logger = logging.getLogger(__name__)
@@ -33,11 +34,16 @@ class RsiEventConsumer:
         usage_recorder: Any,
         projector: Any,
         artifact_service: Any,
+        event_journal: Any = None,
     ) -> None:
         self.task_id = task_id
         self.usage_recorder = usage_recorder
         self.projector = projector
         self.artifact_service = artifact_service
+        tasks_root = getattr(projector, "tasks_root", None)
+        self.event_journal = event_journal
+        if self.event_journal is None and tasks_root is not None:
+            self.event_journal = RsiEventJournal(tasks_root)
         self._on_progress: PushCallback | None = None
         self._on_tree_delta: PushCallback | None = None
         # 节流记录：P2 只推最新值（内部 v3 §4.3）
@@ -49,6 +55,11 @@ class RsiEventConsumer:
 
     async def on_engine_event(self, event: EngineEvent | Any) -> None:
         """事件入口（同时兼容内部 dict 信封和 agent-core dataclass）。"""
+        if self.event_journal is not None:
+            try:
+                self.event_journal.append(self.task_id, event)
+            except Exception:  # noqa: BLE001 - observability must not stop training
+                logger.exception("[RSI] 引擎事件日志写入失败: task=%s", self.task_id)
         provider_event_type = getattr(event, "event_type", None)
         if provider_event_type == "status":
             # TaskStore is the public status authority.  Provider status

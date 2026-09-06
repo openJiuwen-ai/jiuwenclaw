@@ -57,6 +57,9 @@ const METHOD = {
   artifactFilesList: 'rsi.artifact.files.list',
   artifactFilesGet: 'rsi.artifact.files.get',
   treeGet: 'rsi.tree.get',
+  harnessInstall: 'rsi.harness.install',
+  harnessVersionsList: 'rsi.harness.versions.list',
+  harnessRollback: 'rsi.harness.rollback',
 } as const;
 
 const RSI_MOCK_STORAGE_KEY = 'rsi_use_mock';
@@ -137,27 +140,24 @@ function asBoolean(value: unknown, fallback = false): boolean {
 }
 
 export function normalizeRsiScenario(value: unknown, fallback: RsiScenario = 'HARNESS'): RsiScenario {
-  const normalized = String(value ?? '').trim().toUpperCase();
-  return normalized === 'ARTIFACT' ? 'ARTIFACT' :
-    normalized === 'HARNESS' ? 'HARNESS' : fallback;
+  const normalized = String(value ?? '')
+    .trim()
+    .toUpperCase();
+  return normalized === 'ARTIFACT' ? 'ARTIFACT' : normalized === 'HARNESS' ? 'HARNESS' : fallback;
 }
 
 export function normalizeRsiArtifactType(value: unknown): RsiArtifactType | null {
-  const normalized = String(value ?? '').trim().toUpperCase();
+  const normalized = String(value ?? '')
+    .trim()
+    .toUpperCase();
   return normalized === 'PAPER' || normalized === 'PROGRAM' ? normalized : null;
 }
 
 export function normalizeRsiStatus(value: unknown, fallback: RsiTaskStatus = 'CREATED'): RsiTaskStatus {
-  const normalized = String(value ?? '').trim().toUpperCase();
-  const statuses: RsiTaskStatus[] = [
-    'CREATED',
-    'QUEUED',
-    'RUNNING',
-    'COMPLETED',
-    'FAILED',
-    'PAUSED',
-    'TERMINATED',
-  ];
+  const normalized = String(value ?? '')
+    .trim()
+    .toUpperCase();
+  const statuses: RsiTaskStatus[] = ['CREATED', 'QUEUED', 'RUNNING', 'COMPLETED', 'FAILED', 'PAUSED', 'TERMINATED'];
   return statuses.includes(normalized as RsiTaskStatus) ? (normalized as RsiTaskStatus) : fallback;
 }
 
@@ -220,8 +220,16 @@ function normalizeChange(value: unknown): RsiNodeChange | null {
 }
 
 function normalizeNodeType(value: unknown): RsiNodeType {
-  const normalized = String(value ?? '').trim().toUpperCase();
-  if (normalized === 'ROOT' || normalized === 'ADOPTED' || normalized === 'REJECTED' || normalized === 'PROVISIONAL' || normalized === 'PRUNED') {
+  const normalized = String(value ?? '')
+    .trim()
+    .toUpperCase();
+  if (
+    normalized === 'ROOT' ||
+    normalized === 'ADOPTED' ||
+    normalized === 'REJECTED' ||
+    normalized === 'PROVISIONAL' ||
+    normalized === 'PRUNED'
+  ) {
     return normalized;
   }
   if (normalized === 'CANDIDATE' || normalized === 'REPORTING' || normalized === 'SUCCESS') return 'ADOPTED';
@@ -420,6 +428,89 @@ export interface RsiModelOption {
   provider?: string;
 }
 
+export interface RsiHarnessVersion {
+  installation_id: string;
+  task_id: string | null;
+  node_id: string | null;
+  harness_name: string;
+  sha256: string;
+  installed_at: string | null;
+  is_active: boolean;
+  is_initial: boolean;
+  available: boolean;
+}
+
+export interface RsiHarnessVersionsResult {
+  active_installation_id: string | null;
+  versions: RsiHarnessVersion[];
+}
+
+export interface RsiHarnessActivationResult {
+  installation_id: string;
+  task_id: string;
+  node_id: string | null;
+  harness_name: string;
+  sha256: string;
+  status: 'ACTIVE';
+  already_active: boolean;
+  from_installation_id?: string | null;
+  rolled_back?: boolean;
+}
+
+function normalizeHarnessActivation(value: unknown): RsiHarnessActivationResult {
+  const raw = asRecord(value) ?? {};
+  return {
+    installation_id: asString(raw.installation_id),
+    task_id: asString(raw.task_id),
+    node_id: asNullableString(raw.node_id),
+    harness_name: asString(raw.harness_name),
+    sha256: asString(raw.sha256),
+    status: 'ACTIVE',
+    already_active: raw.already_active === true,
+    from_installation_id: asNullableString(raw.from_installation_id),
+    rolled_back: raw.rolled_back === true,
+  };
+}
+
+export function rsiHarnessInstall(taskId: string): Promise<RsiHarnessActivationResult> {
+  return webRequest<unknown>(METHOD.harnessInstall, withRsiSession({ task_id: taskId })).then(
+    normalizeHarnessActivation,
+  );
+}
+
+export function rsiHarnessVersionsList(): Promise<RsiHarnessVersionsResult> {
+  return webRequest<unknown>(METHOD.harnessVersionsList, withRsiSession({})).then((value) => {
+    const raw = asRecord(value) ?? {};
+    const versions = Array.isArray(raw.versions) ? raw.versions : [];
+    return {
+      active_installation_id: asNullableString(raw.active_installation_id),
+      versions: versions.map((value) => {
+        const version = asRecord(value) ?? {};
+        return {
+          installation_id: asString(version.installation_id),
+          task_id: asNullableString(version.task_id),
+          node_id: asNullableString(version.node_id),
+          harness_name: asString(version.harness_name),
+          sha256: asString(version.sha256),
+          installed_at: asNullableString(version.installed_at),
+          is_active: version.is_active === true,
+          is_initial: version.is_initial === true,
+          available: version.available === true,
+        };
+      }),
+    };
+  });
+}
+
+export function rsiHarnessRollback(installationId: string): Promise<RsiHarnessActivationResult> {
+  return webRequest<unknown>(
+    METHOD.harnessRollback,
+    withRsiSession({
+      installation_id: installationId,
+    }),
+  ).then(normalizeHarnessActivation);
+}
+
 export async function rsiListModels(): Promise<RsiModelOption[]> {
   if (isMockEnabled()) {
     return rsiMock.delay(rsiMock.modelList);
@@ -432,12 +523,14 @@ export async function rsiListModels(): Promise<RsiModelOption[]> {
       const model = asRecord(item);
       if (!model) return [];
       const id = asString(model.model_name, `model-${index}`);
-      return [{
-        id,
-        name: asString(model.alias, id),
-        is_free: model.is_free === true,
-        provider: asNullableString(model.model_provider) ?? undefined,
-      }];
+      return [
+        {
+          id,
+          name: asString(model.alias, id),
+          is_free: model.is_free === true,
+          provider: asNullableString(model.model_provider) ?? undefined,
+        },
+      ];
     });
   } catch {
     return [];
@@ -460,7 +553,12 @@ export function rsiDatasetValidate(params: RsiDatasetValidateParams): Promise<Rs
       ? raw.errors.flatMap((item) => {
           const error = asRecord(item);
           return error
-            ? [{ reason: asString(error.reason ?? error.message, '输入校验失败'), code: asString(error.code, 'DATASET_INVALID') }]
+            ? [
+                {
+                  reason: asString(error.reason ?? error.message, '输入校验失败'),
+                  code: asString(error.code, 'DATASET_INVALID'),
+                },
+              ]
             : [];
         })
       : [];
@@ -535,7 +633,9 @@ export function rsiTaskDelete(taskId: string): Promise<{ ok: boolean }> {
   if (isMockEnabled()) {
     return rsiMock.delay({ ok: true });
   }
-  return webRequest<unknown>(METHOD.taskDelete, withRsiSession({ task_id: taskId })).then((value) => ({ ok: asRecord(value)?.ok === true }));
+  return webRequest<unknown>(METHOD.taskDelete, withRsiSession({ task_id: taskId })).then((value) => ({
+    ok: asRecord(value)?.ok === true,
+  }));
 }
 
 function trainingControl(method: string, taskId: string): Promise<RsiTrainingControlResult> {
@@ -611,17 +711,23 @@ export function rsiArtifactDownloadUrl(result: RsiArtifactDownloadResult): strin
 }
 
 export function rsiArtifactFilesList(taskId: string, path: string): Promise<RsiArtifactFilesListResult> {
-  return webRequest<RsiArtifactFilesListResult>(METHOD.artifactFilesList, withRsiSession({
-    task_id: taskId,
-    path,
-  }));
+  return webRequest<RsiArtifactFilesListResult>(
+    METHOD.artifactFilesList,
+    withRsiSession({
+      task_id: taskId,
+      path,
+    }),
+  );
 }
 
 export function rsiArtifactFilesGet(taskId: string, path: string): Promise<RsiArtifactFileGetResult> {
-  return webRequest<RsiArtifactFileGetResult>(METHOD.artifactFilesGet, withRsiSession({
-    task_id: taskId,
-    path,
-  }));
+  return webRequest<RsiArtifactFileGetResult>(
+    METHOD.artifactFilesGet,
+    withRsiSession({
+      task_id: taskId,
+      path,
+    }),
+  );
 }
 
 export function rsiTreeGet(taskId: string): Promise<RsiTreeGetResult> {

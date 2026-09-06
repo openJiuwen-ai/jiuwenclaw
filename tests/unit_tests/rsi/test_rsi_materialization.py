@@ -133,12 +133,16 @@ def test_native_harness_baseline_is_capability_free_and_materializable(
     package = Path(refs["harness_refs"]["validation_harness"])
 
     assert package.is_dir()
-    assert package == tmp_path / "tasks" / "rsi-native-baseline" / "harness" / "rsi"
+    assert package.is_relative_to(
+        tmp_path / "tasks" / "rsi-native-baseline" / "harness" / "versions"
+    )
     assert (package / "harness_config.yaml").read_text(
         encoding="utf-8"
     ) == baseline.read_text(encoding="utf-8")
     assert result["package_path"] == str(package.resolve())
-    assert result["source_config_path"] == str(baseline)
+    assert result["source_config_path"] == str(
+        (package / "harness_config.yaml").resolve()
+    )
 
 
 def test_gdpval_validation_suite_is_normalized(tmp_path: Path) -> None:
@@ -226,9 +230,15 @@ def test_materializer_copies_dataset_wraps_single_harness_and_writes_validation_
     assert refs_payload["harness_refs"] == {
         "validation_harness": str(materialized_package.resolve())
     }
+    assert materialized_package.is_dir()
+    assert materialized_package.is_relative_to(
+        tmp_path / "tasks" / task_id / "harness" / "versions"
+    )
     assert (materialized_package / "harness_config.yaml").read_text(
         encoding="utf-8"
     ) == source_harness.read_text(encoding="utf-8")
+    assert refs["source_path"] == str(materialized_package.resolve())
+    assert refs["source_sha256"] == _tree_digest(materialized_package)
     assert profile_payload["max_epochs"] == 4
     assert profile_payload["data_loader"]["batch_size"] == 8
     assert profile_payload["member_optimizer"]["sibling_candidate_count"] == 3
@@ -259,10 +269,12 @@ def test_materializer_preserves_harness_package_directory_for_engine_checkpoints
     )
 
     refs = yaml.safe_load(Path(result["path"]).read_text(encoding="utf-8"))
-    assert refs["harness_refs"]["validation_harness"] == str(package.resolve())
-    assert result["source_path"] == str(package.resolve())
-    assert result["source_config_path"] == str(config.resolve())
-    assert result["source_sha256"] == _tree_digest(package)
+    local_source = Path(refs["harness_refs"]["validation_harness"])
+    assert local_source.is_dir()
+    assert local_source.is_relative_to(tmp_path / "tasks" / "rsi-package" / "harness")
+    assert result["source_path"] == str(local_source.resolve())
+    assert result["source_config_path"] == str((local_source / "harness_config.yaml").resolve())
+    assert result["source_sha256"] == _tree_digest(local_source)
 
 
 def test_materializer_accepts_manifest_json_harness_directory(tmp_path: Path) -> None:
@@ -287,9 +299,15 @@ def test_materializer_accepts_manifest_json_harness_directory(tmp_path: Path) ->
     )
 
     refs = yaml.safe_load(Path(result["path"]).read_text(encoding="utf-8"))
-    assert refs["harness_refs"]["validation_harness"] == str(package.resolve())
-    assert result["source_config_path"] == str(manifest.resolve())
-    assert result["package_path"] == str(package.resolve())
+    local_package = Path(refs["harness_refs"]["validation_harness"])
+    assert local_package.is_dir()
+    assert local_package.is_relative_to(
+        tmp_path / "tasks" / "rsi-modern-package" / "harness" / "versions"
+    )
+    assert result["source_config_path"] == str(
+        (local_package / "manifest.json").resolve()
+    )
+    assert result["package_path"] == str(local_package.resolve())
 
 
 def test_materializer_copies_single_file_harness_dependencies(tmp_path: Path) -> None:
@@ -349,7 +367,7 @@ def test_materializer_copies_single_file_harness_dependencies(tmp_path: Path) ->
     assert (package / "skills" / "demo" / "SKILL.md").read_text(
         encoding="utf-8"
     ) == skill.read_text(encoding="utf-8")
-    assert result["source_path"] == str(source.resolve())
+    assert result["source_path"] == str(package.resolve())
     assert result["package_path"] == str(package.resolve())
     assert result["target_sha256"] == _tree_digest(package)
 

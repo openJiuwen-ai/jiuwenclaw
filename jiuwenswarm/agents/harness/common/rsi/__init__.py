@@ -8,7 +8,11 @@ from __future__ import annotations
 
 from jiuwenswarm.agents.harness.common.rsi.adapter import RsiEngineAdapter, RsiEventSink
 from jiuwenswarm.agents.harness.common.rsi.artifact_adapter import ArtifactEngineAdapter
-from jiuwenswarm.agents.harness.common.rsi.context import RsiServiceContext, build_rsi_service_context
+from jiuwenswarm.agents.harness.common.rsi.context import (
+    RsiServiceContext,
+    build_rsi_service_context,
+    get_rsi_workspace_root,
+)
 from jiuwenswarm.agents.harness.common.rsi.errors import (
     RsiArtifactNotFound,
     RsiBadRequest,
@@ -108,4 +112,5 @@ __all__ = [
     "build_mock_rsi_adapters",
     "build_rsi_adapters",
     "build_rsi_service_context",
+    "get_rsi_workspace_root",
 ]

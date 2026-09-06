@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import shutil
+from collections.abc import Mapping
 from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
@@ -86,11 +87,13 @@ class RsiTaskMaterializer:
         dataset_root: str | Path | None = None,
         harness_root: str | Path | None = None,
         dataset_validator: Callable[[str], Any] | None = None,
+        allow_missing_harness: bool = False,
     ) -> None:
         self.tasks_root = Path(tasks_root).expanduser().resolve()
         self.dataset_root = _optional_root(dataset_root)
         self.harness_root = _optional_root(harness_root)
         self.dataset_validator = dataset_validator
+        self.allow_missing_harness = bool(allow_missing_harness)
 
     def task_dir(self, task_id: str) -> Path:
         task = str(task_id or "").strip()
@@ -106,19 +109,34 @@ class RsiTaskMaterializer:
         task_id: str,
         source_path: str | Path,
         *,
+        domain: str | None = None,
         validator: Callable[[str], Any] | None = None,
     ) -> dict[str, Any]:
         source = self._source_file(source_path, self.dataset_root, label="数据集")
         try:
-            normalized = normalize_validation_suite(source)
+            normalized = (
+                _load_evobench_suite(source, domain=domain)
+                if domain
+                else normalize_validation_suite(source)
+            )
         except RsiDatasetInvalid:
             raise
         except (OSError, UnicodeError, json.JSONDecodeError) as exc:
             raise RsiDatasetInvalid(f"数据集校验失败: {exc}") from exc
         check = validator or self.dataset_validator
+
+        target_dir = self.task_dir(task_id) / "input"
+        target_dir.mkdir(parents=True, exist_ok=True)
+        if normalized is None:
+            target = target_dir / _safe_filename(source.name, default="validation.json")
+            shutil.copy2(source, target)
+        else:
+            target = target_dir / "cases.json"
+            target.write_text(json.dumps(normalized, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
         if check is not None:
             try:
-                result = check(str(source))
+                result = check(str(target))
             except (RsiDatasetInvalid, RsiPathInvalid, RsiPathNotAllowed):
                 raise
             except Exception as exc:  # noqa: BLE001
@@ -129,24 +147,20 @@ class RsiTaskMaterializer:
                     errors=_validation_errors(result),
                 )
         elif normalized is None:
-            _validate_json_dataset(source)
-
-        target_dir = self.task_dir(task_id) / "input"
-        target_dir.mkdir(parents=True, exist_ok=True)
-        if normalized is None:
-            target = target_dir / _safe_filename(source.name, default="validation.json")
-            shutil.copy2(source, target)
-        else:
-            target = target_dir / "cases.json"
-            target.write_text(
-                json.dumps(normalized, ensure_ascii=False, indent=2) + "\n",
-                encoding="utf-8",
-            )
+            _validate_json_dataset(target)
         return {
-            "source_path": str(source),
+            # The task manifest records the immutable task-local copy.  The
+            # caller's source path is an input to creation, not a runtime
+            # dependency after materialization.
+            "source_path": str(target.resolve()),
             "path": str(target.resolve()),
             "sha256": _sha256(target),
             "source_sha256": _sha256(source),
+            "dataset_id": (
+                str(normalized.get("dataset_id") or "").strip()
+                if normalized is not None
+                else None
+            ),
         }
 
     def materialize_harness_refs(
@@ -156,7 +170,8 @@ class RsiTaskMaterializer:
         *,
         role: str = "validation_harness",
     ) -> dict[str, Any]:
-        source = self._source_path(source_path, self.harness_root, label="Harness")
+        requested_source = self._source_path(source_path, self.harness_root, label="Harness")
+        source = _resolve_harness_source(requested_source, self.harness_root, role=role)
         config_path = _harness_config_path(source)
         try:
             source_data = yaml.safe_load(config_path.read_text(encoding="utf-8"))
@@ -189,11 +204,19 @@ class RsiTaskMaterializer:
         if not role_name or Path(role_name).name != role_name:
             raise RsiInvalidHarness(f"Harness role 非法: {role}")
 
-        target_dir = self.task_dir(task_id) / "harness"
+        task_dir = self.task_dir(task_id)
+        target_dir = task_dir / "harness"
         target_dir.mkdir(parents=True, exist_ok=True)
-        package = source
+        source_sha256 = _path_sha256(source)
+        version_id = f"baseline-{source_sha256[:16]}"
+        version_root = target_dir / "versions" / version_id
         if source.is_file():
-            package = _materialize_file_harness(source, source_data, target_dir)
+            package = _materialize_file_harness(source, source_data, version_root)
+        else:
+            package = version_root / (source.name or "harness")
+            _copy_harness_source(source, package)
+            if _path_sha256(package) != source_sha256:
+                raise RsiInvalidHarness(f"Harness task-local copy hash 不一致: {source}")
         target = target_dir / "harness_refs.yaml"
         payload = {"harness_refs": {role_name: str(package.resolve())}}
         target.write_text(
@@ -201,14 +224,18 @@ class RsiTaskMaterializer:
             encoding="utf-8",
         )
         return {
-            "source_path": str(source),
+            "source_path": str(package.resolve()),
             "package_path": str(package.resolve()),
             "path": str(target.resolve()),
             "sha256": _sha256(target),
-            "source_sha256": _path_sha256(source),
+            "source_sha256": _path_sha256(package),
             "target_sha256": _path_sha256(package),
-            "source_config_path": str(config_path),
+            "source_config_path": str(_harness_config_path(package).resolve()),
             "role": role_name,
+            "version_id": version_id,
+            "wrapper_source_path": (
+                str(requested_source) if requested_source != source else None
+            ),
         }
 
     def materialize_validation_profile(
@@ -217,6 +244,7 @@ class RsiTaskMaterializer:
         model_paths: dict[str, str],
         *,
         profile_name: str = VALIDATION_PROFILE_NAME,
+        options: Mapping[str, Any] | None = None,
         max_iterations: int = 1,
         search_width: int = 2,
     ) -> dict[str, Any]:
@@ -241,21 +269,20 @@ class RsiTaskMaterializer:
         target_dir = task_dir / "config"
         target_dir.mkdir(parents=True, exist_ok=True)
         target = target_dir / "harness_orchestrator.yaml"
-        normalized_max_iterations = max(1, int(max_iterations))
-        normalized_search_width = max(1, int(search_width))
+        profile_options = dict(options or {})
+        if max_iterations != 1 or "max_epochs" not in profile_options:
+            profile_options["max_epochs"] = max_iterations
+        if search_width != 2 or "sibling_candidate_count" not in profile_options:
+            profile_options["sibling_candidate_count"] = search_width
+        profile_options = _profile_options(profile_options)
         payload = {
             "workspace_dir": str(run_dir),
-            "max_epochs": normalized_max_iterations,
+            "max_epochs": profile_options["max_epochs"],
             "model_configs": normalized_paths,
             "data_loader": {
                 "file_pattern": "*.json",
-                "batch_size": 8,
-                "batch_balance_keys": [
-                    "dimension",
-                    "difficulty",
-                    "source",
-                    "task_type",
-                ],
+                "batch_size": profile_options["batch_size"],
+                "batch_balance_keys": ["domain", "source", "task_type"],
             },
             "evaluator": {
                 "backend": "single_harness",
@@ -278,10 +305,11 @@ class RsiTaskMaterializer:
                 "execution_concurrency": 1,
                 "role_execution_concurrency": 1,
                 "action_execution_concurrency_per_role": 1,
-                "sibling_candidate_count": normalized_search_width,
-                "max_issue_attempts_per_batch": 8,
-                "max_repair_rounds_per_batch": 1,
+                "sibling_candidate_count": profile_options["sibling_candidate_count"],
+                "max_issue_attempts_per_batch": profile_options["max_issue_attempts"],
+                "max_repair_rounds_per_batch": profile_options["max_repair_rounds"],
                 "candidate_holdout_cases": 0,
+                "improver_policy_ref": profile_options["improver_policy_ref"],
             },
             "scheduling": {
                 "evaluation_strategy": "hybrid",
@@ -290,6 +318,8 @@ class RsiTaskMaterializer:
                 "full_evaluation_enabled": True,
             },
         }
+        if profile_options["runtime"]:
+            payload["rsi_runtime"] = profile_options["runtime"]
         target.write_text(
             yaml.safe_dump(payload, allow_unicode=True, sort_keys=False),
             encoding="utf-8",
@@ -314,18 +344,41 @@ class RsiTaskMaterializer:
         self,
         task_id: str,
         dataset_path: str | Path,
-        harness_path: str | Path,
+        harness_path: str | Path | None,
         *,
         model_refs: dict[str, str],
         model_resolver: Any,
+        domain: str | None = None,
+        profile_options: Mapping[str, Any] | None = None,
         validator: Callable[[str], Any] | None = None,
         max_iterations: int = 1,
-        search_width: int = 2,
+        search_width: int = 1,
     ) -> RsiTaskMaterialization:
         """Materialize all task inputs in a deterministic order."""
 
-        dataset = self.materialize_dataset(task_id, dataset_path, validator=validator)
-        harness = self.materialize_harness_refs(task_id, harness_path)
+        dataset = self.materialize_dataset(
+            task_id,
+            dataset_path,
+            domain=domain,
+            validator=validator,
+        )
+        if harness_path:
+            harness = self.materialize_harness_refs(task_id, harness_path)
+        elif self.allow_missing_harness:
+            harness = {
+                "source_path": None,
+                "package_path": None,
+                "path": None,
+                "sha256": None,
+                "source_sha256": None,
+                "target_sha256": None,
+                "source_config_path": None,
+                "role": None,
+                "version_id": None,
+                "wrapper_source_path": None,
+            }
+        else:
+            raise RsiInvalidHarness("当前没有可用的活动 Harness 配置")
         models_dir = self.task_dir(task_id) / "models"
         optimizer_ref = str(model_refs.get("optimizer") or "").strip()
         tester_ref = str(model_refs.get("tester") or "").strip()
@@ -340,11 +393,15 @@ class RsiTaskMaterializer:
                 optimizer_ref, "member_optimization", models_dir
             ),
         }
+        effective_profile_options = dict(profile_options or {})
+        if max_iterations != 1 or "max_epochs" not in effective_profile_options:
+            effective_profile_options["max_epochs"] = max_iterations
+        if search_width != 1 or "sibling_candidate_count" not in effective_profile_options:
+            effective_profile_options["sibling_candidate_count"] = search_width
         profile = self.materialize_validation_profile(
             task_id,
             {role: str(item["path"]) for role, item in models.items()},
-            max_iterations=max_iterations,
-            search_width=search_width,
+            options=effective_profile_options,
         )
         return RsiTaskMaterialization(dataset, harness, models, profile)
 
@@ -564,6 +621,182 @@ def _harness_config_path(source: Path) -> Path:
         if candidate.is_file():
             return candidate
     raise RsiInvalidHarness(f"Harness 包缺少配置文件: {source}")
+
+
+def _load_evobench_suite(source: Path, *, domain: str | None) -> dict[str, Any] | None:
+    """Convert an Evo-Bench suite into the case file consumed by openjiuwen.
+
+    The standalone Evo-Bench launcher performs this conversion before calling
+    the RSI orchestrator.  AgentServer receives the suite through the direct
+    API instead, so the same narrow conversion belongs at the materialization
+    boundary.  Ordinary ``{"cases": [...]}`` inputs return ``None`` and keep
+    their original bytes.
+    """
+
+    try:
+        raw = json.loads(source.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise RsiDatasetInvalid(f"数据集 JSON 解析失败: {exc}") from exc
+    if not isinstance(raw, dict) or "validation" not in raw:
+        return None
+    tasks = raw.get("validation")
+    if not isinstance(tasks, list) or not tasks:
+        raise RsiDatasetInvalid("Evo-Bench suite 必须包含非空 validation 数组")
+
+    selected_domain = str(domain or "").strip().lower()
+    if selected_domain and selected_domain not in {"general", "office"}:
+        raise RsiDatasetInvalid(f"Evo-Bench domain 不支持: {domain}")
+
+    cases: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for index, task in enumerate(tasks, start=1):
+        if not isinstance(task, dict):
+            raise RsiDatasetInvalid(f"Evo-Bench validation task 必须是 mapping: #{index}")
+        case_id = str(task.get("id") or "").strip()
+        task_domain = str(task.get("domain") or "").strip().lower()
+        if selected_domain and task_domain != selected_domain:
+            continue
+        if not case_id:
+            raise RsiDatasetInvalid(f"Evo-Bench validation task 缺少 id: #{index}")
+        if case_id in seen:
+            raise RsiDatasetInvalid(f"数据集 case_id 重复: {case_id}")
+        if task_domain not in {"general", "office"}:
+            raise RsiDatasetInvalid(f"Evo-Bench task domain 不支持: {case_id}")
+        seen.add(case_id)
+        metadata = task.get("metadata")
+        task_type = metadata.get("task_type") if isinstance(metadata, dict) else None
+        cases.append(
+            {
+                "case_id": case_id,
+                "task_id": case_id,
+                "input": str(task.get("prompt") or ""),
+                "domain": task_domain,
+                "source": case_id.split("-", 1)[0],
+                "task_type": str(task_type or task_domain),
+            }
+        )
+    if not cases:
+        suffix = f" domain={selected_domain}" if selected_domain else ""
+        raise RsiDatasetInvalid(f"Evo-Bench suite 没有匹配的 validation task{suffix}")
+    return {
+        "dataset_id": f"evobench_validation_{len(cases)}",
+        "cases": cases,
+    }
+
+
+def _resolve_harness_source(source: Path, allowed_root: Path | None, *, role: str) -> Path:
+    """Resolve a refs-wrapper file to the package directory it names."""
+
+    if not source.is_file():
+        return source
+    try:
+        data = yaml.safe_load(source.read_text(encoding="utf-8")) or {}
+    except (OSError, UnicodeError, yaml.YAMLError) as exc:
+        raise RsiInvalidHarness(f"Harness refs 不可读: {source}") from exc
+    if not isinstance(data, dict):
+        return source
+    refs = data.get("harness_refs")
+    if refs is None and any(
+        key in data for key in ("schema_version", "id", "name", "description", "tools", "rails", "skills")
+    ):
+        # A legacy ``harness_config.yaml`` is itself a valid package manifest,
+        # not a top-level ``role: path`` refs wrapper.
+        return source
+    if isinstance(refs, dict):
+        candidates = {
+            str(key): str(value).strip()
+            for key, value in refs.items()
+            if str(value or "").strip()
+        }
+    else:
+        candidates = {
+            str(key): str(value).strip()
+            for key, value in data.items()
+            if isinstance(value, str)
+            and str(key) not in {"version", "source_harness_refs_path"}
+            and str(value).strip()
+        }
+    if not candidates:
+        return source
+    raw_ref = candidates.get(str(role or "").strip())
+    if raw_ref is None and len(candidates) == 1:
+        raw_ref = next(iter(candidates.values()))
+    if raw_ref is None:
+        raise RsiInvalidHarness(
+            f"Harness refs 必须只包含一个可用 role，或包含 {role}: {source}"
+        )
+    target = Path(raw_ref).expanduser()
+    if not target.is_absolute():
+        target = source.parent / target
+    target = target.resolve()
+    if allowed_root is not None:
+        _ensure_within(target, allowed_root, label="Harness ref")
+    if not target.exists():
+        raise RsiInvalidHarness(f"Harness ref 目标不存在: {target}")
+    return target
+
+
+def _harness_ref_target(source: Path) -> Path:
+    """Return the path the engine should load for a Harness source."""
+
+    return source.resolve()
+
+
+def _copy_harness_source(source: Path, target: Path) -> None:
+    """Copy a validated baseline package/file into the task directory."""
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if source.is_dir():
+        if target.exists():
+            if not target.is_dir():
+                raise RsiInvalidHarness(f"Harness task-local 版本路径冲突: {target}")
+            return
+        shutil.copytree(source, target, symlinks=False)
+        return
+    if target.exists():
+        if not target.is_file():
+            raise RsiInvalidHarness(f"Harness task-local 配置路径冲突: {target}")
+        return
+    shutil.copy2(source, target)
+
+
+def _profile_options(options: Mapping[str, Any] | None) -> dict[str, Any]:
+    raw = options or {}
+    values = {
+        "max_epochs": _profile_int(raw, "max_epochs", default=1, minimum=1),
+        "batch_size": _profile_int(raw, "batch_size", default=8, minimum=1),
+        "max_issue_attempts": _profile_int(raw, "max_issue_attempts", default=8, minimum=0),
+        "max_repair_rounds": _profile_int(raw, "max_repair_rounds", default=1, minimum=1),
+        "sibling_candidate_count": _profile_int(
+            raw, "sibling_candidate_count", default=2, minimum=1
+        ),
+        "rollout_concurrency": _profile_int(raw, "rollout_concurrency", default=1, minimum=1),
+        "improver_policy_ref": str(raw.get("improver_policy_ref") or "").strip(),
+    }
+    runtime: dict[str, Any] = {}
+    for key in ("domain", "execution_mode"):
+        value = str(raw.get(key) or "").strip()
+        if value:
+            runtime[key] = value
+    if "rollout_concurrency" in raw:
+        runtime["rollout_concurrency"] = values["rollout_concurrency"]
+    values["runtime"] = runtime
+    return values
+
+
+def _profile_int(raw: Mapping[str, Any], name: str, *, default: int, minimum: int) -> int:
+    value = raw.get(name)
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        raise RsiPathInvalid(f"Validation profile 参数 {name} 必须是整数")
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as exc:
+        raise RsiPathInvalid(f"Validation profile 参数 {name} 必须是整数") from exc
+    if parsed < minimum:
+        raise RsiPathInvalid(f"Validation profile 参数 {name} 小于允许下限 {minimum}")
+    return parsed
 
 
 def _path_sha256(path: Path) -> str:

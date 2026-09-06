@@ -31,6 +31,8 @@ from jiuwenswarm.agents.harness.common.rsi.errors import (
     RsiNotReady,
     RsiPathInvalid,
     RsiTaskNotFound,
+    RsiTaskStateConflict,
+    RsiUnsupportedParameter,
 )
 from jiuwenswarm.agents.harness.common.rsi.models import (
     ArtifactType,
@@ -72,6 +74,7 @@ class RsiTaskService:
         harness_refs_provider: Any = None,
         harness_materializer: Any = None,
         model_resolver: Any = None,
+        harness_activation_store: Any = None,
     ) -> None:
         self.store = store
         self.adapter = adapter
@@ -79,6 +82,7 @@ class RsiTaskService:
         self.harness_refs_provider = harness_refs_provider
         self.harness_materializer = harness_materializer
         self.model_resolver = model_resolver
+        self.harness_activation_store = harness_activation_store
 
     # -- I2 create --
 
@@ -105,6 +109,9 @@ class RsiTaskService:
                 raise RsiBadRequest("harness 优化必填 model_refs.tester")
         max_iterations = _positive_int(params.get("max_iterations"), default=1, field="max_iterations")
         search_width = _positive_int(params.get("search_width"), default=1, field="search_width")
+        harness_profile_options = (
+            _harness_profile_options(params) if scenario is Scenario.HARNESS else {}
+        )
         optimization_instruction = params.get("optimization_instruction")
         if optimization_instruction is not None:
             optimization_instruction = str(optimization_instruction).strip() or None
@@ -163,7 +170,10 @@ class RsiTaskService:
         materialization = None
         if scenario is Scenario.HARNESS and self._harness_materialization_enabled:
             source_harness = self._resolve_harness_source(params)
-            if not source_harness:
+            allow_missing_harness = bool(
+                getattr(self.harness_materializer, "allow_missing_harness", False)
+            )
+            if not source_harness and not allow_missing_harness:
                 raise RsiInvalidHarness("当前没有可用的活动 Harness 配置")
 
             validator = None
@@ -183,6 +193,8 @@ class RsiTaskService:
                         "tester": str(model_refs.get("tester") or ""),
                     },
                     model_resolver=self.model_resolver,
+                    domain=harness_profile_options.get("domain"),
+                    profile_options=harness_profile_options,
                     validator=validator,
                     max_iterations=max_iterations,
                     search_width=search_width,
@@ -194,7 +206,9 @@ class RsiTaskService:
                 _remove_uncommitted_task_dir(self.store.tasks_root, task_id)
                 raise
             input_file = str(materialization.dataset["path"])
-            harness_refs_path = str(materialization.harness["path"])
+            harness_refs_path = (
+                str(materialization.harness.get("path") or "").strip() or None
+            )
         elif scenario is Scenario.HARNESS and self.harness_refs_provider is not None:
             # Preserve the pre-materialization/mock contract: a lightweight
             # provider may expose the active refs path directly.  Production
@@ -218,7 +232,11 @@ class RsiTaskService:
             config.update(
                 {
                     "orchestrator_config_path": materialization.profile["path"],
-                    "dataset_id": "single_harness_benchmark",
+                    "dataset_id": (
+                        materialization.dataset.get("dataset_id")
+                        or "single_harness_benchmark"
+                    ),
+                    "rsi_training_options": harness_profile_options,
                     "rsi_materials": manifest,
                 }
             )
@@ -373,6 +391,12 @@ class RsiTaskService:
         task_id = str(params.get("task_id") or "").strip()
         if not task_id:
             raise RsiBadRequest("task_id 必填")
+        if self.harness_activation_store is not None:
+            for version in self.harness_activation_store.list_versions():
+                if str(version.get("task_id") or "").strip() == task_id:
+                    raise RsiTaskStateConflict(
+                        f"任务 {task_id} 持有保留的 Harness 版本，不可删除"
+                    )
         self.store.delete(task_id, forbid_running=True, forbid_active_artifact=True)
         return {"ok": True}
 
@@ -521,10 +545,14 @@ class RsiTreeService:
         task = self.store.get(task_id) if self.store is not None else None
         if adapter is None and task is not None and self.adapter_resolver is not None:
             adapter = self.adapter_resolver(task.scenario, task.artifact_type)
+        # The in-memory projector is disposable.  Restore the durable workspace
+        # view before asking the Provider for optional recovery/backfill data.
+        self.projector.load_from_disk(task_id)
+        self.projector.register_root(task_id)
         if adapter is not None:
             tree = _read_provider_snapshot(adapter, "get_tree", task_id)
             if tree is not None:
-                return self.projector.sync_provider_tree(task_id, tree)
+                return self.projector.merge_provider_tree(task_id, tree)
         return self.projector.derive_tree(task_id)
 
 
@@ -699,6 +727,62 @@ def _positive_int(raw: Any, *, default: int, field: str) -> int:
         raise RsiBadRequest(f"{field} 必须是正整数") from exc
     if value < 1:
         raise RsiBadRequest(f"{field} 必须是正整数")
+    return value
+
+
+def _harness_profile_options(params: Mapping[str, Any]) -> dict[str, Any]:
+    """Validate the direct API's Generic Harness training controls."""
+
+    nested = params.get("training_options")
+    source = nested if isinstance(nested, Mapping) else {}
+
+    def value(name: str, default: Any = None) -> Any:
+        if name in params:
+            return params.get(name)
+        return source.get(name, default)
+
+    domain_raw = str(value("domain", "") or "").strip().lower()
+    if domain_raw and domain_raw not in {"general", "office"}:
+        raise RsiBadRequest("domain 只支持 general 或 office")
+
+    execution_mode = str(value("execution_mode", "local") or "local").strip().lower()
+    if execution_mode == "auto":
+        execution_mode = "local"
+    if execution_mode != "local":
+        raise RsiUnsupportedParameter(
+            "AgentServer Generic Harness 适配目前只支持 execution_mode=local"
+        )
+
+    return {
+        "domain": domain_raw,
+        "improver_policy_ref": str(value("improver_policy_ref", "") or "").strip(),
+        "execution_mode": execution_mode,
+        "max_epochs": _positive_int(value("max_epochs"), default=1, field="max_epochs"),
+        "batch_size": _positive_int(value("batch_size"), default=8, field="batch_size"),
+        "max_issue_attempts": _non_negative_int(
+            value("max_issue_attempts"), default=8, field="max_issue_attempts"
+        ),
+        "max_repair_rounds": _positive_int(
+            value("max_repair_rounds"), default=1, field="max_repair_rounds"
+        ),
+        "sibling_candidate_count": _positive_int(
+            value("sibling_candidate_count"), default=2, field="sibling_candidate_count"
+        ),
+        "rollout_concurrency": _positive_int(
+            value("rollout_concurrency"), default=1, field="rollout_concurrency"
+        ),
+    }
+
+
+def _non_negative_int(raw: Any, *, default: int, field: str) -> int:
+    if raw is None:
+        return default
+    try:
+        value = int(raw)
+    except (TypeError, ValueError) as exc:
+        raise RsiBadRequest(f"{field} 必须是非负整数") from exc
+    if value < 0:
+        raise RsiBadRequest(f"{field} 必须是非负整数")
     return value
 
 
