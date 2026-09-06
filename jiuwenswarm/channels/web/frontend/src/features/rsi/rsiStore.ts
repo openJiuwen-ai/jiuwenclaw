@@ -4,6 +4,7 @@
 
 import { create } from 'zustand';
 import type {
+  RsiTreeNode,
   RsiTaskListItem,
   RsiTaskGetResult,
   RsiTreeGetResult,
@@ -131,7 +132,7 @@ export const useRsiStore = create<RsiState>((set, get) => ({
             report,
             usage,
             tree: tree ? mergeTree(tree, state.detail[taskId]?.pendingTreeNodes ?? []) : null,
-            pendingTreeNodes: tree ? [] : state.detail[taskId]?.pendingTreeNodes ?? [],
+            pendingTreeNodes: tree ? [] : (state.detail[taskId]?.pendingTreeNodes ?? []),
           },
         },
         detailLoading: false,
@@ -282,9 +283,22 @@ function mergeTree(base: RsiTreeGetResult, deltas: RsiTrainingTreeDeltaPayload['
     map.set(delta.node_id, { ...map.get(delta.node_id), ...delta });
   }
   const nodes = [...map.values()].sort((left, right) => left.iteration - right.iteration);
+  const depthOf = (node: RsiTreeNode): number => {
+    const seen = new Set<string>([node.node_id]);
+    let depth = 0;
+    let parent = node.parent_id;
+    while (parent && map.has(parent) && !seen.has(parent)) {
+      seen.add(parent);
+      depth += 1;
+      parent = map.get(parent)!.parent_id;
+    }
+    return depth;
+  };
   return {
     nodes,
-    depth: nodes.reduce((max, node) => Math.max(max, node.iteration), base.depth),
-    iteration: Math.max(base.iteration, ...nodes.map((node) => node.iteration)),
+    depth: Math.max(0, ...nodes.map(depthOf)),
+    iteration: nodes.some((node) => node.extra?.program != null)
+      ? nodes.filter((node) => node.type === 'ADOPTED' || node.type === 'REJECTED').length
+      : Math.max(base.iteration, ...nodes.filter((node) => node.type !== 'PROVISIONAL').map((node) => node.iteration)),
   };
 }

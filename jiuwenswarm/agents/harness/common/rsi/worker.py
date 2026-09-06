@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from types import SimpleNamespace
 from typing import Any
 
 from jiuwenswarm.agents.harness.common.rsi.errors import (
@@ -28,6 +29,7 @@ from jiuwenswarm.agents.harness.common.rsi.models import TaskStatus
 logger = logging.getLogger(__name__)
 
 _QUEUE_MAXSIZE = 128
+_PROVIDER_IN_PROGRESS = frozenset({"CREATED", "QUEUED", "RUNNING"})
 
 
 class RsiWorker:
@@ -235,6 +237,14 @@ class RsiWorker:
                 result = await adapter.resume(request, on_event=_sink(queue))
             else:
                 result = await adapter.run(request, on_event=_sink(queue))
+            # PaperArtifactProviderImpl starts its orchestrator and returns a
+            # current ``running`` result while the actual tree execution
+            # continues in the same event loop.  Keep the worker task alive
+            # until the durable Provider snapshot reaches a terminal state;
+            # otherwise the generic result handler would mark it failed as
+            # soon as it saw the initial running result.
+            if _provider_status(result) in _PROVIDER_IN_PROGRESS:
+                result = await self._wait_for_provider_terminal(task_id, adapter, result)
             self._apply_result_status(task_id, result)
         except Exception as exc:  # noqa: BLE001
             logger.exception("[RSI] 任务执行失败 task=%s: %s", task_id, exc)
@@ -273,9 +283,15 @@ class RsiWorker:
         return None
 
     def _apply_result_status(self, task_id: str, result: Any) -> None:
-        raw_status = getattr(result, "status", None)
-        raw_status = getattr(raw_status, "value", raw_status)
-        status = str(raw_status or "completed").upper()
+        status = _provider_status(result, default="COMPLETED")
+        if status in _PROVIDER_IN_PROGRESS:
+            # A Provider may legitimately return its current state from
+            # ``run``.  The polling path above normally resolves it; keeping
+            # this guard makes older/custom Providers fail-safe instead of
+            # converting a non-terminal result into FAILED.
+            if not getattr(result, "error_code", None):
+                return
+            status = "FAILED"
         target = {
             "COMPLETED": TaskStatus.COMPLETED.value,
             "FAILED": TaskStatus.FAILED.value,
@@ -293,6 +309,41 @@ class RsiWorker:
             target,
             cause=f"provider.{status.lower()}",
         )
+
+    async def _wait_for_provider_terminal(
+        self,
+        task_id: str,
+        adapter: Any,
+        initial_result: Any,
+    ) -> Any:
+        """Wait for Providers whose ``run`` returns before execution ends."""
+        read_state = getattr(adapter, "read_state", None)
+        if not callable(read_state):
+            logger.warning(
+                "[RSI] Provider.run returned %s without read_state; task=%s remains running",
+                _provider_status(initial_result),
+                task_id,
+            )
+            return initial_result
+
+        while True:
+            try:
+                state = await asyncio.to_thread(read_state, task_id)
+            except (FileNotFoundError, KeyError, OSError):
+                # The Provider may publish its registry/snapshot immediately
+                # after returning from run.  A short retry handles that small
+                # hand-off without blocking event consumption.
+                await asyncio.sleep(0.05)
+                continue
+            status = _provider_status(state)
+            if status not in _PROVIDER_IN_PROGRESS:
+                return SimpleNamespace(
+                    status=status.lower(),
+                    final_node_id=getattr(state, "best_node_id", None),
+                    error_code=getattr(state, "error_code", None),
+                    error_message=getattr(state, "error_message", None),
+                )
+            await asyncio.sleep(0.1)
 
     def _mark_failed_if_running(self, task_id: str, cause: str) -> None:
         try:
@@ -497,3 +548,9 @@ def _sink(queue: asyncio.Queue[EngineEvent | None]):
         queue.put_nowait(event)
 
     return _put
+
+
+def _provider_status(value: Any, *, default: str = "") -> str:
+    raw_status = getattr(value, "status", value)
+    raw_status = getattr(raw_status, "value", raw_status)
+    return str(raw_status or default).upper()

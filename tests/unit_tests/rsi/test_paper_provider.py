@@ -16,6 +16,10 @@ from jiuwenswarm.agents.harness.common.rsi.paper_provider import (
 )
 from jiuwenswarm.agents.harness.common.rsi.provider_factory import build_rsi_adapters
 from openjiuwen.rsi.artifact_rsi.request import ArtifactEngineRequest
+from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.tree_provider.provider import (
+    PaperArtifactProviderImpl,
+)
+from openjiuwen.rsi.artifact_rsi.program_opt import PuctProgramArtifactProvider
 
 
 def _request(tasks_root: Path, task_id: str = "rsi-paper") -> ArtifactEngineRequest:
@@ -33,8 +37,9 @@ def _request(tasks_root: Path, task_id: str = "rsi-paper") -> ArtifactEngineRequ
 def test_real_factory_registers_paper_provider(tmp_path: Path):
     adapters = build_rsi_adapters(tmp_path / "tasks", mode="real")
 
-    assert set(adapters) == {"ARTIFACT:PAPER"}
-    assert isinstance(adapters["ARTIFACT:PAPER"].provider, PaperProvider)
+    assert set(adapters) == {"ARTIFACT:PAPER", "ARTIFACT:PROGRAM"}
+    assert isinstance(adapters["ARTIFACT:PAPER"].provider, PaperArtifactProviderImpl)
+    assert isinstance(adapters["ARTIFACT:PROGRAM"].provider, PuctProgramArtifactProvider)
 
 
 def test_paper_provider_wires_the_bundled_autoresearch_runtime(tmp_path: Path):

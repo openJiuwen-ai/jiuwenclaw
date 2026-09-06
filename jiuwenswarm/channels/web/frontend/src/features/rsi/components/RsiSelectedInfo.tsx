@@ -1,23 +1,16 @@
 /**
- * RSI 画布右侧：节点选中信息浮层（绝对定位覆盖画布右侧）。
- * 默认不显示，点击节点（store.selectedNodeId）后才出现；关闭按钮清空选中。
- * 数据源对齐接口契约：
- *   - 标题：nodeDisplayName（root→基线+场景名；adopted→快照+nodeId）
- *   - 优化对象 chips：harness 按 prompt/skill/tool/rail 四分组（改动取变更摘要，未改动取「其余继承」）；
- *     产物优化按 changes 摘要展示（§9.1 RsiNodeChange）
- *   - 描述信息：继承 {parent_id}，{node.description}
- * 「查看详情」弹窗通过后端产物目录接口读取节点产物文件。
+ * RSI 画布右侧：节点选中信息浮层。
+ *
+ * 节点的名称、阶段、结果和失败原因统一由 presentRsiNode 生成；这里
+ * 只负责把结构化信息排版，避免再次拼接 UUID、原始枚举和长 description。
  */
 import { useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import selectedInfoIcon from '../../../assets/rsi/rsi-icon.svg';
 import { useRsiStore } from '../rsiStore';
-import { nodeChangeGroup, nodeChangeSummary, nodeDisplayName } from '../rsiPresentation';
+import { formatGain, formatScore, nodeChangeDisplayLabel, nodeChangeGroup, presentRsiNode } from '../rsiPresentation';
 import { resolveRsiArtifactSource } from '../rsiArtifactFiles';
-import {
-  rsiArtifactDownload,
-  rsiArtifactDownloadUrl,
-} from '../rsiApi';
+import { rsiArtifactDownload, rsiArtifactDownloadUrl } from '../rsiApi';
 import { executeDesktopSave, type DesktopSaveApiResult } from '../../../utils/desktopSave';
 import { RsiArtifactDetailDialog } from './RsiArtifactDetailDialog';
 
@@ -49,35 +42,54 @@ export function RsiSelectedInfo({ taskId }: RsiSelectedInfoProps) {
     if (!tree || !selectedNodeId) return null;
     return tree.nodes.find((n) => n.node_id === selectedNodeId) ?? null;
   }, [tree, selectedNodeId]);
-  // 无选中节点时不渲染浮层
-  if (!selected || !task) {
-    return null;
-  }
 
-  const title = nodeDisplayName(selected.type, selected.node_id, task.scenario, task.artifact_type);
+  const presentation = useMemo(() => {
+    if (!selected || !task) return null;
+    return presentRsiNode(selected, {
+      scenario: task.scenario,
+      artifactType: task.artifact_type,
+      allNodes: tree?.nodes ?? [],
+      taskRunning: task.status === 'RUNNING',
+    });
+  }, [selected, task, tree?.nodes]);
+
+  // 无选中节点时不渲染浮层
+  if (!selected || !task || !presentation) return null;
+
   const parent = selected.parent_id ? tree?.nodes.find((n) => n.node_id === selected.parent_id) : null;
+  const parentPresentation = parent
+    ? presentRsiNode(parent, {
+        scenario: task.scenario,
+        artifactType: task.artifact_type,
+        allNodes: tree?.nodes ?? [],
+        taskRunning: task.status === 'RUNNING',
+      })
+    : null;
   const artifactSource = resolveRsiArtifactSource(selected, taskId);
   const canViewArtifact = artifactSource !== null;
 
-  // 优化对象 chips：harness 按 4 分组（改动/其余继承）；产物按 changes 摘要。
-  // 基线节点或无变更节点没有优化对象，不渲染占位 tag。
-  let chips: Array<{ text: string; inherited: boolean }>;
+  // Harness 仍然按四个区域展示；产物优化直接展示结构化变更摘要。
   const changes = selected.changes ?? [];
-  if (selected.type === 'ROOT' || changes.length === 0) {
-    chips = [];
-  } else if (task.scenario === 'HARNESS') {
-    chips = HARNESS_GROUPS.map((g) => {
-      const change = selected.changes?.find((c) => nodeChangeGroup(c) === g);
-      return { text: change ? nodeChangeSummary(change) : t('rsi.detail.othersInherit'), inherited: !change };
-    });
-  } else {
-    chips = changes.map((c) => ({ text: nodeChangeSummary(c), inherited: false }));
-  }
+  const chips =
+    selected.type === 'ROOT' || changes.length === 0
+      ? []
+      : task.scenario === 'HARNESS'
+        ? HARNESS_GROUPS.map((group) => {
+            const change = changes.find((item) => nodeChangeGroup(item).toLowerCase() === group);
+            return {
+              text: change
+                ? nodeChangeDisplayLabel(change)
+                : t('rsi.detail.othersInherit', { defaultValue: '其余继承' }),
+              inherited: !change,
+            };
+          })
+        : changes.map((change) => ({ text: nodeChangeDisplayLabel(change), inherited: false }));
 
-  // 描述信息：继承 {parent}，{summary}
-  const desc = [parent ? t('rsi.detail.inherit') + ' ' + parent.node_id : null, selected.description]
-    .filter(Boolean)
-    .join('，');
+  const scoreDeltaRatio =
+    presentation.scoreDelta != null && presentation.parentScore != null && presentation.parentScore !== 0
+      ? presentation.scoreDelta / Math.abs(presentation.parentScore)
+      : null;
+  const scoreDelta = formatGain(scoreDeltaRatio);
 
   const downloadNodeArtifact = async () => {
     const artifactId = selected.snapshot_artifact_id;
@@ -88,8 +100,6 @@ export function RsiSelectedInfo({ taskId }: RsiSelectedInfoProps) {
       const artifact = await rsiArtifactDownload(taskId, artifactId);
       const downloadUrl = rsiArtifactDownloadUrl(artifact);
       if (artifact.is_directory || !downloadUrl) {
-        // Directory artifacts are browsed through the folder dialog. The
-        // dialog downloads each selected file without repackaging the folder.
         if (canViewArtifact) {
           setDetailOpen(true);
           return;
@@ -123,64 +133,141 @@ export function RsiSelectedInfo({ taskId }: RsiSelectedInfoProps) {
       <div className="rsi-selected-info" data-testid="rsi-selected-info">
         <div className="rsi-selected-info__header">
           <img className="rsi-selected-info__icon" src={selectedInfoIcon} alt="" aria-hidden />
-          <span className="rsi-selected-info__title">{title}</span>
+          <div className="rsi-selected-info__title-wrap">
+            <span className="rsi-selected-info__title" title={presentation.title}>
+              {presentation.title}
+            </span>
+            <span className={`rsi-selected-info__status rsi-selected-info__status--${presentation.statusKind}`}>
+              {presentation.runtimeLabel}
+            </span>
+          </div>
           <button
             type="button"
             className="rsi-selected-info__close"
             onClick={() => setSelectedNode(null)}
-            aria-label="close"
+            aria-label={t('rsi.detail.close', { defaultValue: '关闭' })}
           >
             ×
           </button>
         </div>
+
         <div className="rsi-selected-info__body">
-          {chips.length > 0 && (
-            <div>
-              <div className="rsi-selected-info__section-label">
-                {t('rsi.detail.optimizationObject', { defaultValue: '优化对象' })}
-              </div>
+          <div className="rsi-selected-info__context">
+            <span>{presentation.subtitle}</span>
+            {parentPresentation && (
+              <span>
+                {t('rsi.detail.inheritFrom', { defaultValue: '继承自' })} {parentPresentation.title}
+              </span>
+            )}
+          </div>
+
+          {presentation.stageLabel && (
+            <div className="rsi-selected-info__stage">
+              <span className="rsi-selected-info__stage-dot" aria-hidden />
+              {presentation.stageLabel}
+            </div>
+          )}
+
+          <section className="rsi-selected-info__section">
+            <div className="rsi-selected-info__section-label">
+              {t('rsi.detail.changeSummary', { defaultValue: '本次改动' })}
+            </div>
+            {chips.length > 0 ? (
               <div className="rsi-selected-info__chips">
-                {chips.map((c, i) => (
+                {chips.map((chip, index) => (
                   <span
-                    key={i}
-                    className="rsi-selected-info__chip"
+                    key={`${chip.text}-${index}`}
+                    className={`rsi-selected-info__chip${chip.inherited ? ' rsi-selected-info__chip--inherited' : ''}`}
                   >
-                    {c.text}
+                    {chip.text}
                   </span>
                 ))}
               </div>
-            </div>
-          )}
-          <div>
+            ) : (
+              <div className="rsi-selected-info__empty">
+                {selected.type === 'ROOT'
+                  ? t('rsi.detail.baselineDescription', { defaultValue: '这是本次优化的起始版本。' })
+                  : t('rsi.detail.noChangeSummary', { defaultValue: '沿用父版本，暂无结构化改动摘要。' })}
+              </div>
+            )}
+            {presentation.summary && presentation.summary !== chips[0]?.text && (
+              <div className="rsi-selected-info__desc">{presentation.summary}</div>
+            )}
+          </section>
+
+          <section className="rsi-selected-info__section">
             <div className="rsi-selected-info__section-label">
-              {t('rsi.detail.descInfo', { defaultValue: '描述信息' })}
+              {t('rsi.detail.evaluationResult', { defaultValue: '评测结果' })}
             </div>
-            <div className="rsi-selected-info__desc">{desc || '—'}</div>
-          </div>
-          <div className="rsi-selected-info__meta-grid">
-            <div><span>迭代</span><strong>{selected.iteration}</strong></div>
-            <div><span>类型</span><strong>{selected.type}</strong></div>
-            <div><span>分数</span><strong>{selected.score == null ? '—' : selected.score}</strong></div>
-            <div><span>采纳</span><strong>{selected.adopted ? '是' : '否'}</strong></div>
-          </div>
+            <div className="rsi-selected-info__metrics">
+              <div>
+                <span>{t('rsi.detail.score', { defaultValue: '得分' })}</span>
+                <strong>{formatScore(presentation.score)}</strong>
+              </div>
+              <div>
+                <span>{t('rsi.detail.parentScore', { defaultValue: '父节点' })}</span>
+                <strong>{formatScore(presentation.parentScore)}</strong>
+              </div>
+              <div>
+                <span>{t('rsi.detail.scoreDelta', { defaultValue: '差值' })}</span>
+                <strong className={scoreDelta.kind === 'down' ? 'rsi-selected-info__metric-down' : undefined}>
+                  {scoreDelta.text || '--'}
+                </strong>
+              </div>
+            </div>
+          </section>
+
+          {presentation.reasonLabel && (
+            <section className="rsi-selected-info__section rsi-selected-info__reason-section">
+              <div className="rsi-selected-info__section-label">
+                {presentation.lifecycle === 'failed'
+                  ? t('rsi.detail.failureReason', { defaultValue: '失败原因' })
+                  : t('rsi.detail.rejectionReason', { defaultValue: '未采用原因' })}
+              </div>
+              <div className="rsi-selected-info__reason-label">{presentation.reasonLabel}</div>
+              {presentation.reasonDetail && (
+                <div className="rsi-selected-info__reason-detail">{presentation.reasonDetail}</div>
+              )}
+            </section>
+          )}
+
           {selected.snapshot_artifact_id && (
-            <div className="rsi-selected-info__artifact">
-              <div className="rsi-selected-info__section-label">节点产物</div>
+            <section className="rsi-selected-info__section rsi-selected-info__artifact">
+              <div className="rsi-selected-info__section-label">
+                {t('rsi.detail.nodeArtifact', { defaultValue: '节点产物' })}
+              </div>
               <div className="rsi-selected-info__artifact-row">
-                <code>{selected.snapshot_artifact_id}</code>
+                <code title={selected.snapshot_artifact_id}>{selected.snapshot_artifact_id}</code>
                 <button
                   type="button"
                   className="rsi-selected-info__download-btn"
                   onClick={() => void downloadNodeArtifact()}
                   disabled={downloadBusy}
                 >
-                  {downloadBusy ? '处理中…' : canViewArtifact ? '打开产物' : '下载'}
+                  {downloadBusy
+                    ? t('rsi.detail.processing', { defaultValue: '处理中…' })
+                    : canViewArtifact
+                      ? t('rsi.detail.openArtifact', { defaultValue: '打开产物' })
+                      : t('rsi.detail.actionDownload')}
                 </button>
               </div>
               {downloadError && <div className="rsi-selected-info__download-error">{downloadError}</div>}
-            </div>
+            </section>
           )}
+
+          <details className="rsi-selected-info__technical">
+            <summary>{t('rsi.detail.technicalInfo', { defaultValue: '技术信息' })}</summary>
+            <div>
+              <span>{t('rsi.detail.nodeId', { defaultValue: '节点 ID' })}</span>
+              <code title={presentation.rawNodeId}>{presentation.rawNodeId}</code>
+            </div>
+            <div>
+              <span>{t('rsi.detail.nodeType', { defaultValue: '生命周期' })}</span>
+              <code>{presentation.lifecycle}</code>
+            </div>
+          </details>
         </div>
+
         <div className="rsi-selected-info__footer">
           {canViewArtifact && (
             <button type="button" className="rsi-selected-info__detail-btn" onClick={() => setDetailOpen(true)}>
@@ -190,7 +277,11 @@ export function RsiSelectedInfo({ taskId }: RsiSelectedInfoProps) {
         </div>
       </div>
       {detailOpen && (
-        <RsiArtifactDetailDialog source={artifactSource} title={title} onClose={() => setDetailOpen(false)} />
+        <RsiArtifactDetailDialog
+          source={artifactSource}
+          title={presentation.title}
+          onClose={() => setDetailOpen(false)}
+        />
       )}
     </>
   );

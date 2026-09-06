@@ -2688,7 +2688,7 @@ wheels = [
 [[package]]
 name = "openjiuwen"
 version = "0.1.17"
-source = { git = "https://atomgit.com/openJiuwen/agent-core.git?branch=feat%2Frsi#2eb4dba032f216c53ee4333f964414a19c5291aa" }
+source = { git = "https://atomgit.com/openJiuwen/agent-core.git?branch=feat%2Frsi#02c0fd9af08b7f9cb0e85bd6d395245814d85124" }
 dependencies = [
     { name = "agentdescent" },
     { name = "aiofiles" },

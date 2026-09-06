@@ -92,20 +92,25 @@ class RsiProjector:
         """Project an agent-core ``EventNode`` without renumbering its ID.
 
         Artifact Providers persist a complete node and use that ID in their
-        report/tree/artifact references.  Keeping the ID intact is what lets
-        a tree push and a later tree query refer to the same node.
+        report/tree/artifact references.  Keep reporting IDs intact; only the
+        provider's task-root ID is normalized to the service's ``ROOT`` ID.
         """
         from jiuwenswarm.agents.harness.common.rsi.artifact_adapter import provider_node_to_dict
 
         raw = provider_node_to_dict(node)
-        node_id = str(raw.get("node_id") or "")
-        if not node_id:
+        raw_node_id = str(raw.get("node_id") or "")
+        if not raw_node_id:
             return None
+        node_id = _normalize_provider_node_id(task_id, raw_node_id)
         changes = raw.get("changes")
         tree_node = RsiTreeNode(
             node_id=node_id,
             iteration=_safe_int(raw.get("iteration")),
-            parent_id=str(raw["parent_id"]) if raw.get("parent_id") is not None else None,
+            parent_id=(
+                _normalize_provider_node_id(task_id, str(raw["parent_id"]))
+                if raw.get("parent_id") is not None
+                else None
+            ),
             type=str(raw.get("type") or "REJECTED").upper(),
             adopted=bool(raw.get("adopted")),
             score=_safe_float(raw.get("score")),
@@ -119,6 +124,7 @@ class RsiProjector:
         with self._lock:
             self._nodes.setdefault(task_id, {})[node_id] = tree_node
             self._ref_index.setdefault(task_id, {})[node_id] = node_id
+            self._ref_index.setdefault(task_id, {})[raw_node_id] = node_id
             self._persist_locked(task_id)
         return tree_node
 
@@ -136,7 +142,7 @@ class RsiProjector:
         raw = provider_tree_to_web(tree)
         incoming_nodes: list[RsiTreeNode] = []
         for item in raw.get("nodes", []):
-            node = self._tree_node_from_web(item)
+            node = self._tree_node_from_web(item, task_id=task_id)
             if node is not None:
                 incoming_nodes.append(node)
         with self._lock:
@@ -202,11 +208,12 @@ class RsiProjector:
             if node is None:
                 return None
             if stage_name:
-                base = node.description or ""
-                if base and not base.endswith(stage_name):
-                    node.description = f"{base} › {stage_name}"
+                if (node.extra or {}).get("paper") is not None or (node.extra or {}).get("program") is not None:
+                    node.description = stage_name
                 else:
-                    node.description = base or stage_name
+                    base = node.description or ""
+                    node.description = f"{base} › {stage_name}" if base and not base.endswith(stage_name) else base or stage_name
+                node.extra = {**(node.extra or {}), "stage": dict(stage)}
             self._persist_locked(task_id)
             return node
 
@@ -231,7 +238,8 @@ class RsiProjector:
         # （root 注册前 P2 链路可能先收到 progress.metric）仍返回零值进度。
         if nodes is None and not metric:
             raise RsiTaskNotFound(task_id)
-        iteration = _safe_int(metric.get("iteration")) or (len(nodes) - 1 if nodes else 0)
+        iteration = (_safe_int(metric["iteration"]) if "iteration" in metric
+                     else sum(n.type not in {"ROOT", "PROVISIONAL"} for n in (nodes or {}).values()))
         return {
             "iteration": iteration,
             "total_iterations": _safe_int(metric.get("total_iterations")),
@@ -396,15 +404,22 @@ class RsiProjector:
         return mapped if mapped in nodes else None
 
     @staticmethod
-    def _tree_node_from_web(raw: dict[str, Any]) -> RsiTreeNode | None:
-        node_id = str(raw.get("node_id") or "")
-        if not node_id:
+    def _tree_node_from_web(
+        raw: dict[str, Any], *, task_id: str | None = None
+    ) -> RsiTreeNode | None:
+        raw_node_id = str(raw.get("node_id") or "")
+        if not raw_node_id:
             return None
+        node_id = _normalize_provider_node_id(task_id, raw_node_id)
         changes = raw.get("changes")
         return RsiTreeNode(
             node_id=node_id,
             iteration=_safe_int(raw.get("iteration")),
-            parent_id=str(raw["parent_id"]) if raw.get("parent_id") is not None else None,
+            parent_id=(
+                _normalize_provider_node_id(task_id, str(raw["parent_id"]))
+                if raw.get("parent_id") is not None
+                else None
+            ),
             type=str(raw.get("type") or "REJECTED").upper(),
             adopted=bool(raw.get("adopted")),
             score=_safe_float(raw.get("score")),
@@ -429,12 +444,18 @@ class RsiProjector:
             return None
         if node_ref.lower() == "root":
             return nodes.get(_ROOT)
-        if node_ref in nodes:
-            return nodes[node_ref]
+        normalized_ref = _normalize_provider_node_id(task_id, node_ref)
+        if normalized_ref in nodes:
+            return nodes[normalized_ref]
         mapped = self._ref_index.get(task_id, {}).get(node_ref)
         if mapped and mapped in nodes:
             return nodes[mapped]
         return None
+def _normalize_provider_node_id(task_id: str | None, node_id: str) -> str:
+    """Use the service's stable ROOT ID for agent-core's provider root."""
+    if task_id and node_id == f"artifact:{task_id}:root":
+        return _ROOT
+    return node_id
 
 
 def _safe_float(value: Any) -> float | None:

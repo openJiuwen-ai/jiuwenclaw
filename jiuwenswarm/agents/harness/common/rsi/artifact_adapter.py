@@ -28,6 +28,19 @@ from jiuwenswarm.agents.harness.common.rsi.models import (
 def _plain(value: Any) -> Any:
     """Convert Provider dataclasses and nested values to JSON-shaped data."""
 
+    # The paper tree implementation in agent-core uses Pydantic models for
+    # its durable snapshots, while the older artifact providers use
+    # dataclasses.  Keep this boundary structural so JiuwenSwarm does not
+    # import either provider's private model classes.
+    model_dump = getattr(value, "model_dump", None)
+    if callable(model_dump):
+        try:
+            return _plain(model_dump(mode="python"))
+        except TypeError:
+            return _plain(model_dump())
+    model_dict = getattr(value, "dict", None)
+    if callable(model_dict):
+        return _plain(model_dict())
     if is_dataclass(value):
         return {key: _plain(item) for key, item in asdict(value).items()}
     if isinstance(value, Mapping):
@@ -82,7 +95,15 @@ def provider_node_to_dict(node: Any) -> dict[str, Any]:
     if not isinstance(raw, dict):
         return {}
     node_type = str(raw.get("type") or "").upper()
-    if node_type in {"ROOT", "ADOPTED", "REJECTED", "PROVISIONAL", "PRUNED"}:
+    paper = (raw.get("extra") or {}).get("paper") or {}
+    program = (raw.get("extra") or {}).get("program")
+    if node_type == "CANDIDATE":
+        normalized_type = "PROVISIONAL"
+    elif program is not None and node_type == "ADOPTED" and not raw.get("adopted"):
+        normalized_type = "REJECTED"
+    elif node_type == "REPORTING" and paper.get("outcome") == "pending":
+        normalized_type = "PROVISIONAL"
+    elif node_type in {"ROOT", "ADOPTED", "REJECTED", "PROVISIONAL", "PRUNED"}:
         normalized_type = node_type
     elif node_type in {"CANDIDATE", "REPORTING", "SUCCESS"}:
         normalized_type = "ADOPTED" if bool(raw.get("adopted")) else "REJECTED"

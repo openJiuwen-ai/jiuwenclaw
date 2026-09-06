@@ -8,7 +8,7 @@
  */
 
 import type { RsiTreeNode } from './types';
-import { nodeMetrics, nodeRuntimeKind, type NodeRuntimeKind } from './rsiPresentation';
+import { nodeMetrics, nodeRuntimeKindForNode, type NodeRuntimeKind } from './rsiPresentation';
 
 export interface LayoutNode {
   node: RsiTreeNode;
@@ -57,7 +57,7 @@ interface Subtree {
 }
 
 function kindOf(node: RsiTreeNode, taskRunning: boolean): NodeRuntimeKind {
-  return nodeRuntimeKind(node.type, taskRunning);
+  return nodeRuntimeKindForNode(node, taskRunning);
 }
 
 function buildSubtree(

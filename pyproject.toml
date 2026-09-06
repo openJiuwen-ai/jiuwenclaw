@@ -17,7 +17,7 @@ dependencies = [
     "ruamel.yaml>=0.18.0,<0.20",
     "lark-oapi>=1.5.3,<2",
     "loguru>=0.7.3,<0.8",
-    "openjiuwen @ git+https://atomgit.com/openJiuwen/agent-core.git@feat/rsi",
+    "openjiuwen @ git+https://atomgit.com/l_x_d/agent-core_mr.git@feat/rsi",
     "pgvector>=0.4.2,<0.5",
     "portalocker>=3.2.0,<4",
     "websockets>=12.0,<16",
@@ -52,6 +52,7 @@ dependencies = [
     "json-repair>=0.30.0,<0.60",
     "gitcode-api>=1.2.20,<2",
     "faiss-cpu>=1.7.0,<2",
+    "matplotlib>=3.8.0,<4",
     "numpy>=1.24.0,<3",
     "tree-sitter>=0.25.0,<0.26.0",
     "tree-sitter-bash>=0.25.0,<0.26.0",
@@ -69,7 +70,7 @@ harmony = [
     "ruamel.yaml>=0.18.0",
     "lark-oapi>=1.5.3",
     "loguru>=0.7.3",
-    "openjiuwen @ git+https://atomgit.com/openJiuwen/agent-core.git@feat/rsi",
+    "openjiuwen @ git+https://atomgit.com/l_x_d/agent-core_mr.git@feat/rsi",
     "pgvector>=0.4.2",
     "portalocker>=3.2.0",
     "aiosqlite>=0.22.1",
@@ -185,7 +186,7 @@ default-groups = ['dev']
 
 [tool.uv.sources]
 workswarm-tui = { path = "./packages/jiuwenswarm-tui" }  # build-config: tui-source
-openjiuwen = { git = "https://atomgit.com/openJiuwen/agent-core.git", branch = "feat/rsi" }
+openjiuwen = { git = "https://atomgit.com/l_x_d/agent-core_mr.git", branch = "feat/rsi" }
 
 [dependency-groups]
 # Testing (keep in sync with optional-dependencies.test)

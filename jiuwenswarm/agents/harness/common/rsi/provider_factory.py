@@ -59,24 +59,42 @@ def build_rsi_adapters(
 
     ``mode='mock'`` installs Harness, Program, and Paper mock adapters.  In
     production mode a concrete ``HarnessProvider`` can be injected and is
-    wrapped at the same seam.  The paper adapter defaults to the bundled
-    autoResearch bridge, while ``paper_provider`` remains injectable for a
-    downstream implementation to replace it.
+    wrapped at the same seam.  The program and paper adapters default to the
+    concrete Providers shipped by the configured agent-core RSI dependency;
+    ``paper_provider`` remains injectable for compatibility and tests.
     """
     normalized_mode = str(mode or "real").strip().lower()
     adapters = dict(artifact_adapters or {})
     if normalized_mode == "mock":
         adapters.update(build_mock_rsi_adapters(tasks_root, model_resolver=model_resolver))
-    elif paper_provider is None and "ARTIFACT:PAPER" not in adapters:
-        from jiuwenswarm.agents.harness.common.rsi.paper_provider import PaperProvider
+    else:
+        if "ARTIFACT:PROGRAM" not in adapters:
+            # The public ``program_opt.provider`` module is the Protocol;
+            # agent-core's concrete implementation is the PUCT provider.
+            from openjiuwen.rsi.artifact_rsi.program_opt import (
+                PuctProgramArtifactProvider,
+            )
 
-        paper_provider = PaperProvider(tasks_root)
-    if normalized_mode != "mock" and paper_provider is not None:
-        adapters["ARTIFACT:PAPER"] = ArtifactEngineAdapter(
-            "PAPER",
-            paper_provider,
-            model_resolver=model_resolver,
-        )
+            adapters["ARTIFACT:PROGRAM"] = ArtifactEngineAdapter(
+                "PROGRAM",
+                PuctProgramArtifactProvider(),
+                model_resolver=model_resolver,
+            )
+        if paper_provider is None and "ARTIFACT:PAPER" not in adapters:
+            # The implementation is intentionally owned by agent-core.  The
+            # public ``paper_opt.provider`` module is only the Protocol; the
+            # concrete implementation lives under the autoResearch tree provider.
+            from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.tree_provider.provider import (
+                PaperArtifactProviderImpl,
+            )
+
+            paper_provider = PaperArtifactProviderImpl()
+        if paper_provider is not None:
+            adapters["ARTIFACT:PAPER"] = ArtifactEngineAdapter(
+                "PAPER",
+                paper_provider,
+                model_resolver=model_resolver,
+            )
     if harness_provider is not None:
         adapters["HARNESS"] = HarnessEngineAdapter(harness_provider)
     return adapters

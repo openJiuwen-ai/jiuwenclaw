@@ -3,7 +3,7 @@
  */
 import { useTranslation } from 'react-i18next';
 import type { RsiTaskListItem } from '../types';
-import { scenarioLabel } from '../rsiPresentation';
+import { statusBadgeInfo, typeDisplayLabel } from '../rsiPresentation';
 
 interface RsiRailProps {
   tasks: RsiTaskListItem[];
@@ -63,7 +63,7 @@ export function RsiRail({ tasks, loading, error, selectedTaskId, onSelect, onCre
                 role="button"
                 tabIndex={0}
                 data-testid="rsi-rail-item"
-                title={`${scenarioLabel(task.scenario)} · ${task.status}`}
+                title={`${typeDisplayLabel(task.scenario, task.artifact_type)} · ${t(`rsi.detail.${statusBadgeInfo(task.status).labelKey}`)}`}
               >
                 <span className="rsi-rail__item-name">{task.name}</span>
                 {task.running && <span className="rsi-rail__running-dot" aria-label="running" />}

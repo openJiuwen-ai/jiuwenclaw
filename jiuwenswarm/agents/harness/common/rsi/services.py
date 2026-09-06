@@ -807,6 +807,15 @@ def _ensure_provider_valid(result: Any) -> None:
 
 
 def _plain_provider(value: Any) -> Any:
+    model_dump = getattr(value, "model_dump", None)
+    if callable(model_dump):
+        try:
+            return _plain_provider(model_dump(mode="python"))
+        except TypeError:
+            return _plain_provider(model_dump())
+    model_dict = getattr(value, "dict", None)
+    if callable(model_dict):
+        return _plain_provider(model_dict())
     if is_dataclass(value):
         return {key: _plain_provider(item) for key, item in asdict(value).items()}
     if isinstance(value, Mapping):
@@ -816,7 +825,13 @@ def _plain_provider(value: Any) -> Any:
     return value
 
 
-_PROVIDER_QUERY_FALLBACK = (FileNotFoundError, NotImplementedError, OSError, RsiNotReady)
+_PROVIDER_QUERY_FALLBACK = (
+    FileNotFoundError,
+    KeyError,
+    NotImplementedError,
+    OSError,
+    RsiNotReady,
+)
 
 
 def _read_provider_snapshot(adapter: Any, method_name: str, task_id: str) -> Any:
