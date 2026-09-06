@@ -77,13 +77,15 @@ test('canHeartbeatRunNow: enabled=false always rejected even if status is schedu
   assert.equal(canHeartbeatRunNow(false, 'scheduled'), false);
 });
 
-test('canHeartbeatToggleEnable: terminal statuses disable the resume button', () => {
-  assert.equal(canHeartbeatToggleEnable('completed'), false);
-  assert.equal(canHeartbeatToggleEnable('expired'), false);
+test('canHeartbeatToggleEnable: completed resumes after max_runs is increased', () => {
+  assert.equal(canHeartbeatToggleEnable('completed', 1, 1), false);
+  assert.equal(canHeartbeatToggleEnable('completed', 2, 1), true);
+  assert.equal(canHeartbeatToggleEnable('completed', null, 1), false);
+  assert.equal(canHeartbeatToggleEnable('expired', 2, 1), false);
 });
 
 test('canHeartbeatToggleEnable: non-terminal statuses keep the toggle enabled', () => {
-  assert.equal(canHeartbeatToggleEnable('scheduled'), true);
-  assert.equal(canHeartbeatToggleEnable('running'), true);
-  assert.equal(canHeartbeatToggleEnable('disabled'), true);
+  assert.equal(canHeartbeatToggleEnable('scheduled', null, 0), true);
+  assert.equal(canHeartbeatToggleEnable('running', null, 0), true);
+  assert.equal(canHeartbeatToggleEnable('disabled', null, 0), true);
 });

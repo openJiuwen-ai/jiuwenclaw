@@ -1682,6 +1682,38 @@ def _ensure_mcp_builtins(
         pass  # 仅登记到 diff 摘要，文件已解压就位
 
 
+def prepare_runtime_workspace(*, cleanup_stale_descs: bool = True) -> None:
+    """Perform the idempotent workspace work required before runtime children start.
+
+    Desktop and the ``jiuwenswarm.app`` supervisor call this once before they
+    launch AgentServer and Gateway.  The children can then skip the same disk
+    work via ``JIUWENSWARM_RUNTIME_WORKSPACE_READY=1``.  Standalone child
+    entrypoints intentionally retain this function as their fallback.
+    """
+    if cleanup_stale_descs:
+        cleanup_stale_openjiuwen_descs()
+
+    workspace_dir = get_user_workspace_dir()
+    config_file = workspace_dir / "config" / "config.yaml"
+    new_workspace = workspace_dir / "agent" / "workspace"
+    old_workspace = workspace_dir / "agent" / "jiuwenclaw_workspace"
+    mcp_builtins_dir = new_workspace / "mcp" / "mcp_builtins"
+
+    cleanup_team_files(workspace_dir)
+
+    config_missing = not config_file.exists()
+    workspace_migration_needed = old_workspace.exists() and not new_workspace.exists()
+    mcp_builtins_missing = not mcp_builtins_dir.is_dir()
+    workspace_preparation_needed = any(
+        (config_missing, workspace_migration_needed, mcp_builtins_missing)
+    )
+    if workspace_preparation_needed:
+        prepare_workspace(overwrite=False, workspace_dir=workspace_dir)
+
+    ensure_config_migrated_from_template(workspace_dir)
+    ensure_default_builtin_skills()
+
+
 def _close_log_handlers() -> None:
     """Close all jiuwenswarm log handlers to release file locks.
 
@@ -2379,8 +2411,26 @@ def get_interactions_dir() -> Path:
 
 
 def get_cron_jobs_path() -> Path:
-    """Canonical path for cron_jobs.json shared by gateway and agentserver."""
-    return get_user_workspace_dir() / "agent" / "home" / "cron_jobs.json"
+    """Path to cron_jobs.json, following wherever this workspace keeps it.
+
+    ``_migrate_legacy_workspace`` relocates the file to ``gateway/`` while this
+    getter pointed at ``agent/home/``, so after a migration the scheduler read a
+    missing path and silently loaded zero jobs. Resolution order:
+
+    1. ``gateway/`` if present -- the migration ran.
+    2. ``agent/home/`` if present -- it has not; repointing unconditionally
+       would empty the schedules of every deployment that never migrated.
+    3. ``gateway/`` otherwise, so a fresh workspace never creates
+       ``agent/home``, whose existence alone marks a workspace legacy.
+    """
+    workspace = get_user_workspace_dir()
+    gateway_path = workspace / "gateway" / "cron_jobs.json"
+    legacy_path = workspace / "agent" / "home" / "cron_jobs.json"
+    if gateway_path.exists():
+        return gateway_path
+    if legacy_path.exists():
+        return legacy_path
+    return gateway_path
 
 
 def get_heartbeat_jobs_path() -> Path:

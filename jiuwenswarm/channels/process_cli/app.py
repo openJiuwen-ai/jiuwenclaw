@@ -297,14 +297,19 @@ async def run(
         renderer.finish(session_id=session_id, request_id=request_id)
         return 1
     finally:
-        if session_id:
-            await _bounded_cleanup(
-                client.cleanup_session(
-                    channel_id=CHANNEL_ID,
-                    session_id=session_id,
+        try:
+            if session_id:
+                await _bounded_cleanup(
+                    client.cleanup_session(
+                        channel_id=CHANNEL_ID,
+                        session_id=session_id,
+                    )
                 )
-            )
-        await _bounded_cleanup(client.close())
+        finally:
+            # Runtime close must run even when session cleanup itself is
+            # cancelled.  The original cancellation still propagates after
+            # this finally block; only resource ownership is made reliable.
+            await _bounded_cleanup(client.close())
 
 
 async def _bounded_cleanup(awaitable: Any) -> None:

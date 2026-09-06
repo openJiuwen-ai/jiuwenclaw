@@ -10,6 +10,18 @@ from typing import Any
 _EXPORTS = {
     "AgentRuntime": ("jiuwenswarm.runtime.service", "AgentRuntime"),
     "RuntimeStateError": ("jiuwenswarm.runtime.service", "RuntimeStateError"),
+    "RuntimeSessionProvisioner": (
+        "jiuwenswarm.runtime.session_provisioner",
+        "RuntimeSessionProvisioner",
+    ),
+    "SessionDeleteLifecycle": (
+        "jiuwenswarm.runtime.session_provisioner",
+        "SessionDeleteLifecycle",
+    ),
+    "SessionDeleteResult": (
+        "jiuwenswarm.runtime.session_provisioner",
+        "SessionDeleteResult",
+    ),
     "RuntimeExecutionContext": (
         "jiuwenswarm.runtime.context",
         "RuntimeExecutionContext",

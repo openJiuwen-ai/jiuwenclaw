@@ -292,13 +292,29 @@ class StructuredAskUserRail(AskUserRail):
         a rejection with the answer text.
 
         For plain query: delegate to parent class behavior (AskUserPayload).
+
+        每条拒绝信息都必须给出应当改成什么，而不只是指出哪里错了。
+
+        Every rejection below states the remedy as well as the fault. A
+        rejection from here never reaches a person: it is handed back to the
+        model as the tool result, and the model's only move is to call the tool
+        again. A message that names what was wrong without naming what to send
+        instead gives it nothing new to write, so the retry carries identical
+        arguments -- and repeated identical tool calls are what the loop
+        detector ends the run over, with its abort text delivered to the user in
+        place of an answer. Quoting the shape to send is what breaks that cycle,
+        so a rejection added later should quote one too.
         """
         args = self._parse_tool_args(tool_call)
         raw_questions = args.get("questions")
         if "questions" in args and not isinstance(raw_questions, list):
             return self.reject(
                 tool_result=(
-                    "[INVALID_ARGUMENT] questions must be an array when provided."
+                    "[INVALID_ARGUMENT] questions must be an array of question "
+                    "objects. Send it as a JSON array, e.g. questions: "
+                    '[{"question": "Which one?", "options": [{"label": "A"}, '
+                    '{"label": "B"}]}]. To ask a single free-text question '
+                    "instead, omit questions entirely and send only query."
                 )
             )
         questions_data = raw_questions if raw_questions else None
@@ -311,7 +327,9 @@ class StructuredAskUserRail(AskUserRail):
                     "[INVALID_ARGUMENT] ask_user accepts at most "
                     f"{MAX_STRUCTURED_QUESTIONS} questions per call; "
                     f"received {len(questions_data)}. "
-                    "Split them across multiple calls."
+                    "Call ask_user again with the first "
+                    f"{MAX_STRUCTURED_QUESTIONS} questions, and ask the "
+                    "remaining ones in a further call once these are answered."
                 )
             )
 
@@ -320,7 +338,10 @@ class StructuredAskUserRail(AskUserRail):
                 return self.reject(
                     tool_result=(
                         f"[INVALID_ARGUMENT] questions[{question_index}] "
-                        "must be an object."
+                        "must be an object. Replace it with an object carrying "
+                        "the question text, plus 2-4 options when the answer is "
+                        'a choice, e.g. {"question": "Which one?", "options": '
+                        '[{"label": "A"}, {"label": "B"}]}.'
                     )
                 )
             question_text = question.get("question")
@@ -328,14 +349,18 @@ class StructuredAskUserRail(AskUserRail):
                 return self.reject(
                     tool_result=(
                         f"[INVALID_ARGUMENT] questions[{question_index}].question "
-                        "is required and must be a non-empty string."
+                        "is required and must be a non-empty string. Add the "
+                        'sentence to put to the user, e.g. "question": "Which '
+                        'branch should the fix go on?".'
                     )
                 )
             if "header" in question and not isinstance(question["header"], str):
                 return self.reject(
                     tool_result=(
                         f"[INVALID_ARGUMENT] questions[{question_index}].header "
-                        "must be a string when provided."
+                        "must be a string when provided. Send a short label of "
+                        'a few words, e.g. header: "Deployment", or drop the '
+                        "field."
                     )
                 )
             if "options" not in question:
@@ -345,7 +370,10 @@ class StructuredAskUserRail(AskUserRail):
                 return self.reject(
                     tool_result=(
                         f"[INVALID_ARGUMENT] questions[{question_index}].options "
-                        "must be an array when provided."
+                        "must be an array of option objects. Send it as a JSON "
+                        'array, e.g. options: [{"label": "Yes"}, '
+                        '{"label": "No"}]. To let the user answer in their own '
+                        "words instead, omit options entirely."
                     )
                 )
             for option_index, option in enumerate(options):
@@ -358,7 +386,9 @@ class StructuredAskUserRail(AskUserRail):
                     return self.reject(
                         tool_result=(
                             f"[INVALID_ARGUMENT] {path} is required "
-                            "and must be a non-empty string."
+                            "and must be a non-empty string. Give the option "
+                            "the 1-5 words the user should see, e.g. "
+                            '{"label": "Apply update"}.'
                         )
                     )
             if options and not 2 <= len(options) <= 4:
@@ -366,7 +396,10 @@ class StructuredAskUserRail(AskUserRail):
                     tool_result=(
                         f"[INVALID_ARGUMENT] questions[{question_index}].options "
                         "must contain either 0 or 2-4 items; "
-                        f"received {len(options)}."
+                        f"received {len(options)}. Merge or drop choices until "
+                        "at most 4 remain, ask the rest in a further ask_user "
+                        "call, or omit options entirely to let the user answer "
+                        "in their own words."
                     )
                 )
 
@@ -420,7 +453,10 @@ class StructuredAskUserRail(AskUserRail):
                     return self.reject(
                         tool_result=(
                             "[INVALID_ARGUMENT] answers must include at least "
-                            "one non-empty response."
+                            "one non-empty response; the user submitted "
+                            "nothing. Do not treat this as an answer: either "
+                            "call ask_user again with the same question, or "
+                            "continue without it and say what you assumed."
                         )
                     )
                 logger.info(

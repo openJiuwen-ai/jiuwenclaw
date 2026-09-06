@@ -482,7 +482,9 @@ export function ModelDialog({
       name: 'reasoning_level',
       label: t('settingsPanel.fields.reasoning_level.title'),
       component: 'select',
-      options: buildReasoningOptions(reasoning, t('settingsPanel.models.reasoning.auto')),
+      options: buildReasoningOptions(reasoning, t('settingsPanel.models.reasoning.auto'), (value) =>
+        t(`settingsPanel.models.reasoning.options.${value}`, { defaultValue: value }),
+      ),
       onChange: invalidateConnectionState,
     });
   }
@@ -513,11 +515,12 @@ export function ModelDialog({
         )}
         cancelLabel={t('common.cancel')}
         dialogClassName="settings-model-dialog"
+        testIdPrefix="settings-model-dialog"
         onConfirm={() => void validateAndSave()}
         onCancel={requestClose}
       >
         {catalogLoading ? (
-          <div className="settings-model-dialog__catalog-status" role="status" aria-live="polite">
+          <div className="settings-model-dialog__catalog-status" role="status" aria-live="polite" data-testid="settings-model-dialog-catalog-loading">
             {t('settingsPanel.models.catalogLoading')}
           </div>
         ) : null}
@@ -525,6 +528,7 @@ export function ModelDialog({
           <div
             className="settings-model-dialog__catalog-status settings-model-dialog__catalog-status--error"
             role="alert"
+            data-testid="settings-model-dialog-catalog-error"
           >
             <span>
               {t('settingsPanel.models.catalogLoadFailed')}
@@ -534,6 +538,7 @@ export function ModelDialog({
               size="sm"
               disabled={!isConnected || catalogLoading || testing || submitting || saving}
               onClick={onRetryCatalog}
+              data-testid="settings-model-dialog-catalog-retry-btn"
             >
               {t('settingsPanel.feedback.retry')}
             </Button>
@@ -544,6 +549,7 @@ export function ModelDialog({
           disabled={testing || submitting || saving || !catalog.reasoning}
           optionalText={t('common.optional')}
           showOptional={false}
+          testIdPrefix="settings-model-dialog"
           rules={{
             alias: [
               {
@@ -562,7 +568,7 @@ export function ModelDialog({
           items={formItems}
         />
         {saveError ? (
-          <div className="settings-page__error" role="alert">
+          <div className="settings-page__error" role="alert" data-testid="settings-model-dialog-error">
             {saveError}
           </div>
         ) : null}

@@ -106,6 +106,12 @@ class SlowSessionClient(FakeClient):
         return "unreachable"
 
 
+class CancelledCleanupClient(FakeClient):
+    async def cleanup_session(self, *, channel_id: str, session_id: str) -> bool:
+        self.calls.append(f"cleanup:{channel_id}:{session_id}")
+        raise asyncio.CancelledError
+
+
 def _interaction_event(request, question: str) -> RuntimeEvent:
     return RuntimeEvent(
         request_id=request.request_id,
@@ -291,6 +297,24 @@ async def test_runtime_error_returns_failure_and_cleans_up(
 
     client = ErrorClient.latest
     assert result == 1
+    assert client is not None
+    assert client.calls[-2:] == [
+        "cleanup:process_cli:runtime-session",
+        "close",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_cancelled_session_cleanup_still_closes_runtime(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(app, "InProcessRuntimeClient", CancelledCleanupClient)
+
+    with pytest.raises(asyncio.CancelledError):
+        await app.run(_args(tmp_path))
+
+    client = CancelledCleanupClient.latest
     assert client is not None
     assert client.calls[-2:] == [
         "cleanup:process_cli:runtime-session",

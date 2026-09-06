@@ -50,6 +50,8 @@ import {
 } from './slashCommands/registry';
 import {
   getWebSlashCommandsForMode,
+  hasUnfinishedGoal as isUnfinishedGoal,
+  isSlashCommandDisabledByGoal,
   shouldExecuteRegisteredSlashCommand,
   supportsWebSlashCommands,
 } from './slashCommands/semantics';
@@ -74,6 +76,7 @@ import {
   type LocalFilePick,
 } from '../../features/workspace/localFilePicker';
 import { useDesktopLocalFilePickerReady } from '../../hooks';
+import { useAdaptiveTooltip } from '../../hooks/useAdaptiveTooltip';
 import { getInputProjectOptions, isDefaultInputProject } from './projectSelection';
 import AgentPickerIcon from '../../assets/agent-management/智能体选择.svg?react';
 import AttachmentIcon from '../../assets/agent-management/attachment.svg?react';
@@ -98,6 +101,7 @@ import { CodeBranchSelector } from '../../features/code-mode/CodeBranchSelector'
 import { generateUuidV4 } from '../../utils/uuid';
 import { createAgentManagementClient, getAgentAvatarUrl, type AgentCatalogItem } from '../../features/agentManagement';
 import { ContextUsageIndicator } from './ContextUsageIndicator';
+import { isImeCompositionKey } from './imeComposition';
 
 /** 输入栏下拉所需的最小技能数据结构（与 SkillPanel 中的 SkillItem 保持一致） */
 type InputAreaSkillItem = {
@@ -158,6 +162,8 @@ type ComposerSuggestionItem = {
   itemKind?: 'command' | 'skill';
   source?: string;
   takesArgs?: boolean;
+  disabled?: boolean;
+  disabledReason?: string;
 };
 
 function getComposerSuggestionItems(
@@ -613,7 +619,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
   const [hoveredOptionDesc, setHoveredOptionDesc] = useState<string | null>(null);
   const [agentPickerOpen, setAgentPickerOpen] = useState(false);
   const [agentPickerQuery, setAgentPickerQuery] = useState('');
-  const [agentTooltip, setAgentTooltip] = useState<{ id: string; description: string; top: number; left: number } | null>(null);
+  const { tooltip: agentTooltipNode, handlers: agentTooltipHandlers } = useAdaptiveTooltip({ offsetX: -50 });
   const [agentOptions, setAgentOptions] = useState<AgentCatalogItem[]>([]);
   const [agentOptionsStatus, setAgentOptionsStatus] = useState<'idle' | 'loading' | 'success' | 'error'>('idle');
   const agentManagementClient = useMemo(() => createAgentManagementClient(), []);
@@ -721,7 +727,6 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
     if (attachMenuOpen) return;
     setAgentPickerOpen(false);
     setAgentPickerQuery('');
-    setAgentTooltip(null);
   }, [attachMenuOpen]);
   const isPaused = useChatStore((s) => s.runtimes[activeSessionId ?? '']?.isPaused ?? false);
   const queuePaused = useChatStore((s) => s.runtimes[activeSessionId ?? '']?.queuePaused ?? false);
@@ -754,7 +759,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
   // 见 backend-requests.md #1）。走排队后消息复用现有的通用队列机制，行为和普通排队一致。
   const isGoalActive = currentGoal?.status === 'active';
   // 未完成目标：active/paused/blocked 都算，只有 completed（或没有目标）才能再设新目标
-  const hasUnfinishedGoal = currentGoal != null && currentGoal.status !== 'completed';
+  const hasUnfinishedGoal = isUnfinishedGoal(currentGoal);
   const isInterruptible = isProcessing || isPaused || isGoalActive;
   const isAgentMode = mode === 'agent';
   const isTeamMode = mode === 'team';
@@ -764,7 +769,6 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
     if (!isTeamMode) return;
     setAgentPickerOpen(false);
     setAgentPickerQuery('');
-    setAgentTooltip(null);
   }, [isTeamMode]);
 
   const isWorkContextLocked = Boolean(activeSessionId && activeSessionId !== NEW_CONVERSATION_ID);
@@ -812,14 +816,26 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
       }));
   }, [teamMembers]);
 
-  const composerSuggestionItems = useMemo(
-    () => getComposerSuggestionItems(
+  const composerSuggestionItems = useMemo(() => {
+    const items = getComposerSuggestionItems(
       composerSuggestion,
       mentionableMembers,
       getWebSlashCommandsForMode(slashCommands, mode),
       slashSkills,
-    ),
-    [composerSuggestion, mentionableMembers, mode, slashCommands, slashSkills],
+    );
+    return items.map((item) => (
+      item.itemKind === 'command' && isSlashCommandDisabledByGoal(item.id, hasUnfinishedGoal)
+        ? { ...item, disabled: true, disabledReason: t('plan.toolbarUnavailableGoal') }
+        : item
+    ));
+  }, [composerSuggestion, hasUnfinishedGoal, mentionableMembers, mode, slashCommands, slashSkills, t]);
+
+  const selectableComposerSuggestionIndices = useMemo(
+    () => composerSuggestionItems.reduce<number[]>((indices, item, index) => {
+      if (!item.disabled) indices.push(index);
+      return indices;
+    }, []),
+    [composerSuggestionItems],
   );
 
   useEffect(() => {
@@ -863,20 +879,28 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
   }, [activeSession?.work_mode, composerSuggestion?.kind, slashCatalogLoaded, workMode]);
 
   useEffect(() => {
-    setComposerSuggestionIndex(0);
-  }, [composerSuggestion?.kind, composerSuggestion?.query]);
+    setComposerSuggestionIndex(selectableComposerSuggestionIndices[0] ?? -1);
+  }, [composerSuggestion?.kind, composerSuggestion?.query, selectableComposerSuggestionIndices]);
 
   useEffect(() => {
     setComposerSuggestionNavigationMode('pointer');
   }, [composerSuggestion?.kind]);
 
-  useEffect(() => {
-    if (composerSuggestionItems.length === 0) {
-      setComposerSuggestionIndex(0);
-      return;
-    }
-    setComposerSuggestionIndex((index) => Math.min(index, composerSuggestionItems.length - 1));
-  }, [composerSuggestionItems.length]);
+  const moveComposerSuggestionHighlight = useCallback((delta: 1 | -1) => {
+    if (selectableComposerSuggestionIndices.length === 0) return;
+    setComposerSuggestionIndex((current) => {
+      const position = selectableComposerSuggestionIndices.indexOf(current);
+      if (position === -1) {
+        return delta > 0
+          ? selectableComposerSuggestionIndices[0]
+          : selectableComposerSuggestionIndices[selectableComposerSuggestionIndices.length - 1];
+      }
+      const nextPosition = (
+        position + delta + selectableComposerSuggestionIndices.length
+      ) % selectableComposerSuggestionIndices.length;
+      return selectableComposerSuggestionIndices[nextPosition];
+    });
+  }, [selectableComposerSuggestionIndices]);
 
   const inputProjectOptions = useMemo(
     () => getInputProjectOptions(projects, projectSearch),
@@ -2088,28 +2112,22 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
         if (e.key === 'ArrowDown') {
           e.preventDefault();
           setComposerSuggestionNavigationMode('keyboard');
-          if (composerSuggestionItems.length > 0) {
-            setComposerSuggestionIndex((index) => (index + 1) % composerSuggestionItems.length);
-          }
+          moveComposerSuggestionHighlight(1);
           return;
         }
 
         if (e.key === 'ArrowUp') {
           e.preventDefault();
           setComposerSuggestionNavigationMode('keyboard');
-          if (composerSuggestionItems.length > 0) {
-            setComposerSuggestionIndex((index) => (
-              index - 1 + composerSuggestionItems.length
-            ) % composerSuggestionItems.length);
-          }
+          moveComposerSuggestionHighlight(-1);
           return;
         }
 
         if ((e.key === 'Enter' || e.key === 'Tab') && !e.shiftKey) {
-          if (isComposingRef.current || e.nativeEvent.isComposing) return;
+          if (isImeCompositionKey(e.nativeEvent, isComposingRef.current)) return;
           e.preventDefault();
           const item = composerSuggestionItems[composerSuggestionIndex];
-          if (item) {
+          if (item && !item.disabled) {
             insertComposerToken(
               composerSuggestion.kind,
               item.id,
@@ -2123,7 +2141,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
       }
 
       if (e.key !== 'Enter' || e.shiftKey) return;
-      if (isComposingRef.current || e.nativeEvent.isComposing) return;
+      if (isImeCompositionKey(e.nativeEvent, isComposingRef.current)) return;
       e.preventDefault();
       handleSubmit();
     },
@@ -2133,6 +2151,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
       composerSuggestionItems,
       handleSubmit,
       insertComposerToken,
+      moveComposerSuggestionHighlight,
       notifyKVCInputIntent,
     ]
   );
@@ -2804,6 +2823,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
           }}
           onPick={insertComposerToken}
           loading={slashCatalogLoading}
+          slashSkillsOnly={isTeamMode}
         />
       )}
       <div
@@ -2920,6 +2940,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                   role="menuitem"
                   aria-haspopup="menu"
                   aria-expanded={agentPickerOpen}
+                  data-testid="chat-panel-input-attach-menu-agent"
                   onClick={() => {
                     setAgentPickerOpen((open) => !open);
                     setExtensionPanelOpen(false);
@@ -2939,6 +2960,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                     className="chat-agent-picker"
                     direction={attachMenuDirection}
                     ariaLabel={t('chat.agent')}
+                    testId="chat-panel-agent-picker-panel"
                     onMouseEnter={() => setAgentPickerOpen(true)}
                     rowHeight={AGENT_PICKER_ROW_HEIGHT}
                     itemCount={filteredAgentOptions.length}
@@ -2956,6 +2978,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                             value={agentPickerQuery}
                             onChange={(event) => setAgentPickerQuery(event.target.value)}
                             placeholder={t('chat.agentSearchPlaceholder')}
+                            data-testid="chat-panel-agent-picker-search-input"
                           />
                         </div>
                       </label>
@@ -2969,11 +2992,11 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                     }}
                   >
                     {agentOptionsStatus === 'loading' ? (
-                      <div className="chat-agent-picker__state">{t('common.loading')}</div>
+                      <div className="chat-agent-picker__state" data-testid="chat-panel-agent-picker-state" data-variant="loading">{t('common.loading')}</div>
                     ) : agentOptionsStatus === 'error' ? (
-                      <div className="chat-agent-picker__state">{t('agentManagement.states.loadError')}</div>
+                      <div className="chat-agent-picker__state" data-testid="chat-panel-agent-picker-state" data-variant="error">{t('agentManagement.states.loadError')}</div>
                     ) : filteredAgentOptions.length === 0 ? (
-                      <div className="chat-agent-picker__state">
+                      <div className="chat-agent-picker__state" data-testid="chat-panel-agent-picker-state" data-variant={installedAgentOptions.length === 0 ? 'no-installed' : 'no-matches'}>
                         {installedAgentOptions.length === 0 ? t('chat.agentNoInstalled') : t('chat.agentNoMatches')}
                       </div>
                     ) : (
@@ -2987,33 +3010,10 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                             className={clsx('chat-agent-picker__item', isSelected && 'is-selected')}
                             role="menuitemradio"
                             aria-checked={isSelected}
-                            aria-describedby={agentTooltip?.id === item.id ? 'chat-agent-picker-tooltip' : undefined}
-                            onMouseEnter={(event) => {
-                              if (!item.description) return;
-                              const rect = event.currentTarget.getBoundingClientRect();
-                              const tooltipWidth = 240;
-                              const left = rect.right + 8 + tooltipWidth <= window.innerWidth
-                                ? rect.right + 8
-                                : Math.max(8, rect.left - tooltipWidth - 8);
-                              setAgentTooltip({
-                                id: item.id,
-                                description: item.description,
-                                top: Math.min(rect.top, Math.max(8, window.innerHeight - 80)),
-                                left,
-                              });
-                            }}
-                            onMouseLeave={() => setAgentTooltip(null)}
-                            onFocus={(event) => {
-                              if (!item.description) return;
-                              const rect = event.currentTarget.getBoundingClientRect();
-                              setAgentTooltip({
-                                id: item.id,
-                                description: item.description,
-                                top: Math.min(rect.top, Math.max(8, window.innerHeight - 80)),
-                                left: Math.max(8, rect.left - 248),
-                              });
-                            }}
-                            onBlur={() => setAgentTooltip(null)}
+                            data-testid="chat-panel-agent-picker-item"
+                            data-variant={item.id}
+                            data-tooltip={item.description || undefined}
+                            {...agentTooltipHandlers}
                             onClick={() => {
                               if (!activeSessionId) return;
                               useSessionStore.getState().setMode(activeSessionId, 'agent');
@@ -3036,16 +3036,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                     )}
                   </PickerPanel>
                 )}
-                {agentTooltip ? (
-                  <div
-                    id="chat-agent-picker-tooltip"
-                    className="chat-agent-picker__tooltip"
-                    role="tooltip"
-                    style={{ top: agentTooltip.top, left: agentTooltip.left }}
-                  >
-                    {agentTooltip.description}
-                  </div>
-                ) : null}
+                {agentTooltipNode}
                 </div>
                 </>}
                 {/* 插件/MCP 装备目前后端在集群模式下不生效（JiuWenSwarmDeepAdapter
@@ -3063,6 +3054,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                   role="menuitem"
                   aria-haspopup="menu"
                   aria-expanded={skillPanelOpen}
+                  data-testid="chat-panel-input-attach-menu-skill"
                   onClick={() => {
                     setSkillPanelOpen((open) => !open);
                     setAgentPickerOpen(false);
@@ -3100,6 +3092,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                     role="menuitem"
                     aria-haspopup="menu"
                     aria-expanded={extensionPanelOpen}
+                    data-testid="chat-panel-input-attach-menu-extension"
                     onClick={() => {
                       setExtensionPanelOpen((open) => !open);
                       setAgentPickerOpen(false);
@@ -3524,7 +3517,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
             </button>
           )} */}
 
-          {isAgentMode && <ContextUsageIndicator />}
+          {(isAgentMode || isTeamMode) && <ContextUsageIndicator />}
 
           <ChatModelSelector
             disabled={isProcessing || composerDisabled || (!isAgentMode && activeSessionId !== NEW_CONVERSATION_ID)}
@@ -3573,6 +3566,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
               }}
               onPick={insertComposerToken}
               loading={slashCatalogLoading}
+              slashSkillsOnly={isTeamMode}
               placement="below"
             />
           )}
@@ -3944,6 +3938,7 @@ function ComposerSuggestionMenu({
   onPointerHighlight,
   onPick,
   loading,
+  slashSkillsOnly,
   placement = 'above',
 }: {
   suggestion: ComposerSuggestionState;
@@ -3960,6 +3955,7 @@ function ComposerSuggestionMenu({
     slashTakesArgs?: boolean,
   ) => void;
   loading: boolean;
+  slashSkillsOnly: boolean;
   placement?: 'above' | 'below';
 }) {
   const isSlash = suggestion.kind === 'slash';
@@ -4041,8 +4037,12 @@ function ComposerSuggestionMenu({
           <div className="chat-composer-suggestion__empty" data-testid="chat-panel-composer-suggestion-empty">
             {isSlash
               ? loading
-                ? '正在加载指令与技能…'
-                : '没有匹配的指令或技能'
+                ? slashSkillsOnly
+                  ? '正在加载技能…'
+                  : '正在加载指令与技能…'
+                : slashSkillsOnly
+                  ? '没有匹配的技能'
+                  : '没有匹配的指令或技能'
               : t('chat.noTeamMembersAvailable')}
           </div>
         ) : items.map((item, index) => {
@@ -4063,21 +4063,31 @@ function ComposerSuggestionMenu({
                 type="button"
                 className={clsx(
                   'chat-composer-suggestion__item',
-                  highlightedIndex === index && 'chat-composer-suggestion__item--active',
+                  !item.disabled && highlightedIndex === index && 'chat-composer-suggestion__item--active',
+                  item.disabled && 'chat-composer-suggestion__item--disabled',
                 )}
                 role="option"
-                aria-selected={highlightedIndex === index}
+                aria-selected={!item.disabled && highlightedIndex === index}
+                aria-disabled={item.disabled || undefined}
+                disabled={item.disabled}
+                title={item.disabledReason}
                 data-testid="chat-panel-composer-suggestion-item"
                 data-variant={item.id}
                 onMouseDown={(event) => event.preventDefault()}
-                onPointerMove={() => onPointerHighlight(index)}
-                onClick={() => onPick(
-                  suggestion.kind,
-                  item.id,
-                  item.label,
-                  item.itemKind,
-                  item.takesArgs,
-                )}
+                onPointerMove={() => {
+                  if (!item.disabled) onPointerHighlight(index);
+                }}
+                onClick={() => {
+                  if (!item.disabled) {
+                    onPick(
+                      suggestion.kind,
+                      item.id,
+                      item.label,
+                      item.itemKind,
+                      item.takesArgs,
+                    );
+                  }
+                }}
               >
                 {isSlash ? (
                   <>

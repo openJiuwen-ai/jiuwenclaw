@@ -12,7 +12,7 @@ import {
   filterJobsForProject,
   type SidebarCronJob,
 } from '../../stores';
-import type { ProjectInfo, Session } from '../../types';
+import type { AgentMode, ProjectInfo, Session } from '../../types';
 import {
   getConversationMenuItems,
   getProjectNewLabel,
@@ -65,6 +65,12 @@ export type NewConversationOptions = {
    * 见 App.tsx enterNewConversation。 */
   initialEnabledPlugins?: string[];
   initialEnabledMcps?: string[];
+  /**
+   * 强制新会话进入指定模式，覆盖"继承当前活动会话模式"的默认行为，也覆盖未发送的临时新会话
+   * 草稿里残留的模式。用于扩展页"使用插件/使用 MCP/试试这样用"这类入口——插件/MCP 不支持
+   * 集群模式，跳转会话时必须回到单 agent 模式（bug003）。见 App.tsx enterNewConversation。
+   */
+  forceMode?: AgentMode;
 };
 
 function isDefaultProject(project: ProjectInfo): boolean {
@@ -333,6 +339,7 @@ function ProjectEntityRow({
   path,
   isExpanded,
   isPinned,
+  hasUnreadCronResult = false,
   hideActions = false,
   onToggle,
   onNew,
@@ -346,6 +353,7 @@ function ProjectEntityRow({
   path?: string;
   isExpanded: boolean;
   isPinned?: boolean;
+  hasUnreadCronResult?: boolean;
   hideActions?: boolean;
   onToggle: () => void;
   onNew: () => void;
@@ -417,6 +425,13 @@ function ProjectEntityRow({
         <span className="conversation-entity-row__text">
           <span className="conversation-entity-row__title" data-testid="multi-session-project-row-title">{title}</span>
         </span>
+        {hasUnreadCronResult ? (
+          <span
+            className="conversation-list-item__status-dot"
+            aria-hidden="true"
+            data-testid="multi-session-project-row-cron-unread"
+          />
+        ) : null}
         {isExpanded ? <CollapseIcon className="conversation-entity-row__chevron" aria-hidden /> : <ArrowRightIcon className="conversation-entity-row__chevron" aria-hidden />}
         {isPinned ? <PinIcon className="conversation-entity-row__pin" aria-hidden /> : null}
       </button>
@@ -1194,6 +1209,9 @@ export function ConversationSidebar({
   function renderProject(project: ProjectInfo) {
     const sessionsForProject = sortedProjectSessions[project.project_id] || [];
     const expanded = Boolean(expandedProjectIds[project.project_id]);
+    const hasUnreadCronResult = (jobsByProject.get(project.project_id) || []).some(
+      (job) => Boolean(unreadCronJobs[job.id]),
+    );
     return (
       <div key={project.project_id} className="conversation-sidebar__group" data-testid="multi-session-project-group" data-variant={project.project_id}>
         <ProjectEntityRow
@@ -1201,6 +1219,7 @@ export function ConversationSidebar({
           path={project.project_dir || undefined}
           isExpanded={expanded}
           isPinned={project.pinned}
+          hasUnreadCronResult={hasUnreadCronResult}
           hideActions={isDefaultProject(project)}
           newLabel={getProjectNewLabel(project.name, t)}
           projectId={project.project_id}
