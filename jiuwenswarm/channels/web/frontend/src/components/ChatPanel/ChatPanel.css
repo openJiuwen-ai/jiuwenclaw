@@ -406,12 +406,11 @@ overflow: hidden;
   align-items: center;
   gap: 16px;
   box-sizing: border-box;
-  width: calc(100% - 48px);
-  max-width: 980px;
+  width: 400px;
   min-height: 118px;
-  margin: 12px auto 16px;
-  padding: 20px 28px 18px;
-  border: 1px solid var(--color-chat-hero-border);
+  margin: 12px 0;
+  padding: 16px 24px;
+  border: 1px solid var(--color-settings-border);
   border-radius: 22px;
   background-color: var(--color-surface-panel);
   background-image: linear-gradient(
@@ -484,7 +483,7 @@ overflow: hidden;
   color: var(--color-text-primary);
   background: var(--color-surface-card);
   font-size: 15px;
-  font-weight: 650;
+  font-weight: 400;
   cursor: pointer;
 }
 
@@ -4739,4 +4738,44 @@ z-index: 2;
   width: 100%;
   height: 100%;
   object-fit: var(--object-fit, cover);
+}
+
+/* ===========================
+   ChatPanel - Message file download item
+   =========================== */
+
+.chat-panel-file-download-item {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  max-width: 400px;
+  padding:1rem 1.5rem;
+  border: 1px solid var(--color-settings-border);
+  border-radius: var(--radius-lg);
+  background-color: var(--color-surface-card);
+  cursor: pointer;
+}
+
+.chat-panel-file-download-item:hover {
+  border-color: var(--color-border-hover);
+  box-shadow: var(--effect-shadow-md);
+}
+
+.chat-panel-file-download-item--no-preview {
+  cursor: default;
+}
+
+.chat-panel-file-download-item--no-preview:hover {
+  border-color: var(--color-border-default);
+  box-shadow: none;
+}
+
+.chat-panel-file-download-item--expired {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.chat-panel-file-download-item--expired:hover {
+  border-color: var(--color-border-default);
+  box-shadow: none;
 }

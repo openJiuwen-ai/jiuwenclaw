@@ -763,6 +763,9 @@ gateway:
     agent_key_fields:
       - user_id
       - agent_type
+    # Web/TUI 连接建立后后台预热内置 jiuwenswarm 沙箱并打通 instance WS，
+    # 避免首条 chat 卡在 create + 冷启动 502 重试。失败不影响连接。
+    connect_warmup_enabled: true
     registry:
       # Agent OS 注册中心地址（空=本地 stub，不发 HTTP）。一体机默认 http://127.0.0.1:8000
       endpoint:

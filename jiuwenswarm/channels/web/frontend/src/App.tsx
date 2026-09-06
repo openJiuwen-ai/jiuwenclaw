@@ -2340,13 +2340,9 @@ function AppContent({
   }, [kvCacheAffinityEnabled, mode, request]);
 
   const handleUseAgent = useCallback((agentId: string) => {
-    const currentSessionId = sessionIdRef.current || NEW_CONVERSATION_ID;
-    const sessionStore = useSessionStore.getState();
-    sessionStore.setAgentSelectionIntent(currentSessionId, { kind: 'select', id: agentId });
-    sessionStore.setMode(currentSessionId, 'agent');
-    setActiveNav('chat');
-    requestComposerFocus();
-  }, [requestComposerFocus]);
+    enterNewConversation('agent');
+    useSessionStore.getState().setAgentSelectionIntent(NEW_CONVERSATION_ID, { kind: 'select', id: agentId });
+  }, [enterNewConversation]);
 
   const handleUseAgentPrompt = useCallback((agentId: string, prompt: string) => {
     enterNewConversation('agent', { initialInputValue: prompt });
