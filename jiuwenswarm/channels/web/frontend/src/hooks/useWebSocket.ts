@@ -583,6 +583,10 @@ function isPersistedMediaItem(item: MediaItem): boolean {
   return typeof item.path === 'string' && item.path.trim().length > 0;
 }
 
+function isObsMediaItem(item: MediaItem): boolean {
+  return typeof item.url === 'string' && item.url.trim().startsWith('http');
+}
+
 function getMediaMimeType(item: MediaItem): string {
   return item.mime_type || item.mimeType;
 }
@@ -597,12 +601,33 @@ function toPersistedMediaRecord(item: MediaItem): Record<string, unknown> {
   };
 }
 
+function toObsMediaRecord(item: MediaItem): Record<string, unknown> {
+  return {
+    type: item.type,
+    filename: item.filename,
+    mime_type: getMediaMimeType(item),
+    url: item.url,
+    size_bytes: item.size_bytes ?? item.sizeBytes,
+  };
+}
+
+function buildObsChatFiles(mediaItems: MediaItem[]): Array<Record<string, unknown>> {
+  return mediaItems.filter(isObsMediaItem).map((item) => ({
+    url: item.url,
+    name: item.filename,
+    filename: item.filename,
+    size: item.size_bytes ?? item.sizeBytes ?? 0,
+    mime_type: getMediaMimeType(item),
+  }));
+}
+
 function slimPersistedMediaRecords(items: Record<string, unknown>[]): Record<string, unknown>[] {
   return items.map((item) => ({
     type: item.type,
     filename: item.filename,
     mime_type: item.mime_type ?? item.mimeType,
     path: item.path,
+    url: item.url,
     size_bytes: item.size_bytes ?? item.sizeBytes,
   }));
 }
@@ -1545,9 +1570,12 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
       try {
         let outgoingContent = content.replace(/\{\{skill:([^}]+)\}\}/g, '$1');
         let outgoingMediaItems: Record<string, unknown>[] | undefined;
-        let outgoingFiles: Record<string, unknown> | undefined;
+        let outgoingFiles: Record<string, unknown> | Array<Record<string, unknown>> | undefined;
         if (hasMedia) {
-          if (mediaItems.every(isPersistedMediaItem)) {
+          if (mediaItems.every(isObsMediaItem)) {
+            outgoingMediaItems = mediaItems.map(toObsMediaRecord);
+            outgoingFiles = buildObsChatFiles(mediaItems);
+          } else if (mediaItems.every(isPersistedMediaItem)) {
             outgoingMediaItems = mediaItems.map(toPersistedMediaRecord);
             outgoingFiles = buildPersistedMediaFiles(mediaItems);
           } else {

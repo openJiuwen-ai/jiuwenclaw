@@ -67,7 +67,7 @@ from jiuwenswarm.agents.harness.common.rails import (
     StructuredAskUserRail,
 )
 from jiuwenswarm.agents.harness.common.memory.config import get_memory_mode, is_memory_enabled
-from jiuwenswarm.common.local_env_config import is_enterprise
+from jiuwenswarm.edition import is_enterprise
 from jiuwenswarm.agents.harness.common.tools import (
     SkillToolkit,
 )

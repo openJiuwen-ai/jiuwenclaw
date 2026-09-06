@@ -18,6 +18,7 @@ class A2AOutboundErrorCode(str, Enum):
     AGENT_UNAVAILABLE = "A2A_AGENT_UNAVAILABLE"
     AGENT_REVIEW_REQUIRED = "A2A_AGENT_REVIEW_REQUIRED"
     AUTH_REQUIRED = "A2A_AUTH_REQUIRED"
+    AUTH_SCHEME_MISSING = "A2A_AUTH_SCHEME_MISSING"
     DISPATCH_NOT_FOUND = "A2A_DISPATCH_NOT_FOUND"
     DISPATCH_REJECTED = "A2A_DISPATCH_REJECTED"
     DISPATCH_TIMEOUT = "A2A_DISPATCH_TIMEOUT"
@@ -43,6 +44,7 @@ _SAFE_SUMMARIES: dict[A2AOutboundErrorCode, str] = {
     A2AOutboundErrorCode.AGENT_UNAVAILABLE: "指定的第三方 Agent 当前不可用。",
     A2AOutboundErrorCode.AGENT_REVIEW_REQUIRED: "第三方 Agent 配置变化需要确认。",
     A2AOutboundErrorCode.AUTH_REQUIRED: "第三方 Agent 需要有效凭据。",
+    A2AOutboundErrorCode.AUTH_SCHEME_MISSING: "已配置凭据，但 Agent Card 未声明认证方式。请让对方补充认证声明后刷新 Card，或清除不需要的凭据。",
     A2AOutboundErrorCode.DISPATCH_NOT_FOUND: "未找到指定的出站请求。",
     A2AOutboundErrorCode.DISPATCH_REJECTED: "第三方 Agent 拒绝了本次请求。",
     A2AOutboundErrorCode.DISPATCH_TIMEOUT: "等待第三方 Agent 回复超时。",

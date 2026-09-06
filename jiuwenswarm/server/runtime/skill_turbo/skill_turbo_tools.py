@@ -34,6 +34,12 @@ _SKILL_TURBO_STOP_HINT = (
     "work is already done; calling any of them again would duplicate the work."
 )
 
+_PPT_DELIVERY_SUMMARY_POST_TOOL_HINT = (
+    "\n\n[SYSTEM] PPT 交付总结骨架将由系统在本工具结果之后通过流式通道发送给用户，"
+    "无需在本回合重复输出交付总结。禁止 tool_call，禁止再调 "
+    "send_file_to_user / skill_tool / skill_acceleration_exec。"
+)
+
 # 工具返回值会先被 AbilityManager 收成 ToolMessage。after_tool_call 再用
 # StreamEventRail._tool_interrupted_message（随 prompt 语言中/英）覆写 tool_msg。
 # _fix_incomplete_tool_context 认 rail 文案 + 中英文 legacy 模板，故本常量取中文
@@ -41,6 +47,15 @@ _SKILL_TURBO_STOP_HINT = (
 # str(dict) 进 ToolMessage 后模型会当成加速失败并回退 skill_tool。
 _SKILL_TURBO_HITL_PLACEHOLDER = (
     "[工具执行被中断] 工具 skill_acceleration_exec 执行过程中被用户打断，没有执行结果。"
+)
+
+# ── 待在外层 tool_result 之后发出的 PPT 交付总结 ──
+# 不可在 ppt_gen_root / 工具执行中途以 chat.delta 发出：那时无 task_id，会与过程尾
+# 同桶；且早于 skill_acceleration_exec 的 tool_result，RelayClaw 收集窗口会清空。
+# 由 SkillTurboDeliverySummaryRail.after_tool_call（晚于 StreamEventRail 发
+# tool_result）读取并发出。
+_pending_ppt_delivery_summary: ContextVar[str | None] = ContextVar(
+    "pending_ppt_delivery_summary", default=None
 )
 
 # ── SkillTurbo event_type -> DeepAgent OutputSchema.type 反向映射 ──
@@ -128,6 +143,60 @@ def get_skill_turbo_hitl_tic() -> Any:
     return _skill_turbo_hitl_tic.get()
 
 
+def set_pending_ppt_delivery_summary(summary: str) -> None:
+    text = str(summary or "").strip()
+    _pending_ppt_delivery_summary.set(text or None)
+
+
+def clear_pending_ppt_delivery_summary() -> None:
+    _pending_ppt_delivery_summary.set(None)
+
+
+def take_pending_ppt_delivery_summary() -> str:
+    text = str(_pending_ppt_delivery_summary.get() or "").strip()
+    _pending_ppt_delivery_summary.set(None)
+    return text
+
+
+async def emit_pending_ppt_delivery_summary(session: "Session") -> bool:
+    """在外层 tool_result 之后发出无 task_id 的交付总结 chat.delta。
+
+    返回是否实际发出。session 为 None 或骨架非法时静默跳过。
+    """
+    from jiuwenswarm.server.runtime.skill_turbo.skill_codes.ppt.delivery_summary import (
+        DELIVERY_SUMMARY_START,
+    )
+    from openjiuwen.core.session.stream.base import OutputSchema
+
+    summary = take_pending_ppt_delivery_summary()
+    if not summary.startswith(DELIVERY_SUMMARY_START):
+        return False
+    if session is None:
+        logger.warning(
+            "[SkillTurboTool] pending PPT delivery summary dropped: parent session is None"
+        )
+        return False
+    try:
+        await session.write_stream(
+            OutputSchema(
+                type="llm_output",
+                index=0,
+                payload={"content": summary},
+            )
+        )
+        logger.info(
+            "[SkillTurboTool] emitted PPT delivery summary after tool_result chars=%d",
+            len(summary),
+        )
+        return True
+    except Exception:
+        logger.warning(
+            "[SkillTurboTool] emit PPT delivery summary after tool_result failed",
+            exc_info=True,
+        )
+        return False
+
+
 def set_current_skill_turbo_adapter(adapter: Any) -> Token:
     """绑定当前 async 上下文的 DeepAdapter 实例，返回 Token 用于 reset。"""
     return _current_skill_turbo_adapter.set(adapter)
@@ -188,6 +257,63 @@ def _resume_user_input_from_raw(
         if callable(convert):
             return convert(raw, resume_ctx)
     return raw
+
+
+# ────────────────── 中断恢复 hint（一次性 fresh 调用守卫） ──────────────────
+# prepare_interrupt_artifacts_for_request 注入产物摘要时，会在 request.metadata 上
+# 挂一份结构化 hint。本请求内 skill_acceleration_exec 若被全新调用（非 HITL resume），
+# 工具层守卫据此先拒绝一次并附上产物摘要，引导 LLM 走非 skillTurbo 流程基于已有
+# 产物继续；LLM 明确重试（视为全新任务）时 hint 已被消费，放行。
+# request.metadata 经 _update_runtime_config 浅拷贝进 rail metadata（内部 dict 共享
+# 引用），故 consumed 标记在原地标记即可对所有副本生效。
+
+SKILL_TURBO_INTERRUPT_RECOVERY_KEY = "skill_turbo_interrupt_recovery"
+
+
+def set_interrupt_recovery_hint(request: Any, *, summary: str, skill: str = "") -> None:
+    """把一次性中断恢复 hint 挂到 request.metadata（仅注入产物摘要的请求调用）。"""
+    metadata = getattr(request, "metadata", None)
+    if not isinstance(metadata, dict):
+        # metadata 缺失时无处挂载：放弃 hint，守卫对本请求不生效（降级，不影响主流程）
+        return
+    metadata[SKILL_TURBO_INTERRUPT_RECOVERY_KEY] = {
+        "summary": summary,
+        "skill": skill,
+        "request_id": str(getattr(request, "request_id", "") or ""),
+        "consumed": False,
+    }
+
+
+def _pending_interrupt_recovery_hint(request_metadata: Any) -> dict[str, Any] | None:
+    """读取本请求未消费的中断恢复 hint；无 hint 或已消费返回 None。"""
+    if not isinstance(request_metadata, dict):
+        return None
+    hint = request_metadata.get(SKILL_TURBO_INTERRUPT_RECOVERY_KEY)
+    if isinstance(hint, dict) and hint.get("summary") and not hint.get("consumed"):
+        return hint
+    return None
+
+
+def _consume_interrupt_recovery_hint(hint: dict[str, Any]) -> None:
+    """标记 hint 已消费：同请求内的下一次 fresh 调用放行（视为明确的全新任务）。"""
+    hint["consumed"] = True
+
+
+def _build_interrupt_recovery_reject(hint: dict[str, Any]) -> dict[str, Any]:
+    """构造 fresh 调用守卫的一次性拒绝结果（success=False，引导非 skillTurbo 继续）。"""
+    summary = str(hint.get("summary") or "").strip()
+    error = (
+        "检测到上一轮被中断的 SkillAccelerationExec 任务仍有可复用的已完成产物：\n\n"
+        f"{summary}\n\n"
+        "全新调用 skill_acceleration_exec 会丢弃以上产物并从 p0 重新规划执行，"
+        "导致已完成的工作被重复执行。\n"
+        "- 若用户想继续或完成被中断的任务：请勿调用 skill_acceleration_exec，"
+        "改用 skill_tool 走标准流程（可基于以上产物文件继续），"
+        "或用 read_file / edit_file 等工具直接处理产物文件；\n"
+        "- 若用户明确要求与已有产物无关的全新任务：请直接再次调用 "
+        "skill_acceleration_exec，本次将被放行（该提示仅生效一次）。"
+    )
+    return {"success": False, "error": error}
 
 
 def _resolve_skill_turbo_resume_session_id(
@@ -265,6 +391,14 @@ def _build_artifact_summary(holder: dict[str, Any]) -> str:
     return "\n".join(lines) if len(lines) > 1 else ""
 
 
+def _ppt_delivery_summary(artifact_holder: dict[str, Any] | None) -> str:
+    node = (artifact_holder or {}).get("p10_delivery")
+    if not isinstance(node, dict):
+        return ""
+    text = node.get("delivery_summary")
+    return text.strip() if isinstance(text, str) else ""
+
+
 def _wrap_skill_turbo_result(
     result_dict: dict[str, Any],
     artifact_holder: dict[str, Any] | None = None,
@@ -275,13 +409,22 @@ def _wrap_skill_turbo_result(
     若此处追加 "finish your turn" 会与之矛盾。
     """
     artifact_text = _build_artifact_summary(artifact_holder or {})
+    ppt_summary = _ppt_delivery_summary(artifact_holder)
     if result_dict.get("success"):
         parts = [result_dict.get("result") or ""]
         if artifact_text:
             parts.append(artifact_text)
-        parts.append(_SKILL_TURBO_STOP_HINT)
+        if ppt_summary:
+            # 骨架不进 tool_result 正文、也不在流水线内提前 chat.delta；
+            # 挂到 ContextVar，由 after_tool_call 在外层 tool_result 之后流式发出。
+            set_pending_ppt_delivery_summary(ppt_summary)
+            parts.append(_PPT_DELIVERY_SUMMARY_POST_TOOL_HINT)
+        else:
+            clear_pending_ppt_delivery_summary()
+            parts.append(_SKILL_TURBO_STOP_HINT)
         result_dict["result"] = "\n\n".join(p for p in parts if p)
     else:
+        clear_pending_ppt_delivery_summary()
         parts = [result_dict.get("error") or ""]
         if artifact_text:
             parts.append(artifact_text)
@@ -560,6 +703,20 @@ async def skill_turbo(query: str) -> dict[str, Any] | str:
                 task_states=resume_ctx.get("task_states"),
             )
         else:
+            # fresh 调用守卫：本请求注入过"中断恢复 hint"（上一轮中断任务有未消费产物）
+            # 时，先一次性拒绝并附产物摘要，避免新 executor 从 p0 清盘重跑（产物已在
+            # prepare_interrupt_artifacts_for_request 注入时落盘清空，此处只拦 LLM 的
+            # 盲目重启）。LLM 重试（明确全新任务）时 hint 已消费，直接放行。
+            recovery_hint = _pending_interrupt_recovery_hint(request_metadata)
+            if recovery_hint is not None:
+                _consume_interrupt_recovery_hint(recovery_hint)
+                logger.info(
+                    "[SkillTurboTool] interrupt recovery guard: reject fresh "
+                    "run_stream once (unconsumed artifacts from interrupted task)"
+                )
+                return _wrap_skill_turbo_result(
+                    _build_interrupt_recovery_reject(recovery_hint)
+                )
             stream = skill_turbo_inst.run_stream(
                 query, inputs, request_id, channel_id
             )

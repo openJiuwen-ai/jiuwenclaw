@@ -52,7 +52,7 @@ def test_text_output_null_identity():
 
 def test_identity_built_before_sensitive_filter(monkeypatch):
     """IdentityFieldFilter 先拼 identity，SensitiveDataFilter 再脱敏 msg + identity。"""
-    from jiuwenswarm.common.utils import SensitiveDataFilter
+    from jiuwenswarm.infrastructure.log_masking import SensitiveDataFilter
     from jiuwenswarm.infrastructure.log_masking.engine import LogMaskingEngine
 
     IdentityStore.set_test_state(None)
@@ -71,7 +71,10 @@ def test_identity_built_before_sensitive_filter(monkeypatch):
         ],
         db_authoritative=True,
     )
-    monkeypatch.setattr("jiuwenswarm.common.utils.is_enterprise", lambda: True)
+    monkeypatch.setattr(
+        "jiuwenswarm.infrastructure.log_masking.filter.is_enterprise",
+        lambda: True,
+    )
 
     r = logging.LogRecord("t", logging.INFO, "", 0, "hello app_id=foo", (), None)
     IdentityFieldFilter().filter(r)
@@ -86,6 +89,32 @@ def test_identity_built_before_sensitive_filter(monkeypatch):
     out = fmt.format(r)
     assert "app_id=testnull" in out
     assert "app_id=testfoo" in out
+    LogMaskingEngine.reset_for_tests()
+
+
+def test_identity_masked_with_builtin_rules_before_db(monkeypatch):
+    """企业版在 GDB 冷加载前即可用内置规则脱敏 identity（不必等 uses_external_rules）。"""
+    from jiuwenswarm.infrastructure.log_masking import SensitiveDataFilter
+    from jiuwenswarm.infrastructure.log_masking.engine import LogMaskingEngine
+    from jiuwenswarm.infrastructure.utils import fingerprint
+
+    IdentityStore.set_test_state(IdentityInfo(user_id="alice", domain_id="d1", app_id="a1"))
+    LogMaskingEngine.reset_for_tests()
+    assert not LogMaskingEngine.get_instance().uses_external_rules
+    monkeypatch.setattr(
+        "jiuwenswarm.infrastructure.log_masking.filter.is_enterprise",
+        lambda: True,
+    )
+
+    r = logging.LogRecord("t", logging.INFO, "", 0, "ok", (), None)
+    IdentityFieldFilter().filter(r)
+    SensitiveDataFilter().filter(r)
+
+    assert "user_id=******(fp:" in r.identity
+    assert f"fp:{fingerprint('alice')}" in r.identity
+    assert r.user_id == f"******(fp:{fingerprint('alice')})"
+    assert "domain_id=d1" in r.identity
+    assert "app_id=a1" in r.identity
     LogMaskingEngine.reset_for_tests()
 
 

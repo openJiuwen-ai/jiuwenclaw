@@ -16,8 +16,8 @@ from weakref import WeakValueDictionary
 from jiuwenswarm.common.e2a.acp.protocol import build_acp_initialize_result
 from jiuwenswarm.agents.harness.team import get_team_manager
 from jiuwenswarm.common.config import get_config, get_default_models
+from jiuwenswarm.edition import is_enterprise
 from jiuwenswarm.common.local_env_config import (
-    is_enterprise,
     apply_env_overrides_to_active,
     apply_env_removals,
     bind_task_env_overlay,
@@ -65,6 +65,19 @@ _DISK_ONLY_EVOLUTION_METHODS: frozenset[str] = frozenset(
 
 def _normalize_channel_id(channel_id: str | None) -> str:
     return str(channel_id or "default").strip() or "default"
+
+
+def _session_id_prefix_for_channel(channel_id: str | None) -> str:
+    """Path-safe session id prefix; may differ from logical ``channel_id``.
+
+    Cron scheduler uses channel ``__cron__`` for routing, but ids like
+    ``__cron___{ts}_{uuid}`` fail ``sanitize_session_id`` and cannot be
+    used as sessions directory names.
+    """
+    channel_key = _normalize_channel_id(channel_id)
+    if channel_key == "__cron__":
+        return "cron"
+    return channel_key
 
 
 def _normalize_mode(mode: str | None) -> str:
@@ -765,8 +778,9 @@ class AgentManager:
             logger.info("[AgentManager] session ensured: channel_id=%s session_id=%s", channel_id, explicit_session_id)
             return explicit_session_id
         channel_key = _normalize_channel_id(channel_id)
+        session_prefix = _session_id_prefix_for_channel(channel_id)
         session_id = (
-            f"{channel_key}_{int(time.time() * 1000):x}_"
+            f"{session_prefix}_{int(time.time() * 1000):x}_"
             f"{uuid.uuid4().hex[:12]}"
         )
         logger.info(

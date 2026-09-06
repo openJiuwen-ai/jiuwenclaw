@@ -362,6 +362,51 @@ class ChatHistoryStore:
             logger.exception("[history] %s 删除会话失败", self.backend.upper())
             return False
 
+    def set_session_pinned_blocking(
+        self, session_id: str, pinned: bool, *, user: str | None,
+    ) -> tuple[bool, int] | None:
+        """置顶/取消置顶并紧凑重编号；目标会话不存在返回 None。"""
+        if not user:
+            user = "guest"
+        if self._memory:
+            with self._mem_lock:
+                s = self._mem_sessions.get(session_id)
+                if s is None or s.get("user") != user:
+                    return None
+                s["pinned"] = bool(pinned)
+                s["pin_order"] = int(s.get("pin_order") or 0) if pinned else 0
+                pinned_list = sorted(
+                    (x for x in self._mem_sessions.values() if x.get("pinned")),
+                    key=lambda x: int(x.get("pin_order") or 0),
+                )
+                orders: dict[str, int] = {}
+                for idx, x in enumerate(pinned_list, start=1):
+                    x["pinned"] = True
+                    x["pin_order"] = idx
+                    orders[str(x.get("session_id"))] = idx
+                return pinned, orders.get(session_id, 0)
+        return self._get_actor().set_session_pinned_sync(session_id, pinned, user=user)
+
+    def list_pinned_sessions_blocking(
+        self, *, user: str | None,
+    ) -> list[dict[str, Any]]:
+        """该用户全部置顶会话，按 pin_order 升序。库不可用返回空。"""
+        if not user:
+            user = "guest"
+        if self._memory:
+            with self._mem_lock:
+                rows = [
+                    dict(s) for s in self._mem_sessions.values()
+                    if s.get("user") == user and s.get("pinned")
+                ]
+            rows.sort(key=lambda r: int(r.get("pin_order") or 0))
+            return rows
+        try:
+            return self._get_actor().list_pinned_sessions_sync(user=user)
+        except Exception:
+            logger.exception("[history] %s 读取置顶会话失败", self.backend.upper())
+            return []
+
     async def delete_session(
         self, session_id: str, *, user: str | None = None,
     ) -> bool:

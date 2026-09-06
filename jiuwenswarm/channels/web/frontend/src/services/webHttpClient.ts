@@ -1,5 +1,5 @@
 /**
- * 北向 A2 HTTP/SSE 客户端（``VITE_WEB_TRANSPORT=http`` / ``a2``）。
+ * 北向 A2 HTTP/SSE 客户端（``getWebTransport()==='http'``：显式 transport 或企业默认）。
  * 对外口与 WebClient 相同：connect / request / on。映射与泵流只发生在这里。
  */
 import {
@@ -79,6 +79,8 @@ const ROUTES: Record<string, RouteRow> = {
   'locale.get_conf': { verb: 'GET', path: '/locale', kind: 'unary' },
   'locale.set_conf': { verb: 'PUT', path: '/locale', kind: 'unary' },
   'cron.job.list': { verb: 'GET', path: '/cron/jobs', kind: 'unary' },
+  'cron.job.create': { verb: 'POST', path: '/cron/jobs', kind: 'unary' },
+  'cron.job.meta': { verb: 'GET', path: '/cron/jobs/meta', kind: 'unary' },
   'cron.job.get': { verb: 'GET', path: '/cron/jobs/{id}', kind: 'unary' },
   'cron.job.update': { verb: 'PATCH', path: '/cron/jobs/{id}', kind: 'unary' },
   'cron.job.delete': { verb: 'DELETE', path: '/cron/jobs/{id}', kind: 'unary' },
@@ -284,7 +286,7 @@ function errorFields(error: unknown): { message: string; code?: string } {
   return { message: 'request failed' };
 }
 
-export function unwrapHttpUnary(input: unknown): UnaryResult {
+export function unwrapHttpUnary(input: unknown, status?: number): UnaryResult {
   if (!isRecord(input)) {
     return { ok: false, message: 'empty http response', code: 'HTTP_ERROR' };
   }
@@ -299,6 +301,18 @@ export function unwrapHttpUnary(input: unknown): UnaryResult {
   }
   if (input.agent_ready !== undefined) {
     return { ok: true, payload: input, requestId };
+  }
+  // 鉴权代理层（manager-web 同源反代等）返回 FastAPI/Starlette 的 {"detail": ...}
+  // 错误形状——不是标准信封，但要给出真实原因而非笼统的 "invalid http envelope"。
+  if (input.detail !== undefined) {
+    const detail = input.detail;
+    const message =
+      typeof detail === 'string' && detail.trim()
+        ? detail
+        : 'request rejected';
+    const code =
+      status === 401 ? 'UNAUTHORIZED' : status === 403 ? 'FORBIDDEN' : 'HTTP_ERROR';
+    return { ok: false, message, code, requestId };
   }
   return { ok: false, message: 'invalid http envelope', code: 'HTTP_ERROR', requestId };
 }
@@ -670,7 +684,7 @@ export class WebHttpClient {
       if (assembled.kind === 'sse' || assembled.kind === 'history-stream') {
         if (isSseContentType(response.headers.get('content-type'))) {
           if (!response.ok) {
-            const unwrapped = unwrapHttpUnary(await this.readJson(response));
+            const unwrapped = unwrapHttpUnary(await this.readJson(response), response.status);
             throw this.createWebError(
               unwrapped.ok ? i18n.t('network.requestFailed') : unwrapped.message,
               unwrapped.ok ? 'HTTP_ERROR' : unwrapped.code,
@@ -790,7 +804,7 @@ export class WebHttpClient {
         headers: this.identityHeaders(requestId, {}),
         signal: this.connectAbort.signal,
       });
-      const unwrapped = unwrapHttpUnary(await this.readJson(response));
+      const unwrapped = unwrapHttpUnary(await this.readJson(response), response.status);
       if (!unwrapped.ok) {
         throw this.createWebError(
           unwrapped.message,
@@ -907,7 +921,7 @@ export class WebHttpClient {
   }
 
   private async readUnaryPayload(response: Response, requestId: string): Promise<unknown> {
-    const unwrapped = unwrapHttpUnary(await this.readJson(response));
+    const unwrapped = unwrapHttpUnary(await this.readJson(response), response.status);
     if (!unwrapped.ok) {
       throw this.createWebError(
         unwrapped.message,

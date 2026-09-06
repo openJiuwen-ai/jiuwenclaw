@@ -394,6 +394,13 @@ class PPTGenRootNode(PlanNode):
             ):
                 yield chunk
 
+        # 交付总结骨架不在此处流式发出：
+        # 1) 此时 P10 after_subplan 已清空 task_id，骨架会与「PPT生成任务流执行完成」等
+        #    无 stream_source_id 的过程尾落入同一缓冲桶，主气泡第一行变成过程尾；
+        # 2) 该 chat.delta 早于外层 skill_acceleration_exec 的 tool_result，进不了
+        #    RelayClaw 的 pptTurboSummary 收集窗口（tool_result 时还会被清空）。
+        # 骨架由 P10 写入 artifact → skill_turbo_tools 挂 ContextVar →
+        # SkillTurboDeliverySummaryRail 在外层 tool_result 之后再发 llm_output。
         yield {
             "node": self.plan_name,
             "status": "ok",

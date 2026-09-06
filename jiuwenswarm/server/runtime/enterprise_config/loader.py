@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Collection
 from typing import Any
 
-from jiuwenswarm.common.local_env_config import is_enterprise
+from jiuwenswarm.edition import is_enterprise
 from jiuwenswarm.common.schema.agent import AgentRequest
 from jiuwenswarm.common.utils import logger
 
@@ -46,6 +46,8 @@ def _apply_slot_entities(
         result.skill_whitelist = entities
     elif slot == TemplateRefSlot.EXTENSION_CONFIG:
         result.extension_config = entities
+    elif slot == TemplateRefSlot.MCP:
+        result.mcp = entities
     elif slot == TemplateRefSlot.PERMISSIONS:
         result.permissions = entities
 
@@ -62,6 +64,8 @@ def _any_requested_slot_loaded(
         if slot == TemplateRefSlot.SKILL_WHITELIST and result.skill_whitelist:
             return True
         if slot == TemplateRefSlot.EXTENSION_CONFIG and result.extension_config:
+            return True
+        if slot == TemplateRefSlot.MCP and result.mcp is not None:
             return True
         if slot == TemplateRefSlot.PERMISSIONS and result.permissions:
             return True

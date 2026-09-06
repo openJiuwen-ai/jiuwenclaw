@@ -3,7 +3,7 @@
 """Rail Extension Manager - 管理用户自定义的 Rail 扩展."""
 
 from __future__ import annotations
-from jiuwenswarm.common.local_env_config import is_enterprise
+from jiuwenswarm.edition import is_enterprise
 
 import importlib
 import importlib.util

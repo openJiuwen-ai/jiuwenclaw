@@ -254,8 +254,16 @@ def identity_headers(envelope: E2AEnvelope, *, accept: str) -> dict[str, str]:
     （Gateway ``apply_invoke_ids_to_envelope`` 写入）经
     ``X-Service-Id`` / ``X-Agent-Id`` / ``X-Workspace-Key`` 透传。
 
+    ``channel_context.ext`` 是白名单过滤后的请求级扩展字段，经内部
+    ``X-Jiuwenswarm-Request-Ext`` 传输；该头不承担鉴权。
+
     ``gateway_id`` 仅透传保留；Agent 业务（如企业配置 ``RoutingContext``）当前不消费。
     """
+    from jiuwenswarm.common.request_ext import (
+        INTERNAL_HEADER_NAME,
+        METADATA_KEY,
+        encode_internal_header,
+    )
     from jiuwenswarm.common.request_identity import web_routing_identity
 
     headers = {
@@ -289,6 +297,12 @@ def identity_headers(envelope: E2AEnvelope, *, accept: str) -> dict[str, str]:
         text = str(value).strip() if value is not None else ""
         if text:
             headers[header_name] = text
+    channel_context = (
+        envelope.channel_context if isinstance(envelope.channel_context, dict) else {}
+    )
+    encoded_ext = encode_internal_header(channel_context.get(METADATA_KEY))
+    if encoded_ext:
+        headers[INTERNAL_HEADER_NAME] = encoded_ext
     return headers
 
 
@@ -343,7 +357,7 @@ def _query_values(remaining: Mapping[str, Any]) -> dict[str, str]:
 
 
 def assemble_rest_request(envelope: E2AEnvelope, *, base_url: str) -> AssembledRestRequest:
-    """信封 → 一条 REST/SSE 请求。body 只含 params，不含整封 E2A。"""
+    """信封 → REST/SSE；body 保持纯 params，上下文通过内部 header 映射。"""
     method = str(envelope.method or "").strip()
     if not method:
         raise RestAssemblyError("envelope.method 为空，无法组装 REST")

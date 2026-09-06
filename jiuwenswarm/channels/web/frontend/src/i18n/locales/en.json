@@ -34,7 +34,6 @@
     "agent": "Agent",
     "teams": "Teams",
     "sessions": "Sessions",
-    "history": "History",
     "cron": "Scheduled Tasks",
     "skills": "Skills",
     "channels": "Channels",
@@ -544,18 +543,27 @@
     "language": "Language",
     "moreSettings": "More Settings"
   },
-  "history": {
-    "title": "Session History",
-    "subtitle": "Browse session history stored on the Web Pod",
-    "refresh": "Refresh",
-    "loading": "Loading...",
-    "empty": "No session history",
-    "emptyMessages": "This session has no messages",
-    "notFound": "Session not found",
-    "back": "Back to list",
-    "messageCount": "{{count}} messages"
-  },
   "a2aIngress": {
+    "security": {
+      "title": "Security",
+      "description": "Configure caller authentication and response visibility. Use an HTTPS reverse proxy for remote access.",
+      "types": {
+        "none": "No authentication",
+        "bearer": "Bearer Token",
+        "api_key": "API Key (header)"
+      },
+      "configured": "Credential saved",
+      "notConfigured": "No credential saved",
+      "credentialPlaceholder": "Enter security credential",
+      "credentialHint": "16–512 printable ASCII characters without spaces. You can generate a random credential. After saving, use the eye icon to view or copy it. Blank input keeps the saved credential; select Clear to remove it.",
+      "generate": "Generate credential",
+      "show": "Show credential",
+      "hide": "Hide credential",
+      "clear": "Clear saved credential (select no authentication first)",
+      "cardHint": "When enabled, anyone can view the service name, capabilities, and endpoint addresses (Agent Card) without credentials. When disabled, viewing this information also requires authentication. Once authentication is configured, all actual calls always require credentials.",
+      "effective": "Active authentication: {{method}}",
+      "pendingApply": "Stored security settings differ from the running configuration. Save applies them immediately and restarts the running ingress service."
+    },
     "title": "A2A Control Center",
     "subtitle": "Manage the A2A service exposed by JiuwenSwarm.",
     "tabs": {
@@ -573,13 +581,10 @@
     "restartHint": "Stop and restart the ingress service. Existing connections may be briefly interrupted.",
     "refreshStatus": "Refresh status",
     "refreshHint": "Fetch the latest status and configuration without restarting the service.",
-    "save": "Save configuration",
-    "saveAndApply": "Save and apply",
-    "applying": "Applying...",
-    "saved": "Configuration saved; it has not been applied to the running service.",
-    "savedAndApplied": "Configuration saved and applied.",
+    "save": "Save",
+    "saved": "Configuration saved and applied.",
     "disconnected": "Gateway is disconnected, so the A2A service cannot be read or changed.",
-    "saveBeforeLifecycleAction": "Configuration has unsaved changes. Save it before enabling, disabling, or restarting the service.",
+    "saveBeforeLifecycleAction": "Configuration has unsaved changes. Save or cancel them before enabling, disabling, or restarting the service.",
     "states": { "disabled": "Disabled", "starting": "Starting", "running": "Running", "stopping": "Stopping", "error": "Error" },
     "status": {
       "title": "Service status",
@@ -588,8 +593,21 @@
       "effectiveCardUrl": "Effective Agent Card URL",
       "notListening": "Not listening"
     },
-    "config": { "title": "Ingress configuration", "description": "Save updates the desired configuration only; Save and apply reloads the running service." },
+    "config": {
+      "title": "Ingress configuration",
+      "description": "Save applies changes immediately and restarts the service if running. Cancel discards your edits."
+    },
     "outbound": {
+      "credentialHelp": {
+        "method": "Authentication declared by the Agent Card: {{method}}.",
+        "value": "Enter the credential supplied by the remote service. It is sent using the declared authentication method. Use the eye icon to view the saved value. Blank input keeps it; select Clear to remove it.",
+        "header": "header",
+        "query": "query parameter",
+        "cookie": "cookie",
+        "unknown": "Unrecognized authentication method",
+        "undeclared": "No authentication method declared; dispatch fails if a credential is configured",
+        "or": " or "
+      },
       "localDebug": {
         "title": "Local Agent debugging",
         "description": "Controls whether plaintext HTTP Agents on loopback addresses may be discovered and called. Changes apply immediately after saving.",
@@ -623,7 +641,7 @@
         "protocol": "Protocol",
         "expiresAt": "Candidate expires",
         "displayName": "Display name",
-        "credential": "API Key / Bearer (optional, never displayed)",
+        "credential": "Security credential",
         "revision": "Card revision",
         "credentialState": "Credential",
         "lastChecked": "Last checked",
@@ -706,11 +724,15 @@
       }
     },
     "fields": {
+      "auth_type": "Authentication method",
+      "api_key_header": "API Key header name",
+      "credential": "Security credential",
+      "card_auth_required": "Allow anonymous access to service information",
       "host": "Bind host",
       "port": "Bind port",
       "rpc_path": "RPC path",
       "card_path": "Agent Card path",
-      "extended_card_path": "Extended Card path",
+      "extended_card_path": "Extended Agent Card path",
       "protocol_version": "Protocol version",
       "app_name": "Agent name",
       "app_description": "Agent description",
@@ -2225,6 +2247,8 @@
       "timeout": "Execution timed out",
       "running": "Running...",
       "toolName": "Tool name",
+      "sourceSkill": "Source skill",
+      "sourceSkillInline": "{{label}} (skill: {{skill}})",
       "arguments": "Arguments",
       "result": "Result",
       "truncated": "result truncated"

@@ -30,6 +30,7 @@ from openjiuwen.core.single_agent.rail.base import (
     ToolCallInputs,
 )
 from openjiuwen.harness.rails.base import DeepAgentRail
+from openjiuwen.harness.rails.skills.skill_use_rail import get_current_skill_name
 from openjiuwen.harness.schema.task import TodoStatus
 from openjiuwen.harness.tools import TodoListTool
 from openjiuwen.harness.workspace.workspace import WorkspaceNode
@@ -39,6 +40,10 @@ from jiuwenswarm.agents.harness.common.rails.interrupt.interrupt_helpers import 
 )
 from jiuwenswarm.agents.harness.common.prompt.user_prompt_builder import (
     strip_image_content_from_model_context,
+)
+from jiuwenswarm.agents.harness.common.tools.todo_resume import (
+    get_stale_todo_ids,
+    get_pre_invoke_todo_ids,
 )
 from jiuwenswarm.agents.harness.common.rails.symphony import (
     SymphonyToolStreamHandler,
@@ -51,6 +56,7 @@ from jiuwenswarm.agents.harness.common.rails.read_file_validation import (
 )
 from jiuwenswarm.agents.harness.common.rails.task_execution_rail import (
     SKILL_TURBO_OUTER_TODO_ACTIVE_EXTRA_KEY,
+    extract_effective_project_dir,
 )
 from jiuwenswarm.common.tool_display import (
     build_tool_display_name,
@@ -73,6 +79,21 @@ def _early_checkpoint_disabled_by_env() -> bool:
 # non-enterprise runs. Enterprise deploy normally sets the env (e.g. 500).
 _DEFAULT_TOOL_RESULT_DISPLAY_MAX_CHARS = 60000
 _TOOL_RESULT_DISPLAY_MAX_CHARS_LIMIT = 100_000
+
+
+def _resolve_source_skill(session: Any = None) -> str:
+    """Return active skill name for tool-call attribution, or empty string.
+
+    Prefer session-backed binding (set by skill_tool); ContextVar alone does
+    not propagate across tool execution contexts — same issue as skill_turbo
+    request_metadata rebinding below.
+    """
+    try:
+        name = get_current_skill_name(session)
+    except Exception:
+        logger.debug("resolve source_skill failed", exc_info=True)
+        return ""
+    return str(name or "").strip()
 
 
 def _resolve_tool_result_display_max_chars() -> int:
@@ -1263,9 +1284,9 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
                 set_effective_request_workspace_dir,
                 set_interactive_ask,
             )
-            _epd = _md.get("effective_project_dir")
-            if isinstance(_epd, str) and _epd.strip():
-                ws_token = set_effective_request_workspace_dir(_epd.strip())
+            _epd = extract_effective_project_dir(_md)
+            if _epd is not None:
+                ws_token = set_effective_request_workspace_dir(_epd)
                 ctx.extra[_SKILL_TURBO_WORKSPACE_TOKEN_EXTRA_KEY] = ws_token
             _ia = _md.get("interactive_ask")
             if _ia is not None:
@@ -1456,6 +1477,9 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
             )
             if display_name:
                 tool_call_payload["display_name"] = display_name
+            source_skill = _resolve_source_skill(session)
+            if source_skill:
+                tool_call_payload["source_skill"] = source_skill
             await session.write_stream(
                 OutputSchema(
                     type="tool_call",
@@ -1492,6 +1516,9 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
                 if error_state:
                     tool_result_payload["status"] = "error"
                     tool_result_payload["is_error"] = True
+            source_skill = _resolve_source_skill(session)
+            if source_skill:
+                tool_result_payload["source_skill"] = source_skill
             await session.write_stream(
                 OutputSchema(
                     type="tool_result",
@@ -1591,17 +1618,21 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
     @staticmethod
     async def _emit_tool_update(session: Session, tool_call: Any, *, status: str) -> None:
         try:
+            update_payload: dict[str, Any] = {
+                "tool_name": getattr(tool_call, "name", "") if tool_call else "",
+                "tool_call_id": getattr(tool_call, "id", "") if tool_call else "",
+                "arguments": getattr(tool_call, "arguments", {}) if tool_call else {},
+                "status": str(status or "").strip() or "in_progress",
+            }
+            source_skill = _resolve_source_skill(session)
+            if source_skill:
+                update_payload["source_skill"] = source_skill
             await session.write_stream(
                 OutputSchema(
                     type="tool_update",
                     index=0,
                     payload={
-                        "tool_update": {
-                            "tool_name": getattr(tool_call, "name", "") if tool_call else "",
-                            "tool_call_id": getattr(tool_call, "id", "") if tool_call else "",
-                            "arguments": getattr(tool_call, "arguments", {}) if tool_call else {},
-                            "status": str(status or "").strip() or "in_progress",
-                        }
+                        "tool_update": update_payload,
                     },
                 )
             )
@@ -1622,6 +1653,39 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
                 "[StreamEventRail] Failed to load todos: %s", exc
             )
             return
+
+        # skip 窗口内（prepare hook 清理了跨请求残留 todo）过滤掉同一批旧 id：
+        # todo.updated 是全量快照旁路，不过滤会把旧任务的 completed 条目重新
+        # 弹回前端（task.update 通道的 _stale_todo_ids 过滤管不到这条旁路）。
+        try:
+            stale_ids = get_stale_todo_ids(session)
+        except Exception:
+            stale_ids = set()
+        if stale_ids:
+            # 仅过滤 stale 集中仍处于终态（cancelled/completed）的旧残留项。
+            # 本轮 LLM 通过 todo_create/todo_modify 重建的同 ID 项状态为
+            # pending/in_progress，不会被过滤。
+            # 额外排除本轮新建的同 ID 项：若 id 不在磁盘快照（pre_invoke_todo_ids）
+            # 中，说明是本轮 LLM 新建的，即使 id 与 stale 集合重合也不应过滤。
+            pre_invoke_ids = get_pre_invoke_todo_ids(session)
+            _DONE_STATUSES = frozenset({"cancelled", "completed"})  # pylint: disable=huawei-invalid-name
+            before = len(todos_data)
+            todos_data = [
+                t for t in todos_data
+                if not (  # pylint: disable=complicate-comprehension
+                    str(getattr(t, "id", "")) in stale_ids  # pylint: disable=complicate-comprehension
+                    and str(getattr(t, "status", "")).lower() in _DONE_STATUSES
+                    and (not pre_invoke_ids or str(getattr(t, "id", "")) in pre_invoke_ids)
+                )
+            ]
+            logger.info(
+                "[StreamEventRail] todo.updated filtered stale todos: "
+                "session_id=%s stale_ids=%d before=%d after=%d",
+                session_id,
+                len(stale_ids),
+                before,
+                len(todos_data),
+            )
 
         # Parent StreamEventRail only: team-member rails use their own
         # workspace and must not feed request_summaries.tasks.

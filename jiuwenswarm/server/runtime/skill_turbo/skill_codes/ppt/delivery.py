@@ -6,6 +6,10 @@ from pathlib import Path
 from typing import Any
 
 from jiuwenswarm.server.runtime.skill_turbo.plan_node import AbortError, PlanNode
+from jiuwenswarm.server.runtime.skill_turbo.skill_codes.ppt.delivery_summary import (
+    build_delivery_summary_skeleton,
+    is_backup_listing_path,
+)
 from jiuwenswarm.server.runtime.skill_turbo.skill_codes.ppt.ppt_common import PptCommon
 from jiuwenswarm.server.runtime.skill_turbo.skill_codes.ppt.utils.bash_utils import (
     normalize_tool_text,
@@ -123,36 +127,67 @@ class DeliveryNode(PlanNode):
         summary = self._build_summary(
             delivery_status, pptx_filename, page_count, pages_dir, send_file_status
         )
+        delivery_summary = ""
+        if task_completed:
+            outline_text = await self._read_outline_text(inputs, output_dir)
+            delivery_summary = build_delivery_summary_skeleton(
+                pptx_filename=pptx_filename,
+                total_pages=total_pages or page_count,
+                delivery_status=delivery_status,
+                send_file_status=send_file_status,
+                pages_ok=pages_ok,
+                outline_text=outline_text,
+                topic=str(inputs.get("topic") or "").strip(),
+                style_id=str(inputs.get("style_id") or "").strip(),
+                speaker_notes_status=str(inputs.get("speaker_notes_status") or "skipped"),
+                need_speaker_notes=bool(inputs.get("need_speaker_notes")),
+                has_documents=bool(inputs.get("has_documents")),
+                image_map_path=str(inputs.get("image_map_path") or "").strip(),
+                export_status=export_status,
+            )
 
         logger.info(
-            "[P10] 交付完成 status=%s send=%s pptx=%s task_completed=%s",
+            "[P10] 交付完成 status=%s send=%s pptx=%s task_completed=%s summary_emitted=%s",
             delivery_status,
             send_file_status,
             pptx_filename,
             task_completed,
+            bool(delivery_summary),
         )
 
+        artifact_info = {
+            "delivery_status": delivery_status,
+            "send_file_status": send_file_status,
+            "pptx_filename": pptx_filename,
+            "task_completed": task_completed,
+            "speaker_notes_status": str(inputs.get("speaker_notes_status") or "skipped"),
+            "delivery_summary_emitted": bool(delivery_summary),
+        }
         return {
             "delivery_status": delivery_status,
             "artifact_tag": artifact_tag,
             "send_file_status": send_file_status,
             "summary": summary,
-            # __artifact__ 字段供 SkillTurboExecutor._collect_node_artifact 提取，
-            # 记录到 _node_artifacts_holder，最终由 _build_artifact_summary 构建产物摘要，
-            # 追加到 skill_acceleration_exec 返回给 DeepAgent 主链路的 tool_result 中。
-            # 没有 __artifact__ 时产物摘要为空，LLM 偶发性因看不到产物证据而误调 skill_tool 重跑。
+            "delivery_summary": delivery_summary,
             "__artifact__": {
-                "info": {
-                    "delivery_status": delivery_status,
-                    "send_file_status": send_file_status,
-                    "pptx_filename": pptx_filename,
-                    "task_completed": task_completed,
-                    # prod 新增：演讲备注状态（best-effort，可能 skipped/partial/ok）
-                    "speaker_notes_status": str(inputs.get("speaker_notes_status") or "skipped"),
-                },
+                "info": artifact_info,
                 "files": [{"path": pptx_path}] if pptx_path else [],
+                "delivery_summary": delivery_summary,
             },
         }
+
+    async def _read_outline_text(self, inputs: dict[str, Any], output_dir: str) -> str:
+        outline_path = str(inputs.get("outline_path") or "").strip()
+        if not outline_path and output_dir:
+            outline_path = str(Path(output_dir) / "outline.md")
+        if not outline_path:
+            return ""
+        return await PptCommon.read_file(
+            self,
+            outline_path,
+            required=False,
+            label="outline.md",
+        )
 
     async def _send_file(self, pptx_path: str) -> str:
         if not self.has_tool("send_file_to_user"):
@@ -215,7 +250,9 @@ class DeliveryNode(PlanNode):
                     raise
                 files = []
 
-        page_files = [f for f in files if f.startswith("page-") and f.endswith(".pptx.html")]
+        page_files = [
+            f for f in files if f.startswith("page-") and f.endswith(".pptx.html")
+        ]
         if page_count <= 0:
             return bool(page_files)
         return len(page_files) == page_count
@@ -224,7 +261,11 @@ class DeliveryNode(PlanNode):
         if result is None:
             return []
         if isinstance(result, list):
-            return [self._basename(self._extract_path_from_item(x)) for x in result]
+            return [
+                name
+                for name in (self._basename(self._extract_path_from_item(x)) for x in result)
+                if name
+            ]
         if isinstance(result, dict):
             for key in ("entries", "files", "filenames", "items", "result", "matches", "paths"):
                 v = result.get(key)
@@ -286,6 +327,8 @@ class DeliveryNode(PlanNode):
 
     @staticmethod
     def _basename(path: str) -> str:
+        if is_backup_listing_path(path):
+            return ""
         path = path.replace("\\", "/").rstrip("/")
         return path.rsplit("/", 1)[-1] if "/" in path else path
 

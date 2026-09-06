@@ -47,15 +47,47 @@ def tenant_workspace_root(
 
 
 def patch_multi_tenant_workspace_dirs(monkeypatch, tmp_path: Path) -> None:
-    def _mock(workspace_key: str) -> Path:
-        wk = str(workspace_key or "default").strip() or "default"
+    """Redirect tenant disk roots under ``tmp_path/workspace_{key}/``.
+
+    Patches both ``utils`` and modules that ``from utils import get_multi_tenant...``
+    (import binding), resets ``_workspace_base_dir`` cache, and clears tenant
+    ContextVar bindings so tests cannot leak ``service_*/agent_*`` defaults.
+    """
+    import jiuwenswarm.common.utils as utils_mod
+
+    try:
+        from jiuwenswarm.server.runtime.tenant_context import clear_tenant_bindings
+
+        clear_tenant_bindings()
+    except ImportError:
+        pass
+
+    # Drop cached workspace base so get_user_workspace_dir sees the patch.
+    monkeypatch.setattr(utils_mod, "_workspace_base_dir", None, raising=False)
+
+    def _mock_user_workspace_dir() -> Path:
+        return tmp_path
+
+    def _mock_multi_tenant(workspace_key: str, agent_id: str | None = None) -> Path:
+        # New API: one workspace_key. Old API: (service_id, agent_id).
+        if agent_id is not None:
+            wk = tenant_workspace_key(workspace_key, agent_id)
+        else:
+            wk = str(workspace_key or "default").strip() or "default"
         return tmp_path / f"workspace_{wk}"
 
-    monkeypatch.setattr(
+    targets = [
+        "jiuwenswarm.common.utils.get_user_workspace_dir",
         "jiuwenswarm.common.utils.get_multi_tenant_user_workspace_dir",
-        _mock,
-    )
-    monkeypatch.setattr(
         "jiuwenswarm.gateway.tenant_paths.get_multi_tenant_user_workspace_dir",
-        _mock,
-    )
+        "jiuwenswarm.agents.harness.common.tools.cron.cron_tools.get_multi_tenant_user_workspace_dir",
+    ]
+    for target in targets:
+        try:
+            if target.endswith("get_user_workspace_dir"):
+                monkeypatch.setattr(target, _mock_user_workspace_dir)
+            else:
+                monkeypatch.setattr(target, _mock_multi_tenant)
+        except AttributeError:
+            # Module may be absent in slim installs; ignore.
+            pass

@@ -896,7 +896,7 @@ agent_ras:
     notify_user_on_warning: true
 
 # web_enterprise 聊天附件上传（自部署 MinIO / S3 兼容对象存储）
-# 环境变量可覆盖：JIUWENCLAW_MINIO_ENDPOINT / ACCESS_KEY / SECRET_KEY / BUCKET / SECURE / PUBLIC_BASE_URL
+# 环境变量：OBS_URL / OBS_ACCESS_KEY / OBS_SECRET_KEY / OBS_BUCKET / OBS_SECURE / OBS_PUBLIC_BASE_URL / OBS_REGION
 minio:
   endpoint:
   access_key:
@@ -1131,7 +1131,7 @@ permissions:
     cron_toggle_job: allow
     cron_preview_job: allow
     acp_chat: ask
-    skill_acceleration_exec: allow
+    skill_acceleration_exec: ask
 
   rules:
     - id: shell_allow_dir
@@ -1330,6 +1330,19 @@ updater:
   sha256_name_pattern: "JiuwenSwarm-setup-{version}.exe.sha256"
   timeout_seconds: 20
   pypi_mirror: "https://mirrors.aliyun.com/pypi"
+
+# Gateway ↔ AgentServer 分块文件传输（Agent→Gateway 下载 · 逃生阀）
+# 默认关闭（个人与企业均关）。企业下载主路径为 OBS URL + Gateway 代理，不依赖本块。
+# 显式 enabled: true 或 env JIUWENSWARM_FILE_DOWNLOAD_VIA_PUSH=1 才开启 file.download.* push。
+# 企业上传仍走 MinIO URL（is_enterprise 跳过 GW→Agent 分片）。
+file_transfer:
+  chunk_size: 65536
+  max_file_size: 104857600
+  transfer_timeout: 300
+  received_files_dir: "agent/workspace/received_files"
+  cleanup_interval: 3600
+  cleanup_age: 86400
+  max_concurrent_transfers: 5
 
 extensions:
   # 扩展包搜索目录（字符串），用 ';' 分割多个目录：

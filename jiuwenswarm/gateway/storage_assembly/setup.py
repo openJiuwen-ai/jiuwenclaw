@@ -8,7 +8,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-from jiuwenswarm.common.utils import is_enterprise
+from jiuwenswarm.edition import is_enterprise
 from jiuwenswarm.gateway.storage.backends.db.persistent_store import DbPersistentBackend
 from jiuwenswarm.gateway.storage.backends.file_persistent import FilePersistentBackend
 from jiuwenswarm.gateway.storage.backends.memory_ephemeral import MemoryEphemeralBackend

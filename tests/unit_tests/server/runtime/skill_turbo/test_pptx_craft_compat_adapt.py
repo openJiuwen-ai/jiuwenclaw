@@ -20,6 +20,7 @@ from jiuwenswarm.server.runtime.skill_turbo.skill_codes.ppt.ppt_page_gen import 
     _repair_content_template_chrome,
     _uses_content_template_fill,
     _uses_structural_template_fill,
+    _validate_chart_mount_references,
     _validate_custom_content_template_fill_output,
 )
 from jiuwenswarm.server.runtime.skill_turbo.skill_turbo_tools import skill_turbo
@@ -450,6 +451,37 @@ def test_validate_custom_content_fill_theme_and_placeholders():
     ok2, reason2 = _validate_custom_content_template_fill_output(seed, filled_theme_left)
     assert not ok2
     assert reason2 == "unfilled_placeholders"
+
+
+def test_custom_content_fill_does_not_hard_fail_on_chart_mount_mismatch():
+    """贵阳 case 回归：mount 错配不得使填槽校验失败（禁止进 missing / 拒导出）。"""
+    pad = "<!-- pad -->" * 20
+    seed = (
+        '<!DOCTYPE html><html><head><style id="theme-contract">'
+        "{{THEME_CSS_VARIABLES}}</style></head><body>"
+        f"{pad}"
+        '<div class="ppt-slide"><div class="content-safe">'
+        "<header><h1>{{PAGE_TITLE}}</h1></header>"
+        '<main class="page-main flex-1">{{PAGE_CONTENT}}</main>'
+        "<footer><p>{{PAGE_FOOTER}}</p></footer>"
+        "</div></div></body></html>"
+    )
+    mismatch_body = (
+        '<div class="flex-1 min-h-0 flex flex-col">'
+        '<div id="chart-2" class="w-full h-full"></div></div>'
+        "<script>"
+        'echarts.init(document.getElementById("chart-1"));'
+        "var option={};"
+        "</script>"
+    )
+    filled = seed.replace("{{THEME_CSS_VARIABLES}}", "--color-text:#111;")
+    filled = filled.replace("{{PAGE_TITLE}}", "标题")
+    filled = filled.replace("{{PAGE_CONTENT}}", mismatch_body)
+    filled = filled.replace("{{PAGE_FOOTER}}", "来源")
+    assert _validate_chart_mount_references(filled) is False
+    ok, reason = _validate_custom_content_template_fill_output(seed, filled)
+    assert ok, reason
+    assert reason != "chart_mount_id_mismatch"
 
 
 @pytest.mark.asyncio
