@@ -311,6 +311,7 @@ from jiuwenswarm.agents.harness.common.tools.video_gen_tools import (
     generate_video,
     check_video_status,
     _get_video_gen_api_credentials,
+    video_gen_enabled,
 )
 
 from jiuwenswarm.agents.harness.common.tools import (
@@ -4488,6 +4489,9 @@ class JiuWenSwarmDeepAdapter:
     ) -> bool:
         """Build DeepAgent video generation config from service config/env mapping."""
         _ = config_base
+        if not video_gen_enabled():
+            logger.info("[JiuWenSwarmDeepAdapter] video_gen tools skipped: Video processing disabled")
+            return False
         api_key, api_base, model = _get_video_gen_api_credentials()
         if not (api_key and api_base and model):
             logger.info("[JiuWenSwarmDeepAdapter] video_gen tools skipped: Video Model config incomplete")

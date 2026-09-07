@@ -11,15 +11,14 @@ if the job is still running after that, it returns the job_id and tells the
 agent to call check_video_status instead of blocking indefinitely or
 pretending the video is ready when it isn't.
 
-Credentials come solely from the existing "Video Model" config panel slot
-(VIDEO_API_KEY/VIDEO_API_BASE/VIDEO_MODEL_NAME - see
-apply_video_model_config_from_yaml). There is no separate settings entry and
-no built-in default endpoint/model: whatever's configured there is what
-these tools use, and all three must be set. Note this is the SAME slot
-video_understanding reads; pointing it at a generation-only model (e.g.
-OpenRouter's bytedance/seedance-2.0-fast) will break video understanding,
-since that tool expects a chat-completions-style video-analysis model, not a
-/videos generation endpoint.
+Credentials come from a dedicated "Video processing" config panel slot
+(VIDEO_GEN_API_KEY/VIDEO_GEN_API_BASE/VIDEO_GEN_MODEL_NAME/VIDEO_GEN_PROVIDER)
+- separate from the "Video Model" slot video_understanding reads, so the two
+capabilities can point at independent models (e.g. a chat-completions-style
+video-analysis model for understanding, and OpenRouter's
+bytedance/seedance-2.0-fast for generation) without one breaking the other.
+There is no built-in default endpoint/model: whatever's configured there is
+what these tools use, and api_key/api_base/model must all be set.
 """
 from __future__ import annotations
 
@@ -44,15 +43,26 @@ _MAX_POLL_SECONDS = 120
 _TERMINAL_STATUSES = {"completed", "failed", "cancelled", "expired"}
 
 
-def _get_video_gen_api_credentials() -> tuple[str, str, str]:
-    """Resolve video-generation credentials from the "Video Model" config
-    panel slot only (VIDEO_API_KEY/VIDEO_API_BASE/VIDEO_MODEL_NAME - see
-    apply_video_model_config_from_yaml). No fallback env vars, no built-in
-    default endpoint or model - an empty string means unconfigured.
+def video_gen_enabled() -> bool:
+    """Whether the "Video processing" switch in configuration settings is on.
+
+    Mirrors multimodal_model_enabled's env-var gate (see multimodal_config.py):
+    VIDEO_GEN_ENABLED is set from that switch and checked independently of
+    whether the Video processing config itself is complete, so a user can
+    leave valid credentials in place while still turning generation off.
     """
-    api_key = os.environ.get("VIDEO_API_KEY", "").strip()
-    api_base = os.environ.get("VIDEO_API_BASE", "").strip()
-    model = os.environ.get("VIDEO_MODEL_NAME", "").strip()
+    return str(os.environ.get("VIDEO_GEN_ENABLED", "")).strip().lower() in ("1", "true", "yes", "on")
+
+
+def _get_video_gen_api_credentials() -> tuple[str, str, str]:
+    """Resolve video-generation credentials from the dedicated "Video
+    processing" config panel slot only (VIDEO_GEN_API_KEY/VIDEO_GEN_API_BASE/
+    VIDEO_GEN_MODEL_NAME). No fallback env vars, no built-in default endpoint
+    or model - an empty string means unconfigured.
+    """
+    api_key = os.environ.get("VIDEO_GEN_API_KEY", "").strip()
+    api_base = os.environ.get("VIDEO_GEN_API_BASE", "").strip()
+    model = os.environ.get("VIDEO_GEN_MODEL_NAME", "").strip()
     return api_key, api_base, model
 
 
@@ -172,7 +182,7 @@ async def generate_video(
     api_key, api_base, model = _get_video_gen_api_credentials()
     if not (api_key and api_base and model):
         return (
-            "[ERROR]: video generation is not configured - set the Video Model "
+            "[ERROR]: video generation is not configured - set the Video processing "
             "API key, API URL, and model name in configuration settings."
         )
     prompt = (prompt or "").strip()
@@ -257,7 +267,7 @@ async def check_video_status(job_id: str, save_dir: str | None = None) -> str:
     api_key, api_base, _ = _get_video_gen_api_credentials()
     if not (api_key and api_base):
         return (
-            "[ERROR]: video generation is not configured - set the Video Model "
+            "[ERROR]: video generation is not configured - set the Video processing "
             "API key, API URL, and model name in configuration settings."
         )
     job_id = (job_id or "").strip()

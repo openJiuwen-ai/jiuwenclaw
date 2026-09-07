@@ -60,6 +60,7 @@ from jiuwenswarm.agents.harness.common.tools.video_gen_tools import (
     generate_video,
     check_video_status,
     _get_video_gen_api_credentials,
+    video_gen_enabled,
 )
 from jiuwenswarm.agents.harness.common.tools.xiaoyi_phone_tools import (
     add_collection,
@@ -431,8 +432,10 @@ def _build_image_gen_tools(ctx: SwarmBuildContext) -> list[Any]:
 
 
 def _build_video_gen_tools(ctx: SwarmBuildContext) -> list[Any]:
-    """Build the video-generation tools when the Video Model config is complete."""
+    """Build the video-generation tools when enabled and the Video Model config is complete."""
     _ = ctx
+    if not video_gen_enabled():
+        return []
     api_key, api_base, model = _get_video_gen_api_credentials()
     if not (api_key and api_base and model):
         return []

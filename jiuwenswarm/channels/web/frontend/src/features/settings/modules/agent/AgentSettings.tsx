@@ -21,13 +21,24 @@ import './AgentSettings.css';
 
 const keyFields = ['jina_api_key', 'bocha_api_key', 'perplexity_api_key', 'serper_api_key'] as const;
 const modalities = ['vision', 'audio', 'video'] as const;
+const videoGenFields = [
+  'video_gen_provider',
+  'video_gen_protocol',
+  'video_gen_api_base',
+  'video_gen_api_key',
+  'video_gen_model',
+] as const;
 
 function isSearchKeyField(name: string): name is (typeof keyFields)[number] {
   return keyFields.some((field) => field === name);
 }
 
+function isVideoGenField(name: string): name is (typeof videoGenFields)[number] {
+  return videoGenFields.some((field) => field === name);
+}
+
 function isRequiredAgentConfigField(name: string): boolean {
-  return isSearchKeyField(name);
+  return isSearchKeyField(name) || isVideoGenField(name);
 }
 
 type SaveConfig = (updates: Record<string, string>, operation: string) => Promise<unknown>;
@@ -256,6 +267,79 @@ export function AgentMediaSettings({ disabled }: SettingsCustomItemProps) {
           save={saveConfig}
           enableOnSave={dialog.enableOnSave}
           onSaved={handleSaveResult}
+          onClose={() => setDialog(null)}
+        />
+      ) : null}
+    </>
+  );
+}
+
+export function VideoGenSettings({ disabled }: SettingsCustomItemProps) {
+  const { t } = useTranslation();
+  const { isConnected } = useSettingsServices();
+  const { values, savingKeys, save } = useSettingsSource();
+  const [dialog, setDialog] = useState<{ enableOnSave: boolean } | null>(null);
+  const saveConfig: SaveConfig = (updates, operation) => save(updates, operation);
+
+  const configured = videoGenFields.every((name) => String(values[name] ?? '').trim());
+  const enabled = configured && parseConfigBoolean(values.video_gen_enabled);
+  const busy = [...videoGenFields, 'video_gen_enabled'].some((field) => savingKeys.has(field));
+  const name = t('settingsPanel.fields.video_gen_enabled.title');
+
+  const toggle = async (nextEnabled: boolean) => {
+    if (nextEnabled && !configured) {
+      setDialog({ enableOnSave: true });
+      return;
+    }
+    try {
+      await saveConfig({ video_gen_enabled: toConfigBoolean(nextEnabled) }, 'settingsPanel.fields.video_gen_enabled.title');
+    } catch {
+      // Surfaced via savingKeys/isConnected state already; nothing further to do here.
+    }
+  };
+
+  return (
+    <>
+      <SettingRow
+        className="settings-agent-media__row"
+        title={name}
+        description={t('settingsPanel.fields.video_gen_enabled.description')}
+        subSettings={
+          configured ? (
+            <div className="settings-agent-media__model-card">
+              <strong className="settings-agent-media__model-name">{String(values.video_gen_model)}</strong>
+              <div className="settings-agent-media__actions">
+                <Button
+                  variant="quiet"
+                  size="sm"
+                  icon={<settingsActionIcons.edit aria-hidden />}
+                  title={t('common.modify')}
+                  aria-label={`${t('common.modify')} ${name}`}
+                  disabled={disabled || !isConnected || busy}
+                  onClick={() => setDialog({ enableOnSave: false })}
+                />
+              </div>
+            </div>
+          ) : null
+        }
+      >
+        <Switch
+          checked={enabled}
+          disabled={disabled || !isConnected || busy}
+          aria-label={t('settingsPanel.agent.toggleCapability', { name })}
+          onChange={(nextEnabled) => void toggle(nextEnabled)}
+        />
+      </SettingRow>
+      {dialog ? (
+        <AgentConfigDialog
+          titleKey="settingsPanel.agent.videoGenConfigTitle"
+          fields={videoGenFields}
+          config={values}
+          save={
+            dialog.enableOnSave
+              ? (updates, operation) => saveConfig({ ...updates, video_gen_enabled: toConfigBoolean(true) }, operation)
+              : saveConfig
+          }
           onClose={() => setDialog(null)}
         />
       ) : null}

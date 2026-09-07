@@ -27,15 +27,15 @@ _TEST_MODEL = "example/video-gen-model"
 
 
 def _clear_video_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    for name in ("VIDEO_API_KEY", "VIDEO_API_BASE", "VIDEO_MODEL_NAME"):
+    for name in ("VIDEO_GEN_API_KEY", "VIDEO_GEN_API_BASE", "VIDEO_GEN_MODEL_NAME", "VIDEO_GEN_ENABLED"):
         monkeypatch.delenv(name, raising=False)
 
 
 def _set_video_model_config(monkeypatch: pytest.MonkeyPatch, *, api_key: str = "sk-test") -> None:
-    """Configure the Video Model panel slot the tools now read exclusively."""
-    monkeypatch.setenv("VIDEO_API_KEY", api_key)
-    monkeypatch.setenv("VIDEO_API_BASE", _TEST_API_BASE)
-    monkeypatch.setenv("VIDEO_MODEL_NAME", _TEST_MODEL)
+    """Configure the dedicated "Video processing" panel slot the tools read."""
+    monkeypatch.setenv("VIDEO_GEN_API_KEY", api_key)
+    monkeypatch.setenv("VIDEO_GEN_API_BASE", _TEST_API_BASE)
+    monkeypatch.setenv("VIDEO_GEN_MODEL_NAME", _TEST_MODEL)
 
 
 @pytest.fixture(autouse=True)
@@ -74,6 +74,27 @@ def _speed_up_polling(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 # ---------------------------------------------------------------------------
+# video_gen_enabled - the "Video processing" settings switch
+# ---------------------------------------------------------------------------
+
+
+def test_video_gen_enabled_false_when_unset():
+    assert vg.video_gen_enabled() is False
+
+
+@pytest.mark.parametrize("value", ["1", "true", "True", "TRUE", "yes", "on"])
+def test_video_gen_enabled_true_for_truthy_values(monkeypatch: pytest.MonkeyPatch, value: str):
+    monkeypatch.setenv("VIDEO_GEN_ENABLED", value)
+    assert vg.video_gen_enabled() is True
+
+
+@pytest.mark.parametrize("value", ["0", "false", "False", "no", "off", "", "garbage"])
+def test_video_gen_enabled_false_for_falsy_values(monkeypatch: pytest.MonkeyPatch, value: str):
+    monkeypatch.setenv("VIDEO_GEN_ENABLED", value)
+    assert vg.video_gen_enabled() is False
+
+
+# ---------------------------------------------------------------------------
 # _get_video_gen_api_credentials
 # ---------------------------------------------------------------------------
 
@@ -94,8 +115,8 @@ def test_credentials_read_only_from_video_model_config_panel(monkeypatch: pytest
 
 
 def test_credentials_partial_config_leaves_missing_fields_empty(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setenv("VIDEO_API_KEY", "sk-only-key-set")
-    # VIDEO_API_BASE / VIDEO_MODEL_NAME intentionally left unset.
+    monkeypatch.setenv("VIDEO_GEN_API_KEY", "sk-only-key-set")
+    # VIDEO_GEN_API_BASE / VIDEO_GEN_MODEL_NAME intentionally left unset.
 
     api_key, api_base, model = vg._get_video_gen_api_credentials()
 
@@ -200,7 +221,7 @@ async def test_generate_video_without_api_key_returns_error(monkeypatch: pytest.
     result = await generate_video(prompt="a golden retriever puppy running")
 
     assert result == (
-        "[ERROR]: video generation is not configured - set the Video Model "
+        "[ERROR]: video generation is not configured - set the Video processing "
         "API key, API URL, and model name in configuration settings."
     )
 
@@ -209,7 +230,7 @@ async def test_generate_video_without_api_key_returns_error(monkeypatch: pytest.
 async def test_generate_video_with_partial_config_returns_error(monkeypatch: pytest.MonkeyPatch):
     """Key set but API URL/model missing - no built-in default to fall back
     to, so this must be treated the same as fully unconfigured."""
-    monkeypatch.setenv("VIDEO_API_KEY", "sk-test")
+    monkeypatch.setenv("VIDEO_GEN_API_KEY", "sk-test")
 
     def _unexpected_request(request: httpx.Request) -> httpx.Response:
         raise AssertionError(f"no HTTP call should be made with partial config, got {request.url}")
@@ -219,14 +240,14 @@ async def test_generate_video_with_partial_config_returns_error(monkeypatch: pyt
     result = await generate_video(prompt="a golden retriever puppy running")
 
     assert result == (
-        "[ERROR]: video generation is not configured - set the Video Model "
+        "[ERROR]: video generation is not configured - set the Video processing "
         "API key, API URL, and model name in configuration settings."
     )
 
 
 @pytest.mark.asyncio
 async def test_check_video_status_with_partial_config_returns_error(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setenv("VIDEO_API_KEY", "sk-test")
+    monkeypatch.setenv("VIDEO_GEN_API_KEY", "sk-test")
 
     def _unexpected_request(request: httpx.Request) -> httpx.Response:
         raise AssertionError(f"no HTTP call should be made with partial config, got {request.url}")
@@ -236,7 +257,7 @@ async def test_check_video_status_with_partial_config_returns_error(monkeypatch:
     result = await check_video_status(job_id="job-123")
 
     assert result == (
-        "[ERROR]: video generation is not configured - set the Video Model "
+        "[ERROR]: video generation is not configured - set the Video processing "
         "API key, API URL, and model name in configuration settings."
     )
 
@@ -454,7 +475,7 @@ async def test_generate_video_http_error_during_submit_is_caught(monkeypatch: py
 async def test_check_video_status_without_api_key_returns_error(monkeypatch: pytest.MonkeyPatch):
     result = await check_video_status(job_id="job-123")
     assert result == (
-        "[ERROR]: video generation is not configured - set the Video Model "
+        "[ERROR]: video generation is not configured - set the Video processing "
         "API key, API URL, and model name in configuration settings."
     )
 

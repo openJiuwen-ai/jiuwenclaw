@@ -102,6 +102,14 @@ export const SETTINGS_CONFIG_FIELDS: readonly ConfigFieldContract[] = [
   envField('video_vendor_key', 'agent', 'text', 'VIDEO_VENDOR_KEY'),
   envField('video_plan', 'agent', 'text', 'VIDEO_PLAN'),
   envField('video_enabled', 'agent', 'boolean', 'VIDEO_ENABLED'),
+  // Video processing (generation) - dedicated slot, separate from the video
+  // understanding fields above.
+  envField('video_gen_api_base', 'agent', 'text', 'VIDEO_GEN_API_BASE'),
+  envField('video_gen_api_key', 'agent', 'text', 'VIDEO_GEN_API_KEY'),
+  envField('video_gen_model', 'agent', 'text', 'VIDEO_GEN_MODEL_NAME'),
+  envField('video_gen_provider', 'agent', 'text', 'VIDEO_GEN_PROVIDER'),
+  envField('video_gen_protocol', 'agent', 'text', 'VIDEO_GEN_PROTOCOL'),
+  envField('video_gen_enabled', 'agent', 'boolean', 'VIDEO_GEN_ENABLED'),
 
   yamlField('permissions_enabled', 'security', 'boolean', 'permissions.enabled'),
 
