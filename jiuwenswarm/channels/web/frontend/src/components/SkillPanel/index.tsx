@@ -3400,9 +3400,13 @@ export function SkillPanel({
                                   {t('skills.mySkillsTabs.builtin')}
                                 </span>
                               </div>
-                            </div>
-                          );
-                        })}
+                              <div className="card-grid-auto">
+                                {builtinSkills.map(renderMySkillCard)}
+                              </div>
+                            </>
+                          )}
+                        </>
+                      )}
                       </div>
                     </div>
                   ) : null}
