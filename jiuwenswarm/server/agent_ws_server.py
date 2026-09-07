@@ -10618,6 +10618,15 @@ class AgentWebSocketServer:
                     model_resolver=context.model_resolver,
                 )
                 self._rsi_harness_provider = harness_provider
+            from jiuwenswarm.agents.harness.common.rsi.provider_factory import build_rsi_adapters
+
+            context.register_adapters(
+                build_rsi_adapters(
+                    context.tasks_root,
+                    mode="real",
+                    model_resolver=self._resolve_model,
+                )
+            )
             context.register_harness_provider(harness_provider)
         context.bind_harness_installer(self._agent_manager)
         handlers = RsiAgentServerHandlers(

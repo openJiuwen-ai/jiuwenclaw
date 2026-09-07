@@ -29,23 +29,29 @@ const BINARY_EXTENSIONS = new Set([
 
 const MIME_BY_EXTENSION: Record<string, string> = {
   bib: 'text/plain',
+  csv: 'text/csv',
   css: 'text/css',
+  diff: 'text/plain',
   htm: 'text/html',
   html: 'text/html',
   js: 'text/javascript',
   json: 'application/json',
+  jsonl: 'application/x-ndjson',
   jsx: 'text/javascript',
   md: 'text/markdown',
   markdown: 'text/markdown',
+  log: 'text/plain',
   pdf: 'application/pdf',
   png: 'image/png',
   py: 'text/x-python',
+  sh: 'text/plain',
   sty: 'text/plain',
   tex: 'text/plain',
   toml: 'text/plain',
   ts: 'text/typescript',
   tsx: 'text/typescript',
   txt: 'text/plain',
+  tsv: 'text/tab-separated-values',
   xml: 'application/xml',
   yaml: 'text/plain',
   yml: 'text/plain',
@@ -109,7 +115,10 @@ function collectArtifactPaths(value: unknown): string[] {
 export function resolveRsiArtifactSource(node: RsiTreeNode, taskId: string): RsiArtifactSource | null {
   const paths = collectArtifactPaths(node.extra);
   if (paths.length === 0) return null;
-  return { taskId, path: normalizePath(paths[0]), initialFilePath: null };
+  // The canonical paper artifact is a directory. Legacy snapshots can still
+  // expose a ZIP, so prefer a non-ZIP path when both representations exist.
+  const path = paths.find((candidate) => fileExtension(baseName(candidate)) !== 'zip') ?? paths[0];
+  return { taskId, path: normalizePath(path), initialFilePath: null };
 }
 
 export function canViewNodeArtifact(node: RsiTreeNode): boolean {
@@ -121,9 +130,10 @@ export function isPreviewableEntry(entry: RsiArtifactFileEntry): boolean {
   const extension = fileExtension(entry.name);
   if (BINARY_EXTENSIONS.has(extension)) return false;
   if (LATEX_TEXT_EXTENSIONS.has(extension)) return true;
+  if (extension === 'jsonl') return true;
   const mime = entry.mimeType ?? mimeTypeFor(entry.name);
   return mime.startsWith('text/') || mime.startsWith('image/') || mime === 'application/pdf'
-    || mime === 'application/json' || mime === 'application/xml';
+    || mime === 'application/json' || mime === 'application/x-ndjson' || mime === 'application/xml';
 }
 
 export async function loadRsiArtifactFiles(source: RsiArtifactSource): Promise<RsiArtifactLoadResult> {

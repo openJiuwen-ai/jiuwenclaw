@@ -14,17 +14,15 @@ import waitingIcon from '../../../assets/rsi/rsi-waiting.svg';
 import type { RsiTaskGetResult, RsiTreeGetResult } from '../types';
 import {
   legendDotClass,
-  nodeDisplayName,
   formatCost,
+  presentRsiNode,
   statusBadgeInfo,
   type StatusBadgeKind,
   type NodeStatusKind,
   type NodeIconKind,
-  nodeRuntimeKind,
   runtimeKindColorClass,
-  runtimeIconKind,
-  nodeRuntimeLabel,
   nodeScoreLines,
+  type RsiNodePresentation,
 } from '../rsiPresentation';
 import { layoutTree, type LayoutNode, type TreeLayout } from '../rsiTreeLayout';
 import { useRsiStore } from '../rsiStore';
@@ -39,6 +37,7 @@ const LEGEND: Array<{ kind: NodeStatusKind; labelKey: string }> = [
   { kind: 'best-path', labelKey: 'rsi.detail.legendBestPath' },
   { kind: 'evaluated', labelKey: 'rsi.detail.legendEvaluated' },
   { kind: 'pending', labelKey: 'rsi.detail.legendPending' },
+  { kind: 'failed', labelKey: 'rsi.detail.legendFailed' },
   { kind: 'pruned', labelKey: 'rsi.detail.legendPruned' },
 ];
 
@@ -222,7 +221,10 @@ function TaskStatusIcon({ kind, title }: { kind: StatusBadgeKind; title: string 
         d="M12 7C11.4 7 11 7.4 11 8V12.5C11 13.1 11.4 13.5 12 13.5C12.6 13.5 13 13.1 13 12.5V8C13 7.4 12.6 7 12 7Z"
         fill="white"
       />
-      <path d="M12 17C12.55 17 13 16.55 13 16C13 15.45 12.55 15 12 15C11.45 15 11 15.45 11 16C11 16.55 11.45 17 12 17Z" fill="white" />
+      <path
+        d="M12 17C12.55 17 13 16.55 13 16C13 15.45 12.55 15 12 15C11.45 15 11 15.45 11 16C11 16.55 11.45 17 12 17Z"
+        fill="white"
+      />
     </svg>
   );
 }
@@ -345,9 +347,8 @@ function TreeEdges({ layout, onHoverChange }: { layout: TreeLayout; onHoverChang
 
 // 单个树节点卡片：上层(状态色 + 黑色徽章图标 + 名称 + 状态标签) + 下层(分数行/状态文本 + 展开/收起)
 interface RsiNodeCardProps {
-  name: string;
+  presentation: RsiNodePresentation;
   ln: LayoutNode;
-  taskRunning: boolean;
   selected: boolean;
   edgeHover: boolean;
   collapsed: boolean;
@@ -357,9 +358,8 @@ interface RsiNodeCardProps {
   onSelect: (id: string) => void;
 }
 function RsiNodeCard({
-  name,
+  presentation,
   ln,
-  taskRunning,
   selected,
   edgeHover,
   collapsed,
@@ -368,9 +368,9 @@ function RsiNodeCard({
   onToggleScore,
   onSelect,
 }: RsiNodeCardProps) {
-  const kind = nodeRuntimeKind(ln.node.type, taskRunning);
-  const label = nodeRuntimeLabel(kind);
-  const icon = runtimeIconKind(kind);
+  const kind = presentation.runtimeKind;
+  const label = presentation.runtimeLabel;
+  const icon = presentation.runtimeIcon;
 
   const scoreLines = nodeScoreLines(ln.node);
   // 折叠态最多 3 行，展开最多 5 行（超出滚动）
@@ -392,27 +392,38 @@ function RsiNodeCard({
       <div className={`rsi-node__bar ${runtimeKindColorClass(kind)}`}>
         <div className="rsi-node__bar-left">
           <StatusBadge icon={icon} />
-          <span className="rsi-node__name">{name}</span>
+          <span className="rsi-node__name" title={presentation.title}>
+            {presentation.title}
+          </span>
         </div>
         <span className="rsi-node__status">{label}</span>
       </div>
       <div className="rsi-node__body">
-        {kind === 'evaluating' ? (
-          <div className="rsi-node__eval-text">{ln.node.description ?? '正在分析实现'}</div>
-        ) : kind === 'pending' ? (
-          <div className="rsi-node__score-line">
-            <span className="rsi-node__score-num">--</span>
-            <span className="rsi-node__score-label">分数</span>
-          </div>
-        ) : scoreLines.length === 0 && ln.node.type === 'PRUNED' ? (
-          <div className="rsi-node__eval-text">结果不通过</div>
+        {kind === 'evaluating' || kind === 'pending' ? (
+          <>
+            {presentation.stageLabel && <div className="rsi-node__stage">{presentation.stageLabel}</div>}
+            {presentation.summary && <div className="rsi-node__summary">{presentation.summary}</div>}
+            {!presentation.stageLabel && !presentation.summary && (
+              <div className="rsi-node__eval-text">{kind === 'evaluating' ? '正在处理' : '等待处理'}</div>
+            )}
+          </>
+        ) : kind === 'failed' ? (
+          <>
+            <div className="rsi-node__reason">{presentation.reasonLabel ?? '生成失败'}</div>
+            {presentation.reasonDetail && <div className="rsi-node__summary">{presentation.reasonDetail}</div>}
+          </>
+        ) : kind === 'pruned' && scoreLines.length === 0 ? (
+          <div className="rsi-node__reason">{presentation.reasonLabel ?? '搜索空间已剪枝'}</div>
+        ) : scoreLines.length === 0 && presentation.summary ? (
+          <div className="rsi-node__summary">{presentation.summary}</div>
         ) : scoreLines.length === 0 ? (
           <div className="rsi-node__score-line">
             <span className="rsi-node__score-num">--</span>
-            <span className="rsi-node__score-label">分数</span>
+            <span className="rsi-node__score-label">得分</span>
           </div>
         ) : (
           <>
+            {presentation.summary && <div className="rsi-node__summary">{presentation.summary}</div>}
             {shown.map((sl, i) => (
               <div className="rsi-node__score-line" key={i}>
                 <span className="rsi-node__score-num">{sl.value}</span>
@@ -495,6 +506,15 @@ export function RsiCanvasArea({ task, tree }: RsiCanvasAreaProps) {
     const roots = tree.nodes.filter((n) => n.parent_id === null);
     return layoutTree(roots, tree.nodes, collapsed, running, scoreExpanded);
   }, [tree, collapsed, running, scoreExpanded]);
+  const presentationContext = useMemo(
+    () => ({
+      scenario: task.scenario,
+      artifactType: task.artifact_type,
+      allNodes: tree?.nodes ?? [],
+      taskRunning: running,
+    }),
+    [task.scenario, task.artifact_type, tree?.nodes, running],
+  );
   const layoutRef = useRef(layout);
   const centeredViewportKeyRef = useRef<string | null>(null);
   const viewportKey = `${task.task_id}:${fullscreen}`;
@@ -623,8 +643,10 @@ export function RsiCanvasArea({ task, tree }: RsiCanvasAreaProps) {
   }, []);
 
   const title =
-    task.scenario === 'ARTIFACT' && task.artifact_type === 'PROGRAM'
-      ? t('rsi.detail.programProcess')
+    task.scenario === 'ARTIFACT'
+      ? task.artifact_type === 'PAPER'
+        ? t('rsi.detail.paperProcess', { defaultValue: '论文优化过程' })
+        : t('rsi.detail.programProcess')
       : t('rsi.detail.harnessProcess');
 
   // 状态条数据：运行态进度/成本来自 P2 推送（liveProgress），回退 task.progress/usage（§3.3/§3.4）
@@ -632,25 +654,32 @@ export function RsiCanvasArea({ task, tree }: RsiCanvasAreaProps) {
   const installedTask = useRsiStore((s) => Boolean(s.installedTaskIds[task.task_id]));
   const installed = task.status === 'COMPLETED' && installedTask;
   const statusInfo = statusBadgeInfo(task.status, installed);
-  const provisionalNode = tree?.nodes.find((n) => n.type === 'PROVISIONAL') ?? null;
-  const bestArtifactNode =
+  const provisionalNode =
     [...(tree?.nodes ?? [])]
-      .filter((node) => node.type === 'ADOPTED')
-      .sort((a, b) => b.iteration - a.iteration)[0] ?? null;
+      .filter((node) => node.type === 'PROVISIONAL')
+      .sort((left, right) => right.iteration - left.iteration)[0] ?? null;
+  const activePresentation = provisionalNode ? presentRsiNode(provisionalNode, presentationContext) : null;
+  const bestArtifactNode =
+    [...(tree?.nodes ?? [])].filter((node) => node.type === 'ADOPTED').sort((a, b) => b.iteration - a.iteration)[0] ??
+    null;
+  const bestPresentation = bestArtifactNode ? presentRsiNode(bestArtifactNode, presentationContext) : null;
   const bestArtifactId =
     task.best_artifact?.artifact_id ?? bestArtifactNode?.snapshot_artifact_id ?? bestArtifactNode?.node_id ?? null;
   const completedWithBest = task.status === 'COMPLETED' && Boolean(bestArtifactId);
   const statusText = completedWithBest
     ? t('rsi.detail.bestArtifactPrefix', { defaultValue: '最优产物' })
-    : running && provisionalNode
-      ? t('rsi.detail.evaluating', { defaultValue: '正在评测' })
+    : running && activePresentation
+      ? (activePresentation.stageLabel ??
+        (activePresentation.lifecycle === 'evaluating'
+          ? t('rsi.detail.evaluating', { defaultValue: '正在评测' })
+          : t('rsi.detail.runningStage', { defaultValue: '优化中' })))
       : t('rsi.detail.' + statusInfo.labelKey);
   const candidate = running
-    ? provisionalNode
-      ? t('rsi.detail.candidate', { defaultValue: '候选' }) + provisionalNode.node_id
+    ? activePresentation
+      ? activePresentation.title
       : null
     : completedWithBest
-      ? bestArtifactId
+      ? (bestPresentation?.title ?? t('rsi.detail.currentBest', { defaultValue: '当前最优版本' }))
       : null;
   const cost = liveProgress?.usageCost ?? task.usage?.cost_estimate ?? null;
   const progressIter = liveProgress?.iteration ?? task.progress?.iteration ?? 0;
@@ -666,7 +695,16 @@ export function RsiCanvasArea({ task, tree }: RsiCanvasAreaProps) {
           {t('rsi.detail.expandView', { defaultValue: '放大查看' })}
         </button>
       </div>
-      <div className="rsi-canvas-area__hint">{t('rsi.detail.nodeHint')}</div>
+      <div className="rsi-canvas-area__hint">
+        {t(
+          task.scenario === 'ARTIFACT'
+            ? task.artifact_type === 'PAPER'
+              ? 'rsi.detail.paperNodeHint'
+              : 'rsi.detail.programNodeHint'
+            : 'rsi.detail.harnessNodeHint',
+          { defaultValue: '节点展示每轮候选、阶段和评测结果；点击节点查看完整信息' },
+        )}
+      </div>
 
       <div className="rsi-canvas-wrap">
         <RsiCanvasStatusBar
@@ -718,13 +756,11 @@ export function RsiCanvasArea({ task, tree }: RsiCanvasAreaProps) {
                 {/* 节点：上层色条（左名称+右状态）+ 下层（图标+分数/摘要） */}
                 {layout.nodes.map((ln: LayoutNode) => {
                   const selected = ln.node.node_id === selectedNodeId;
-                  const name = nodeDisplayName(ln.node.type, ln.node.node_id, task.scenario, task.artifact_type);
                   return (
                     <RsiNodeCard
                       key={ln.node.node_id}
-                      name={name}
+                      presentation={presentRsiNode(ln.node, presentationContext)}
                       ln={ln}
-                      taskRunning={running}
                       selected={selected}
                       edgeHover={hoveredEdgeParentId === ln.node.node_id}
                       collapsed={collapsed.has(ln.node.node_id)}
@@ -821,13 +857,11 @@ export function RsiCanvasArea({ task, tree }: RsiCanvasAreaProps) {
                     </svg>
                     {layout.nodes.map((ln: LayoutNode) => {
                       const selected = ln.node.node_id === selectedNodeId;
-                      const name = nodeDisplayName(ln.node.type, ln.node.node_id, task.scenario, task.artifact_type);
                       return (
                         <RsiNodeCard
                           key={ln.node.node_id}
-                          name={name}
+                          presentation={presentRsiNode(ln.node, presentationContext)}
                           ln={ln}
-                          taskRunning={running}
                           selected={selected}
                           edgeHover={hoveredEdgeParentId === ln.node.node_id}
                           collapsed={collapsed.has(ln.node.node_id)}

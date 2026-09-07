@@ -33,7 +33,6 @@ import type {
   RsiUsage,
   RsiUsageGetResult,
 } from './types';
-import { rsiMock } from './mockData';
 
 export const RSI_EVENTS = {
   statusChanged: 'rsi.training.status.changed',
@@ -245,11 +244,23 @@ function normalizeTreeNode(value: unknown): RsiTreeNode | null {
     ? raw.changes.map(normalizeChange).filter((item): item is RsiNodeChange => item !== null)
     : null;
   const extra = asRecord(raw.extra);
+  const paper = asRecord(extra?.paper);
+  const rawType = asString(raw.type).toUpperCase();
+  let type =
+    rawType === 'REPORTING'
+      ? paper?.outcome === 'pending'
+        ? 'PROVISIONAL'
+        : asBoolean(raw.adopted)
+          ? 'ADOPTED'
+          : 'REJECTED'
+      : normalizeNodeType(raw.type);
+  if (rawType === 'CANDIDATE') type = 'PROVISIONAL';
+  if (extra?.program != null && rawType === 'ADOPTED' && !asBoolean(raw.adopted)) type = 'REJECTED';
   return {
     node_id: nodeId,
     iteration: asNumber(raw.iteration),
     parent_id: asNullableString(raw.parent_id),
-    type: normalizeNodeType(raw.type),
+    type,
     adopted: asBoolean(raw.adopted),
     score: asNullableNumber(raw.score),
     description: asNullableString(raw.summary ?? raw.description),
@@ -691,6 +702,9 @@ export function rsiUsageGet(taskId: string): Promise<RsiUsageGetResult | null> {
 }
 
 export function rsiArtifactDownload(taskId: string, artifactId?: string): Promise<RsiArtifactDownloadResult> {
+  if (isMockEnabled()) {
+    return rsiMock.delay(rsiMock.artifactDownload(taskId, artifactId));
+  }
   const params: Record<string, unknown> = { task_id: taskId };
   if (artifactId) params.artifact_id = artifactId;
   return webRequest<unknown>(METHOD.artifactDownload, withRsiSession(params)).then((value) => {
@@ -700,6 +714,7 @@ export function rsiArtifactDownload(taskId: string, artifactId?: string): Promis
       kind: asString(raw.kind) === 'artifact_package' ? 'artifact_package' : 'harness_plugin',
       is_best: raw.is_best === true,
       filename: asString(raw.filename, asString(raw.path).split(/[\\/]/).pop() || 'download'),
+      is_directory: raw.is_directory === true,
       download_url: asNullableString(raw.download_url) ?? undefined,
       download_token: asNullableString(raw.download_token) ?? undefined,
     };
@@ -711,6 +726,9 @@ export function rsiArtifactDownloadUrl(result: RsiArtifactDownloadResult): strin
 }
 
 export function rsiArtifactFilesList(taskId: string, path: string): Promise<RsiArtifactFilesListResult> {
+  if (isMockEnabled()) {
+    return rsiMock.delay(rsiMock.artifactFilesList(taskId, path));
+  }
   return webRequest<RsiArtifactFilesListResult>(
     METHOD.artifactFilesList,
     withRsiSession({
@@ -721,6 +739,9 @@ export function rsiArtifactFilesList(taskId: string, path: string): Promise<RsiA
 }
 
 export function rsiArtifactFilesGet(taskId: string, path: string): Promise<RsiArtifactFileGetResult> {
+  if (isMockEnabled()) {
+    return rsiMock.delay(rsiMock.artifactFilesGet(taskId, path));
+  }
   return webRequest<RsiArtifactFileGetResult>(
     METHOD.artifactFilesGet,
     withRsiSession({

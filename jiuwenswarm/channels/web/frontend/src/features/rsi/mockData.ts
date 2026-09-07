@@ -8,6 +8,9 @@ import type {
   RsiTreeGetResult,
   RsiReportGetResult,
   RsiUsageGetResult,
+  RsiArtifactDownloadResult,
+  RsiArtifactFileGetResult,
+  RsiArtifactFilesListResult,
 } from './types';
 
 // 延时模拟网络往返，避免 mock 响应过快掩盖 loading 态
@@ -341,6 +344,62 @@ const mockUsage: Record<string, RsiUsageGetResult> = {
   },
 };
 
+function mockArtifactRoot(taskId: string, artifactId = 'best'): string {
+  return `mock://rsi/${encodeURIComponent(taskId)}/${encodeURIComponent(artifactId)}`;
+}
+
+function mockArtifactFilesList(taskId: string, path: string): RsiArtifactFilesListResult {
+  const root = path.trim().replace(/\/+$/, '') || mockArtifactRoot(taskId);
+  const readmePath = `${root}/README.md`;
+  const nodePath = `${root}/node.json`;
+  const diffDirectory = `${root}/changes`;
+  const diffPath = `${diffDirectory}/iteration-004.diff`;
+  const tracePath = `${root}/agent_trace.jsonl`;
+  const readme = 'This is a deterministic mock RSI artifact.\n';
+  const node = JSON.stringify({ task_id: taskId, root, status: 'adopted' }, null, 2);
+  const diff = '# mock artifact change\n+ generated node snapshot\n';
+  const trace = '{"event":"artifact_ready","mock":true}\n';
+  return {
+    root,
+    initial_path: readmePath,
+    files: [
+      { name: 'README.md', path: readmePath, isDirectory: false, size: readme.length, type: 'text/markdown' },
+      { name: 'node.json', path: nodePath, isDirectory: false, size: node.length, type: 'application/json' },
+      { name: 'changes', path: diffDirectory, isDirectory: true, size: 0, type: 'application/octet-stream' },
+      { name: 'iteration-004.diff', path: diffPath, isDirectory: false, size: diff.length, type: 'text/plain' },
+      { name: 'agent_trace.jsonl', path: tracePath, isDirectory: false, size: trace.length, type: 'application/x-ndjson' },
+    ],
+  };
+}
+
+function mockArtifactFilesGet(taskId: string, path: string): RsiArtifactFileGetResult {
+  const name = path.split(/[\\/]/).pop()?.toLowerCase() ?? '';
+  let content = 'This is a deterministic mock RSI artifact.\n';
+  let type = 'text/markdown';
+  if (name === 'node.json') {
+    content = JSON.stringify({ task_id: taskId, path, status: 'adopted' }, null, 2);
+    type = 'application/json';
+  } else if (name.endsWith('.diff')) {
+    content = '# mock artifact change\n+ generated node snapshot\n';
+    type = 'text/plain';
+  } else if (name.endsWith('.jsonl')) {
+    content = '{"event":"artifact_ready","mock":true}\n';
+    type = 'application/x-ndjson';
+  }
+  return { path, name: path.split(/[\\/]/).pop() || 'artifact', size: content.length, type, encoding: 'text', content };
+}
+
+function mockArtifactDownload(taskId: string, artifactId?: string): RsiArtifactDownloadResult {
+  const safeArtifactId = (artifactId || 'best').replace(/[^A-Za-z0-9_.-]+/g, '-');
+  return {
+    path: mockArtifactRoot(taskId, artifactId || 'best'),
+    kind: 'artifact_package',
+    is_best: true,
+    is_directory: true,
+    filename: `mock-${taskId}-${safeArtifactId}`,
+  };
+}
+
 export const rsiMock = {
   delay,
   modelList: rsiMockModelList,
@@ -349,4 +408,7 @@ export const rsiMock = {
   tree: (taskId: string) => (taskId === 'rsi-task-004' ? { nodes: [], depth: 0, iteration: 0 } : mockTree), // 排队中的实验暂无演进树；其余复用同一份 mock 树
   report: (taskId: string) => mockReport[taskId],
   usage: (taskId: string) => mockUsage[taskId],
+  artifactDownload: mockArtifactDownload,
+  artifactFilesList: mockArtifactFilesList,
+  artifactFilesGet: mockArtifactFilesGet,
 };

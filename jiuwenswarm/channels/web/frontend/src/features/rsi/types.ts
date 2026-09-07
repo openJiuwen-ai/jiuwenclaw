@@ -225,6 +225,7 @@ export interface RsiArtifactDownloadResult {
   kind: 'harness_plugin' | 'artifact_package';
   is_best: boolean;
   filename: string;
+  is_directory?: boolean;
   download_url?: string;
   download_token?: string;
 }

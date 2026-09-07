@@ -135,14 +135,6 @@ class RsiTaskService:
             ).strip() or None
             if artifact_type is ArtifactType.PROGRAM and not artifact_path:
                 raise RsiBadRequest("PROGRAM 必填 artifact_path")
-            if artifact_path:
-                path = Path(artifact_path).expanduser()
-                if not path.exists():
-                    raise RsiPathInvalid(f"产物路径不存在: {artifact_path}")
-                if artifact_type is ArtifactType.PAPER and (
-                    not path.is_file() or path.suffix.lower() != ".zip"
-                ):
-                    raise RsiPathInvalid("PAPER 产物必须是 .zip")
             if artifact_type is ArtifactType.PAPER:
                 input_file = str(params.get("input_file") or "").strip() or None
                 if not artifact_path and not optimization_instruction:
@@ -458,21 +450,18 @@ class RsiDatasetService:
             scenario, artifact_type,
             artifact_type_required=(scenario == "ARTIFACT"),
         )
-        path = Path(input_file).expanduser()
-        if not path.exists() or (scenario != Scenario.ARTIFACT.value and not path.is_file()):
-            raise RsiPathInvalid(f"本地路径不存在: {path}")
         result: RsiDatasetResult
         selected_adapter = adapter or self.adapter
         if selected_adapter is None and self.adapter_resolver is not None:
             selected_adapter = self.adapter_resolver(scenario, artifact_type)
         if selected_adapter is not None and hasattr(selected_adapter, "validate_input"):
             result = selected_adapter.validate_input(
-                str(path), scenario=scenario, artifact_type=artifact_type
+                input_file, scenario=scenario, artifact_type=artifact_type
             )
         else:
             from jiuwenswarm.agents.harness.common.rsi.adapter import default_validate_input
 
-            result = default_validate_input(str(path))
+            result = default_validate_input(input_file)
         return result.to_dict()
 
 
@@ -597,7 +586,11 @@ class RsiUsageService:
 
 
 class RsiArtifactDownloadService:
-    """``rsi.artifact.download`` 定位（I12；下载通道复用 Gateway HTTP Range bridge）。"""
+    """``rsi.artifact.download`` 定位文件或产物目录。
+
+    文件继续返回 Gateway HTTP 下载链接；目录不伪造一个不可用的文件
+    链接，前端通过 artifact.files.list/get 浏览目录并下载其中的文件。
+    """
 
     def __init__(self, artifact_service: Any, store: Any, *, adapter_resolver: Any = None) -> None:
         self.artifact_service = artifact_service
@@ -605,7 +598,7 @@ class RsiArtifactDownloadService:
         self.adapter_resolver = adapter_resolver
 
     def locate(self, params: dict[str, Any], *, adapter: Any = None) -> dict[str, Any]:
-        """返回可下载文件信息（zip path/kind/is_best）；HTTP 流由通道层完成。"""
+        """返回文件/目录信息；HTTP 文件流由通道层完成。"""
         task_id = str(params.get("task_id") or "").strip()
         if not task_id:
             raise RsiBadRequest("task_id 必填")
@@ -633,8 +626,10 @@ class RsiArtifactDownloadService:
             "kind": artifact.kind,
             "is_best": artifact.is_best,
             "filename": Path(artifact.path).name,
+            "is_directory": Path(artifact.path).is_dir(),
         }
-        result.update(_download_fields(result["path"], params))
+        if not result["is_directory"]:
+            result.update(_download_fields(result["path"], params))
         return result
 
     def _locate_provider(
@@ -669,8 +664,8 @@ class RsiArtifactDownloadService:
             path.relative_to(task_dir)
         except ValueError as exc:
             raise RsiPathInvalid("Provider 产物路径超出任务目录") from exc
-        if not path.is_file():
-            raise RsiArtifactNotFound(f"产物文件不存在: {path}")
+        if not path.is_file() and not path.is_dir():
+            raise RsiArtifactNotFound(f"产物路径不存在: {path}")
         best_node_id = None
         report = _read_provider_snapshot(adapter, "read_report", task_id)
         if report is not None:
@@ -692,8 +687,10 @@ class RsiArtifactDownloadService:
             ),
             "is_best": is_best,
             "filename": path.name,
+            "is_directory": path.is_dir(),
         }
-        result.update(_download_fields(result["path"], params))
+        if not result["is_directory"]:
+            result.update(_download_fields(result["path"], params))
         return result
 
 
@@ -810,6 +807,15 @@ def _ensure_provider_valid(result: Any) -> None:
 
 
 def _plain_provider(value: Any) -> Any:
+    model_dump = getattr(value, "model_dump", None)
+    if callable(model_dump):
+        try:
+            return _plain_provider(model_dump(mode="python"))
+        except TypeError:
+            return _plain_provider(model_dump())
+    model_dict = getattr(value, "dict", None)
+    if callable(model_dict):
+        return _plain_provider(model_dict())
     if is_dataclass(value):
         return {key: _plain_provider(item) for key, item in asdict(value).items()}
     if isinstance(value, Mapping):
@@ -819,7 +825,13 @@ def _plain_provider(value: Any) -> Any:
     return value
 
 
-_PROVIDER_QUERY_FALLBACK = (FileNotFoundError, NotImplementedError, OSError, RsiNotReady)
+_PROVIDER_QUERY_FALLBACK = (
+    FileNotFoundError,
+    KeyError,
+    NotImplementedError,
+    OSError,
+    RsiNotReady,
+)
 
 
 def _read_provider_snapshot(adapter: Any, method_name: str, task_id: str) -> Any:

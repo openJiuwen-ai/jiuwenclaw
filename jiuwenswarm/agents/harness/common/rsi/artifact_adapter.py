@@ -28,6 +28,19 @@ from jiuwenswarm.agents.harness.common.rsi.models import (
 def _plain(value: Any) -> Any:
     """Convert Provider dataclasses and nested values to JSON-shaped data."""
 
+    # The paper tree implementation in agent-core uses Pydantic models for
+    # its durable snapshots, while the older artifact providers use
+    # dataclasses.  Keep this boundary structural so JiuwenSwarm does not
+    # import either provider's private model classes.
+    model_dump = getattr(value, "model_dump", None)
+    if callable(model_dump):
+        try:
+            return _plain(model_dump(mode="python"))
+        except TypeError:
+            return _plain(model_dump())
+    model_dict = getattr(value, "dict", None)
+    if callable(model_dict):
+        return _plain(model_dict())
     if is_dataclass(value):
         return {key: _plain(item) for key, item in asdict(value).items()}
     if isinstance(value, Mapping):
@@ -82,7 +95,15 @@ def provider_node_to_dict(node: Any) -> dict[str, Any]:
     if not isinstance(raw, dict):
         return {}
     node_type = str(raw.get("type") or "").upper()
-    if node_type in {"ROOT", "ADOPTED", "REJECTED", "PROVISIONAL", "PRUNED"}:
+    paper = (raw.get("extra") or {}).get("paper") or {}
+    program = (raw.get("extra") or {}).get("program")
+    if node_type == "CANDIDATE":
+        normalized_type = "PROVISIONAL"
+    elif program is not None and node_type == "ADOPTED" and not raw.get("adopted"):
+        normalized_type = "REJECTED"
+    elif node_type == "REPORTING" and paper.get("outcome") == "pending":
+        normalized_type = "PROVISIONAL"
+    elif node_type in {"ROOT", "ADOPTED", "REJECTED", "PROVISIONAL", "PRUNED"}:
         normalized_type = node_type
     elif node_type in {"CANDIDATE", "REPORTING", "SUCCESS"}:
         normalized_type = "ADOPTED" if bool(raw.get("adopted")) else "REJECTED"
@@ -157,7 +178,10 @@ def provider_best_artifact(report: Any) -> dict[str, Any] | None:
     best_node_id = raw.get("best_node_id")
     refs = raw.get("artifact_index") or []
     best: dict[str, Any] | None = None
-    for ref in refs:
+    # The report can contain a module-level node package followed by the
+    # complete iteration snapshot.  Both may point at the same best node;
+    # the newest ref is the one the task-level download should expose.
+    for ref in reversed(refs):
         if not isinstance(ref, dict):
             continue
         if best_node_id is not None and ref.get("node_id") == best_node_id:
@@ -194,6 +218,9 @@ def provider_report_to_web(report: Any, state: Any = None) -> dict[str, Any]:
     metrics.setdefault("eval_total", 0)
     metrics.setdefault("pruned_count", 0)
     metrics.setdefault("iterations", _safe_int(state_raw.get("iteration")))
+    best_artifact = provider_best_artifact(report)
+    if not metrics.get("best_artifact_id"):
+        metrics["best_artifact_id"] = best_artifact.get("artifact_id") if best_artifact else None
     return {
         "status": provider_status(raw.get("status") or state_raw.get("status")),
         "best_score": _safe_float_or_none(
@@ -204,7 +231,7 @@ def provider_report_to_web(report: Any, state: Any = None) -> dict[str, Any]:
         ),
         "metrics": metrics,
         "usage": usage,
-        "best_artifact": provider_best_artifact(report),
+        "best_artifact": best_artifact,
         "report_summary": str(raw.get("summary") or ""),
         "markdown": None,
     }

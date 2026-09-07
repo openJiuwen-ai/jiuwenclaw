@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
+from types import SimpleNamespace
 from typing import Any
 
 from jiuwenswarm.agents.harness.common.rsi.errors import (
@@ -28,6 +30,10 @@ from jiuwenswarm.agents.harness.common.rsi.models import TaskStatus
 logger = logging.getLogger(__name__)
 
 _QUEUE_MAXSIZE = 128
+_PROVIDER_IN_PROGRESS = frozenset({"CREATED", "QUEUED", "RUNNING"})
+_PROVIDER_POLL_TIMEOUT_SECONDS = 30 * 60
+_PROVIDER_POLL_INTERVAL_SECONDS = 0.1
+_PROVIDER_HANDOFF_RETRY_SECONDS = 0.05
 
 
 class RsiWorker:
@@ -49,6 +55,7 @@ class RsiWorker:
         projector: Any,
         artifact_service: Any,
         push_callbacks: dict[str, Any] | None = None,
+        provider_poll_timeout: float = _PROVIDER_POLL_TIMEOUT_SECONDS,
     ) -> None:
         self.store = store
         self.adapters = adapters
@@ -62,6 +69,11 @@ class RsiWorker:
         self._last_enqueued: str | None = None
         self._resume_task_ids: set[str] = set()
         self._control_tasks: dict[str, asyncio.Task[Any]] = {}
+        # Providers that return before their durable snapshot reaches a
+        # terminal state are polled here.  Keep the bound configurable for
+        # deployments and tests, while protecting the queue from a Provider
+        # that is stuck in CREATED/QUEUED/RUNNING forever.
+        self.provider_poll_timeout = max(0.1, float(provider_poll_timeout))
 
     # -- 队列 --
 
@@ -170,7 +182,10 @@ class RsiWorker:
         except RuntimeError:
             # 无运行中事件循环（同步上下文/单测/冷启动脚本）：入队成功但执行延后，
             # 由事件循环就绪后的下一次 enqueue 或显式 _ensure_runner 接管（内部 v3 §4.2）。
-            logger.warning("[RSI] 无运行中事件循环，任务已入队，等待事件循环接管: task=%s", getattr(self, "_last_enqueued", ""))
+            logger.warning(
+                "[RSI] 无运行中事件循环，任务已入队，等待事件循环接管: task=%s",
+                getattr(self, "_last_enqueued", ""),
+            )
             self._run_task = None
 
     async def _run_loop(self) -> None:
@@ -235,6 +250,14 @@ class RsiWorker:
                 result = await adapter.resume(request, on_event=_sink(queue))
             else:
                 result = await adapter.run(request, on_event=_sink(queue))
+            # PaperArtifactProviderImpl starts its orchestrator and returns a
+            # current ``running`` result while the actual tree execution
+            # continues in the same event loop.  Keep the worker task alive
+            # until the durable Provider snapshot reaches a terminal state;
+            # otherwise the generic result handler would mark it failed as
+            # soon as it saw the initial running result.
+            if _provider_status(result) in _PROVIDER_IN_PROGRESS:
+                result = await self._wait_for_provider_terminal(task_id, adapter, result)
             self._apply_result_status(task_id, result)
         except Exception as exc:  # noqa: BLE001
             logger.exception("[RSI] 任务执行失败 task=%s: %s", task_id, exc)
@@ -273,9 +296,15 @@ class RsiWorker:
         return None
 
     def _apply_result_status(self, task_id: str, result: Any) -> None:
-        raw_status = getattr(result, "status", None)
-        raw_status = getattr(raw_status, "value", raw_status)
-        status = str(raw_status or "completed").upper()
+        status = _provider_status(result, default="COMPLETED")
+        if status in _PROVIDER_IN_PROGRESS:
+            # A Provider may legitimately return its current state from
+            # ``run``.  The polling path above normally resolves it; keeping
+            # this guard makes older/custom Providers fail-safe instead of
+            # converting a non-terminal result into FAILED.
+            if not getattr(result, "error_code", None):
+                return
+            status = "FAILED"
         target = {
             "COMPLETED": TaskStatus.COMPLETED.value,
             "FAILED": TaskStatus.FAILED.value,
@@ -292,6 +321,83 @@ class RsiWorker:
             [TaskStatus.RUNNING.value],
             target,
             cause=f"provider.{status.lower()}",
+        )
+
+    async def _wait_for_provider_terminal(
+        self,
+        task_id: str,
+        adapter: Any,
+        initial_result: Any,
+    ) -> Any:
+        """Wait for Providers whose ``run`` returns before execution ends.
+
+        A Provider crash or lost snapshot must not permanently occupy the
+        single-worker queue.  The timeout result is deliberately shaped like
+        an ``EngineResult`` so the normal task-state and result persistence
+        paths mark the task failed and allow the next queued task to run.
+        """
+        read_state = getattr(adapter, "read_state", None)
+        if not callable(read_state):
+            logger.warning(
+                "[RSI] Provider.run returned %s without read_state; task=%s remains running",
+                _provider_status(initial_result),
+                task_id,
+            )
+            return initial_result
+
+        deadline = time.monotonic() + self.provider_poll_timeout
+        last_status = _provider_status(initial_result, default="RUNNING")
+        last_error: Exception | None = None
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            try:
+                state = await asyncio.wait_for(
+                    asyncio.to_thread(read_state, task_id),
+                    timeout=remaining,
+                )
+            except asyncio.TimeoutError:
+                last_error = asyncio.TimeoutError(
+                    f"Provider.read_state exceeded {self.provider_poll_timeout:.1f}s"
+                )
+                break
+            except (FileNotFoundError, KeyError, OSError) as exc:
+                # The Provider may publish its registry/snapshot immediately
+                # after returning from run.  A short retry handles that small
+                # hand-off without blocking event consumption.
+                last_error = exc
+                sleep_for = min(_PROVIDER_HANDOFF_RETRY_SECONDS, remaining)
+                if sleep_for > 0:
+                    await asyncio.sleep(sleep_for)
+                continue
+            status = _provider_status(state)
+            if status not in _PROVIDER_IN_PROGRESS:
+                return SimpleNamespace(
+                    status=status.lower(),
+                    final_node_id=getattr(state, "best_node_id", None),
+                    error_code=getattr(state, "error_code", None),
+                    error_message=getattr(state, "error_message", None),
+                )
+            last_status = status
+            sleep_for = min(_PROVIDER_POLL_INTERVAL_SECONDS, deadline - time.monotonic())
+            if sleep_for > 0:
+                await asyncio.sleep(sleep_for)
+
+        elapsed = self.provider_poll_timeout - max(0.0, deadline - time.monotonic())
+        logger.error(
+            "[RSI] Provider 未在 %.1f 秒内进入终态，task=%s status=%s error=%s",
+            elapsed,
+            task_id,
+            last_status,
+            last_error,
+        )
+        return SimpleNamespace(
+            task_id=task_id,
+            status="failed",
+            final_node_id=getattr(initial_result, "final_node_id", None),
+            error_code="PROVIDER_TIMEOUT",
+            error_message="Provider 超时未进入终态",
         )
 
     def _mark_failed_if_running(self, task_id: str, cause: str) -> None:
@@ -497,3 +603,9 @@ def _sink(queue: asyncio.Queue[EngineEvent | None]):
         queue.put_nowait(event)
 
     return _put
+
+
+def _provider_status(value: Any, *, default: str = "") -> str:
+    raw_status = getattr(value, "status", value)
+    raw_status = getattr(raw_status, "value", raw_status)
+    return str(raw_status or default).upper()

@@ -122,10 +122,31 @@ def _usage_from_value(value: Any) -> Usage | None:
     """Convert Provider dataclasses or dicts without coupling to agent-core."""
     if value is None:
         return None
-    raw = asdict(value) if is_dataclass(value) else value
+    model_dump = getattr(value, "model_dump", None)
+    if callable(model_dump):
+        try:
+            raw = model_dump(mode="python")
+        except TypeError:
+            raw = model_dump()
+    else:
+        model_dict = getattr(value, "dict", None)
+        if callable(model_dict):
+            raw = model_dict()
+        else:
+            raw = asdict(value) if is_dataclass(value) else value
     if not isinstance(raw, Mapping):
         return None
     tokens_raw = raw.get("tokens")
+    token_model_dump = getattr(tokens_raw, "model_dump", None)
+    if callable(token_model_dump):
+        try:
+            tokens_raw = token_model_dump(mode="python")
+        except TypeError:
+            tokens_raw = token_model_dump()
+    else:
+        token_model_dict = getattr(tokens_raw, "dict", None)
+        if callable(token_model_dict):
+            tokens_raw = token_model_dict()
     if is_dataclass(tokens_raw):
         tokens_raw = asdict(tokens_raw)
     if not isinstance(tokens_raw, Mapping):

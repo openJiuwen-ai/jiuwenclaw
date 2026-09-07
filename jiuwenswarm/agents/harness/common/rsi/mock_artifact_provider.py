@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import shutil
 import zipfile
 from dataclasses import asdict
 from pathlib import Path
@@ -76,10 +77,15 @@ class MockArtifactProvider:
                 valid=False,
                 errors=[{"code": "PATH_INVALID", "message": f"artifact path does not exist: {path}"}],
             )
-        if self.artifact_type == "paper" and path.is_file() and path.suffix.lower() != ".zip":
+        if self.artifact_type == "paper" and not path.is_file() and not path.is_dir():
             return ArtifactValidationResult(
                 valid=False,
-                errors=[{"code": "PATH_INVALID", "message": "paper artifact must be a .zip file"}],
+                errors=[
+                    {
+                        "code": "PATH_INVALID",
+                        "message": f"paper artifact must be a file or directory: {path}",
+                    }
+                ],
             )
         return ArtifactValidationResult(valid=True, errors=[])
 
@@ -346,11 +352,14 @@ class MockArtifactProvider:
                     if adopted
                     else f"{task_id}:artifact:{iteration}:candidate:{candidate}"
                 )
-                artifact_path = run_dir / "artifacts" / (
-                    f"{self.artifact_type}-{iteration:03d}.zip"
+                artifact_name = (
+                    f"{self.artifact_type}-{iteration:03d}"
                     if adopted
-                    else f"{self.artifact_type}-{iteration:03d}-candidate-{candidate:02d}.zip"
+                    else f"{self.artifact_type}-{iteration:03d}-candidate-{candidate:02d}"
                 )
+                if self.artifact_type != "paper":
+                    artifact_name += ".zip"
+                artifact_path = run_dir / "artifacts" / artifact_name
                 accepted_iteration_score = None if self.artifact_type == "paper" else round(
                     0.5 + 0.05 * iteration,
                     4,
@@ -431,6 +440,10 @@ class MockArtifactProvider:
                     failure_class=None if adopted else "MOCK_BRANCH_GATE",
                     changes=[change],
                     extra={
+                        # Keep one canonical node-level path for the detail
+                        # preview.  The nested artifact ref remains the
+                        # download contract consumed by the service layer.
+                        "artifact_path": str(artifact_path),
                         group: {
                             "logical_kind": node_type,
                             "iteration": iteration,
@@ -664,8 +677,8 @@ class MockArtifactProvider:
 
         A mock run must never copy or hash the user's source tree.  The real
         Provider owns source materialization; this Provider only creates a
-        deterministic downloadable package that exercises the complete
-        service/Gateway/HTTP download path.
+        deterministic artifact directory (or a program ZIP) that exercises
+        the complete service/Gateway/preview path.
         """
         target.parent.mkdir(parents=True, exist_ok=True)
         manifest = {
@@ -713,6 +726,35 @@ class MockArtifactProvider:
             "snapshot_artifact_id": artifact_id,
             "changes": [asdict(change)],
         }
+        if self.artifact_type == "paper":
+            if target.exists() or target.is_symlink():
+                _remove_path(target)
+            target.mkdir(parents=True, exist_ok=True)
+            (target / "README.md").write_text(
+                (
+                    "This is a deterministic mock RSI artifact directory.\n"
+                    "The source artifact was intentionally not copied.\n"
+                    f"Iteration: {iteration}\n"
+                ),
+                encoding="utf-8",
+            )
+            (target / "mock-optimization.json").write_text(
+                json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+            (target / "node.json").write_text(
+                json.dumps(node_detail, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+            diff_path = target / "changes" / f"iteration-{iteration:03d}.diff"
+            diff_path.parent.mkdir(parents=True, exist_ok=True)
+            diff_path.write_text(
+                (
+                    f"# mock {self.artifact_type} branch {candidate} change\n"
+                    f"parent: {parent_node_id}\n{change.summary}\n"
+                ),
+                encoding="utf-8",
+            )
+            return
+
         with zipfile.ZipFile(target, "w", zipfile.ZIP_STORED) as archive:
             archive.writestr(
                 "README.md",
@@ -881,10 +923,27 @@ def _node_candidate(raw: Any, iteration: int) -> int | None:
 
 def _sha256(path: Path) -> str:
     digest = hashlib.sha256()
-    with path.open("rb") as fh:
-        for chunk in iter(lambda: fh.read(1024 * 1024), b""):
-            digest.update(chunk)
+    if path.is_file():
+        with path.open("rb") as fh:
+            for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+                digest.update(chunk)
+    elif path.is_dir():
+        for child in sorted(path.rglob("*")):
+            if not child.is_file():
+                continue
+            digest.update(child.relative_to(path).as_posix().encode("utf-8"))
+            digest.update(b"\0")
+            with child.open("rb") as fh:
+                for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+                    digest.update(chunk)
     return digest.hexdigest()
+
+
+def _remove_path(path: Path) -> None:
+    if path.is_symlink() or path.is_file():
+        path.unlink()
+    elif path.is_dir():
+        shutil.rmtree(path)
 
 
 __all__ = ["MockArtifactProvider", "build_mock_artifact_adapters"]

@@ -8,7 +8,6 @@ import pytest
 from jiuwenswarm.agents.harness.common.rsi import build_rsi_service_context
 from jiuwenswarm.agents.harness.common.rsi.errors import (
     RsiBadRequest,
-    RsiPathInvalid,
     RsiScenarioNotSupported,
     RsiUnsupportedParameter,
     RsiTaskNotFound,
@@ -74,16 +73,22 @@ class TestTaskCreate:
         with pytest.raises(RsiScenarioNotSupported):
             ctx.task_service.create(params)
 
-    def test_paper_requires_zip(self, ctx):
+    def test_paper_file_or_directory_is_accepted_without_extension_check(self, ctx, tmp_path: Path):
+        ctx.install_mock_artifact_adapters()
+        paper = tmp_path / "paper"
+        paper.mkdir()
+        (paper / "main.tex").write_text("\\section{Paper}\n", encoding="utf-8")
         params = {
             "scenario": "ARTIFACT",
             "artifact_type": "PAPER",
             "name": "paper-task",
             "model_refs": {"optimizer": "opt"},
-            "artifact_path": "C:/missing/paper.docx",
+            "artifact_path": str(paper),
         }
-        with pytest.raises(RsiPathInvalid):
-            ctx.task_service.create(params)
+        # The service only delegates path semantics. The selected Provider
+        # owns artifact-specific validation and accepts a source directory.
+        result = ctx.task_service.create(params)
+        assert result["status"] == TaskStatus.CREATED.value
 
     def test_paper_artifact_type_required(self, ctx):
         params = {

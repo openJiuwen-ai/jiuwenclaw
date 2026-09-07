@@ -10,7 +10,7 @@
 import { useTranslation } from 'react-i18next';
 import optimizeImage from '../../../assets/rsi/rsi-optimize.svg';
 import type { RsiTaskGetResult, RsiReportGetResult, RsiUsageGetResult } from '../types';
-import { formatScore, formatGain, formatTokensK } from '../rsiPresentation';
+import { formatScore, formatGain, formatTokensK, presentRsiNode, typeDisplayLabel } from '../rsiPresentation';
 import { useRsiStore } from '../rsiStore';
 
 interface RsiResultSummaryProps {
@@ -22,17 +22,32 @@ interface RsiResultSummaryProps {
 export function RsiResultSummary({ task, report, usage }: RsiResultSummaryProps) {
   const { t } = useTranslation();
   const liveProgress = useRsiStore((s) => (s.selectedTaskId ? s.detail[s.selectedTaskId]?.liveProgress : null));
+  const tree = useRsiStore((s) => s.detail[task.task_id]?.tree ?? null);
 
   // 分数优先取运行时推送，回退 task.progress/report
   const score = liveProgress?.score ?? task.progress?.score ?? report?.best_score ?? null;
   const baseline = liveProgress?.baseline ?? task.progress?.baseline ?? report?.baseline ?? null;
   const gain = score != null && baseline != null && baseline > 0 ? (score - baseline) / baseline : null;
   const gainFmt = formatGain(gain);
-  const bestName = task.best_artifact?.name
-    ?? report?.best_artifact?.name
-    ?? task.best_artifact?.artifact_id
-    ?? report?.best_artifact?.artifact_id
-    ?? null;
+  const bestArtifactId = task.best_artifact?.artifact_id ?? report?.best_artifact?.artifact_id ?? null;
+  const bestNode =
+    tree?.nodes.find((node) => bestArtifactId != null && node.snapshot_artifact_id === bestArtifactId) ??
+    [...(tree?.nodes ?? [])].filter((node) => node.type === 'ADOPTED').sort((a, b) => b.iteration - a.iteration)[0] ??
+    null;
+  const bestPresentation = bestNode
+    ? presentRsiNode(bestNode, {
+        scenario: task.scenario,
+        artifactType: task.artifact_type,
+        allNodes: tree?.nodes ?? [],
+        taskRunning: task.status === 'RUNNING',
+      })
+    : null;
+  const bestName =
+    task.best_artifact?.name ??
+    report?.best_artifact?.name ??
+    bestPresentation?.title ??
+    (bestArtifactId ? `${typeDisplayLabel(task.scenario, task.artifact_type)} · 当前最优版本` : null) ??
+    null;
   const queued = task.status === 'CREATED' || task.status === 'QUEUED';
 
   const evalPassed = queued ? null : (report?.metrics.eval_passed ?? null);

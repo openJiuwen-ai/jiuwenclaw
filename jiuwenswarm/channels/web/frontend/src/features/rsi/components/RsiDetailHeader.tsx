@@ -43,9 +43,17 @@ interface RsiDetailHeaderProps {
   liveCost: number | null;
   createdAt: string | null;
   onOpenConfig: () => void;
+  onOpenArtifact: (path: string, title: string) => void;
 }
 
-export function RsiDetailHeader({ task, report, liveCost, createdAt, onOpenConfig }: RsiDetailHeaderProps) {
+export function RsiDetailHeader({
+  task,
+  report,
+  liveCost,
+  createdAt,
+  onOpenConfig,
+  onOpenArtifact,
+}: RsiDetailHeaderProps) {
   const { t } = useTranslation();
   const patchTaskStatus = useRsiStore((s) => s.patchTaskStatus);
   const removeListItem = useRsiStore((s) => s.removeListItem);
@@ -76,10 +84,17 @@ export function RsiDetailHeader({ task, report, liveCost, createdAt, onOpenConfi
           if (!result.ok) throw new Error('task delete failed');
           removeListItem(task.task_id);
         } else if (action === 'download') {
-          const artifactId = report?.metrics.best_artifact_id ?? undefined;
+          const artifactId =
+            report?.metrics.best_artifact_id
+            ?? report?.best_artifact?.artifact_id
+            ?? task.best_artifact?.artifact_id
+            ?? undefined;
           const artifact = await rsiArtifactDownload(task.task_id, artifactId);
           const downloadUrl = rsiArtifactDownloadUrl(artifact);
-          if (!downloadUrl) throw new Error('RSI 产物下载链接不可用');
+          if (artifact.is_directory || !downloadUrl) {
+            onOpenArtifact(artifact.path, `${task.name} · ${artifact.filename}`);
+            return;
+          }
           const pywebviewApi = (window as DownloadCapableWindow).pywebview?.api;
           if (pywebviewApi?.download_file) {
             const outcome = await executeDesktopSave(() => pywebviewApi.download_file!(downloadUrl, artifact.filename));
@@ -99,7 +114,16 @@ export function RsiDetailHeader({ task, report, liveCost, createdAt, onOpenConfi
         setBusy(false);
       }
     },
-    [task.task_id, report, patchTaskStatus, removeListItem, markTaskInstalled, onOpenConfig],
+    [
+      task.task_id,
+      task.best_artifact,
+      report,
+      patchTaskStatus,
+      removeListItem,
+      markTaskInstalled,
+      onOpenConfig,
+      onOpenArtifact,
+    ],
   );
 
   const handleAction = useCallback(

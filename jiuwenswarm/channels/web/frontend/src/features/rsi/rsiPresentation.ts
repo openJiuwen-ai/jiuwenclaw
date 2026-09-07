@@ -4,7 +4,7 @@
 import type { RsiArtifactType, RsiNodeChange, RsiNodeType, RsiScenario, RsiTaskStatus, RsiTreeNode } from './types';
 
 // 节点类型 → 展示用状态色类名（对应 rsi.css 的 bar--* 与图例 dot）
-export type NodeStatusKind = 'best-path' | 'evaluated' | 'pending' | 'pruned';
+export type NodeStatusKind = 'best-path' | 'evaluated' | 'pending' | 'failed' | 'pruned';
 
 // 节点 type → 状态色映射（对齐样式概要：最优路径/已评测/待评测/已剪枝）
 // adopted/root → best-path；rejected → evaluated；provisional → pending；pruned → pruned
@@ -28,6 +28,435 @@ export function statusKindClass(kind: NodeStatusKind): string {
 
 export function legendDotClass(kind: NodeStatusKind): string {
   return `rsi-legend__dot rsi-node__bar--${kind}`;
+}
+
+type JsonRecord = Record<string, unknown>;
+
+function asRecord(value: unknown): JsonRecord | null {
+  return value && typeof value === 'object' && !Array.isArray(value) ? (value as JsonRecord) : null;
+}
+
+function asText(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const text = value.trim();
+  return text || null;
+}
+
+function asFiniteNumber(value: unknown): number | null {
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  if (typeof value === 'string' && value.trim()) {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
+}
+
+function extraRecord(node: RsiTreeNode, key: string): JsonRecord | null {
+  return asRecord(node.extra?.[key]);
+}
+
+function firstNumber(...values: unknown[]): number | null {
+  for (const value of values) {
+    const number = asFiniteNumber(value);
+    if (number != null) return number;
+  }
+  return null;
+}
+
+function clampText(value: string | null, max = 180): string | null {
+  const text = value?.trim();
+  if (!text) return null;
+  return text.length > max ? `${text.slice(0, max - 1).trimEnd()}…` : text;
+}
+
+const STAGE_LABELS: Record<string, string> = {
+  plan: '规划中',
+  planning: '规划中',
+  research: '调研中',
+  researching: '调研中',
+  survey: '调研中',
+  design: '设计中',
+  designing: '设计中',
+  implement: '实现中',
+  implementation: '实现中',
+  execute: '执行中',
+  execution: '执行中',
+  evaluate: '评测中',
+  evaluation: '评测中',
+  score: '评测中',
+  report: '撰写中',
+  reporting: '撰写中',
+  write: '撰写中',
+  writing: '撰写中',
+  paper_writing: '撰写中',
+  paper_generation: '撰写中',
+  compile: '编译校验中',
+  compiling: '编译校验中',
+  code_generation: '实现中',
+  program_generation: '实现中',
+  validate: '校验中',
+  validation: '校验中',
+};
+
+/** Convert provider stage ids/names into a short, stable user-facing label. */
+export function nodeStageLabel(node: RsiTreeNode): string | null {
+  const rawStage = node.extra?.stage;
+  const stage = asRecord(rawStage);
+  const id = asText(stage?.id ?? stage?.key ?? stage?.stage ?? rawStage)
+    ?.toLowerCase()
+    .replace(/[-\s]+/g, '_');
+  const raw =
+    asText(stage?.name ?? stage?.label) ??
+    asText(rawStage) ??
+    id ??
+    (isStageDescription(node.description) ? node.description : null);
+  if (!raw) return null;
+  if (id) {
+    const normalizedId = id.replace(/_/g, '');
+    const knownById = Object.entries(STAGE_LABELS).find(([key]) => key.replace(/_/g, '') === normalizedId);
+    if (knownById) return knownById[1];
+  }
+  const lower = raw.toLowerCase();
+  if (lower.includes('调研') || lower.includes('research') || lower.includes('survey')) return '调研中';
+  if (lower.includes('设计') || lower.includes('design')) return '设计中';
+  if (lower.includes('实现') || lower.includes('implement') || lower.includes('生成程序')) return '实现中';
+  if (lower.includes('执行') || lower.includes('execute') || lower.includes('experiment')) return '执行中';
+  if (lower.includes('评测') || lower.includes('评分') || lower.includes('evaluat') || lower.includes('score')) {
+    return '评测中';
+  }
+  if (lower.includes('撰写') || lower.includes('报告') || lower.includes('report') || lower.includes('write'))
+    return '撰写中';
+  if (lower.includes('编译') || lower.includes('校验') || lower.includes('validat') || lower.includes('compil')) {
+    return '编译校验中';
+  }
+  if (lower.includes('规划') || lower.includes('plan')) return '规划中';
+  return clampText(raw, 24);
+}
+
+function isStageDescription(value: string | null): boolean {
+  if (!value) return false;
+  const lower = value.toLowerCase();
+  return (
+    lower.includes('正在') ||
+    lower.includes('进行中') ||
+    lower.includes('research') ||
+    lower.includes('evaluat') ||
+    lower.includes('implement') ||
+    lower.includes('compile') ||
+    lower.includes('validat') ||
+    lower.includes('reporting')
+  );
+}
+
+const CHANGE_AREA_LABELS: Record<string, string> = {
+  paper: '论文内容',
+  program: '程序逻辑',
+  prompt: '提示词',
+  skill: '技能',
+  tool: '工具',
+  rail: '护栏',
+  experiments: '实验设计',
+  experiment: '实验设计',
+  reporting: '报告生成',
+};
+
+const OPERATION_LABELS: Record<string, string> = {
+  add: '新增',
+  create: '新增',
+  generate: '生成',
+  modify: '调整',
+  update: '调整',
+  remove: '移除',
+  delete: '移除',
+  replace: '替换',
+};
+
+function changeAreaLabel(change: RsiNodeChange): string | null {
+  const raw = nodeChangeGroup(change).trim().toLowerCase();
+  if (!raw) return null;
+  return CHANGE_AREA_LABELS[raw] ?? raw;
+}
+
+/** A compact change sentence used by both the tree card and the detail drawer. */
+export function nodeChangeDisplayLabel(change: RsiNodeChange): string {
+  const summary = clampText(change.summary ?? change.reason ?? null, 150);
+  if (summary) {
+    if (summary === 'Generated a new paper version.') return '生成新的论文版本';
+    if (summary === 'the starting program') return '基线程序';
+    return summary;
+  }
+  const area = changeAreaLabel(change);
+  const operation = OPERATION_LABELS[change.operation.toLowerCase()] ?? change.operation.toLowerCase();
+  return [area, operation].filter(Boolean).join(' · ') || '产生结构化改动';
+}
+
+function nodeDescriptionSummary(node: RsiTreeNode): string | null {
+  const description = asText(node.description);
+  if (!description || isStageDescription(description)) return null;
+  if (
+    description === 'paper optimization root' ||
+    description === 'No starting paper; first node writes from scratch.'
+  ) {
+    return '从基线开始生成论文';
+  }
+  if (description === 'Uploaded starting paper (ingestion not yet wired in).') return '已上传起始论文';
+  if (description === 'the starting program') return '从基线程序开始优化';
+  return clampText(description);
+}
+
+/** The one-line change/description used inside a tree card. */
+export function nodeSummaryText(node: RsiTreeNode): string | null {
+  return (node.changes ?? []).map(nodeChangeDisplayLabel).find(Boolean) ?? nodeDescriptionSummary(node);
+}
+
+function paperOutcome(node: RsiTreeNode): string | null {
+  return asText(extraRecord(node, 'paper')?.outcome)?.toLowerCase() ?? null;
+}
+
+function hasRuntimeFailure(node: RsiTreeNode): boolean {
+  if (paperOutcome(node) === 'failed') return true;
+  const program = extraRecord(node, 'program');
+  const evaluation = asRecord(program?.evaluation);
+  if (asRecord(program?.error) || evaluation?.valid === false) return true;
+  const failureClass = (node.failure_class ?? '').toLowerCase();
+  const failureReason = (node.failure_reason ?? '').toLowerCase();
+  return (
+    (/fail|error|crash|terminat|invalid|exception|timeout/.test(failureClass) &&
+      failureClass !== 'rejected_by_score') ||
+    /manager decision failed|pipeline failed|generation failed|compile failed|execution timed out/.test(failureReason)
+  );
+}
+
+function scoreForNode(node: RsiTreeNode): number | null {
+  return firstNumber(node.score, extraRecord(node, 'paper')?.score_overall);
+}
+
+function siblingAttempt(node: RsiTreeNode, allNodes: RsiTreeNode[]): { index: number; total: number } | null {
+  const siblings = allNodes
+    .filter(
+      (candidate) =>
+        candidate.node_id !== node.node_id &&
+        candidate.parent_id === node.parent_id &&
+        candidate.iteration === node.iteration,
+    )
+    .concat(node)
+    .sort((left, right) => left.node_id.localeCompare(right.node_id));
+  if (siblings.length <= 1) return null;
+  const index = Math.max(
+    0,
+    siblings.findIndex((candidate) => candidate.node_id === node.node_id),
+  );
+  return { index: index + 1, total: siblings.length };
+}
+
+function attemptInfo(
+  node: RsiTreeNode,
+  allNodes: RsiTreeNode[],
+): { round: number; attempt: { index: number; total: number } | null } {
+  const paper = extraRecord(node, 'paper');
+  const program = extraRecord(node, 'program');
+  const round = Math.max(1, firstNumber(paper?.round_index, program?.round_index, node.iteration) ?? 1);
+  const explicitAttempt = firstNumber(paper?.attempt);
+  const sibling = siblingAttempt(node, allNodes);
+  if (explicitAttempt != null) {
+    const total = Math.max(explicitAttempt, sibling?.total ?? 0);
+    return { round, attempt: total > 1 ? { index: explicitAttempt, total } : null };
+  }
+  return { round, attempt: sibling };
+}
+
+export type RsiNodeLifecycle =
+  'baseline' | 'generating' | 'evaluating' | 'pending' | 'adopted' | 'rejected' | 'failed' | 'pruned';
+
+export interface RsiNodePresentationContext {
+  scenario: RsiScenario;
+  artifactType: RsiArtifactType | null;
+  allNodes?: RsiTreeNode[];
+  taskRunning?: boolean;
+}
+
+export interface RsiNodePresentation {
+  title: string;
+  subtitle: string;
+  lifecycle: RsiNodeLifecycle;
+  statusKind: NodeStatusKind;
+  runtimeKind: NodeRuntimeKind;
+  runtimeLabel: string;
+  runtimeIcon: NodeIconKind;
+  stageLabel: string | null;
+  summary: string | null;
+  changeItems: string[];
+  reasonLabel: string | null;
+  reasonDetail: string | null;
+  parentTitle: string | null;
+  iteration: number;
+  attempt: { index: number; total: number } | null;
+  score: number | null;
+  parentScore: number | null;
+  scoreDelta: number | null;
+  rawNodeId: string;
+}
+
+function artifactObjectLabel(scenario: RsiScenario, artifactType: RsiArtifactType | null): string {
+  if (scenario === 'HARNESS') return 'Harness';
+  return artifactType === 'PROGRAM' ? '程序' : '论文';
+}
+
+function lifecycleForNode(node: RsiTreeNode, taskRunning: boolean): RsiNodeLifecycle {
+  if (node.type === 'ROOT') return 'baseline';
+  if (node.type === 'PRUNED') return 'pruned';
+  if (node.type === 'PROVISIONAL') {
+    if (!taskRunning) return 'pending';
+    return nodeStageLabel(node)?.includes('评测') ? 'evaluating' : 'generating';
+  }
+  if (hasRuntimeFailure(node)) return 'failed';
+  return node.type === 'ADOPTED' || node.adopted ? 'adopted' : 'rejected';
+}
+
+function failureLabel(
+  node: RsiTreeNode,
+  lifecycle: RsiNodeLifecycle,
+  score: number | null,
+  parentScore: number | null,
+): string | null {
+  if (lifecycle === 'failed') {
+    const failureClass = (node.failure_class ?? '').toLowerCase();
+    const failureReason = (node.failure_reason ?? '').toLowerCase();
+    if (
+      failureClass.includes('manager') ||
+      failureClass.includes('decision') ||
+      failureReason.includes('manager decision')
+    ) {
+      return '管理器决策失败';
+    }
+    if (failureClass.includes('scor')) return '评分失败';
+    if (failureClass.includes('compile') || failureClass.includes('valid')) return '编译或校验未通过';
+    if (failureClass.includes('timeout')) return '执行超时';
+    return '生成失败';
+  }
+  if (lifecycle === 'rejected') {
+    if (score != null && parentScore != null) return '得分未超过父节点';
+    return '未达到采纳条件';
+  }
+  if (lifecycle === 'pruned') return '搜索空间已剪枝';
+  return null;
+}
+
+function lifecycleStatusKind(lifecycle: RsiNodeLifecycle): NodeStatusKind {
+  switch (lifecycle) {
+    case 'baseline':
+    case 'adopted':
+      return 'best-path';
+    case 'generating':
+    case 'evaluating':
+    case 'pending':
+      return 'pending';
+    case 'failed':
+      return 'failed';
+    case 'pruned':
+      return 'pruned';
+    case 'rejected':
+      return 'evaluated';
+  }
+}
+
+function lifecycleRuntimeKind(lifecycle: RsiNodeLifecycle): NodeRuntimeKind {
+  switch (lifecycle) {
+    case 'baseline':
+    case 'adopted':
+      return 'best-path';
+    case 'generating':
+      return 'evaluating';
+    case 'evaluating':
+      return 'evaluating';
+    case 'pending':
+      return 'pending';
+    case 'failed':
+      return 'failed';
+    case 'rejected':
+      return 'evaluated';
+    case 'pruned':
+      return 'pruned';
+  }
+}
+
+/**
+ * The runtime kind controls colors/layout, while the lifecycle carries the
+ * user-facing phase. Keep these labels separate so a node that is still
+ * generating an artifact is not presented as if evaluation had already
+ * started.
+ */
+function lifecycleRuntimeLabel(lifecycle: RsiNodeLifecycle): string {
+  switch (lifecycle) {
+    case 'baseline':
+    case 'adopted':
+      return '当前最优';
+    case 'generating':
+      return '生成中';
+    case 'evaluating':
+      return '评测中';
+    case 'pending':
+      return '待处理';
+    case 'rejected':
+      return '未采用';
+    case 'failed':
+      return '失败';
+    case 'pruned':
+      return '已剪枝';
+  }
+}
+
+function titleForNode(
+  context: RsiNodePresentationContext,
+  lifecycle: RsiNodeLifecycle,
+  round: number,
+  attempt: { index: number; total: number } | null,
+): string {
+  const objectLabel = artifactObjectLabel(context.scenario, context.artifactType);
+  if (lifecycle === 'baseline') return `基线${objectLabel}`;
+  if (lifecycle === 'adopted') return `${objectLabel}版本 ${round} · 当前最优`;
+  const suffix = lifecycle === 'failed' ? '尝试' : lifecycle === 'pruned' ? '候选' : '候选';
+  const attemptLabel = attempt ? ` ${attempt.index}/${attempt.total}` : '';
+  return `第 ${round} 轮 · ${objectLabel}${suffix}${attemptLabel}`;
+}
+
+export function presentRsiNode(node: RsiTreeNode, context: RsiNodePresentationContext): RsiNodePresentation {
+  const allNodes = context.allNodes ?? [node];
+  const taskRunning = Boolean(context.taskRunning);
+  const lifecycle = lifecycleForNode(node, taskRunning);
+  const { round, attempt } = attemptInfo(node, allNodes);
+  const parent = node.parent_id ? allNodes.find((candidate) => candidate.node_id === node.parent_id) : null;
+  const score = scoreForNode(node);
+  const parentScore = parent ? scoreForNode(parent) : null;
+  const changeItems = (node.changes ?? []).map(nodeChangeDisplayLabel).filter(Boolean);
+  const summary = changeItems[0] ?? nodeDescriptionSummary(node);
+  const reasonLabel = failureLabel(node, lifecycle, score, parentScore);
+  return {
+    title: titleForNode(context, lifecycle, round, attempt),
+    subtitle:
+      lifecycle === 'baseline'
+        ? '优化起点'
+        : attempt
+          ? `第 ${round} 轮 · 尝试 ${attempt.index}/${attempt.total}`
+          : `第 ${round} 轮`,
+    lifecycle,
+    statusKind: lifecycleStatusKind(lifecycle),
+    runtimeKind: lifecycleRuntimeKind(lifecycle),
+    runtimeLabel: lifecycleRuntimeLabel(lifecycle),
+    runtimeIcon: runtimeIconKind(lifecycleRuntimeKind(lifecycle)),
+    stageLabel: nodeStageLabel(node),
+    summary,
+    changeItems,
+    reasonLabel,
+    reasonDetail: clampText(asText(node.failure_reason), 500),
+    parentTitle: parent ? presentRsiNode(parent, { ...context, allNodes }).title : null,
+    iteration: round,
+    attempt,
+    score,
+    parentScore,
+    scoreDelta: score != null && parentScore != null ? score - parentScore : null,
+    rawNodeId: node.node_id,
+  };
 }
 
 export function nodeChangeGroup(change: RsiNodeChange): string {
@@ -56,11 +485,7 @@ export function statusLabelKey(status: RsiTaskStatus): string {
 // 运行态操作按钮映射：根据当前状态返回可执行动作集
 export type RsiActionKind = 'config' | 'delete' | 'pause' | 'resume' | 'install' | 'download';
 
-export function actionsForStatus(
-  status: RsiTaskStatus,
-  scenario: RsiScenario,
-  installed = false,
-): RsiActionKind[] {
+export function actionsForStatus(status: RsiTaskStatus, scenario: RsiScenario, installed = false): RsiActionKind[] {
   const actions: RsiActionKind[] = ['config', 'delete'];
   switch (status) {
     case 'QUEUED':
@@ -132,17 +557,17 @@ export function formatDateTime(iso: string | null | undefined): string {
   );
 }
 
-// 场景显示名（带产物子类型分隔符）
+// 场景显示名：面向用户的名称不再使用“产物优化|论文”这种技术分隔符。
 export function scenarioLabel(scenario: 'HARNESS' | 'ARTIFACT'): string {
   return scenario === 'HARNESS' ? 'Harness优化' : '产物优化';
 }
 export function artifactTypeLabel(type: 'PAPER' | 'PROGRAM'): string {
   return type === 'PAPER' ? '论文' : '程序';
 }
-// 完整类型标签：Harness优化 / 产物优化|程序 / 产物优化|论文
+// 完整类型标签：Harness优化 / 论文优化 / 程序优化
 export function typeDisplayLabel(scenario: 'HARNESS' | 'ARTIFACT', artifactType: 'PAPER' | 'PROGRAM' | null): string {
   if (scenario === 'HARNESS') return 'Harness优化';
-  return '产物优化|' + artifactTypeLabel(artifactType ?? 'PAPER');
+  return artifactType === 'PROGRAM' ? '程序优化' : '论文优化';
 }
 
 // 状态徽章信息：i18n 标签 key + 图标类型
@@ -172,7 +597,7 @@ export function statusBadgeInfo(status: RsiTaskStatus, installed = false): Statu
   }
 }
 
-// 节点显示名称：根→基线+场景名；被采纳→快照+节点ID；其余→节点ID
+// 节点显示名称：保留旧调用点的兼容包装。新 UI 使用 presentRsiNode，避免把 UUID 直接展示给用户。
 export function nodeDisplayName(
   type: RsiNodeType,
   nodeId: string,
@@ -184,13 +609,13 @@ export function nodeDisplayName(
     if (artifactType === 'PAPER') return '基线论文';
     return '基线程序';
   }
-  if (type === 'ADOPTED') {
-    return '快照' + nodeId;
-  }
-  return nodeId;
+  const objectLabel = artifactObjectLabel(scenario, artifactType);
+  const match = nodeId.match(/(?:attempt|node|N|:)(\d+)$/i);
+  const ordinal = match?.[1] ?? '候选';
+  return type === 'ADOPTED' ? `${objectLabel}版本 ${ordinal}` : `${objectLabel}候选 ${ordinal}`;
 }
 
-// 节点状态标签（上层右侧）：基线/当前最优/已评测/评测中/剪枝
+// 节点状态标签（兼容旧调用点）；新 UI 使用 presentRsiNode.runtimeLabel。
 export function nodeStatusLabel(type: RsiNodeType): string {
   switch (type) {
     case 'ROOT':
@@ -198,18 +623,18 @@ export function nodeStatusLabel(type: RsiNodeType): string {
     case 'ADOPTED':
       return '当前最优';
     case 'REJECTED':
-      return '已评测';
+      return '未采用';
     case 'PROVISIONAL':
-      return '评测中';
+      return '进行中';
     case 'PRUNED':
-      return '剪枝';
+      return '已剪枝';
   }
 }
 
 // ── 运行态展示：区分「评测中」与「待评测」（同色 #FCE7AE，图标/文案不同）──
 // provisional + 任务运行中 → 评测中；provisional + 任务非运行 → 待评测。
 // 后端若给节点增加独立评测状态字段，可在 nodeRuntimeKind 内替换该启发式。
-export type NodeRuntimeKind = 'best-path' | 'evaluated' | 'evaluating' | 'pending' | 'pruned';
+export type NodeRuntimeKind = 'best-path' | 'evaluated' | 'evaluating' | 'pending' | 'failed' | 'pruned';
 
 export type NodeIconKind = 'crown' | 'check' | 'chevron-double' | 'clock' | 'minus';
 
@@ -228,6 +653,12 @@ export function nodeRuntimeKind(type: RsiNodeType, taskRunning: boolean): NodeRu
   }
 }
 
+/** Node-aware runtime mapping. Unlike the legacy type-only helper, this distinguishes failed attempts. */
+export function nodeRuntimeKindForNode(node: RsiTreeNode, taskRunning: boolean): NodeRuntimeKind {
+  const lifecycle = lifecycleForNode(node, taskRunning);
+  return lifecycleRuntimeKind(lifecycle);
+}
+
 // 运行态 kind → 上层背景色 class（评测中复用 pending 色板）
 export function runtimeKindColorClass(kind: NodeRuntimeKind): string {
   const color = kind === 'evaluating' ? 'pending' : kind;
@@ -243,6 +674,8 @@ export function runtimeIconKind(kind: NodeRuntimeKind): NodeIconKind {
       return 'check';
     case 'evaluating':
       return 'chevron-double';
+    case 'failed':
+      return 'minus';
     case 'pending':
       return 'clock';
     case 'pruned':
@@ -254,15 +687,17 @@ export function runtimeIconKind(kind: NodeRuntimeKind): NodeIconKind {
 export function nodeRuntimeLabel(kind: NodeRuntimeKind): string {
   switch (kind) {
     case 'best-path':
-      return '最优路径';
+      return '当前最优';
     case 'evaluated':
-      return '已评测';
+      return '未采用';
     case 'evaluating':
       return '评测中';
     case 'pending':
-      return '待评测';
+      return '待处理';
+    case 'failed':
+      return '失败';
     case 'pruned':
-      return '剪枝';
+      return '已剪枝';
   }
 }
 
@@ -275,7 +710,8 @@ export interface NodeScoreLine {
 
 export function nodeScoreLines(node: RsiTreeNode): NodeScoreLine[] {
   const lines: NodeScoreLine[] = [];
-  if (node.score != null) lines.push({ value: formatScore(node.score), label: '分数' });
+  const score = scoreForNode(node);
+  if (score != null) lines.push({ value: formatScore(score), label: '得分' });
   const extra = node.extra;
   if (extra && typeof extra === 'object') {
     const potential = extra['potential_score'];
@@ -285,11 +721,23 @@ export function nodeScoreLines(node: RsiTreeNode): NodeScoreLine[] {
     for (const [k, v] of Object.entries(extra)) {
       if (k === 'potential_score' || k === 'other_score') continue;
       if (k.endsWith('_score') && typeof v === 'number') {
-        lines.push({ value: formatScore(v), label: k.replace(/_score$/, '') });
+        lines.push({ value: formatScore(v), label: scoreLabel(k.replace(/_score$/, '')) });
       }
     }
   }
   return lines;
+}
+
+function scoreLabel(value: string): string {
+  const labels: Record<string, string> = {
+    overall: '总分',
+    quality: '质量分',
+    correctness: '正确性',
+    gate: '门槛分',
+    reward: '奖励分',
+    rollout: '执行分',
+  };
+  return labels[value.toLowerCase()] ?? value.replace(/[_-]+/g, ' ');
 }
 
 // 节点尺寸估算（布局与组件共用，保证布局高度=渲染高度）
@@ -297,6 +745,7 @@ export function nodeScoreLines(node: RsiTreeNode): NodeScoreLine[] {
 export const RSI_NODE_BAR_H = 32;
 export const RSI_SCORE_LINE_H = 26; // 分数行行高
 export const RSI_EVAL_LINE_H = 24; // 评测中/文本行高
+export const RSI_SUMMARY_LINE_H = 20; // 节点摘要行高
 export const RSI_BODY_PAD = 8; // 下层上下 padding 合计
 export const RSI_BODY_MIN_H = 42; // 下层最小高度（与节点高保真 32 + 42 对齐）
 export const RSI_NODE_MIN_W = 180;
@@ -315,24 +764,41 @@ function evalTextRows(text: string, width: number): number {
   return Math.min(4, Math.max(1, Math.ceil(text.length / charsPerLine)));
 }
 
+function summaryRows(text: string, width: number): number {
+  const charsPerLine = Math.max(1, Math.floor((width - 20) / 8));
+  return Math.min(2, Math.max(1, Math.ceil(text.length / charsPerLine)));
+}
+
 // 节点宽高估算：barH(32) + bodyH(随内容)；评测中宽度自适应(<=280)。
 export function nodeMetrics(node: RsiTreeNode, kind: NodeRuntimeKind, scoreExpanded: boolean): NodeMetrics {
   const barH = RSI_NODE_BAR_H;
   let width = RSI_NODE_MIN_W;
   let bodyH = RSI_BODY_PAD;
+  const summary = nodeSummaryText(node);
+  const stage = nodeStageLabel(node);
   if (kind === 'evaluating') {
-    const text = node.description ?? '正在分析实现';
-    width = Math.min(RSI_NODE_MAX_W, Math.max(RSI_NODE_MIN_W, text.length * 14 + 32));
-    bodyH = Math.max(RSI_BODY_MIN_H, RSI_BODY_PAD + evalTextRows(text, width) * RSI_EVAL_LINE_H);
+    const text = stage ?? summary ?? '正在处理';
+    const secondary = stage && summary ? summary : null;
+    width = Math.min(RSI_NODE_MAX_W, Math.max(RSI_NODE_MIN_W, text.length * 8 + 32));
+    bodyH = Math.max(
+      RSI_BODY_MIN_H,
+      RSI_BODY_PAD + evalTextRows(text, width) * RSI_EVAL_LINE_H + (secondary ? RSI_SUMMARY_LINE_H : 0),
+    );
   } else if (kind === 'best-path' || kind === 'evaluated') {
     const linesArr = nodeScoreLines(node);
     const shown = scoreExpanded ? Math.min(linesArr.length, 5) : Math.min(linesArr.length, 3);
-    bodyH = Math.max(RSI_BODY_MIN_H, RSI_BODY_PAD + shown * RSI_SCORE_LINE_H);
+    const summaryH = summary ? summaryRows(summary, RSI_NODE_MIN_W) * RSI_SUMMARY_LINE_H : 0;
+    bodyH = Math.max(RSI_BODY_MIN_H, RSI_BODY_PAD + summaryH + shown * RSI_SCORE_LINE_H);
     if (linesArr.length > 3) bodyH += RSI_SCORE_TOGGLE_H;
   } else if (kind === 'pending') {
-    bodyH = Math.max(RSI_BODY_MIN_H, RSI_BODY_PAD + RSI_SCORE_LINE_H);
+    bodyH = Math.max(RSI_BODY_MIN_H, RSI_BODY_PAD + RSI_SUMMARY_LINE_H);
+  } else if (kind === 'failed') {
+    bodyH = Math.max(RSI_BODY_MIN_H, RSI_BODY_PAD + RSI_EVAL_LINE_H + (node.failure_reason ? RSI_SUMMARY_LINE_H : 0));
   } else if (kind === 'pruned') {
-    bodyH = Math.max(RSI_BODY_MIN_H, RSI_BODY_PAD + (node.score == null ? RSI_EVAL_LINE_H : RSI_SCORE_LINE_H));
+    bodyH = Math.max(
+      RSI_BODY_MIN_H,
+      RSI_BODY_PAD + (node.score == null && !summary ? RSI_EVAL_LINE_H : RSI_SCORE_LINE_H),
+    );
   }
   return { width, barH, bodyH };
 }

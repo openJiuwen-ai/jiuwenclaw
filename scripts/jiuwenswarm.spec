@@ -199,6 +199,7 @@ http2_submodules = [
 
 # 部分包需要显式声明隐藏导入
 hiddenimports = webview_hiddenimports + http2_submodules + [
+    "matplotlib",  # 论文 reporting 阶段生成结果图
     "pandas",  # pymilvus 依赖
     "tiktoken_ext",  # tiktoken 编码插件（cl100k_base 等）
     "tiktoken_ext.openai_public",
@@ -221,7 +222,6 @@ hiddenimports = webview_hiddenimports + http2_submodules + [
 # 排除不需要的模块以减小体积（pandas 为 pymilvus/openjiuwen 所需，不可排除）
 excludes = [
     "tkinter",
-    "matplotlib",
     "scipy",
     "numpy.tests",
     # External CLI SDKs and their native executables are optional runtimes.
@@ -254,6 +254,14 @@ icon_path = os.path.join(
 # the binary placed here.
 import sysconfig as _sysconfig
 _bundled_binaries = []
+
+# 论文 reporting 阶段会动态生成 PDF 结果图。显式收集 matplotlib，避免
+# PyInstaller 因延迟导入或 backend/font 数据遗漏导致冻结包运行失败。
+_matplotlib_datas, _matplotlib_binaries, _matplotlib_hidden = collect_all("matplotlib")
+datas += _matplotlib_datas
+hiddenimports += _matplotlib_hidden
+_bundled_binaries += _matplotlib_binaries
+
 _ruff_suffix = ".exe" if sys.platform == "win32" else ""
 _ruff_scripts_dir = _sysconfig.get_path("scripts")
 _ruff_candidates = []
