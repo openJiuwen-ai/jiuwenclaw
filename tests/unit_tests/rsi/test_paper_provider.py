@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import threading
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -158,6 +159,69 @@ def test_reporting_resource_order_preserves_a_paper_source_directory():
     paths = ["input/paper/paper"]
 
     assert _safe_reporting_resource_paths(paths) == paths
+
+
+def test_paper_provider_warns_before_truncating_node_files(tmp_path: Path):
+    run_dir = tmp_path / "run"
+    files_dir = run_dir / "reports"
+    files_dir.mkdir(parents=True)
+    for index in range(130):
+        (files_dir / f"report-{index:03d}.txt").write_text(str(index), encoding="utf-8")
+
+    provider = PaperProvider(tmp_path / "tasks")
+    with patch(
+        "jiuwenswarm.agents.harness.common.rsi.paper_provider.logger.warning"
+    ) as warning:
+        files = provider._collect_provider_files(  # noqa: SLF001 - truncation contract
+            run_dir,
+            ["reports"],
+            node_id="node-1",
+        )
+
+    assert len(files) == 128
+    warning.assert_called_once()
+    message = str(warning.call_args.args[0])
+    assert "node %s reported %d files" in message
+    assert warning.call_args.args[1:] == ("node-1", 130, 2, 128)
+
+
+def test_paper_provider_logs_when_model_environment_lock_is_busy():
+    model = SimpleNamespace(
+        model_client_config=SimpleNamespace(api_key="key", api_base="http://localhost"),
+        model_config=SimpleNamespace(model_name="model"),
+    )
+    lock_started = threading.Event()
+    release_lock = threading.Event()
+
+    def hold_lock() -> None:
+        with PaperProvider._MODEL_ENV_LOCK:  # noqa: SLF001 - lock observability contract
+            lock_started.set()
+            release_lock.wait(timeout=2)
+
+    holder = threading.Thread(target=hold_lock)
+    holder.start()
+    assert lock_started.wait(timeout=1)
+
+    waiter_done = threading.Event()
+
+    def wait_for_lock() -> None:
+        with PaperProvider._temporary_model_environment(model):  # noqa: SLF001
+            pass
+        waiter_done.set()
+
+    with patch(
+        "jiuwenswarm.agents.harness.common.rsi.paper_provider.logger.warning"
+    ) as warning:
+        waiter = threading.Thread(target=wait_for_lock)
+        waiter.start()
+        time.sleep(0.05)
+        assert not waiter_done.is_set()
+        release_lock.set()
+        waiter.join(timeout=1)
+
+    holder.join(timeout=1)
+    assert waiter_done.is_set()
+    assert any("等待进程级模型环境锁" in str(call.args[0]) for call in warning.call_args_list)
 
 
 @pytest.mark.asyncio

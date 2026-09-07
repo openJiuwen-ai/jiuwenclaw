@@ -26,10 +26,11 @@ async def test_stage_snapshot_keeps_one_pending_node_and_zero_completed(tmp_path
         tree = projector.sync_provider_tree("t", {
             "nodes": storage.load_tree(), "depth": 0, "iteration": 0,
         })
-        assert len(tree["nodes"]) == 1
-        assert tree["nodes"][0]["description"] == stage
-        assert tree["nodes"][0]["type"] == "PROVISIONAL"
-        assert tree["nodes"][0]["extra"]["stage"]["name"] == stage
+        assert len(tree["nodes"]) == 2
+        pending = next(item for item in tree["nodes"] if item["node_id"] != "ROOT")
+        assert pending["description"] == stage
+        assert pending["type"] == "PROVISIONAL"
+        assert pending["extra"]["stage"]["name"] == stage
         assert projector.derive_progress("t")["iteration"] == 0
     completed = storage.load_tree()[0].model_copy(update={
         "adopted": True, "extra": {"paper": {"outcome": "success"}},
@@ -38,6 +39,7 @@ async def test_stage_snapshot_keeps_one_pending_node_and_zero_completed(tmp_path
     tree = projector.sync_provider_tree("t", {
         "nodes": storage.load_tree(), "depth": 0, "iteration": 1,
     })
-    assert len(tree["nodes"]) == 1
-    assert tree["nodes"][0]["type"] == "ADOPTED"
+    assert len(tree["nodes"]) == 2
+    pending = next(item for item in tree["nodes"] if item["node_id"] != "ROOT")
+    assert pending["type"] == "ADOPTED"
     assert projector.derive_progress("t")["iteration"] == 1

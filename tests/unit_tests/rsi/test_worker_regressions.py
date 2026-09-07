@@ -150,6 +150,64 @@ class TestWorkerRunLoop:
         assert captured["task_id"] == t
         assert captured["results"] == {"best_score": 0.8, "state_path": "/s"}
 
+    async def test_provider_polling_timeout_returns_failure(self, ctx):
+        """A Provider stuck in RUNNING must release the worker with a failure result."""
+
+        class StuckAdapter:
+            def read_state(self, task_id: str):
+                del task_id
+                return SimpleNamespace(status="running")
+
+        ctx.worker.provider_poll_timeout = 0.02
+        result = await ctx.worker._wait_for_provider_terminal(  # noqa: SLF001
+            "rsi-stuck",
+            StuckAdapter(),
+            SimpleNamespace(status="running"),
+        )
+
+        assert result.status == "failed"
+        assert result.error_code == "PROVIDER_TIMEOUT"
+        assert result.error_message == "Provider 超时未进入终态"
+
+    async def test_provider_timeout_does_not_block_next_queued_task(self, ctx):
+        """Timeout terminalization lets the following queued task start."""
+
+        class StuckAdapter:
+            def __init__(self) -> None:
+                self.run_tasks: list[str] = []
+
+            def build_request(self, task_view, *, resume: bool = False):
+                del resume
+                return task_view
+
+            async def run(self, request, *, on_event=None):
+                del on_event
+                self.run_tasks.append(request.task_id)
+                return SimpleNamespace(status="running")
+
+            def read_state(self, task_id: str):
+                del task_id
+                return SimpleNamespace(status="running")
+
+        adapter = StuckAdapter()
+        ctx.register_adapters({"HARNESS": adapter})
+        ctx.worker.provider_poll_timeout = 0.02
+        first = _create(ctx, "stuck-1")
+        second = _create(ctx, "stuck-2")
+
+        ctx.worker.enqueue(first)
+        ctx.worker.enqueue(second)
+        await asyncio.wait_for(ctx.worker._queue.join(), timeout=1)  # noqa: SLF001
+
+        assert adapter.run_tasks == [first, second]
+        assert ctx.store.get(first).status == TaskStatus.FAILED.value
+        assert ctx.store.get(second).status == TaskStatus.FAILED.value
+        runner = ctx.worker._run_task
+        assert runner is not None
+        runner.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await runner
+
 
 class TestProviderControl:
     async def test_pause_commits_state_after_provider_returns(self, ctx):

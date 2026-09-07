@@ -165,7 +165,12 @@ class RsiProjector:
             self._normalize_parents_locked(task_id)
             metric = self._metric.setdefault(task_id, {})
             node_iteration = max(
-                (node.iteration for node in nodes.values() if node.node_id != _ROOT),
+                (
+                    node.iteration
+                    for node in nodes.values()
+                    if node.node_id != _ROOT
+                    and node.type not in {"PROVISIONAL", "CANDIDATE"}
+                ),
                 default=0,
             )
             metric["iteration"] = max(
@@ -379,6 +384,12 @@ class RsiProjector:
     def _merge_node(cls, local: RsiTreeNode, provider: RsiTreeNode) -> RsiTreeNode:
         adopted = bool(local.adopted or provider.adopted)
         extra = {**(local.extra or {}), **(provider.extra or {})}
+        paper_extra = (provider.extra or {}).get("paper")
+        paper_pending = (
+            provider.type == "PROVISIONAL"
+            and isinstance(paper_extra, dict)
+            and paper_extra.get("outcome") == "pending"
+        )
         merged = RsiTreeNode(
             node_id=local.node_id,
             iteration=local.iteration if local.iteration > 0 else provider.iteration,
@@ -386,7 +397,11 @@ class RsiProjector:
             type="ADOPTED" if adopted else (local.type or provider.type or "REJECTED"),
             adopted=adopted,
             score=local.score if local.score is not None else provider.score,
-            description=local.description or provider.description,
+            description=(
+                provider.description
+                if paper_pending and provider.description
+                else local.description or provider.description
+            ),
             snapshot_artifact_id=local.snapshot_artifact_id or provider.snapshot_artifact_id,
             failure_reason=None if adopted else (local.failure_reason or provider.failure_reason),
             failure_class=None if adopted else (local.failure_class or provider.failure_class),
@@ -451,9 +466,14 @@ class RsiProjector:
         if mapped and mapped in nodes:
             return nodes[mapped]
         return None
+
+
 def _normalize_provider_node_id(task_id: str | None, node_id: str) -> str:
     """Use the service's stable ROOT ID for agent-core's provider root."""
-    if task_id and node_id == f"artifact:{task_id}:root":
+    if task_id and node_id in {
+        f"artifact:{task_id}:root",
+        f"artifact:{task_id}:node:0",
+    }:
         return _ROOT
     return node_id
 

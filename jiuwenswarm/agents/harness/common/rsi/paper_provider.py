@@ -50,6 +50,7 @@ _ARTIFACTS_DIR = "artifacts"
 _NODE_ARTIFACTS_DIR = "node_artifacts"
 _ITERATION_RE = re.compile(r"-iteration-(\d+)$")
 _PACKAGE_ITERATION_RE = re.compile(r"paper-optimization-(\d+)$")
+_MAX_PROVIDER_FILES = 128
 _MISSING = object()
 _REPORTING_TEXT_SUFFIXES = frozenset(
     {
@@ -156,10 +157,11 @@ class PaperProvider:
     supports_pause = False
     supports_resume = False
 
-    # autoResearch's module agents read model credentials from environment
-    # variables.  Serialize this small compatibility window so one provider
-    # run cannot temporarily change the variables observed by another paper
-    # run in the same AgentServer process.
+    # autoResearch's module agents still read model credentials from environment
+    # variables.  This compatibility lock intentionally serializes paper runs
+    # in one AgentServer process; _temporary_model_environment logs when a
+    # concurrent run has to wait.  It can be removed once all modules accept
+    # an explicit model configuration.
     _MODEL_ENV_LOCK = threading.RLock()
 
     def __init__(
@@ -506,7 +508,7 @@ class PaperProvider:
             reflection=ReflectionAgent(config),
             reporting=_ReportingAgentBoundaryAdapter(ReportingAgent(config)),
         )
-        with self._temporary_model_environment(request.model):
+        with self._temporary_model_environment(request.model, task_id=request.task_id):
             set_project_root(run_dir)
             return asyncio.run(
                 runtime.arun(
@@ -550,7 +552,12 @@ class PaperProvider:
 
     @classmethod
     @contextlib.contextmanager
-    def _temporary_model_environment(cls, model: Any) -> Iterator[None]:
+    def _temporary_model_environment(
+        cls,
+        model: Any,
+        *,
+        task_id: str | None = None,
+    ) -> Iterator[None]:
         client = getattr(model, "model_client_config", None)
         request_config = getattr(model, "model_config", None)
         values = {
@@ -561,7 +568,15 @@ class PaperProvider:
             "MODEL_TIMEOUT": _model_value(client, "timeout"),
         }
         values = {key: str(value) for key, value in values.items() if value not in (None, "")}
-        with cls._MODEL_ENV_LOCK:
+        acquired_without_wait = cls._MODEL_ENV_LOCK.acquire(blocking=False)
+        if not acquired_without_wait:
+            logger.warning(
+                "[RSI] paper Provider 等待进程级模型环境锁；"
+                "并发 paper 任务将在当前任务完成后执行: task=%s",
+                task_id or "<unknown>",
+            )
+            cls._MODEL_ENV_LOCK.acquire()
+        try:
             previous: dict[str, object] = {}
             for key, value in values.items():
                 previous[key] = os.environ.get(key, _MISSING)
@@ -574,6 +589,8 @@ class PaperProvider:
                         os.environ.pop(key, None)
                     else:
                         os.environ[key] = str(value)
+        finally:
+            cls._MODEL_ENV_LOCK.release()
 
     # -- Runtime observation and snapshots --------------------------------
 
@@ -967,7 +984,7 @@ class PaperProvider:
         while retaining every file produced by that module.
         """
 
-        candidates = self._collect_provider_files(run_dir, raw_paths)
+        candidates = self._collect_provider_files(run_dir, raw_paths, node_id=node_id)
         if not candidates:
             return None
 
@@ -1006,7 +1023,13 @@ class PaperProvider:
         )
         return destination
 
-    def _collect_provider_files(self, run_dir: Path, raw_paths: Any) -> list[Path]:
+    def _collect_provider_files(
+        self,
+        run_dir: Path,
+        raw_paths: Any,
+        *,
+        node_id: str | None = None,
+    ) -> list[Path]:
         candidates: list[Path] = []
         for raw in raw_paths or []:
             path = self._provider_path(run_dir, raw)
@@ -1018,12 +1041,21 @@ class PaperProvider:
                 candidates.extend(item for item in sorted(path.rglob("*")) if item.is_file())
         unique: list[Path] = []
         seen: set[str] = set()
-        for path in candidates[:128]:
+        for path in candidates:
             key = str(path)
             if key in seen:
                 continue
             seen.add(key)
             unique.append(path)
+        if len(unique) > _MAX_PROVIDER_FILES:
+            logger.warning(
+                "[RSI] paper Provider node %s reported %d files; truncating %d files to %d",
+                node_id or "<unknown>",
+                len(unique),
+                len(unique) - _MAX_PROVIDER_FILES,
+                _MAX_PROVIDER_FILES,
+            )
+            return unique[:_MAX_PROVIDER_FILES]
         return unique
 
     def _artifact_ref(
