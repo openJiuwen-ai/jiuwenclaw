@@ -6208,7 +6208,7 @@ class PPTPageGenNode(PlanNode):
             "__artifact__": {
                 "info": {
                     "ppt_gen_status": ppt_gen_status,
-                    "page_count": len(final_page_files),
+                    "total_pages": len(final_page_files),
                     "missing_count": len(missing_pages),
                 },
                 "files": [{"path": f, "desc": "PPT页面"} for f in final_page_files] if final_page_files else [],
@@ -6438,7 +6438,7 @@ class PPTPageGenNode(PlanNode):
             "__artifact__": {
                 "info": {
                     "ppt_gen_status": ppt_gen_status,
-                    "page_count": len(page_files),
+                    "total_pages": len(page_files),
                     "missing_count": len(missing_pages),
                 },
                 "files": [{"path": f, "desc": "PPT页面"} for f in page_files] if page_files else [],
