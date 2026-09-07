@@ -33,20 +33,6 @@ def test_normalize_template_ref_accepts_list() -> None:
     }
 
 
-def test_normalize_template_ref_drops_skill_whitelist() -> None:
-    assert normalize_template_ref(
-        {
-            "skill_whitelist": [
-                "a1000001-0000-4000-8000-000000000001",
-                "abc",
-            ],
-            "skill_prebuilt": ["tpl-a"],
-        }
-    ) == {
-        "skill_prebuilt": ["tpl-a"],
-    }
-
-
 def test_normalize_template_ref_rejects_string_slot_value() -> None:
     with pytest.raises(ValueError, match="must be a list"):
         normalize_template_ref(

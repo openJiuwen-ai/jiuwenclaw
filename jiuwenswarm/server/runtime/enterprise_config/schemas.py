@@ -51,10 +51,7 @@ DEFAULT_AGENT_LOAD_SLOTS = frozenset({
 
 
 def normalize_template_ref(value: Any) -> dict[str, list[str]]:
-    """将 ``template_ref`` 规范为 ``{slot: [ref_string, ...]}``；空值键省略，同槽位去重保序。
-
-    丢弃已废弃的 ``skill_whitelist`` 槽位。
-    """
+    """将 ``template_ref`` 规范为 ``{slot: [ref_string, ...]}``；空值键省略，同槽位去重保序。"""
     if value is None:
         return {}
     if not isinstance(value, dict):
@@ -62,7 +59,7 @@ def normalize_template_ref(value: Any) -> dict[str, list[str]]:
     out: dict[str, list[str]] = {}
     for key, raw in value.items():
         slot = str(key).strip()
-        if not slot or raw is None or slot == "skill_whitelist":
+        if not slot or raw is None:
             continue
         if not isinstance(raw, list):
             raise ValueError(f"template_ref[{slot!r}] must be a list")
