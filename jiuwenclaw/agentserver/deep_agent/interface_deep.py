@@ -13,6 +13,7 @@ import json
 import logging
 import importlib
 import os
+import time
 from contextvars import ContextVar, Token
 from dataclasses import dataclass
 from pathlib import Path
@@ -2887,13 +2888,18 @@ class JiuWenClawDeepAdapter:
                 - 其余字段透传给 DeepAgentConfig。
             mode: 实例化模式，支持 "claw"（默认，使用 create_deep_agent）和 "code"（使用 create_code_agent）。
         """
+        _t_total = time.monotonic()
         await self.set_checkpoint()
+        _t_ckpt = time.monotonic()
 
         self._instance_overrides = dict(config) if isinstance(config, dict) else {}
         config_base = get_config()
         bootstrap_request = self._instance_overrides.pop("request", None)
+        _rid = getattr(bootstrap_request, "request_id", "") or "?"
+        _t_ent0 = time.monotonic()
         if bootstrap_request is not None:
             await self._load_enterprise_config(bootstrap_request)
+        _t_ent = time.monotonic()
         config_base = self._merge_enterprise_models_into_config(config_base)
         self._refresh_multimodal_configs(config_base)
         self._startup_config_base = config_base
@@ -2902,6 +2908,7 @@ class JiuWenClawDeepAdapter:
         self._config_cache = config.copy()
         self._agent_name = self._instance_overrides.get("agent_name", config.get("agent_name", "main_agent"))
 
+        _t_skill0 = time.monotonic()
         if is_skill_whitelist_tenant(self._agent_id, self._service_id):
             enterprise_skills: list[dict[str, Any]] = []
             if self._enterprise_config is not None:
@@ -2924,7 +2931,7 @@ class JiuWenClawDeepAdapter:
             self._prebuilt_skills = {
                 str(name) for name in sync_result.prebuilt_skill_dirs if str(name).strip()
             }
-
+        _t_skill = time.monotonic()
         # Keep constructor-injected tenant workspace by default.
         # Only override when request explicitly provides workspace_dir.
         configured_workspace = self._instance_overrides.get("workspace_dir")
@@ -2932,7 +2939,9 @@ class JiuWenClawDeepAdapter:
             self._workspace_dir = configured_workspace
 
         try:
+            _t_model0 = time.monotonic()
             model = self._create_model(config_base)
+            _t_model = time.monotonic()
         except Exception as exc:
             logger.error(
                 "[JiuWenClawDeepAdapter] create_instance 模型初始化失败(%s): %s",
@@ -2942,20 +2951,25 @@ class JiuWenClawDeepAdapter:
             raise
         agent_card = AgentCard(name=self._agent_name, id=self._runtime_agent_scope_id())
 
+        _t_tools0 = time.monotonic()
         tool_cards = await self._get_tool_cards(agent_card.id, mode=mode)
+        _t_tools = time.monotonic()
         logger.info("[JiuWenClawDeepAdapter] Agent card id: %s", agent_card.id)
         self._tool_cards = tool_cards
 
         from jiuwenclaw.agentserver.permissions.config_loader import get_effective_permissions_config
 
+        _t_perm0 = time.monotonic()
         permissions_cfg = get_effective_permissions_config()
         init_permission_engine(permissions_cfg)
+        _t_perm = time.monotonic()
         logger.info(
             "[JiuWenClawDeepAdapter] Permission engine initialized: enabled=%s",
             permissions_cfg.get("enabled", True),
         )
 
         # 触发 BEFORE_SYSTEM_PROMPT_BUILD 钩子获取扩展目录
+        _t_hook0 = time.monotonic()
         extra_skill_dir: str | None = None
         custom_home_dir: str | None = None
         try:
@@ -2977,19 +2991,25 @@ class JiuWenClawDeepAdapter:
             )
         except Exception as exc:
             logger.warning("[JiuWenClawDeepAdapter] hook trigger failed: %s", exc)
+        _t_hook = time.monotonic()
 
+        _t_rails0 = time.monotonic()
         rails_list = self._build_agent_rails(
             config, config_base, mode=mode,
             extra_skill_dir=extra_skill_dir,
             custom_home_dir=custom_home_dir,
         )
+        _t_rails = time.monotonic()
 
+        _t_sysop0 = time.monotonic()
         sys_operation = self._create_sys_operation()
         if sys_operation is None:
             raise RuntimeError("sys_operation is not available, maybe task is not running")
 
         self._sys_operation = sys_operation
+        _t_sysop = time.monotonic()
         configured_subagents = self._build_configured_subagents(model, config, config_base)
+        _t_subagents = time.monotonic()
         common_kwargs = dict(
             model=model,
             card=agent_card,
@@ -3014,6 +3034,7 @@ class JiuWenClawDeepAdapter:
             language=self._resolve_runtime_language(),
         )
 
+        _t_agent0 = time.monotonic()
         if mode == "code":
             self._instance = create_code_agent(**common_kwargs)
         else:
@@ -3024,13 +3045,38 @@ class JiuWenClawDeepAdapter:
                 audio_model_config=self._audio_model_config,
                 completion_timeout=config.get("completion_timeout", 21600.0),
             )
+        _t_agent = time.monotonic()
         logger.info("[JiuWenClawDeepAdapter] 初始化完成: agent_name=%s", self._agent_name)
 
         # 动态加载用户自定义的 Rail 扩展
+        _t_urails0 = time.monotonic()
         await self.load_user_rails()
+        _t_urails = time.monotonic()
 
         # Initialize fork_agent tools
         self._init_subagent_tools()
+        _t_subtools = time.monotonic()
+        logger.info(
+            "[AgentPerf] deep_create_instance: request_id=%s agent=%s total_ms=%.1f "
+            "ckpt_ms=%.1f ent_cfg_ms=%.1f skill_sync_ms=%.1f model_ms=%.1f "
+            "tool_cards_ms=%.1f perm_ms=%.1f hook_ms=%.1f rails_ms=%.1f "
+            "sysop_ms=%.1f subagents_ms=%.1f create_agent_ms=%.1f "
+            "user_rails_ms=%.1f subagent_tools_ms=%.1f",
+            _rid, self._agent_name, (_t_subtools - _t_total) * 1000,
+            (_t_ckpt - _t_total) * 1000,
+            (_t_ent - _t_ent0) * 1000,
+            (_t_skill - _t_skill0) * 1000,
+            (_t_model - _t_model0) * 1000,
+            (_t_tools - _t_tools0) * 1000,
+            (_t_perm - _t_perm0) * 1000,
+            (_t_hook - _t_hook0) * 1000,
+            (_t_rails - _t_rails0) * 1000,
+            (_t_sysop - _t_sysop0) * 1000,
+            (_t_subagents - _t_sysop) * 1000,
+            (_t_agent - _t_agent0) * 1000,
+            (_t_urails - _t_urails0) * 1000,
+            (_t_subtools - _t_urails) * 1000,
+        )
 
     def _init_subagent_tools(self) -> None:
         """Initialize fork_agent and spawn_subagent tools for creating subagents."""
