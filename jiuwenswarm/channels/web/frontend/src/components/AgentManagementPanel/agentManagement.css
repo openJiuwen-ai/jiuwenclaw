@@ -1664,6 +1664,22 @@
   font-size: 12px;
 }
 
+.agent-management-form-field__label-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.agent-management-field-counter {
+  color: var(--color-text-muted);
+  font-size: 12px;
+}
+
+.agent-management-field-counter.is-limit {
+  color: var(--color-feedback-warning);
+}
+
 .agent-management-form-section__header {
   display: flex;
   align-items: flex-start;

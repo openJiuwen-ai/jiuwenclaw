@@ -3197,6 +3197,7 @@ const showWorkspaceDivider = effectiveTeamAreaExpanded && !showConversationNotFo
         {hasVisitedAgents && (
           <div className={`app-section min-h-0 ${activeNav === 'agents' ? '' : 'is-hidden'}`}>
             <AgentManagementPanel
+              isActive={activeNav === 'agents'}
               onUseAgent={handleUseAgent}
               onUsePrompt={handleUseAgentPrompt}
               onCreateViaChat={() => requestSessionNavigation('new', {

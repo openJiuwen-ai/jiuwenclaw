@@ -2278,6 +2278,7 @@
       "namePlaceholder": "Enter a display name",
       "descriptionLabel": "Capability description",
       "descriptionPlaceholder": "Describe what this Expert is good at",
+      "charCount": "{{count}}/{{max}}",
       "tagLabel": "Domain tags (optional)",
       "tagPlaceholder": "Choose strength tags",
       "toggleTags": "Expand or collapse domain tags",

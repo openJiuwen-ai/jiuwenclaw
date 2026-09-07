@@ -31,6 +31,7 @@ import { PageHeader, PageToolbarSearch } from '../ui';
 type PanelView = 'catalog' | 'mine' | 'detail' | 'create';
 
 type AgentManagementPanelProps = {
+  isActive?: boolean;
   onUseAgent?: (id: string) => void;
   onUsePrompt?: (id: string, prompt: string) => void;
   onCreateViaChat?: () => void;
@@ -122,6 +123,7 @@ function deriveAgentId(name: string): string {
 }
 
 export function AgentManagementPanel({
+  isActive = true,
   onUseAgent,
   onUsePrompt,
   onCreateViaChat,
@@ -156,6 +158,8 @@ export function AgentManagementPanel({
   const [mcpStatus, setMcpStatus] = useState<RequestStatus>('idle');
   const catalogRef = useRef<AgentCatalogItem[]>(state.catalog);
   const catalogRevisionRef = useRef(0);
+  const panelMountedRef = useRef(false);
+  const panelPrevActiveRef = useRef(false);
   const detailRevisionRef = useRef(0);
   const filesRevisionRef = useRef(0);
   const fileRevisionRef = useRef(0);
@@ -234,9 +238,18 @@ export function AgentManagementPanel({
     }
   }, [client]);
 
+  // 切换到专家页面时刷新目录（面板常驻挂载、切走仅隐藏，聊天里新建的专家
+  // 不会主动通知前端），沿用 SkillPanel 的激活转换检测；首次挂载也走此入口，
+  // 避免与旧的 mount-only 请求重复。
   useEffect(() => {
-    void loadCatalog();
-  }, [loadCatalog]);
+    const prevIsActive = panelPrevActiveRef.current;
+    const isInitialMount = !panelMountedRef.current;
+    panelMountedRef.current = true;
+    if (isActive && (!prevIsActive || isInitialMount)) {
+      void loadCatalog();
+    }
+    panelPrevActiveRef.current = isActive;
+  }, [isActive, loadCatalog]);
 
   useEffect(() => {
     return () => {
