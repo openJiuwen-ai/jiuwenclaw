@@ -54,14 +54,22 @@ def _llm_config():
     )
 
 
-def test_thinking_disabled_request_overrides_returns_isolated_core_config():
+def test_thinking_disabled_request_overrides_returns_isolated_compatibility_fields():
     first = thinking_disabled_request_overrides()
     second = thinking_disabled_request_overrides()
 
-    assert first == {"reasoning": {"mode": "disabled"}}
-    first["reasoning"]["mode"] = "enabled"
+    assert first == {
+        "extra_body": {
+            "thinking": {"type": "disabled"},
+            "enable_thinking": False,
+            "chat_template_kwargs": {"enable_thinking": False},
+        }
+    }
+    first["extra_body"]["thinking"]["type"] = "enabled"
+    first["extra_body"]["chat_template_kwargs"]["enable_thinking"] = True
 
-    assert second == {"reasoning": {"mode": "disabled"}}
+    assert second["extra_body"]["thinking"]["type"] == "disabled"
+    assert second["extra_body"]["chat_template_kwargs"]["enable_thinking"] is False
 
 
 def test_extract_message_content_supports_openjiuwen_response_shape():
@@ -133,8 +141,12 @@ def test_llm_config_removes_internal_reasoning_level():
     request_kwargs = config.model_request_kwargs()
 
     assert "reasoning_level" not in request_kwargs
+    assert "reasoning" not in request_kwargs
     assert request_kwargs["max_tokens"] == 99
-    assert request_kwargs["reasoning"] == {"mode": "disabled"}
+    assert (
+        request_kwargs["extra_body"]
+        == thinking_disabled_request_overrides()["extra_body"]
+    )
 
 
 def test_llm_config_forces_high_reasoning_config_to_disabled():
@@ -147,7 +159,19 @@ def test_llm_config_forces_high_reasoning_config_to_disabled():
             },
             request={
                 "max_tokens": 99,
-                "extra_body": {"custom_option": {"enabled": True}},
+                "reasoning": {"mode": "enabled", "effort": "max"},
+                "reasoning_effort": "high",
+                "thinking": {"type": "enabled"},
+                "enable_thinking": True,
+                "chat_template_kwargs": {"enable_thinking": True},
+                "extra_body": {
+                    "custom_option": {"enabled": True},
+                    "reasoning": {"effort": "high"},
+                    "thinking": {"type": "enabled"},
+                    "enable_thinking": True,
+                    "thinking_budget": 4096,
+                    "chat_template_kwargs": {"enable_thinking": True},
+                },
             },
         )
     )
@@ -155,10 +179,48 @@ def test_llm_config_forces_high_reasoning_config_to_disabled():
     request_kwargs = config.model_request_kwargs()
 
     assert "reasoning_level" not in request_kwargs
+    assert "reasoning" not in request_kwargs
     assert "reasoning_effort" not in request_kwargs
+    assert "thinking" not in request_kwargs
+    assert "enable_thinking" not in request_kwargs
+    assert "chat_template_kwargs" not in request_kwargs
     assert request_kwargs["max_tokens"] == 99
-    assert request_kwargs["reasoning"] == {"mode": "disabled"}
-    assert request_kwargs["extra_body"] == {"custom_option": {"enabled": True}}
+    assert request_kwargs["extra_body"] == {
+        "custom_option": {"enabled": True},
+        **thinking_disabled_request_overrides()["extra_body"],
+    }
+
+
+def test_llm_config_legacy_controls_reach_core_without_neutral_reasoning_plan(
+    monkeypatch,
+):
+    config = LLMConfig.from_model_entry(
+        _model_entry(
+            reasoning_level="high",
+            client={
+                "api_base": "https://custom.example.test/v1",
+                "model_name": "deepseek-v4-flash",
+            },
+        )
+    )
+
+    captured = {}
+
+    class FakeModel:
+        def __init__(self, *, model_client_config, model_config):
+            captured["client"] = model_client_config
+            captured["request"] = model_config
+
+    monkeypatch.setattr("openjiuwen.core.foundation.llm.Model", FakeModel)
+
+    model = config.create_model()
+
+    assert isinstance(model, FakeModel)
+    assert captured["request"].reasoning is None
+    assert (
+        captured["request"].extra_body
+        == thinking_disabled_request_overrides()["extra_body"]
+    )
 
 
 def test_llm_config_owns_nested_model_entry_data():
