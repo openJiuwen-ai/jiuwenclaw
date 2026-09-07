@@ -77,12 +77,20 @@ def test_alibaba_custom_api_uses_curated_verified_model_allowlist() -> None:
 
     assert preset is not None
     assert preset.default_model == "qwen3.8-max"
-    assert len(preset.model_options) == 28
+    assert len(preset.model_options) == 47
     assert {
         "qwen3.8-max",
         "qwen3-coder-next",
+        "deepseek-r1",
+        "deepseek-v3.2",
         "deepseek-v4-pro",
+        "deepseek-v4-pro-0813",
+        "kimi-k2-thinking",
+        "kimi-k2.6",
+        "MiniMax-M2.1",
         "MiniMax-M2.5",
+        "glm-4.7",
+        "glm-5.2-fast-preview",
         "qwen3-vl-plus",
         "qwen3.5-omni-plus",
         "qwen3.8-27b",
