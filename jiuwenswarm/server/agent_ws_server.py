@@ -10655,7 +10655,9 @@ class AgentWebSocketServer:
         from jiuwenswarm.agents.harness.common.rsi.context import get_rsi_workspace_root
         from jiuwenswarm.common.utils import get_user_workspace_dir
         try:
-            active = RsiHarnessActivationStore(get_rsi_workspace_root()).resolve_active_runtime_path()
+            active = RsiHarnessActivationStore(
+                get_rsi_workspace_root() / "tasks"
+            ).resolve_active_runtime_path()
             if active:
                 return active
         except Exception as exc:

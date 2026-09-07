@@ -3280,6 +3280,7 @@
       "actionConfig": "Configuration",
       "actionDelete": "Delete",
       "actionPause": "Pause",
+      "actionStop": "Stop task",
       "pauseUnsupported": "The current Harness engine does not support pausing while running",
       "actionUnknownError": "Unknown error",
       "actionFailed": "Action failed: {{message}}",
@@ -3322,8 +3323,24 @@
       "deleteBody": "Experiment data cannot be restored after deletion. Delete this experiment?",
       "pauseTitle": "Pause experiment",
       "pauseBody": "The current optimization will stop. Pause this experiment?",
+      "stopTitle": "Stop task",
+      "stopBody": "Stopping will terminate the current optimization task. Stop this experiment?",
       "queuedTitle": "This experiment is queued",
       "queuedHint": "1 more task is optimizing. Please wait."
+    },
+    "stage": {
+      "caseRunning": "Evaluating case {{index}}/{{total}}",
+      "casePassed": "Case {{index}}/{{total}} passed",
+      "caseFailed": "Case {{index}}/{{total}} failed",
+      "caseError": "Case {{index}}/{{total}} execution error",
+      "caseSkipped": "Case {{index}}/{{total}} skipped",
+      "analysisRunning": "Analyzing failed cases",
+      "analysisDone": "Failure analysis completed",
+      "analysisError": "Failure analysis failed",
+      "candidateRunning": "Generating candidate {{index}}/{{total}}",
+      "candidateDone": "Candidate {{index}}/{{total}} generated",
+      "candidateError": "Candidate {{index}}/{{total}} generation failed",
+      "scoreSuffix": " · {{score}}"
     }
   }
 }

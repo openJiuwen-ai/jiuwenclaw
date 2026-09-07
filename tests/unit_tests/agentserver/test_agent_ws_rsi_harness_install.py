@@ -32,8 +32,8 @@ def test_rsi_context_binds_installer_to_agent_manager(monkeypatch, tmp_path):
 def test_rsi_active_harness_precedes_generic_registry(monkeypatch, tmp_path):
     runtime_path = (
         tmp_path
-        / "workspace"
         / "rsi"
+        / "tasks"
         / "rsi-task"
         / "harness"
         / "versions"
@@ -41,7 +41,7 @@ def test_rsi_active_harness_precedes_generic_registry(monkeypatch, tmp_path):
         / "validation_harness"
     )
     runtime_path.mkdir(parents=True)
-    store = RsiHarnessActivationStore(tmp_path / "workspace" / "rsi")
+    store = RsiHarnessActivationStore(tmp_path / "rsi" / "tasks")
     store.commit(
         {
             "installation_id": "install-a",

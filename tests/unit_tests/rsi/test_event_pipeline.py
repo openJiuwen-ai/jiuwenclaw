@@ -69,7 +69,9 @@ class TestProjectorProgress:
         })
         projector.on_node_stage("rsi-t1", {"node_ref": "c1", "stage": {"id": "verify", "name": "验证中"}})
         assert node is not None
-        assert node.description == "优化 › 验证中"
+        # 统一动态阶段语义：description 覆盖为当前阶段文案，而不是追加历史。
+        assert node.description == "验证中"
+        assert node.extra["stage"]["name"] == "验证中"
 
     def test_tree_persist_reload(self, projector, tmp_path):
         projector.register_root("rsi-t1")

@@ -33,6 +33,7 @@ import type {
   RsiUsage,
   RsiUsageGetResult,
 } from './types';
+import { rsiMock } from './mockData';
 
 export const RSI_EVENTS = {
   statusChanged: 'rsi.training.status.changed',
@@ -315,7 +316,6 @@ function normalizeTask(value: unknown): RsiTaskGetResult {
       },
       input_file: asNullableString(config.input_file),
       max_iterations: asNumber(config.max_iterations, 1),
-      search_width: asNumber(config.search_width, 1),
       optimization_instruction: asNullableString(config.optimization_instruction),
       artifact_path: asNullableString(config.artifact_path),
     },
@@ -601,7 +601,6 @@ export function rsiTaskCreate(params: RsiTaskCreateParams): Promise<RsiTaskCreat
   }
   if (params.artifact_path?.trim()) wire.artifact_path = params.artifact_path;
   if (params.max_iterations != null) wire.max_iterations = params.max_iterations;
-  if (params.search_width != null) wire.search_width = params.search_width;
   if (params.optimization_instruction?.trim()) wire.optimization_instruction = params.optimization_instruction;
   return webRequest<unknown>(METHOD.taskCreate, withRsiSession(wire)).then((value) => {
     const raw = asRecord(value) ?? {};

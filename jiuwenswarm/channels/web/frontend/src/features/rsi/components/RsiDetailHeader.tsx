@@ -9,7 +9,7 @@ import deleteIcon from '../../../assets/rsi/rsi-delete.svg';
 import pauseIcon from '../../../assets/rsi/rsi-pause.svg';
 import runningIcon from '../../../assets/rsi/rsi-runing.svg';
 import waitingIcon from '../../../assets/rsi/rsi-waiting2.svg';
-import type { RsiTaskGetResult, RsiReportGetResult } from '../types';
+import type { RsiTaskGetResult, RsiReportGetResult, RsiTreeGetResult } from '../types';
 import {
   actionsForStatus,
   typeDisplayLabel,
@@ -24,6 +24,7 @@ import {
   rsiTaskDelete,
   rsiTrainingPause,
   rsiTrainingResume,
+  rsiTrainingTerminate,
   rsiArtifactDownload,
   rsiArtifactDownloadUrl,
   rsiHarnessInstall,
@@ -40,6 +41,7 @@ type DownloadCapableWindow = Window & {
 interface RsiDetailHeaderProps {
   task: RsiTaskGetResult;
   report: RsiReportGetResult | null;
+  tree: RsiTreeGetResult | null;
   liveCost: number | null;
   createdAt: string | null;
   onOpenConfig: () => void;
@@ -49,6 +51,7 @@ interface RsiDetailHeaderProps {
 export function RsiDetailHeader({
   task,
   report,
+  tree,
   liveCost,
   createdAt,
   onOpenConfig,
@@ -61,7 +64,7 @@ export function RsiDetailHeader({
   const installedTask = useRsiStore((s) => Boolean(s.installedTaskIds[task.task_id]));
   const installed = task.status === 'COMPLETED' && installedTask;
   const [busy, setBusy] = useState(false);
-  const [confirmAction, setConfirmAction] = useState<'delete' | 'pause' | null>(null);
+  const [confirmAction, setConfirmAction] = useState<'delete' | 'pause' | 'stop' | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
 
   const runAction = useCallback(
@@ -78,6 +81,9 @@ export function RsiDetailHeader({
           patchTaskStatus(task.task_id, res.status);
         } else if (action === 'resume') {
           const res = await rsiTrainingResume(task.task_id);
+          patchTaskStatus(task.task_id, res.status);
+        } else if (action === 'stop') {
+          const res = await rsiTrainingTerminate(task.task_id);
           patchTaskStatus(task.task_id, res.status);
         } else if (action === 'delete') {
           const result = await rsiTaskDelete(task.task_id);
@@ -128,7 +134,7 @@ export function RsiDetailHeader({
 
   const handleAction = useCallback(
     (action: RsiActionKind) => {
-      if (action === 'delete' || action === 'pause') {
+      if (action === 'delete' || action === 'pause' || action === 'stop') {
         setConfirmAction(action);
         return;
       }
@@ -144,7 +150,7 @@ export function RsiDetailHeader({
     await runAction(action);
   }, [confirmAction, runAction]);
 
-  const actions = actionsForStatus(task.status, task.scenario, installed);
+  const actions = actionsForStatus(task.status, task.scenario, installed, tree);
   const orderedActions = [...actions];
   const deleteIndex = orderedActions.indexOf('delete');
   if (deleteIndex > 0) {
@@ -157,16 +163,14 @@ export function RsiDetailHeader({
     delete: t('rsi.detail.actionDelete'),
     pause: t('rsi.detail.actionPause'),
     resume: t('rsi.detail.actionResume'),
+    stop: t('rsi.detail.actionStop'),
     install: t('rsi.detail.actionInstall'),
     download: t('rsi.detail.actionDownload'),
   };
-  const harnessRunning = task.scenario === 'HARNESS' && task.status === 'RUNNING';
-
   // 类型标签 + 状态徽章 + 数值标签
   const typeLabel = typeDisplayLabel(task.scenario, task.artifact_type);
   const badge = statusBadgeInfo(task.status, installed);
   const maxIter = t('rsi.detail.tagMaxIterations') + '：' + task.config.max_iterations;
-  const maxWidth = t('rsi.detail.tagMaxSearchWidth') + '：' + task.config.search_width;
   const createdLabel = t('rsi.detail.tagCreatedAt', { defaultValue: '创建时间' }) + '：' + formatDateTime(createdAt);
   const failureReason = badge.kind === 'failed' ? task.failure_reason : null;
 
@@ -189,8 +193,6 @@ export function RsiDetailHeader({
           </span>
           <span className="rsi-detail__divider" />
           <span className="rsi-detail__tag rsi-detail__tag--meta">{maxIter}</span>
-          <span className="rsi-detail__divider" />
-          <span className="rsi-detail__tag rsi-detail__tag--meta">{maxWidth}</span>
           <span className="rsi-detail__divider" />
           <span className="rsi-detail__tag rsi-detail__tag--meta">{createdLabel}</span>
         </div>
@@ -226,9 +228,8 @@ export function RsiDetailHeader({
                 type="button"
                 className={className}
                 onClick={() => handleAction(action)}
-                disabled={busy || (action === 'pause' && harnessRunning)}
+                disabled={busy}
                 aria-label={action === 'delete' ? actionLabel.delete : undefined}
-                title={action === 'pause' && harnessRunning ? t('rsi.detail.pauseUnsupported') : undefined}
                 data-testid={`rsi-action-${action}`}
               >
                 {action === 'delete' && (
@@ -249,10 +250,22 @@ export function RsiDetailHeader({
         <div className="rsi-confirm-overlay" role="presentation">
           <div className="rsi-confirm" role="dialog" aria-modal="true" aria-labelledby="rsi-confirm-title">
             <div className="rsi-confirm__title" id="rsi-confirm-title">
-              {t(confirmAction === 'delete' ? 'rsi.detail.deleteTitle' : 'rsi.detail.pauseTitle')}
+              {t(
+                confirmAction === 'delete'
+                  ? 'rsi.detail.deleteTitle'
+                  : confirmAction === 'stop'
+                    ? 'rsi.detail.stopTitle'
+                    : 'rsi.detail.pauseTitle',
+              )}
             </div>
             <div className="rsi-confirm__body">
-              {t(confirmAction === 'delete' ? 'rsi.detail.deleteBody' : 'rsi.detail.pauseBody')}
+              {t(
+                confirmAction === 'delete'
+                  ? 'rsi.detail.deleteBody'
+                  : confirmAction === 'stop'
+                    ? 'rsi.detail.stopBody'
+                    : 'rsi.detail.pauseBody',
+              )}
             </div>
             <div className="rsi-confirm__actions">
               <button

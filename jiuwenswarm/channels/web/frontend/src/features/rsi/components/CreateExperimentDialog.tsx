@@ -31,7 +31,6 @@ interface FormState {
   tester: string;
   datasetFile: string;
   maxIterations: number;
-  searchWidth: number;
   optimizationInstruction: string;
   artifactPath: string;
 }
@@ -45,7 +44,6 @@ function defaultForm(): FormState {
     tester: '',
     datasetFile: '',
     maxIterations: 2,
-    searchWidth: 2,
     optimizationInstruction: '',
     artifactPath: '',
   };
@@ -193,7 +191,6 @@ export function CreateExperimentDialog({ open, onClose, onCreated }: CreateExper
                 tester: form.tester,
               },
               max_iterations: form.maxIterations,
-              search_width: form.searchWidth,
             }
           : {
               scenario: 'ARTIFACT',
@@ -401,12 +398,6 @@ export function CreateExperimentDialog({ open, onClose, onCreated }: CreateExper
         {showMaxIterations && (
           <Field label={t('rsi.createDialog.maxIterationsLabel')}>
             <SegmentedSlider value={form.maxIterations} min={1} max={5} onChange={(v) => update('maxIterations', v)} />
-          </Field>
-        )}
-
-        {branch === 'HARNESS' && (
-          <Field label={t('rsi.createDialog.searchWidthLabel')}>
-            <SegmentedSlider value={form.searchWidth} min={1} max={5} onChange={(v) => update('searchWidth', v)} />
           </Field>
         )}
 

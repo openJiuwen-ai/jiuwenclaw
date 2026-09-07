@@ -279,10 +279,10 @@ def build_rsi_service_context(
     harness_activation_store: RsiHarnessActivationStore | None = None,
     harness_installer: Any = None,
 ) -> RsiServiceContext:
-    """默认组合根（tasks_root 缺省取 ``.jiuwenswarm/workspace/rsi``）。"""
+    """默认组合根（tasks_root 缺省取 ``.jiuwenswarm/rsi/tasks``）。"""
     use_production_harness = enable_harness_materialization
     if tasks_root is None:
-        tasks_root = get_rsi_workspace_root()
+        tasks_root = get_rsi_workspace_root() / "tasks"
         if use_production_harness is None:
             use_production_harness = True
     if use_production_harness:
@@ -315,11 +315,11 @@ def build_rsi_service_context(
 
 
 def get_rsi_workspace_root() -> Path:
-    """Return the canonical workspace root for all RSI task directories."""
+    """Return the RSI workspace root (``.jiuwenswarm/rsi``)."""
 
     from jiuwenswarm.common.utils import get_user_workspace_dir
 
-    return (Path(get_user_workspace_dir()) / "workspace" / "rsi").expanduser().resolve()
+    return (Path(get_user_workspace_dir()) / "rsi").expanduser().resolve()
 
 
 def _configured_root(name: str) -> Path | None:

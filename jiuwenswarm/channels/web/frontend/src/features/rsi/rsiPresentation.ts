@@ -1,7 +1,15 @@
 ﻿// RSI 纯展示函数：状态文案 / 节点状态色 / 分数格式化等。
 // 与数据层解耦，便于组件复用与单测。
 
-import type { RsiArtifactType, RsiNodeChange, RsiNodeType, RsiScenario, RsiTaskStatus, RsiTreeNode } from './types';
+import type {
+  RsiArtifactType,
+  RsiNodeChange,
+  RsiNodeType,
+  RsiScenario,
+  RsiTaskStatus,
+  RsiTreeNode,
+  RsiTreeGetResult,
+} from './types';
 
 // 节点类型 → 展示用状态色类名（对应 rsi.css 的 bar--* 与图例 dot）
 export type NodeStatusKind = 'best-path' | 'evaluated' | 'pending' | 'failed' | 'pruned';
@@ -98,16 +106,60 @@ const STAGE_LABELS: Record<string, string> = {
   validation: '校验中',
 };
 
-/** Convert provider stage ids/names into a short, stable user-facing label. */
-export function nodeStageLabel(node: RsiTreeNode): string | null {
+/** Parse the structured provider stage payload carried in node.extra.stage. */
+interface RsiNodeStageSpec {
+  id: string;
+  status: string;
+  name: string | null;
+  failedCaseCount: number | null;
+  caseIndex: number | null;
+  totalCases: number | null;
+  caseId: string | null;
+  score: number | null;
+  candidateIndex: number | null;
+  totalCandidates: number | null;
+}
+
+export function nodeStageSpec(node: RsiTreeNode): RsiNodeStageSpec | null {
   const rawStage = node.extra?.stage;
   const stage = asRecord(rawStage);
   const id = asText(stage?.id ?? stage?.key ?? stage?.stage ?? rawStage)
     ?.toLowerCase()
     .replace(/[-\s]+/g, '_');
+  if (!id) return null;
+  const name = asText(stage?.name ?? stage?.label);
+  const status = asText(stage?.status)?.toLowerCase() ?? '';
+  return {
+    id,
+    status,
+    name,
+    failedCaseCount: firstNumber(stage?.failed_case_count, stage?.failedCaseCount),
+    caseIndex: firstNumber(stage?.case_index, stage?.caseIndex),
+    totalCases: firstNumber(stage?.total_cases, stage?.totalCases),
+    caseId: asText(stage?.case_id ?? stage?.caseId),
+    score: firstNumber(stage?.score),
+    candidateIndex: firstNumber(stage?.candidate_index, stage?.candidateIndex),
+    totalCandidates: firstNumber(stage?.total_candidates, stage?.totalCandidates),
+  };
+}
+
+/** Convert provider stage ids/names into a short, stable user-facing label. */
+export function nodeStageLabel(node: RsiTreeNode): string | null {
+  const spec = nodeStageSpec(node);
+  const namedStage = spec?.name ?? null;
+  const id = spec?.id ?? null;
+  // Real single-harness progress stages carry an index; keep their exact
+  // per-case/generation text instead of collapsing them to the generic label.
+  if (
+    namedStage &&
+    id &&
+    (id.startsWith('evaluate.case.') || id.startsWith('analyze.') || id === 'generate.candidate')
+  ) {
+    return clampText(namedStage, 40);
+  }
   const raw =
-    asText(stage?.name ?? stage?.label) ??
-    asText(rawStage) ??
+    namedStage ??
+    asText(node.extra?.stage) ??
     id ??
     (isStageDescription(node.description) ? node.description : null);
   if (!raw) return null;
@@ -146,6 +198,74 @@ function isStageDescription(value: string | null): boolean {
     lower.includes('validat') ||
     lower.includes('reporting')
   );
+}
+
+export type RsiI18nFunction = (
+  key: string,
+  options?: Record<string, unknown>,
+) => string | null;
+
+/** Localized stage label based on structured provider fields. */
+export function nodeStageLocalizedLabel(
+  node: RsiTreeNode,
+  t: RsiI18nFunction | null | undefined,
+): string | null {
+  const spec = nodeStageSpec(node);
+  if (!spec) return null;
+  if (spec.id.startsWith('evaluate.case.')) {
+    const statusMap: Record<string, string> = {
+      passed: 'casePassed',
+      failed: 'caseFailed',
+      error: 'caseError',
+      skipped: 'caseSkipped',
+      running: 'caseRunning',
+    };
+    const key = statusMap[spec.status];
+    if (!key) return spec.name ?? nodeStageLabel(node);
+    const params: Record<string, unknown> = {
+      index: spec.caseIndex ?? 0,
+      total: spec.totalCases ?? 0,
+    };
+    const label = t?.(`rsi.stage.${key}`, { ...params, defaultValue: spec.name ?? '' });
+    if (!label) return spec.name ?? nodeStageLabel(node);
+    if (spec.score != null && (spec.status === 'passed' || spec.status === 'failed')) {
+      const suffix = t?.('rsi.stage.scoreSuffix', {
+        score: spec.score.toFixed(2),
+        defaultValue: ` · 得分 ${spec.score.toFixed(2)}`,
+      }) ?? ` · 得分 ${spec.score.toFixed(2)}`;
+      return `${label}${suffix}`;
+    }
+    return label;
+  }
+  if (spec.id === 'generate.candidate') {
+    const statusMap: Record<string, string> = {
+      done: 'candidateDone',
+      error: 'candidateError',
+      running: 'candidateRunning',
+    };
+    const key = statusMap[spec.status];
+    if (!key) return spec.name ?? nodeStageLabel(node);
+    const params: Record<string, unknown> = {
+      index: spec.candidateIndex ?? 0,
+      total: spec.totalCandidates ?? 0,
+    };
+    const label = t?.(`rsi.stage.${key}`, { ...params, defaultValue: spec.name ?? '' });
+    return label || spec.name || nodeStageLabel(node);
+  }
+  if (spec.id.startsWith('analyze.')) {
+    const statusMap: Record<string, string> = {
+      done: 'analysisDone',
+      error: 'analysisError',
+      running: 'analysisRunning',
+    };
+    const key = statusMap[spec.status] ?? 'analysisRunning';
+    const params: Record<string, unknown> = {
+      count: spec.failedCaseCount ?? 0,
+    };
+    const label = t?.(`rsi.stage.${key}`, { ...params, defaultValue: spec.name ?? '' });
+    return label || spec.name || nodeStageLabel(node);
+  }
+  return null;
 }
 
 const CHANGE_AREA_LABELS: Record<string, string> = {
@@ -307,6 +427,9 @@ function lifecycleForNode(node: RsiTreeNode, taskRunning: boolean): RsiNodeLifec
   if (node.type === 'PRUNED') return 'pruned';
   if (node.type === 'PROVISIONAL') {
     if (!taskRunning) return 'pending';
+    const stage = nodeStageSpec(node);
+    if (stage?.id.startsWith('evaluate.case.')) return 'evaluating';
+    if (stage?.id === 'generate.candidate') return 'generating';
     return nodeStageLabel(node)?.includes('评测') ? 'evaluating' : 'generating';
   }
   if (hasRuntimeFailure(node)) return 'failed';
@@ -483,23 +606,36 @@ export function statusLabelKey(status: RsiTaskStatus): string {
 }
 
 // 运行态操作按钮映射：根据当前状态返回可执行动作集
-export type RsiActionKind = 'config' | 'delete' | 'pause' | 'resume' | 'install' | 'download';
+export type RsiActionKind = 'config' | 'delete' | 'pause' | 'resume' | 'stop' | 'install' | 'download';
 
-export function actionsForStatus(status: RsiTaskStatus, scenario: RsiScenario, installed = false): RsiActionKind[] {
+export function actionsForStatus(
+  status: RsiTaskStatus,
+  scenario: RsiScenario,
+  installed = false,
+  tree: RsiTreeGetResult | null = null,
+): RsiActionKind[] {
   const actions: RsiActionKind[] = ['config', 'delete'];
   switch (status) {
     case 'QUEUED':
     case 'CREATED':
-    case 'RUNNING':
       actions.push('pause');
+      break;
+    case 'RUNNING':
+      // Harness 引擎不支持运行中暂停，改用停止任务（后端 terminate）。
+      actions.push(scenario === 'HARNESS' ? 'stop' : 'pause');
       break;
     case 'PAUSED':
       actions.push('resume');
       break;
     case 'COMPLETED':
       if (!installed) {
-        if (scenario === 'HARNESS') actions.push('install');
-        actions.push('download');
+        if (scenario === 'HARNESS') {
+          // 仅有基线节点（没有真正展开优化）时，尚未生成可安装的 Harness 插件包。
+          const hasOptimizedNodes = (tree?.nodes.length ?? 0) > 1;
+          if (hasOptimizedNodes) actions.push('install');
+        } else {
+          actions.push('download');
+        }
       }
       break;
     case 'FAILED':
@@ -711,7 +847,7 @@ export interface NodeScoreLine {
 export function nodeScoreLines(node: RsiTreeNode): NodeScoreLine[] {
   const lines: NodeScoreLine[] = [];
   const score = scoreForNode(node);
-  if (score != null) lines.push({ value: formatScore(score), label: '得分' });
+  if (score != null) lines.push({ value: formatScore(score), label: '分数' });
   const extra = node.extra;
   if (extra && typeof extra === 'object') {
     const potential = extra['potential_score'];
