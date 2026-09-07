@@ -2281,6 +2281,7 @@
       "namePlaceholder": "输入展示名称",
       "descriptionLabel": "能力介绍",
       "descriptionPlaceholder": "说明这个专家擅长什么",
+      "charCount": "{{count}}/{{max}}",
       "tagLabel": "领域标签（可选）",
       "tagPlaceholder": "请选择领域标签",
       "toggleTags": "展开或收起领域标签",
