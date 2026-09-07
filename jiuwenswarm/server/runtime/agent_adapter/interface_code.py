@@ -68,7 +68,10 @@ from jiuwenswarm.server.runtime.agent_adapter.statusline_setup_agent import (
 from jiuwenswarm.server.runtime.agent_adapter.trusted_web_search import (
     TrustedWebFreeSearchTool,
 )
-from jiuwenswarm.agents.harness.common.rails.interrupt.interrupt_helpers import build_permission_rail
+from jiuwenswarm.agents.harness.common.rails.interrupt.interrupt_helpers import (
+    apply_permission_trusted_dirs,
+    build_permission_rail,
+)
 from jiuwenswarm.agents.harness.common.browser_defaults import (
     DEFAULT_BROWSER_AGENT_MAX_ITERATIONS,
 )
@@ -1431,6 +1434,7 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
                     "model_name": config_base.get("models", {}).get(
                         "default", {}
                     ).get("model_client_config", {}).get("model_name", "gpt-4"),
+                    "session_id": getattr(self, "_parent_session_id", None),
                 },
             ),
             _RailBuildInfo("_code_filesystem_rail", self._build_filesystem_rail),
@@ -1856,9 +1860,13 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
         workspace = self._workspace_dir or "./"
         sys_operation = self._sys_operation
         subagents: list[Any] = []
+        browser_enabled = self._browser_runtime_enabled()
         self._browser_runtime_settings = None
         self._browser_runtime_security_profile = None
-        self._sync_browser_runtime_environment(config_base)
+        self._sync_browser_runtime_environment(
+            config_base,
+            runtime_enabled=browser_enabled,
+        )
 
         statusline_setup_cfg = (
             subagents_cfg.get(STATUSLINE_SETUP_AGENT_TYPE)
@@ -1946,7 +1954,6 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
             # browser_agent
             browser_agent_cfg = subagents_cfg.get("browser_agent")
 
-            browser_enabled = self._browser_runtime_enabled()
             if browser_enabled:
                 if not str(os.getenv("BROWSER_DRIVER") or "").strip():
                     os.environ["BROWSER_DRIVER"] = "managed"
@@ -2158,13 +2165,16 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
             )
             if self._eternal_conversation_enabled and self._context_processor_rail is not None:
                 self.shutdown_context_session_memory(self._context_processor_rail)
-        # PermissionInterruptRail: per-request trusted_dirs 注入，使 external_directory
-        # 检查将这些子树视为 internal 而跳过 ask/deny（与 RuntimePromptRail 对齐）。
+        # PermissionInterruptRail: session 任务目录是 workspace；project_dir 并入 trusted_dirs。
         # 用 getattr 兼容绕过 __init__ 的测试构造（_permission_rail 仅在 rail 构建流程赋值）。
         permission_rail = getattr(self, "_permission_rail", None)
         if permission_rail is not None:
             try:
-                permission_rail.set_trusted_dirs(runtime_config.trusted_dirs)
+                apply_permission_trusted_dirs(
+                    permission_rail,
+                    trusted_dirs=runtime_config.trusted_dirs,
+                    project_dir=runtime_config.project_dir or self._project_dir,
+                )
             except Exception:
                 logger.debug(
                     "[JiuwenSwarmCodeAdapter] permission_rail.set_trusted_dirs failed",
