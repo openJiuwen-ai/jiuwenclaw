@@ -10641,11 +10641,11 @@ class AgentWebSocketServer:
         return handlers
 
     def _rsi_harness_refs_provider(self, params: dict[str, Any] | None = None) -> str | None:
-        """Locate RSI active Harness first, then use controlled generic fallback.
+        """Resolve an explicit installed Plugin, or use the active Harness.
 
-        Browser callers normally omit ``harness_id`` and get the active package.
-        A trusted product integration may provide an installed ``harness_id`` /
-        ``package_id``; arbitrary paths are intentionally not resolved here.
+        ``package_id`` uses the same Plugin registry as chat. Omitting it keeps
+        the existing baseline fallback; ``harness_id`` remains a legacy registry
+        selector. Arbitrary browser-supplied paths are not resolved here.
         """
         import json
         from jiuwenswarm.agents.harness.common.rsi.harness_activation import (
@@ -10654,6 +10654,25 @@ class AgentWebSocketServer:
         )
         from jiuwenswarm.agents.harness.common.rsi.context import get_rsi_workspace_root
         from jiuwenswarm.common.utils import get_user_workspace_dir
+        requested_id = str(
+            (params or {}).get("package_id") or ""
+        ).strip()
+        if requested_id:
+            from jiuwenswarm.agents.harness.common.rsi.errors import RsiInvalidHarness
+            from jiuwenswarm.server.runtime import extension_package_manager as equipment
+
+            # Resolve the existing package selector through the same registry
+            # as chat.send. Never silently replace an explicit selection by H0.
+            try:
+                if not equipment.is_plugin_allowed(requested_id):
+                    raise ValueError(f"Plugin is not installed: {requested_id}")
+                package = equipment.resolve_plugin_dir(requested_id)
+                manifest = json.loads((package / "manifest.json").read_text(encoding="utf-8"))
+                if manifest.get("mcps"):
+                    raise ValueError("RSI isolated evaluation does not yet support Plugin MCP dependencies")
+                return str(package.resolve())
+            except (ValueError, OSError) as exc:
+                raise RsiInvalidHarness(str(exc)) from exc
         try:
             active = RsiHarnessActivationStore(
                 get_rsi_workspace_root() / "tasks"
@@ -10678,20 +10697,15 @@ class AgentWebSocketServer:
             _HARNESS_PACKAGES_FILE,
         )
         try:
-            if not _HARNESS_PACKAGES_FILE.is_file():
-                return None
-            with _HARNESS_PACKAGES_FILE.open("r", encoding="utf-8") as fh:
-                data = json.load(fh)
+            data = {}
+            if _HARNESS_PACKAGES_FILE.is_file():
+                with _HARNESS_PACKAGES_FILE.open("r", encoding="utf-8") as fh:
+                    data = json.load(fh)
             active_ids = data.get("active_package_ids") or []
             packages = data.get("packages") or []
             by_id = {str(p.get("id")): p for p in packages if isinstance(p, dict)}
-            requested_id = str(
-                (params or {}).get("harness_id")
-                or (params or {}).get("package_id")
-                or ""
-            ).strip()
-            package_ids = [requested_id] if requested_id else active_ids
-            for package_id in package_ids:
+            legacy_id = str((params or {}).get("harness_id") or "").strip()
+            for package_id in ([legacy_id] if legacy_id else active_ids):
                 package = by_id.get(str(package_id))
                 if not package:
                     continue

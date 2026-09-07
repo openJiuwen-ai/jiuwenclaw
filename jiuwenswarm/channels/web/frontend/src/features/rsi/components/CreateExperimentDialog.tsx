@@ -14,6 +14,8 @@ import { useSessionStore } from '../../../stores/sessionStore';
 import { ModelProviderIcon } from '../../../components/ModelProviderIcon';
 import TipIcon from '../../../assets/tip.svg?react';
 import type { ModelEntry } from '../../../types';
+import { pluginPackagesApi } from '../../../services/pluginPackagesApi';
+import { localizedText, type PluginPackageSummary } from '../../../types/pluginPackage';
 
 interface CreateExperimentDialogProps {
   open: boolean;
@@ -30,6 +32,7 @@ interface FormState {
   optimizer: string;
   tester: string;
   datasetFile: string;
+  packageId: string;
   maxIterations: number;
   optimizationInstruction: string;
   artifactPath: string;
@@ -43,6 +46,7 @@ function defaultForm(): FormState {
     optimizer: '',
     tester: '',
     datasetFile: '',
+    packageId: '',
     maxIterations: 2,
     optimizationInstruction: '',
     artifactPath: '',
@@ -50,7 +54,9 @@ function defaultForm(): FormState {
 }
 
 export function CreateExperimentDialog({ open, onClose, onCreated }: CreateExperimentDialogProps) {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
+  const [plugins, setPlugins] = useState<PluginPackageSummary[]>([]);
+  const [pluginError, setPluginError] = useState('');
   const [form, setForm] = useState<FormState>(defaultForm);
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [submitting, setSubmitting] = useState(false);
@@ -59,6 +65,23 @@ export function CreateExperimentDialog({ open, onClose, onCreated }: CreateExper
 
   const branch: Branch = form.scenario === 'HARNESS' ? 'HARNESS' : form.artifactType;
   const isArtifact = form.scenario === 'ARTIFACT';
+
+  useEffect(() => {
+    if (!open) return;
+    let cancelled = false;
+    setPluginError('');
+    void pluginPackagesApi
+      .list()
+      .then((items) => {
+        if (!cancelled) setPlugins(items.filter((item) => item.installed));
+      })
+      .catch((error: unknown) => {
+        if (!cancelled) setPluginError(error instanceof Error ? error.message : String(error));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [open]);
 
   // 选择数据集路径后自动校验
   useEffect(() => {
@@ -185,6 +208,7 @@ export function CreateExperimentDialog({ open, onClose, onCreated }: CreateExper
           ? {
               scenario: 'HARNESS',
               input_file: form.datasetFile,
+              ...(form.packageId ? { package_id: form.packageId } : {}),
               name: form.name.trim(),
               model_refs: {
                 optimizer: form.optimizer,
@@ -265,20 +289,17 @@ export function CreateExperimentDialog({ open, onClose, onCreated }: CreateExper
           <h2 id="rsi-create-title" style={{ fontSize: 16, fontWeight: 600 }}>
             {t('rsi.createDialog.title')}
           </h2>
-          <button
-            type="button"
-            className="rsi-create-dialog__close"
-            onClick={onClose}
-            aria-label="close"
-          >
+          <button type="button" className="rsi-create-dialog__close" onClick={onClose} aria-label="close">
             ×
           </button>
         </div>
 
-        {form.artifactType === 'PROGRAM' && <div className="rsi-create-dialog__info-bar">
-          <TipIcon className="w-3.5 h-3.5 shrink-0" />
-          <span>{t('rsi.createDialog.infoBar')}</span>
-        </div>}
+        {form.artifactType === 'PROGRAM' && (
+          <div className="rsi-create-dialog__info-bar">
+            <TipIcon className="w-3.5 h-3.5 shrink-0" />
+            <span>{t('rsi.createDialog.infoBar')}</span>
+          </div>
+        )}
 
         {/* 基础字段 */}
         <Field label={t('rsi.createDialog.nameLabel')}>
@@ -329,6 +350,26 @@ export function CreateExperimentDialog({ open, onClose, onCreated }: CreateExper
         </Field>
 
         {branch === 'HARNESS' && (
+          <Field label={t('rsi.createDialog.pluginLabel')}>
+            <select
+              className="rsi-input"
+              aria-label={t('rsi.createDialog.pluginLabel')}
+              value={form.packageId}
+              onChange={(event) => update('packageId', event.target.value)}
+              disabled={submitting}
+            >
+              <option value="">{t('rsi.createDialog.pluginDefault')}</option>
+              {plugins.map((plugin) => (
+                <option key={plugin.id} value={plugin.id} disabled={plugin.connectionState !== 'connected'}>
+                  {localizedText(plugin.displayName, i18n.language)}
+                </option>
+              ))}
+            </select>
+            {pluginError && <Err text={pluginError} />}
+          </Field>
+        )}
+
+        {branch === 'HARNESS' && (
           <Field label={t('rsi.createDialog.testerModelLabel')}>
             <ModelSelect value={form.tester} onChange={(v) => update('tester', v)} />
             {errors.tester && <Err text={errors.tester} />}
@@ -336,10 +377,7 @@ export function CreateExperimentDialog({ open, onClose, onCreated }: CreateExper
         )}
 
         {branch === 'HARNESS' && (
-          <Field
-            label={t('rsi.createDialog.datasetLabel')}
-            tip={t('rsi.createDialog.datasetTip')}
-          >
+          <Field label={t('rsi.createDialog.datasetLabel')} tip={t('rsi.createDialog.datasetTip')}>
             <PathInput
               value={form.datasetFile}
               placeholder={t('rsi.createDialog.datasetPlaceholder')}
@@ -421,15 +459,7 @@ export function CreateExperimentDialog({ open, onClose, onCreated }: CreateExper
   );
 }
 
-function Field({
-  label,
-  tip,
-  children,
-}: {
-  label: string;
-  tip?: string;
-  children: React.ReactNode;
-}) {
+function Field({ label, tip, children }: { label: string; tip?: string; children: React.ReactNode }) {
   return (
     <div style={{ marginBottom: 14 }}>
       <label style={{ display: 'block', fontSize: 13, marginBottom: 6, color: 'var(--color-text-primary)' }}>

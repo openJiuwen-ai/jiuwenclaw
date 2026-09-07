@@ -62,6 +62,22 @@ async def test_rsi_adapter_uses_load_plugin_record_not_deprecated_config_api():
 
 
 @pytest.mark.asyncio
+async def test_new_session_restores_rsi_installation_from_tasks_root(monkeypatch, tmp_path):
+    from jiuwenswarm.agents.harness.common.rsi.harness_activation import RsiHarnessActivationStore
+    runtime = tmp_path / "rsi" / "tasks" / "task" / "harness" / "versions" / "v1" / "plugin"
+    runtime.mkdir(parents=True)
+    RsiHarnessActivationStore(tmp_path / "rsi" / "tasks").commit({
+        "installation_id": "v1", "runtime_path": str(runtime), "sha256": "a" * 64,
+    })
+    monkeypatch.setattr("jiuwenswarm.common.utils.get_user_workspace_dir", lambda: tmp_path)
+    instance = FakeDeepAgent()
+    adapter = _make_adapter(instance)
+    result = await adapter._load_rsi_active_harness()
+    assert result["status"] == "ACTIVE"
+    assert instance.load_plugin_calls == [str(runtime)]
+
+
+@pytest.mark.asyncio
 async def test_rsi_adapter_keeps_old_record_when_new_load_fails():
     instance = FakeDeepAgent()
     adapter = _make_adapter(instance)
