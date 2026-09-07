@@ -14,6 +14,7 @@ class TemplateRefSlot(StrEnum):
     VIDEO_MODEL = "video_model"
     AUDIO_MODEL = "audio_model"
     VISION_MODEL = "vision_model"
+    IMAGE_GEN_MODEL = "image_gen_model"
     EMBEDDING_MODEL = "embedding_model"
     SKILL_PREBUILT = "skill_prebuilt"
     EXTENSION_CONFIG = "extension_config"
@@ -26,6 +27,7 @@ SLOT_ENTITY_TABLE: dict[TemplateRefSlot, str] = {
     TemplateRefSlot.VIDEO_MODEL: "model_template",
     TemplateRefSlot.AUDIO_MODEL: "model_template",
     TemplateRefSlot.VISION_MODEL: "model_template",
+    TemplateRefSlot.IMAGE_GEN_MODEL: "model_template",
     TemplateRefSlot.EMBEDDING_MODEL: "embedding_template",
     TemplateRefSlot.SKILL_PREBUILT: "skill_prebuilt_template",
     TemplateRefSlot.EXTENSION_CONFIG: "extension_config_template",
@@ -38,6 +40,7 @@ MODEL_SLOT_KEYS = frozenset({
     TemplateRefSlot.VIDEO_MODEL,
     TemplateRefSlot.AUDIO_MODEL,
     TemplateRefSlot.VISION_MODEL,
+    TemplateRefSlot.IMAGE_GEN_MODEL,
 })
 
 DEFAULT_AGENT_LOAD_SLOTS = frozenset({

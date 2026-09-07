@@ -261,6 +261,106 @@ def test_embedding_slot_is_loaded_separately_from_model_slots() -> None:
     assert TemplateRefSlot.EMBEDDING_MODEL not in MODEL_SLOT_KEYS
 
 
+def test_image_gen_slot_is_registered_as_model_slot() -> None:
+    from jiuwenswarm.server.runtime.enterprise_config.apply_models import (
+        SLOT_TO_CONFIG_KEY,
+    )
+    from jiuwenswarm.server.runtime.enterprise_config.schemas import (
+        DEFAULT_AGENT_LOAD_SLOTS,
+        MODEL_SLOT_KEYS,
+        SLOT_ENTITY_TABLE,
+        TemplateRefSlot,
+    )
+
+    assert TemplateRefSlot.IMAGE_GEN_MODEL.value == "image_gen_model"
+    assert SLOT_ENTITY_TABLE[TemplateRefSlot.IMAGE_GEN_MODEL] == "model_template"
+    assert TemplateRefSlot.IMAGE_GEN_MODEL in MODEL_SLOT_KEYS
+    assert TemplateRefSlot.IMAGE_GEN_MODEL in DEFAULT_AGENT_LOAD_SLOTS
+    assert SLOT_TO_CONFIG_KEY[TemplateRefSlot.IMAGE_GEN_MODEL] == "image_gen"
+
+
+def test_enterprise_image_gen_maps_to_models_image_gen_section() -> None:
+    from jiuwenswarm.server.runtime.enterprise_config.apply_models import (
+        apply_enterprise_models_to_config,
+    )
+    from jiuwenswarm.server.runtime.enterprise_config.schemas import (
+        EffectiveEnterpriseConfig,
+        RoutingContext,
+        TemplateRefSlot,
+    )
+
+    enterprise = EffectiveEnterpriseConfig(
+        routing=RoutingContext(group_id="g", bot_id="b", user_id="u"),
+        models={
+            TemplateRefSlot.IMAGE_GEN_MODEL.value: [
+                {
+                    "template_name": "image-gen",
+                    "template_id": "img-1",
+                    "api_base": "https://image.example.com/v1",
+                    "api_key": "image-key",
+                    "model_id": "wanx-v1",
+                    "model_provider": "dashscope",
+                    "parameters": {"size": "1024*1024"},
+                }
+            ]
+        },
+    )
+
+    merged, applied = apply_enterprise_models_to_config({"models": {}}, enterprise)
+
+    assert applied is True
+    assert merged["models"]["image_gen"] == {
+        "model_client_config": {
+            "api_base": "https://image.example.com/v1",
+            "api_key": "image-key",
+            "model_name": "wanx-v1",
+            "client_provider": "dashscope",
+            "timeout": 1800,
+            "verify_ssl": False,
+        },
+        "model_config_obj": {"size": "1024*1024"},
+    }
+
+
+def test_normalize_model_types_accepts_image_gen() -> None:
+    """Assert EE model_template allows image_gen without importing gateway DB deps."""
+    import ast
+    from pathlib import Path
+
+    path = (
+        Path(__file__).resolve().parents[3]
+        / "packages"
+        / "jiuwenclaw-ee"
+        / "gateway"
+        / "extensions"
+        / "manager_config_receiver"
+        / "core"
+        / "template"
+        / "model_template.py"
+    )
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    wanted = {"_ALLOWED_MODEL_TYPES", "_normalize_model_types"}
+    kept: list[ast.stmt] = []
+    for node in tree.body:
+        if isinstance(node, ast.FunctionDef) and node.name in wanted:
+            kept.append(node)
+        elif isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name) and target.id in wanted:
+                    kept.append(node)
+                    break
+    module = ast.Module(body=kept, type_ignores=[])
+    ast.fix_missing_locations(module)
+    namespace: dict = {"__name__": "_model_template_symbols"}
+    exec("from typing import Any", namespace)
+    exec(compile(module, str(path), "exec"), namespace)
+
+    assert "image_gen" in namespace["_ALLOWED_MODEL_TYPES"]
+    normalize = namespace["_normalize_model_types"]
+    assert normalize(["image_gen"]) == ["image_gen"]
+    assert normalize(["default", "image_gen"]) == ["default", "image_gen"]
+
+
 def test_enterprise_embedding_maps_to_embed_config_section() -> None:
     from jiuwenswarm.server.runtime.enterprise_config.apply_models import (
         apply_enterprise_models_to_config,
