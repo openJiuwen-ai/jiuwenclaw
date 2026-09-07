@@ -11,6 +11,7 @@ import pytest
 from jiuwenswarm.server.runtime.skill_turbo.skill_codes.ppt.ppt_page_gen import (
     _build_content_template_fill_prompt,
     _build_content_template_fill_system_prompt,
+    _count_agenda_items,
     _build_page_gen_rewrite_hint,
     _extract_chart_scaffold_region,
     _extract_designer_section,
@@ -214,6 +215,37 @@ def test_is_chart_candidate_structural_never_elevates():
         outline_page="**类型**：agenda\n**数据需求**：目录",
         research_page="图表趋势对比",
     )
+
+
+def test_count_agenda_items_accepts_custom_target_page_markers():
+    html = """
+    <div class="ppt-slide" type="agenda">
+      <main>
+        <section><span>P03</span><p>市场概览</p></section>
+        <section><span>P05</span><p>竞争格局</p></section>
+        <section><span>P07</span><p>落地路径</p></section>
+      </main>
+    </div>
+    """
+
+    assert _count_agenda_items(html) == 3
+
+
+def test_count_agenda_items_accepts_preset_roman_anchor_comments():
+    html = """
+    <div class="ppt-slide agenda-stage" type="agenda">
+      <div class="grid">
+        <!-- Ⅰ -->
+        <div><span>Ⅰ</span><p>背景</p></div>
+        <!-- Ⅱ -->
+        <div><span>Ⅱ</span><p>策略</p></div>
+        <!-- Ⅲ -->
+        <div><span>Ⅲ</span><p>执行</p></div>
+      </div>
+    </div>
+    """
+
+    assert _count_agenda_items(html) == 3
 
 
 def test_content_fill_prompt_content_type_elevated_by_data_needs():

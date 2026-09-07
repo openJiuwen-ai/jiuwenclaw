@@ -573,8 +573,11 @@ def _extract_head_url_fingerprint(html: str) -> frozenset[str]:
     return frozenset(urls)
 
 
-# agenda 条目编号模式：>01< ~ >09<（模板内编号 span）
-_AGENDA_ITEM_NUM_RE = re.compile(r">0([1-9])<")
+# agenda 模板注释锚点：预设模板默认保留 `<!-- 条目 N -->` / `<!-- 01 -->` / `<!-- Ⅰ -->`
+_AGENDA_ITEM_COMMENT_RE = re.compile(
+    r"<!--\s*(?:条目\s*\d+|0\d+|[ⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩ]+)\s*-->",
+    re.IGNORECASE,
+)
 # 大纲中研究需求 ✅ 行模式
 _OUTLINE_RESEARCH_REQ_RE = re.compile(r"\*\*研究需求\*\*.*?✅")
 
@@ -602,8 +605,24 @@ def _find_agenda_page_num(outline_text: str) -> int:
 
 
 def _count_agenda_items(html: str) -> int:
-    """从 agenda 页 HTML 中统计条目数（按编号 01-09 去重计数）。"""
-    return len(set(_AGENDA_ITEM_NUM_RE.findall(html or "")))
+    """从 agenda 页 HTML 中统计条目数。
+
+    对齐 pptx-craft：目录条目允许随风格使用 01/罗马数字/P03 等不同展示形式，
+    因此这里只按条目结构做宽松统计，不把编号字面量当作硬门禁。
+    """
+    if not html:
+        return 0
+
+    comment_hits = _AGENDA_ITEM_COMMENT_RE.findall(html)
+    if comment_hits:
+        return len(comment_hits)
+
+    item_count = 0
+    for match in _VISIBLE_TEXT_LEAF_RE.finditer(html):
+        marker = _normalize_page_marker_text(match.group("text"))
+        if _VISIBLE_PAGE_MARKER_RE.fullmatch(marker):
+            item_count += 1
+    return item_count
 
 
 def _validate_agenda_item_count(
@@ -4916,14 +4935,11 @@ class PageWorkerNode(DisableThinkingMixin, PlanNode):
                 sorted(vote_deviant),
             )
 
-        # agenda 条目数校验：目录页条目数必须等于大纲内容章节数
+        # agenda 条目数校验：仅记 warning，不把已生成的目录页打成 missing。
         agenda_deviant = _validate_agenda_item_count(outline_full, vote_pages)
         if agenda_deviant:
-            missing_pages.extend(
-                p for p in agenda_deviant if p not in missing_pages
-            )
             logger.warning(
-                "[P8.1] agenda 条目数与大纲内容章节数不匹配 pages=%s，转 missing 走补写",
+                "[P8.1] agenda 条目数与大纲内容章节数不匹配 pages=%s（仅警告，不进 missing）",
                 sorted(agenda_deviant),
             )
 
@@ -6293,7 +6309,7 @@ class PPTPageGenNode(PlanNode):
                 check_ok = False
                 break
 
-        # agenda 条目数校验：读取生成的 agenda 页 HTML，比对大纲内容章节数
+        # agenda 条目数校验：仅记 warning，不把已生成的目录页打成 missing。
         agenda_page_num = _find_agenda_page_num(outline_text)
         if agenda_page_num and agenda_page_num not in missing_pages:
             agenda_path = f"{pages_dir}/page-{agenda_page_num}.pptx.html"
@@ -6303,10 +6319,9 @@ class PPTPageGenNode(PlanNode):
                 item_count = _count_agenda_items(agenda_html)
                 if content_chapters > 0 and item_count != content_chapters:
                     logger.warning(
-                        "[P8-TP] agenda 条目数(%d) ≠ 大纲内容章节数(%d) page=%d，转 missing 走补写",
+                        "[P8-TP] agenda 条目数(%d) ≠ 大纲内容章节数(%d) page=%d（仅警告，不进 missing）",
                         item_count, content_chapters, agenda_page_num,
                     )
-                    missing_pages.append(agenda_page_num)
 
         ppt_gen_status = "ok"
         if missing_pages:
