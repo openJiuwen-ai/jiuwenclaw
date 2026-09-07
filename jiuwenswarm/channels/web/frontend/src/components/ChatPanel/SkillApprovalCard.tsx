@@ -23,9 +23,14 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { useChatStore } from '../../stores';
 import type { SkillApprovalAction, SkillApprovalCardPayload } from '../../types';
+import { shouldUnlockPendingApproval } from '../InteractionSlot/interactionSubmission';
 
 interface SkillApprovalCardProps {
-  onSubmit: (requestId: string, answers: { selected_options: string[]; action?: SkillApprovalAction }[], source?: string) => void;
+  onSubmit: (
+    requestId: string,
+    answers: { selected_options: string[]; action?: SkillApprovalAction }[],
+    source?: string,
+  ) => Promise<void>;
   card: SkillApprovalCardPayload | null;
 }
 
@@ -86,16 +91,25 @@ export function SkillApprovalCard({ onSubmit, card }: SkillApprovalCardProps) {
   }, [card, question]);
 
   const handleAction = useCallback(
-    (action: SkillApprovalAction) => {
+    async (action: SkillApprovalAction) => {
       if (!pendingQuestion || submitted) return;
+      const requestId = pendingQuestion.request_id;
+      const sessionId = activeSessionId;
       setSubmitted(true);
-      onSubmit(pendingQuestion.request_id, [{ selected_options: [ACTION_WIRE_LABELS[action]], action }], pendingQuestion.source);
-      const sid = useChatStore.getState().activeSessionId;
-      if (sid) {
-        useChatStore.getState().setPendingQuestion(sid, null);
+      await onSubmit(
+        requestId,
+        [{ selected_options: [ACTION_WIRE_LABELS[action]], action }],
+        pendingQuestion.source,
+      );
+      const state = useChatStore.getState();
+      const currentRequestId = sessionId
+        ? state.getRuntime(sessionId)?.pendingQuestion?.request_id
+        : null;
+      if (shouldUnlockPendingApproval(currentRequestId, requestId)) {
+        setSubmitted(false);
       }
     },
-    [pendingQuestion, submitted, onSubmit],
+    [activeSessionId, pendingQuestion, submitted, onSubmit],
   );
 
   if (!pendingQuestion) {
