@@ -1990,7 +1990,7 @@ def test_optional_dependency_install_times_out_after_one_hour(
     monkeypatch.setattr(
         app_web_handlers,
         "_build_optional_dependency_install_args",
-        lambda _package: ["installer"],
+        lambda _package, _cli_agent: ["installer"],
     )
     monkeypatch.setattr(
         app_web_handlers.subprocess,
