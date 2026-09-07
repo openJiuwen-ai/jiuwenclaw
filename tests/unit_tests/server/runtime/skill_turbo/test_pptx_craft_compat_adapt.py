@@ -9,6 +9,8 @@ import json
 import pytest
 
 from jiuwenswarm.server.runtime.skill_turbo.skill_codes.ppt.ppt_page_gen import (
+    PageGenContext,
+    PageWorkerNode,
     _build_content_template_fill_prompt,
     _build_content_template_fill_system_prompt,
     _build_page_gen_rewrite_hint,
@@ -166,6 +168,20 @@ def test_content_fill_prompt_non_chart_page_skips_chart_section():
     assert "PAGE_CONTENT 密度硬约束" in prompt
     assert "## 图表与数据可视化" not in prompt
     assert "OUTLINE_FULL_MARKER" not in prompt
+
+
+def test_content_fill_prompt_retry_uses_original_html_as_edit_base():
+    prompt = _minimal_fill_prompt(
+        style_id="business-classic",
+        outline_page="**类型**：data\n**标题**：数据页",
+        rewrite_hint="修复 chart 容器高度链",
+        original_html="<html><body><main><section>旧版本</section></main></body></html>",
+    )
+
+    assert "上次产物（原始 HTML，作为本轮定点修复基底）" in prompt
+    assert "<section>旧版本</section>" in prompt
+    assert "本轮必须以“上次产物（原始 HTML）”为编辑基底做定点修复" in prompt
+    assert "`seed_html` 仅用于约束骨架/Chrome/占位符边界；`original_html` 才是当前页面已形成状态的来源。" in prompt
 
 
 def test_content_fill_prompt_custom_vs_preset_page_content_rules():
@@ -495,3 +511,48 @@ async def test_skill_turbo_template_path_bypass_hard_fails():
     error = str(result.get("error") or "")
     assert "自定义模板" in error or "模板包" in error
     assert "skill_tool" in error
+
+
+@pytest.mark.asyncio
+async def test_generate_one_passes_original_html_to_content_template_fill(monkeypatch):
+    node = object.__new__(PageWorkerNode)
+    captured: dict[str, str] = {}
+
+    async def fake_generate_content_template_fill(self, ctx, *, rewrite_hint="", original_html=""):
+        captured["rewrite_hint"] = rewrite_hint
+        captured["original_html"] = original_html
+        return "<html></html>", "", ""
+
+    monkeypatch.setattr(
+        PageWorkerNode,
+        "_generate_content_template_fill",
+        fake_generate_content_template_fill,
+    )
+
+    ctx = PageGenContext(
+        page_num=3,
+        style_id="business-classic",
+        style_text="style stub",
+        outline_page=_RESEARCH_OUTLINE,
+        research_page="research stub",
+        outline_is_full=False,
+        image_map_page="",
+        designer_md_text="",
+        user_query="",
+        total_pages=8,
+        pptx_root="D:/pptx-craft",
+        outline_full=_RESEARCH_OUTLINE,
+    )
+
+    html, raw_html, reason = await PageWorkerNode._generate_one(
+        node,
+        ctx,
+        rewrite_hint="仅修复 overflow",
+        original_html="<html><body><main>旧页</main></body></html>",
+    )
+
+    assert html == "<html></html>"
+    assert raw_html == ""
+    assert reason == ""
+    assert captured["rewrite_hint"] == "仅修复 overflow"
+    assert captured["original_html"] == "<html><body><main>旧页</main></body></html>"
