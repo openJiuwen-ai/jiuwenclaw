@@ -612,7 +612,7 @@ def _extract_head_url_fingerprint(html: str) -> frozenset[str]:
 
 # agenda 模板注释锚点：预设模板默认保留 `<!-- 条目 N -->` / `<!-- 01 -->` / `<!-- Ⅰ -->`
 _AGENDA_ITEM_COMMENT_RE = re.compile(
-    r"<!--\s*(?:条目\s*\d+|0\d+|[ⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩ]+)\s*-->",
+    r"<!--\s*(?:条目\s*\d+|0*\d+|[ⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩ]+)\s*-->",
     re.IGNORECASE,
 )
 # 大纲中研究需求 ✅ 行模式
@@ -652,10 +652,12 @@ def _count_agenda_items(html: str) -> int:
 
     comment_hits = _AGENDA_ITEM_COMMENT_RE.findall(html)
     if comment_hits:
-        return len(comment_hits)
+        return len(set(comment_hits))
 
+    main_match = _MAIN_BLOCK_RE.search(html)
+    scan_html = main_match.group(0) if main_match else html
     item_count = 0
-    for match in _VISIBLE_TEXT_LEAF_RE.finditer(html):
+    for match in _VISIBLE_TEXT_LEAF_RE.finditer(scan_html):
         marker = _normalize_page_marker_text(match.group("text"))
         if _VISIBLE_PAGE_MARKER_RE.fullmatch(marker):
             item_count += 1
