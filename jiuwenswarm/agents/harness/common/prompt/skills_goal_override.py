@@ -8,12 +8,11 @@ openjiuwen source file.
 
 What this patch does:
 
-1. **Skills section** — replaces the dynamic ``# Skills`` header with a curated
-   static catalogue (the xiaoyi work canonical skill list). Dynamic installed
-   skills are rendered directly from their structured ``Skill`` objects, rather
-   than reparsing their Markdown representation. Static-name collisions are
-   de-duplicated. A bounded catalogue keeps whole descriptions first, then
-   preserves later skill names in compact form for on-demand discovery.
+1. **Skills section** — keeps the upstream 小艺-first policy as stable prompt
+   text, then renders currently loaded installed skills directly from their
+   structured ``Skill`` objects rather than reparsing Markdown. A bounded
+   catalogue keeps whole descriptions first, then preserves later skill names
+   in compact form for on-demand discovery.
 
 2. **Goal section** — the static ``# Goal 模式工作规则`` / ``Goal 上下文规则``
    protocol block (``_GOAL_PROTOCOL``) is emptied, and
@@ -56,147 +55,8 @@ _DEFAULT_SKILLS_PROMPT_MAX_CHARS = 30_000
 # latter unless the rail result is normalized below.
 _SKILLS_SECTION_PRIORITY = 56
 
-_STATIC_BLOCK_EN = """## Skills
-
-The following skills provide specialized instructions for specific tasks. Use `skill_tool` to load a skill's full `SKILL.md` when the task matches its description; follow that file before executing the skill. The catalogue is metadata, not a replacement for the skill instructions.
-
-<available_skills>
-  <skill>
-    <name>xiaoyi-web-search-win</name>
-    <description>Default for real-time web retrieval and web-information queries. Use another search interface only when the user explicitly requests it.</description>
-  </skill>
-  <skill>
-    <name>find-skills</name>
-    <description>Default for skill discovery, retrieval, and installation unless the user explicitly requests another method.</description>
-  </skill>
-  <skill>
-    <name>xiaoyi-doc-convert</name>
-    <description>Convert among DOCX, PDF, XLSX, PPTX, Markdown, and other mainstream document formats. Use it before manual conversion scripts.</description>
-  </skill>
-  <skill>
-    <name>xiaoyi-ppt-win</name>
-    <description>Create, edit, generate, or beautify template-based presentations. Prefer it to manual python-pptx-style generation unless the user requests otherwise or it cannot meet the requirement.</description>
-  </skill>
-  <skill>
-    <name>aigc_marker</name>
-    <description>Add standard AIGC markers to generated documents, spreadsheets, presentations, Markdown, HTML, images, audio, video, and other supported files.</description>
-  </skill>
-  <skill>
-    <name>execution-validator-skill</name>
-    <description>Mandatory pre-safety validation for command execution, file access, and content transmission. It must not be bypassed or disabled.</description>
-  </skill>
-  <skill>
-    <name>secret-guardian</name>
-    <description>Privacy and secret protection for configurations, logs, prompts, reports, environment variables, and workspace content containing sensitive identifiers or keys.</description>
-  </skill>
-  <skill>
-    <name>skill-creator-win</name>
-    <description>Create, optimize, debug, and evaluate independent single-agent skills.</description>
-  </skill>
-  <skill>
-    <name>skill-scope</name>
-    <description>Mandatory security scan before every skill installation, from any source; no exceptions or bypasses.</description>
-  </skill>
-  <skill>
-    <name>swarmskill-creator</name>
-    <description>Create, convert, or refactor multi-agent team skills and orchestration workflows. Use skill-creator-win for ordinary single-skill work.</description>
-  </skill>
-  <skill>
-    <name>xiaoyi-pdf-win</name>
-    <description>Create, edit, lay out, convert, merge, split, extract, watermark, fill, protect, decrypt, or parse PDFs. Use it whenever the request involves PDF processing.</description>
-  </skill>
-  <skill>
-    <name>seedream-image-gen</name>
-    <description>Generate images. Deliver the image file, not only a prompt or script.</description>
-  </skill>
-  <skill>
-    <name>seedance-video-gen</name>
-    <description>Generate videos. Deliver the video file, not only storyboard Markdown.</description>
-  </skill>
-  <skill>
-    <name>music-generation</name>
-    <description>Generate music or audio and deliver the audio file.</description>
-  </skill>
-  <skill>
-    <name>xiaoyi-image-understanding-win</name>
-    <description>Analyze and understand images.</description>
-  </skill>
-</available_skills>
-"""
-
-_STATIC_BLOCK_CN = """## 技能
-
-以下技能为特定任务提供专门指引。当任务符合某项技能描述时，使用 `skill_tool` 加载其完整 `SKILL.md`，并在执行前遵循该文件。此目录仅提供元数据，不能替代技能的完整说明。
-
-<available_skills>
-  <skill>
-    <name>xiaoyi-web-search-win</name>
-    <description>实时网页检索和网络信息查询的默认技能；仅当用户明确指定其他搜索接口时才切换。</description>
-  </skill>
-  <skill>
-    <name>find-skills</name>
-    <description>技能发现、检索和安装的默认技能；仅当用户明确要求其他方法时才例外。</description>
-  </skill>
-  <skill>
-    <name>xiaoyi-doc-convert</name>
-    <description>在 DOCX、PDF、XLSX、PPTX、Markdown 等主流文档格式间转换；应优先于手工转换脚本。</description>
-  </skill>
-  <skill>
-    <name>xiaoyi-ppt-win</name>
-    <description>创建、编辑、生成和美化基于模板的演示文稿；除非用户另有要求或技能无法满足需求，应优先于 python-pptx 等手工生成方式。</description>
-  </skill>
-  <skill>
-    <name>aigc_marker</name>
-    <description>为文档、表格、演示文稿、Markdown、HTML、图片、音频、视频及其他支持的生成文件添加标准 AIGC 标识。</description>
-  </skill>
-  <skill>
-    <name>execution-validator-skill</name>
-    <description>命令执行、文件访问和内容传输的强制前置安全校验；不得绕过或禁用。</description>
-  </skill>
-  <skill>
-    <name>secret-guardian</name>
-    <description>保护配置、日志、提示词、报告、环境变量及含密钥或敏感标识的工作区内容中的隐私和秘密。</description>
-  </skill>
-  <skill>
-    <name>skill-creator-win</name>
-    <description>创建、优化、调试和评估独立的单智能体技能。</description>
-  </skill>
-  <skill>
-    <name>skill-scope</name>
-    <description>所有来源的技能安装前必须进行安全扫描；不得例外或绕过。</description>
-  </skill>
-  <skill>
-    <name>swarmskill-creator</name>
-    <description>创建、转换和重构多智能体团队技能与编排工作流；普通单技能工作使用 skill-creator-win。</description>
-  </skill>
-  <skill>
-    <name>xiaoyi-pdf-win</name>
-    <description>创建、编辑、排版、转换、合并、拆分、提取、加水印、填写表单、加密、解密或解析 PDF；凡涉及 PDF 处理时使用。</description>
-  </skill>
-  <skill>
-    <name>seedream-image-gen</name>
-    <description>生成图像；应交付图像文件，而非仅交付提示词或脚本。</description>
-  </skill>
-  <skill>
-    <name>seedance-video-gen</name>
-    <description>生成视频；应交付视频文件，而非仅交付分镜 Markdown。</description>
-  </skill>
-  <skill>
-    <name>music-generation</name>
-    <description>生成音乐或音频并交付音频文件。</description>
-  </skill>
-  <skill>
-    <name>xiaoyi-image-understanding-win</name>
-    <description>分析和理解图像。</description>
-  </skill>
-</available_skills>
-"""
-
-_STATIC_BLOCK: Dict[str, str] = {"cn": _STATIC_BLOCK_CN, "en": _STATIC_BLOCK_EN}
-
-# The historical static catalogue above is deliberately overridden here. Keep
-# only the upstream 小艺-first policy as stable prompt text; every skill entry
-# is sourced from the rail's currently loaded user skills.
+# Keep only the upstream 小艺-first policy as stable prompt text; every skill
+# entry is sourced from the rail's currently loaded user skills.
 _SKILLS_PREAMBLE_EN = """# Skills
 
 Prefer the skills and tools below; call `skill_tool` to retrieve the full `SKILL.md` for a skill.
