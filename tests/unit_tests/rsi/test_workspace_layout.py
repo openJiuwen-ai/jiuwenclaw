@@ -4,7 +4,7 @@ from jiuwenswarm.agents.harness.common.rsi.context import build_rsi_service_cont
 from jiuwenswarm.agents.harness.common.rsi.models import RsiTask, TaskStatus, utcnow_iso
 
 
-def test_default_rsi_context_uses_workspace_rsi_root(monkeypatch, tmp_path: Path):
+def test_default_rsi_context_uses_legacy_rsi_tasks_root(monkeypatch, tmp_path: Path):
     user_workspace = tmp_path / ".jiuwenswarm"
     monkeypatch.setattr(
         "jiuwenswarm.common.utils.get_user_workspace_dir",
@@ -16,7 +16,7 @@ def test_default_rsi_context_uses_workspace_rsi_root(monkeypatch, tmp_path: Path
         enable_harness_materialization=False,
     )
 
-    expected_root = (user_workspace / "workspace" / "rsi").resolve()
+    expected_root = (user_workspace / "rsi" / "tasks").resolve()
     assert context.tasks_root == expected_root
     assert context.harness_activation_store.root == expected_root
     assert context.harness_activation_store.activation_path == expected_root / "activation.json"

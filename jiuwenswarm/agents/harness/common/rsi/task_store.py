@@ -1,6 +1,6 @@
 """RsiTaskStore：任务存储 + 状态机（内部 v3 §4.1 + 一致性规则 §8）。
 
-- JSON 文件存储：``.jiuwenswarm/workspace/rsi/<task_id>/task.json``（内部 v3 §1 边界：不新增 DB）。
+- JSON 文件存储：``.jiuwenswarm/rsi/tasks/<task_id>/task.json``（内部 v3 §1 边界：不新增 DB）。
 - 状态机唯一入口 ``update_status(from_states, to, cause)``；非法迁移抛 ``TASK_STATE_CONFLICT``。
 - P1 钩子：成功迁移后触发 ``on_status_changed(task_id, old_status, new_status)``（服务侧权威，不依赖引擎事件）。
 - ``delete`` 按 guard 校验运行中/排队/暂停/在用产物不可删。
