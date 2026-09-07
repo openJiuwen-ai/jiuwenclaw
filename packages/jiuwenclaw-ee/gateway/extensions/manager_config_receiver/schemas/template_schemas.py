@@ -147,17 +147,18 @@ class ExtensionConfigTemplateCreateRequest(ExtensionConfigTemplateUpdateRequest)
     hook_type: str = Field(..., min_length=1, max_length=32)
 
 
-class SkillWhitelistTemplateUpdateRequest(SafeTextMixin):
+class SkillPrebuiltTemplateUpdateRequest(SafeTextMixin):
     template_name: str | None = Field(default=None, max_length=128)
     description: str | None = Field(default=None, max_length=512)
     skill_id: str | None = Field(default=None, max_length=512)
-    skill_version: str | None = Field(default=None, max_length=64)
-    skill_source: SkillSourceUrl | None = None
+    package_url: SkillSourceUrl | None = None
+    source_id: str | None = Field(default=None, max_length=64)
+    version_id: str | None = Field(default=None, max_length=128)
     enabled: bool | None = None
     data: dict[str, Any] | None = None
 
 
-class SkillWhitelistTemplateCreateRequest(SkillWhitelistTemplateUpdateRequest):
+class SkillPrebuiltTemplateCreateRequest(SkillPrebuiltTemplateUpdateRequest):
     template_id: str = Field(..., min_length=1, max_length=100)
     template_name: str = Field(..., min_length=1, max_length=128)
     skill_id: str = Field(..., min_length=1, max_length=512)

@@ -2360,8 +2360,12 @@ class SkillManager:
         verification: dict[str, Any] | None = None,
         market_display_name: str = "",
         author: str = "",
+        source_type: str = "user",
     ) -> dict[str, Any]:
         """Atomically replace the entity, then commit the JSON installation record."""
+        normalized_source_type = str(source_type or "user").strip() or "user"
+        if normalized_source_type not in {"user", "prebuilt"}:
+            raise ValueError(f"invalid source_type for source install: {source_type}")
         existing_ref = self._find_installation_by_skill_ref(source_id, skill_id)
         existing_name = str((existing_ref or {}).get("name") or "").strip()
         if existing_ref is not None and not force:
@@ -2399,7 +2403,7 @@ class SkillManager:
             staging.rename(dest)
             record = self.record_skill_installation(
                 name=skill_name,
-                source_type="user",
+                source_type=normalized_source_type,
                 source=source_id,
                 origin=f"{source_id}:{skill_id}",
                 version=version,
@@ -2411,6 +2415,7 @@ class SkillManager:
                 entity_dir=entity_dir,
                 market_display_name=market_display_name,
                 author=author,
+                replace_by_name=normalized_source_type == "prebuilt",
             )
         except Exception:
             if dest.exists():
@@ -2425,6 +2430,81 @@ class SkillManager:
             _safe_rmtree(backup)
         self._refresh_agent_data_indexes()
         return self._skill_installation_dto(record)
+
+    async def install_prebuilt_from_provider(
+        self,
+        *,
+        source_id: str,
+        skill_id: str,
+        version_id: str,
+        force: bool = True,
+    ) -> dict[str, Any]:
+        """Install one Provider artifact as ``source_type=prebuilt`` (enterprise reconcile)."""
+        source_id = str(source_id or "").strip()
+        skill_id = str(skill_id or "").strip()
+        version_id = str(version_id or "").strip()
+        if not source_id or not skill_id or not version_id:
+            return {
+                "ok": False,
+                "error_code": "missing_params",
+                "detail": "source_id, skill_id and version_id are required",
+            }
+        try:
+            descriptor, body, verification = await self._fetch_verified_source_artifact(
+                source_id=source_id,
+                skill_id=skill_id,
+                version_id=version_id,
+                params={},
+            )
+            with tempfile.TemporaryDirectory(prefix="jiuwenswarm_prebuilt_provider_") as tmpdir:
+                tmp_path = Path(tmpdir)
+                self._safe_extract_zip_bytes_to_dir(body, tmp_path)
+                skill_dir = self._locate_skill_dir(tmp_path)
+                if skill_dir is None:
+                    raise SourceRegistryError(
+                        "invalid_package", "downloaded content is missing SKILL.md"
+                    )
+                skill_md = self._try_find_skill_file(skill_dir)
+                metadata = self._parse_skill_md(skill_md) if skill_md is not None else None
+                if not isinstance(metadata, dict):
+                    raise SourceRegistryError("invalid_package", "SKILL.md cannot be parsed")
+                skill_name = _safe_path_name(
+                    str(metadata.get("name") or skill_dir.name), "skill"
+                )
+                version = str(
+                    metadata.get("version")
+                    or descriptor.metadata.get("version")
+                    or version_id
+                ).strip()
+                record = self._commit_source_skill_entity(
+                    skill_dir,
+                    skill_name=skill_name,
+                    source_id=source_id,
+                    skill_id=skill_id,
+                    version_id=version_id,
+                    version=version,
+                    force=force,
+                    fingerprint=descriptor.fingerprint,
+                    verification=verification,
+                    source_type="prebuilt",
+                )
+            return {
+                "ok": True,
+                "skill_name": str(record.get("name") or skill_name).strip(),
+                "row": record,
+                "version": version,
+            }
+        except SourceRegistryError as exc:
+            return {"ok": False, "error_code": exc.code, "detail": str(exc)}
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "prebuilt provider install failed: source_id=%s skill_id=%s version_id=%s error=%s",
+                source_id,
+                skill_id,
+                version_id,
+                exc,
+            )
+            return {"ok": False, "error_code": "download_failed", "detail": str(exc)}
 
     async def handle_skills_source_install(self, params: dict) -> dict:
         """Install one exact Provider artifact through the common transaction."""

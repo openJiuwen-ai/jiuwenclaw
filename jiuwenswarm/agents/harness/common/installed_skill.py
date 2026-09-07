@@ -247,7 +247,7 @@ async def upsert_installed_skill(
     if existing is not None:
         existing_map = _row_to_dict(existing)
         installed_at = existing_map.get("installed_at") or now
-        # 预制项 user_id 可空：更新时若未传则保留原值（抬升时清空）
+        # 预置项 user_id 可空：更新时若未传则保留原值（抬升时清空）
         if user_id is None and st == SOURCE_USER:
             row_data["user_id"] = existing_map.get("user_id")
         update_payload = dict(row_data)

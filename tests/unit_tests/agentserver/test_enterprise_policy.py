@@ -15,7 +15,7 @@ def test_normalize_template_ref_accepts_list() -> None:
         {
             "default_model": ["f2222222-2222-4222-8222-222222222202"],
             "vision_model": ["f2222222-2222-4222-8222-222222222202"],
-            "skill_whitelist": [
+            "skill_prebuilt": [
                 "a1000001-0000-4000-8000-000000000001",
                 "abc",
                 "abc",
@@ -26,10 +26,24 @@ def test_normalize_template_ref_accepts_list() -> None:
     ) == {
         "default_model": ["f2222222-2222-4222-8222-222222222202"],
         "vision_model": ["f2222222-2222-4222-8222-222222222202"],
-        "skill_whitelist": [
+        "skill_prebuilt": [
             "a1000001-0000-4000-8000-000000000001",
             "abc",
         ],
+    }
+
+
+def test_normalize_template_ref_drops_skill_whitelist() -> None:
+    assert normalize_template_ref(
+        {
+            "skill_whitelist": [
+                "a1000001-0000-4000-8000-000000000001",
+                "abc",
+            ],
+            "skill_prebuilt": ["tpl-a"],
+        }
+    ) == {
+        "skill_prebuilt": ["tpl-a"],
     }
 
 
@@ -94,7 +108,7 @@ async def test_load_effective_config_by_instance_agent_resource(
                         "vision_model": [m2],
                         "video_model": [m1],
                         "audio_model": [m1],
-                        "skill_whitelist": [w1, w2],
+                        "skill_prebuilt": [w1, w2],
                         "extension_config": [e1, e2],
                     },
                     "data": None,
@@ -135,7 +149,7 @@ async def test_load_effective_config_by_instance_agent_resource(
     assert loaded.template_ref["vision_model"] == [m2]
     assert loaded.template_ref["video_model"] == [m1]
     assert loaded.template_ref["audio_model"] == [m1]
-    assert loaded.template_ref["skill_whitelist"] == [w1, w2]
+    assert loaded.template_ref["skill_prebuilt"] == [w1, w2]
     assert loaded.template_ref["extension_config"] == [e1, e2]
 
 

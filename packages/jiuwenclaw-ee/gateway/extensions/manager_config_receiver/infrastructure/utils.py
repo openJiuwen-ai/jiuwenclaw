@@ -58,7 +58,7 @@ KNOWN_SLOT_KEYS = frozenset({
     "audio_model",
     "vision_model",
     "embedding_model",
-    "skill_whitelist",
+    "skill_prebuilt",
     "extension_config",
     "mcp",
     "permissions",

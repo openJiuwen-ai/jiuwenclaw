@@ -42,8 +42,8 @@ def _apply_slot_entities(
         result.models[slot] = entities
     elif slot == TemplateRefSlot.EMBEDDING_MODEL:
         result.embedding = entities
-    elif slot == TemplateRefSlot.SKILL_WHITELIST:
-        result.skill_whitelist = entities
+    elif slot == TemplateRefSlot.SKILL_PREBUILT:
+        result.skill_prebuilt = entities
     elif slot == TemplateRefSlot.EXTENSION_CONFIG:
         result.extension_config = entities
     elif slot == TemplateRefSlot.MCP:
@@ -61,7 +61,7 @@ def _any_requested_slot_loaded(
             return True
         if slot == TemplateRefSlot.EMBEDDING_MODEL and result.embedding:
             return True
-        if slot == TemplateRefSlot.SKILL_WHITELIST and result.skill_whitelist:
+        if slot == TemplateRefSlot.SKILL_PREBUILT and result.skill_prebuilt:
             return True
         if slot == TemplateRefSlot.EXTENSION_CONFIG and result.extension_config:
             return True
