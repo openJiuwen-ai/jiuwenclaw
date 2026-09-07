@@ -2,7 +2,7 @@
 
 """Code mode prompt builder — English-only.
 
-Provides 7 static prompt sections.
+Provides 6 static prompt sections.
 Each section is a PromptSection with English-only content.
 
 Sections are injected once at agent creation time (build_code_system_prompt).
@@ -34,7 +34,6 @@ class CodePromptPriority(IntEnum):
     USING_YOUR_TOOLS = 31
     ACTIONS_WITH_CARE = 35
     TONE_AND_STYLE = 45
-    OUTPUT_EFFICIENCY = 50
     SESSION_GUIDANCE = 55
 
 
@@ -536,77 +535,6 @@ def _code_tone_and_style_prompt() -> PromptSection:
     )
 
 
-# ─── Output Efficiency ─────────────────────────────
-
-
-def _code_output_efficiency_prompt() -> PromptSection:
-    content = (
-        "# Text output (does not apply to tool calls)\n"
-        "\n"
-        "Assume users can't see most tool calls or thinking — "
-        "only your text output.\n"
-        "Before your first tool call, "
-        "state in one sentence what you're about to do.\n"
-        "While working, give short updates at key moments: "
-        "when you find something, when you change direction, "
-        "or when you hit a blocker. "
-        "Brief is good — silent is not. "
-        "One sentence per update is almost always enough.\n"
-        "\n"
-        "Don't narrate your internal deliberation. "
-        "User-facing text should be relevant communication to the user, "
-        "not a running commentary on your thought process. "
-        "State results and decisions directly, "
-        "and focus user-facing text on relevant updates for the user.\n"
-        "\n"
-        "When you do write updates, "
-        "write so the reader can pick up cold: "
-        "complete sentences, "
-        "no unexplained jargon or shorthand from earlier in the session. "
-        "But keep it tight — "
-        "a clear sentence is better than a clear paragraph.\n"
-        "\n"
-        "End-of-turn summary: one or two sentences. "
-        "What changed and what's next. Nothing else.\n"
-        "\n"
-        "Match responses to the task: "
-        "a simple question gets a direct answer, "
-        "not headers and sections.\n"
-        "\n"
-        "**IMPORTANT**: The following applies to text output only — "
-        "it does NOT limit your tool call count or codebase exploration depth:\n"
-        "\n"
-        "Go straight to the point. "
-        "Try the simplest approach first without going in circles. "
-        "Do not overdo it. Be extra concise.\n"
-        "\n"
-        "Keep your text output brief and direct. "
-        "Lead with the answer or action, not the reasoning. "
-        "Skip filler words, preamble, and unnecessary transitions. "
-        "Do not restate what the user said — just do it. "
-        "When explaining, "
-        "include only what is necessary for the user to understand.\n"
-        "\n"
-        "Focus text output on:\n"
-        "- Decisions that need the user's input\n"
-        "- High-level status updates at natural milestones\n"
-        "- Errors or blockers that change the plan\n"
-        "\n"
-        "If you can say it in one sentence, don't use three. "
-        "Prefer short, direct sentences over long explanations. "
-        "This does not apply to code or tool calls.\n"
-        "\n"
-        "Don't create planning, decision, "
-        "or analysis documents unless the user asks for them — "
-        "work from conversation context, not intermediate files."
-    )
-    return PromptSection(
-        name="code_output_efficiency",
-        content={"en": content},
-        priority=CodePromptPriority.OUTPUT_EFFICIENCY,
-    )
-
-
 # ─── Section Generators ────────────────────────────
 
 
@@ -621,7 +549,6 @@ _CODE_SECTION_GENERATORS = [
     _code_using_your_tools_prompt,
     _code_actions_with_care_prompt,
     _code_tone_and_style_prompt,
-    _code_output_efficiency_prompt,
 ]
 
 

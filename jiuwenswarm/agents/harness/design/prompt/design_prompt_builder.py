@@ -33,7 +33,6 @@ class DesignPromptPriority(IntEnum):
     SYSTEM = 14
     CORE_CAPABILITIES = 19
     TONE_AND_STYLE = 45
-    OUTPUT_EFFICIENCY = 50
 
 
 # ─── Intro ────────────────────────────────────────
@@ -173,49 +172,6 @@ def _design_tone_and_style_prompt() -> PromptSection:
     )
 
 
-# ─── Output Efficiency ─────────────────────────────
-
-
-def _design_output_efficiency_prompt() -> PromptSection:
-    content = (
-        "# Text output (does not apply to tool calls)\n"
-        "\n"
-        "Assume users can't see most tool calls or thinking — only your text "
-        "output. Before your first tool call, state in one sentence what you're "
-        "about to do. While working, give short updates at key moments: when you "
-        "finish a slide, when you change direction, or when you hit a blocker. "
-        "Brief is good — silent is not. One sentence per update is almost always "
-        "enough.\n"
-        "\n"
-        "Don't narrate your internal deliberation. User-facing text should be "
-        "relevant communication to the user, not a running commentary on your "
-        "thought process. State results and decisions directly.\n"
-        "\n"
-        "When you do write updates, write so the reader can pick up cold: "
-        "complete sentences, no unexplained jargon. But keep it tight — a clear "
-        "sentence is better than a clear paragraph.\n"
-        "\n"
-        "End-of-turn summary: one or two sentences. What was delivered and what's "
-        "next. For PPT, name the .pptx file path and the page count.\n"
-        "\n"
-        "**IMPORTANT**: The following applies to text output only — it does NOT limit "
-        "your tool call count:\n"
-        "\n"
-        "Go straight to the point. Try the simplest approach first without going "
-        "in circles. Be extra concise.\n"
-        "\n"
-        "Don't create planning, decision, or analysis documents unless the user "
-        "asks for them — work from conversation context, not intermediate files. "
-        "For video, a 分镜 markdown is an internal scratch artifact, not the "
-        "user-facing deliverable — the video file is.\n"
-    )
-    return PromptSection(
-        name="design_output_efficiency",
-        content={"en": content},
-        priority=DesignPromptPriority.OUTPUT_EFFICIENCY,
-    )
-
-
 # ─── Section Generators ────────────────────────────
 
 
@@ -227,7 +183,6 @@ _DESIGN_SECTION_GENERATORS = [
     _design_core_capabilities_prompt,
     _design_system_prompt,
     _design_tone_and_style_prompt,
-    _design_output_efficiency_prompt,
 ]
 
 
