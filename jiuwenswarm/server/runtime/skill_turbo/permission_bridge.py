@@ -252,6 +252,10 @@ async def save_resume_ctx(
         "plan_code": plan_code,
         "inputs": dict(inputs),
         "pending_tool_call_id": pending_tool_call_id,
+        # update_state 使用 merge 语义；上一轮 mark_resume_in_flight 写入的
+        # resume_in_flight=True 不会因新 entry 缺少该键而被移除。显式置 None
+        # 让 merge 将其从持久化状态中删除，避免下一轮恢复被误判为重复答案。
+        "resume_in_flight": None,
     }
     if task_states:
         entry["task_states"] = copy.deepcopy(task_states)
