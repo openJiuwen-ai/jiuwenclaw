@@ -3853,7 +3853,6 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         from jiuwenswarm.common.config import (
             delete_model_resource, upsert_model_group_resource, upsert_model_resource,
         )
-        from jiuwenswarm.common.model_catalog import ModelCatalog
         from jiuwenswarm.common.model_errors import (
             MODEL_SELECTION_NOT_FOUND, MODEL_SELECTION_REFERENCED, ModelSelectionError,
         )

@@ -48,12 +48,12 @@ class ModelSelectionResolver:
         if groups:
             return ModelSelection(type="model_group", id=groups[0]["model_group_id"])
         if context.legacy_model_name:
-            matches = [
-                model
-                for model in self.catalog.list_public_models()
-                if model["model_name"] == context.legacy_model_name
-                or model["alias"] == context.legacy_model_name
-            ]
+            matches = []
+            for model in self.catalog.list_public_models():
+                name_matches = model["model_name"] == context.legacy_model_name
+                alias_matches = model["alias"] == context.legacy_model_name
+                if name_matches or alias_matches:
+                    matches.append(model)
             if len(matches) == 1:
                 return ModelSelection(type="model", id=matches[0]["model_id"])
         models = [m for m in self.catalog.list_public_models() if m["is_default"]]
