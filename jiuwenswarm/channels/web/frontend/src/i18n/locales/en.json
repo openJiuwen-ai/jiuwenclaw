@@ -76,12 +76,15 @@
     },
     "dialog": {
       "discardTitle": "Discard unsaved changes",
-      "discardConfirm": "You have unsaved changes. Discard them?"
+      "discardConfirm": "You have unsaved changes. Discard them?",
+      "clearTitle": "Clear {{name}}",
+      "clearConfirm": "The saved {{name}} will be deleted. Are you sure you want to clear it?"
     },
     "common": {
       "configured": "Configured",
       "notConfigured": "Not configured",
       "configure": "Configure",
+      "clear": "Clear",
       "showValue": "Show value",
       "hideValue": "Hide value"
     },
@@ -150,7 +153,9 @@
       "fetchReasons": {
         "noEndpoint": "Using the provider preset list: this provider does not expose a model-list endpoint",
         "apiKeyRequired": "Using the provider preset list: enter an API key to fetch the latest models",
-        "remoteFailed": "Using the provider preset list: the remote request failed or returned no models"
+        "remoteFailed": "Using the provider preset list: the remote request failed or returned no models",
+        "remoteAuthFailed": "Using the provider preset list: invalid API key or auth mismatch (HTTP 401/403)",
+        "remoteRateLimited": "Using the provider preset list: rate limited (HTTP 429), retry later"
       },
       "vendorGroups": {
         "token_plan": "Token Plan",
@@ -242,6 +247,8 @@
       "toggleCapability": "Toggle {{name}} capability",
       "saveAndEnable": "Save and enable",
       "savedRestartRequired": "Saved; takes effect after restart.",
+      "deleteModelTitle": "Delete model configuration",
+      "deleteModelConfirm": "This deletes the saved model configuration for {{name}} and turns the capability off if it is currently enabled.",
       "team": "Agent team"
     },
     "browser": {
@@ -249,7 +256,6 @@
       "runtimeDescription": "The existing backend resets the browser runtime after saving.",
       "path": "Browser path",
       "pathDescription": "Specify the browser executable path, or leave it empty for automatic detection.",
-      "preferredBrowser": "Preferred browser",
       "runMode": "Browser run mode",
       "runModeDescription": "Show the browser window in the foreground or run in headless mode.",
       "headed": "Show in foreground",
@@ -278,10 +284,6 @@
         "title": "Browser path",
         "description": "Specify the browser executable path, or leave it empty for automatic detection.",
         "placeholder": "For example, /Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
-      },
-      "browser_type": {
-        "title": "Preferred browser",
-        "description": "Pinning a type searches only that browser; an explicit path always wins."
       },
       "headless": {
         "title": "Browser run mode",
@@ -639,6 +641,7 @@
     "addImageDisabled": "Cannot add images while processing or recording",
     "addFile": "Add file",
     "addFileDisabled": "Cannot add files while processing or recording",
+    "addFileTooltip": "Add files, experts, skills, connectors",
     "addAttachment": "Add attachment",
     "removeImage": "Remove image",
     "sendTask": "Send message without interrupting model",
@@ -1172,9 +1175,12 @@
       "codexHint": "The SDK is installed automatically when needed; use the built-in CLI, a CLI from PATH, or a specified path.",
       "useBuiltin": "Use built-in CLI",
       "detect": "Detect",
+      "detectHint": "Find the CLI in PATH or at the given path and check version compatibility",
       "selectFile": "Choose file",
       "selectFileTitle": "Choose {{agent}} command",
       "selectFileFailed": "Failed to choose file",
+      "copyPath": "Copy detected path",
+      "copied": "Copied",
       "cliPathPlaceholder": "Auto-detect {{agent}}, or enter an executable path",
       "statusUnknown": "Not checked",
       "statusOk": "Available",
@@ -1186,15 +1192,12 @@
       "compatibilityWarning": "The detected version may be incompatible. You can change the executable path, upgrade the version, or select \"Use built-in CLI\" to use the default startup mode.",
       "compatibilityWarningWithVersion": "The detected version may be incompatible. You can change the executable path, upgrade to {{version}} or later, or select \"Use built-in CLI\" to use the default startup mode.",
       "windowsScriptPath": "The selected file is a Windows script. Choose a real executable, or select \"Use built-in CLI\".",
-      "dependencyInstalling": "Installing optional components for {{agents}} in the background. They remain disabled during installation; enable them again and save the configuration when installation finishes.",
-      "dependencyInstalled": "The optional {{agent}} component is installed. Enable it again and save the configuration.",
-      "dependencyInstallPhasePreparing": "Preparing {{agent}} dependency installation",
-      "dependencyInstallPhaseInstalling": "Installing {{agent}} dependencies",
-      "dependencyInstallPhaseVerifying": "Verifying {{agent}} dependencies",
-      "dependencyInstallPhaseSucceeded": "{{agent}} dependencies installed. Enable {{agent}} again and save the configuration.",
-      "dependencyInstallPhaseFailed": "{{agent}} dependency installation failed",
+      "missingInPath": "{{agent}} CLI was not found in the system PATH. Enter an executable path, or select \"Use built-in CLI\".",
+      "missingPath": "Path does not exist: {{path}}. Check the path, or select \"Use built-in CLI\".",
+      "unavailableCli": "Failed to run {{agent}} CLI ({{reason}}). Check the executable, or select \"Use built-in CLI\".",
+      "autoSaved": "{{agents}} dependencies finished installing. Your configuration has been saved automatically.",
       "installDialogTitle": "Install optional components",
-      "installDialogDescription": "Closing this dialog does not interrupt installation. When it finishes, return to Third-Party Agent settings, enable the component again, and save the configuration.",
+      "installDialogDescription": "Closing this dialog does not interrupt installation. Your configuration will be saved automatically when installation finishes.",
       "installArtifact": "Downloading file {{current}} of {{total}}: {{package}} {{version}}",
       "installProgress": "Download progress",
       "installEta": "About {{eta}} remaining",
@@ -1210,7 +1213,7 @@
         "downloading": "Downloading",
         "installing": "Installing",
         "verifying": "Verifying",
-        "succeeded": "Installed. Enable again to use",
+        "succeeded": "Installed",
         "failed": "Installation failed",
         "running": "Installing"
       }
@@ -1508,9 +1511,6 @@
     }
   },
   "browser": {
-    "browserTypeAuto": "Auto (Chrome > Edge)",
-    "browserTypeChrome": "Chrome",
-    "browserTypeEdge": "Microsoft Edge",
     "errors": {
       "loadPath": "Failed to load browser settings"
     }
@@ -2172,7 +2172,7 @@
     "subtitle": "Create and manage reusable Expert assets",
     "tabsLabel": "Expert management categories",
     "tabs": { "catalog": "Expert marketplace", "mine": "My Experts" },
-    "source": { "builtin": "Official", "local": "Mine" },
+    "source": { "builtin": "Official", "local": "Mine", "hub": "Hub" },
     "categoryLabel": "Expert categories",
     "categoryAll": "All",
     "categoryOther": "Other",
@@ -2630,6 +2630,7 @@
       "restart_pending": "Restart pending",
       "restarting": "Restarting...",
       "installing": "Installing",
+      "connect": "Connect",
       "error": "Check failed",
       "unsupported": "Unsupported platform",
       "disabled": "Updater disabled"
@@ -2949,6 +2950,7 @@
       "cliIncompleteNamed": "The CLI is incomplete or outdated. Please run the following command to install or upgrade it, then retry: {{command}}"
     },
     "card": {
+      "connect": "Connect",
       "use": "Use",
       "useNotWired": "Not wired yet — use it from the \"+\" panel in the chat input instead.",
       "install": "Install",
@@ -2956,6 +2958,7 @@
       "connecting": "Connecting",
       "disconnecting": "Disconnecting",
       "deleting": "Deleting",
+      "uninstalling": "Uninstalling",
       "stateError": "Connection failed",
       "retry": "Retry",
       "uninstall": "Uninstall",
@@ -3029,6 +3032,9 @@
     },
     "toast": {
       "mcpConnected": "Connector connected successfully.",
+      "mcpInstalled": "Connector installed. Connect it before use.",
+      "mcpUninstalled": "Connector uninstalled successfully.",
+      "mcpUninstallPendingReload": "The package was removed, but the running service will finish refreshing on the next reload.",
       "mcpCreated": "Connector created successfully.",
       "mcpCreatedAndConnected": "Connector created and connected successfully.",
       "pluginInstalled": "Plugin installed successfully.",
@@ -3085,7 +3091,8 @@
       "cancel": "Cancel",
       "confirm": "Confirm",
       "search": "Search",
-      "noResult": "No matches found"
+      "noResult": "No matches found",
+      "loadFailed": "Failed to load details. Please try again."
     }
   },
   "auth": {

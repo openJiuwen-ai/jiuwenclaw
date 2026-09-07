@@ -641,8 +641,7 @@ class HeartbeatSchedulerService:
         completed_attempt = normalized in {"succeeded", "failed"}
         next_count = int(job.run_count) + (1 if completed_attempt else 0)
         terminal = completed_attempt and (
-            bool(job.delete_after_run)
-            or job.schedule.type == SCHEDULE_ONCE
+            job.schedule.type == SCHEDULE_ONCE
             or (job.max_runs is not None and next_count >= int(job.max_runs))
         )
         # Scheduler claims already advanced next_run_at from the trigger time.
@@ -783,7 +782,7 @@ class HeartbeatSchedulerService:
                 "session_id": job.session_id,
                 "reason": "session_deleting",
             }
-        # completed 表示 once/delete_after_run/max_runs 已经达成。run_now
+        # completed 表示 once/max_runs 已经达成。run_now
         # 不能绕过这些停止条件；需要再次执行时必须先由显式 update/toggle
         # 立即执行终态任务前先恢复其可运行状态。
         if job.status == STATUS_COMPLETED or (

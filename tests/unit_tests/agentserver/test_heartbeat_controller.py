@@ -396,6 +396,13 @@ async def test_create_rejects_client_id_unknown_fields_and_string_booleans(
         await ctrl.create_job({**base, "id": "client-selected"})
     with pytest.raises(ValueError, match="enabled must be boolean"):
         await ctrl.create_job({**base, "enabled": "false"})
+    with pytest.raises(ValueError, match="unknown fields"):
+        await ctrl.create_job({**base, "delete_after_run": True})
+
+    job = await ctrl.create_job(base)
+    assert "delete_after_run" not in job
+    with pytest.raises(ValueError, match="unknown fields"):
+        await ctrl.update_job(job["id"], {"delete_after_run": True})
 
 
 async def test_get_meta(ctrl: HeartbeatController) -> None:
@@ -405,7 +412,7 @@ async def test_get_meta(ctrl: HeartbeatController) -> None:
     assert "interval" in meta["schedule_types"]
     assert "skip" in meta["concurrency_policies"]
     assert meta["run_count_semantics"].startswith("increments for succeeded")
-    assert "delete_after_run" in meta["deprecated_fields"]
+    assert meta["deprecated_fields"] == {}
     assert "session_busy_wait_timeout_seconds" not in meta["limits"]
 
 
@@ -416,6 +423,8 @@ def test_limits_are_normalized_for_meta(ctrl: HeartbeatController) -> None:
             "max_active_jobs_per_session": "3",
             "max_active_jobs_global": "9",
             "default_max_runs": "null",
+            "execution_timeout_seconds": "45.5",
+            "user_preemption_timeout_seconds": "2.5",
         }
     )
     limits = ctrl.get_meta()["limits"]
@@ -423,6 +432,8 @@ def test_limits_are_normalized_for_meta(ctrl: HeartbeatController) -> None:
     assert limits["max_active_jobs_per_session"] == 3
     assert limits["max_active_jobs_global"] == 9
     assert limits["default_max_runs"] is None
+    assert limits["execution_timeout_seconds"] == 45.5
+    assert limits["user_preemption_timeout_seconds"] == 2.5
 
 
 def test_limits_cannot_advertise_interval_below_model_floor(
@@ -430,3 +441,13 @@ def test_limits_cannot_advertise_interval_below_model_floor(
 ) -> None:
     with pytest.raises(ValueError, match="min_interval_seconds must be at least 60"):
         ctrl.set_limits({"min_interval_seconds": 30})
+
+
+@pytest.mark.parametrize(
+    "key", ["execution_timeout_seconds", "user_preemption_timeout_seconds"]
+)
+def test_runtime_timeouts_must_be_positive(
+    ctrl: HeartbeatController, key: str
+) -> None:
+    with pytest.raises(ValueError, match=f"{key} must be greater than zero"):
+        ctrl.set_limits({key: 0})

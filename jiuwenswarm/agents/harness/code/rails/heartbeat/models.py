@@ -9,7 +9,7 @@
   按 schedule 投递 follow-up prompt,使 Agent 回到同一线程继续处理。
 
 字段命名原则:与 Cron 已有字段语义一致的必须同名同义(``id/name/enabled/created_at/updated_at/
-timezone/delete_after_run``);Heartbeat 独有语义才新增字段。
+timezone``);Heartbeat 独有语义才新增字段。
 """
 
 from __future__ import annotations
@@ -362,7 +362,6 @@ class HeartbeatJob:
     concurrency_policy: str = DEFAULT_CONCURRENCY_POLICY
     session_deleted_policy: str = DEFAULT_SESSION_DELETED_POLICY
     max_runs: int | None = DEFAULT_MAX_RUNS
-    delete_after_run: bool = False
     kind: str = HEARTBEAT_KIND
     created_at: float | None = None
     updated_at: float | None = None
@@ -389,7 +388,6 @@ class HeartbeatJob:
             "concurrency_policy": self.concurrency_policy,
             "session_deleted_policy": self.session_deleted_policy,
             "max_runs": self.max_runs,
-            "delete_after_run": bool(self.delete_after_run),
             "created_at": self.created_at,
             "updated_at": self.updated_at,
             "next_run_at": self.next_run_at,
@@ -474,12 +472,6 @@ class HeartbeatJob:
             if max_runs < 1:
                 raise ValueError("max_runs must be at least 1")
 
-        delete_after_run = _persisted_bool(
-            data, "delete_after_run", default=False
-        )
-        if not isinstance(delete_after_run, bool):
-            raise ValueError("delete_after_run must be boolean")
-
         created_at = data.get("created_at", None)
         updated_at = data.get("updated_at", None)
         created_at_f = float(created_at) if isinstance(created_at, (int, float)) else None
@@ -499,6 +491,13 @@ class HeartbeatJob:
         )
 
         run_count = int(data.get("run_count") or 0)
+        # Heartbeat once exposed ``delete_after_run`` as a second run limit.
+        # Retired records are normalized on read and serialized without it.
+        if data.get("delete_after_run") is True:
+            if status in HEARTBEAT_TERMINAL_STATUSES:
+                max_runs = max(1, run_count)
+            else:
+                max_runs = run_count + 1
 
         metadata_raw = data.get("metadata", None)
         metadata = dict(metadata_raw) if isinstance(metadata_raw, dict) else {}
@@ -522,7 +521,6 @@ class HeartbeatJob:
             concurrency_policy=concurrency_policy,
             session_deleted_policy=session_deleted_policy,
             max_runs=max_runs,
-            delete_after_run=delete_after_run,
             created_at=created_at_f,
             updated_at=updated_at_f,
             next_run_at=next_run_at,

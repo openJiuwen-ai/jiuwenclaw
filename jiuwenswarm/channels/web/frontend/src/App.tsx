@@ -66,6 +66,8 @@ import { AgentMode, MediaItem, UserAnswer, ModelEntry, type Session } from './ty
 import type {
   ExternalCliAgentKind,
   ExternalCliDependencyInstallStatus,
+  ExternalCliDetectResult,
+  ExternalCliPendingChoice,
 } from './components/ExternalCliAgentsSection';
 import {
   ensureSessionRuntimes,
@@ -121,6 +123,7 @@ import {
   setA2UIActionHandler,
 } from './features/a2ui/actionBridge';
 import { saveBlob } from './utils/desktopSave';
+import { restoreSessionEquipment } from './utils/enabledExtensions';
 import { generateUuidV4 } from './utils/uuid';
 import { ApplicationPluginOutlet } from './applicationPlugins/ApplicationPluginOutlet';
 import { enabledApplicationPlugins } from './applicationPlugins/manifest';
@@ -324,6 +327,14 @@ function AppContent({
   const [externalCliInstallDialogOpen, setExternalCliInstallDialogOpen] = useState(false);
   const [externalCliInstallStatuses, setExternalCliInstallStatuses] = useState<ExternalCliInstallStatuses>({});
   const [hasVisitedAgents, setHasVisitedAgents] = useState(false);
+  // Deferred CLI agent choices held here (not inside Settings) so they survive
+  // leaving/returning to the Settings page while a dependency install runs.
+  const [externalCliPendingChoices, setExternalCliPendingChoices] =
+    useState<Partial<Record<ExternalCliAgentKind, ExternalCliPendingChoice>>>({});
+  // Latest CLI detect results, also held at the App layer so returning to the
+  // Settings page shows the previous status instead of flashing "not checked".
+  const [externalCliDetectResults, setExternalCliDetectResults] =
+    useState<Partial<Record<ExternalCliAgentKind, ExternalCliDetectResult>>>({});
   const [hasVisitedSkills, setHasVisitedSkills] = useState(false);
   const [requestedSettingsModuleId, setRequestedSettingsModuleId] =
     useState<SettingsModuleTarget | null>(null);
@@ -1420,6 +1431,9 @@ function AppContent({
       });
       upsertSessionMetadata(session, { setCurrent: sessionIdRef.current === targetSessionId });
       useWorkspaceStore.getState().upsertSession(session);
+      if (session.session_equipment && typeof session.session_equipment === 'object') {
+        restoreSessionEquipment(targetSessionId, session.session_equipment);
+      }
       if (sessionIdRef.current === targetSessionId) {
         setMissingSessionId((current) => (current === targetSessionId ? null : current));
         // 同 handleRestoreSession：拿到后端 metadata 里的 model 后还原 selectedModelName，
@@ -3267,21 +3281,25 @@ const showWorkspaceDivider = effectiveTeamAreaExpanded && !showConversationNotFo
         {activeNav === 'settings' && (
           <div className="app-section">
             <SettingsPage
-                definition={settingsPageDefinition}
-                isConnected={isConnected}
-                connectionState={connectionState}
-                request={settingsRequest}
-                onHasChangesChange={handleSettingsHasChangesChange}
-                onConfigSaved={handleSettingsConfigSaved}
-                onDetectExternalCli={detectExternalCli}
-                onSelectExternalCliPath={selectExternalCliPath}
-                onTrackExternalCliDependencyInstalls={trackExternalCliDependencyInstalls}
-                externalCliInstallStatuses={externalCliInstallStatuses}
-                externalCliInstallBusy={Object.values(externalCliInstallStatuses).some(
-                  (status) => status?.status === 'running',
-                )}
-                onOpenExternalCliInstallDialog={() => setExternalCliInstallDialogOpen(true)}
-                initialModuleId={requestedSettingsModuleId ?? undefined}
+              definition={settingsPageDefinition}
+              isConnected={isConnected}
+              connectionState={connectionState}
+              request={settingsRequest}
+              onHasChangesChange={handleSettingsHasChangesChange}
+              onConfigSaved={handleSettingsConfigSaved}
+              onDetectExternalCli={detectExternalCli}
+              onSelectExternalCliPath={selectExternalCliPath}
+              onTrackExternalCliDependencyInstalls={trackExternalCliDependencyInstalls}
+              externalCliInstallStatuses={externalCliInstallStatuses}
+              externalCliInstallBusy={Object.values(externalCliInstallStatuses).some(
+                (status) => status?.status === 'running',
+              )}
+              onOpenExternalCliInstallDialog={() => setExternalCliInstallDialogOpen(true)}
+              externalCliPendingChoices={externalCliPendingChoices}
+              onExternalCliPendingChoicesChange={setExternalCliPendingChoices}
+              externalCliDetectResults={externalCliDetectResults}
+              onExternalCliDetectResultsChange={setExternalCliDetectResults}
+              initialModuleId={requestedSettingsModuleId ?? undefined}
             />
           </div>
         )}
@@ -3309,35 +3327,37 @@ const showWorkspaceDivider = effectiveTeamAreaExpanded && !showConversationNotFo
           </div>
         )}
         {activeNav === 'connectorMarket' && (
-          <div className="app-section">
-            <ConnectorMarketPanel
-              applicationPlugins={applicationPlugins}
-              applicationPluginsLoading={applicationPluginState.loading}
-              applicationPluginsError={applicationPluginState.error}
-              onRefreshApplicationPlugins={applicationPluginState.refresh}
-              onCreateViaChat={() => window.dispatchEvent(new CustomEvent('jiuwen:new-conversation', {
-                detail: {
-                  skillName: 'plugin-creator',
-                  suffixText: t('connectorMarket.chatPrompts.createPlugin'),
-                  metadata: { scene: 'create_plugin' },
-                },
-              }))}
-              onUseExample={(initialInputValue, mcpName) =>
-                requestSessionNavigation('new', { initialInputValue, initialEnabledMcps: [mcpName], forceMode: 'agent' })
-              }
-              onUsePluginExample={(initialInputValue, pluginId) =>
-                requestSessionNavigation('new', { initialInputValue, initialEnabledPlugins: [pluginId], forceMode: 'agent' })
-              }
-              onUseExtension={({ kind, id }) =>
-                requestSessionNavigation(
-                  'new',
-                  kind === 'plugin'
-                    ? { initialEnabledPlugins: [id], forceMode: 'agent' }
-                    : { initialEnabledMcps: [id], forceMode: 'agent' },
-                )
-              }
+          <div className="app-page-body">
+            <div className="page-content">
+              <ConnectorMarketPanel
+                applicationPlugins={applicationPlugins}
+                applicationPluginsLoading={applicationPluginState.loading}
+                applicationPluginsError={applicationPluginState.error}
+                onRefreshApplicationPlugins={applicationPluginState.refresh}
+                onCreateViaChat={() => window.dispatchEvent(new CustomEvent('jiuwen:new-conversation', {
+                  detail: {
+                    skillName: 'plugin-creator',
+                    suffixText: t('connectorMarket.chatPrompts.createPlugin'),
+                    metadata: { scene: 'create_plugin' },
+                  },
+                }))}
+                onUseExample={(initialInputValue, mcpName) =>
+                  requestSessionNavigation('new', { initialInputValue, initialEnabledMcps: [mcpName], forceMode: 'agent' })
+                }
+                onUsePluginExample={(initialInputValue, pluginId) =>
+                  requestSessionNavigation('new', { initialInputValue, initialEnabledPlugins: [pluginId], forceMode: 'agent' })
+                }
+                onUseExtension={({ kind, id }) =>
+                  requestSessionNavigation(
+                    'new',
+                    kind === 'plugin'
+                      ? { initialEnabledPlugins: [id], forceMode: 'agent' }
+                      : { initialEnabledMcps: [id], forceMode: 'agent' },
+                  )
+                }
               />
             </div>
+          </div>
         )}
       </main>
 

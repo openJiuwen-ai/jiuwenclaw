@@ -196,6 +196,7 @@ from jiuwenswarm.agents.harness.common.auto_harness import (
 )
 from jiuwenswarm.agents.harness.common.rails.interrupt.interrupt_helpers import (
     SKILL_EVOLUTION_APPROVAL_SCHEMA,
+    apply_permission_trusted_dirs,
     build_permission_rail,
     convert_interactions_to_ask_user_question,
 )
@@ -2060,8 +2061,36 @@ class JiuWenSwarmDeepAdapter:
         if mode in self._SKIP_EXTENSION_MODES or is_team_mode(mode):
             return None
 
-        params.setdefault("agent_template_name", "")
-        params.setdefault("plugin_names", [])
+        # Equipment fields are tri-state at the chat boundary:
+        #   omitted -> keep the session's current mount
+        #   empty   -> explicitly unload
+        #   value   -> replace with the requested package(s)
+        # Treating omission as empty used to silently unload plugin-owned skills
+        # when a retry or a refreshed frontend omitted ``plugin_names``.
+        if "agent_template_name" not in params:
+            params["agent_template_name"] = (
+                self._loaded_agent_template[0]
+                if self._loaded_agent_template is not None
+                else ""
+            )
+        if "plugin_names" not in params:
+            params["plugin_names"] = list(self._loaded_plugins)
+        try:
+            agent_template_name = params.get("agent_template_name")
+            if isinstance(agent_template_name, str) and agent_template_name.strip():
+                params["agent_template_name"] = equipment.resolve_equipment_runtime_id(
+                    "agent_templates", agent_template_name
+                )
+            plugin_names = params.get("plugin_names")
+            if isinstance(plugin_names, list):
+                params["plugin_names"] = [
+                    equipment.resolve_equipment_runtime_id("plugin_packages", item)
+                    if isinstance(item, str) and item.strip()
+                    else item
+                    for item in plugin_names
+                ]
+        except (TypeError, ValueError) as exc:
+            return self._equipment_error_response(request, str(exc))
 
         # Rule1: extension packages must be installed
         marketplace_error = self._marketplace_equipment_gate(params)
@@ -2089,6 +2118,16 @@ class JiuWenSwarmDeepAdapter:
             await self._load_plugins_for_request(params)
         except (ValueError, RuntimeError) as exc:
             return self._equipment_error_response(request, str(exc))
+        from jiuwenswarm.server.runtime.session.session_metadata import (
+            save_session_equipment,
+        )
+
+        save_session_equipment(
+            request.session_id or "",
+            agent_template_name=params.get("agent_template_name"),
+            plugin_names=params.get("plugin_names"),
+            mcp=params.get("mcp"),
+        )
         return None
 
     @staticmethod
@@ -2446,8 +2485,36 @@ class JiuWenSwarmDeepAdapter:
                 lock.locked() or self._session_adapter_lock_has_waiters(lock)
             ):
                 continue
+            # 常驻 subagent 尚在的会话不做 idle 回收：TTL 淘汰会连带
+            # cancel_all 杀掉 idle/running 的 subagent（issue #3625），
+            # 与 subagent 工具"常驻直到显式 close"的契约冲突。
+            # 仅拦截 idle 淘汰路径；session 删除 / 热重载 / 进程退出的
+            # 清理仍走原逻辑。
+            if self._session_has_live_subagents(sid):
+                continue
             if await self.cleanup_session_adapter(sid):
                 evicted += 1
+
+    def _session_has_live_subagents(self, sid: str) -> bool:
+        """Return whether the session-scoped adapter still holds live subagents.
+
+        Reads the parent DeepAgent's per-session SubagentControl registry
+        (openjiuwen ``_subagent_controls``) without creating either object.
+        """
+        adapter = self._session_adapters.get(sid)
+        if adapter is None:
+            return False
+        get_instance = getattr(adapter, "get_live_session_instance", None)
+        if not callable(get_instance):
+            return False
+        agent = get_instance(sid)
+        if agent is None:
+            return False
+        controls = getattr(agent, "_subagent_controls", None)
+        if not isinstance(controls, dict):
+            return False
+        control = controls.get(sid)
+        return bool(control is not None and control.list_live())
 
     async def cleanup_session_adapter(self, session_id: str | None) -> bool:
         """Release an idle session-scoped adapter without deleting session history."""
@@ -7344,6 +7411,7 @@ class JiuWenSwarmDeepAdapter:
                     .get("default", {})
                     .get("model_client_config", {})
                     .get("model_name", "gpt-4"),
+                    "session_id": getattr(self, "_parent_session_id", None),
                 },
             ),
             _RailBuildInfo(
@@ -7516,9 +7584,24 @@ class JiuWenSwarmDeepAdapter:
 
     def _update_permission_rail(self, config_base: dict[str, Any] | None) -> None:
         """原地更新已有 PermissionRail 配置，或在首次启用时新建。"""
+        from jiuwenswarm.agents.harness.common.rails.permissions.permission_compose import (
+            compose_host_effective_permissions,
+        )
+        from jiuwenswarm.agents.harness.common.rails.permissions.permissions_layers import (
+            load_session_permissions,
+            load_user_permissions,
+        )
+
         permission_config = config_base.get("permissions", {}) if config_base else {}
+        session_id = str(getattr(self, "_parent_session_id", None) or "").strip() or None
         if self._permission_rail is not None:
-            self._permission_rail.update_config(permission_config)
+            effective = compose_host_effective_permissions(
+                global_permissions=permission_config if isinstance(permission_config, dict) else {},
+                user_permissions=load_user_permissions(),
+                session_permissions=load_session_permissions(session_id),
+                session_id=session_id,
+            )
+            self._permission_rail.update_config(effective)
             logger.info("[JiuWenSwarmDeepAdapter] _permission_rail config hot-updated")
         elif permission_config.get("enabled", False):
             self._permission_rail = build_permission_rail(
@@ -7528,6 +7611,7 @@ class JiuWenSwarmDeepAdapter:
                 .get("default", {})
                 .get("model_client_config", {})
                 .get("model_name", "gpt-4"),
+                session_id=session_id,
             )
             if self._permission_rail is not None:
                 logger.info("[JiuWenSwarmDeepAdapter] _permission_rail newly created on hot-reload")
@@ -9349,13 +9433,17 @@ class JiuWenSwarmDeepAdapter:
             self._runtime_prompt_rail.set_session_id(runtime_config.session_id)
         if self._response_prompt_rail:
             self._response_prompt_rail.set_channel(resolved_channel)
-        # PermissionInterruptRail: per-request trusted_dirs 注入，使 external_directory
-        # 检查将这些子树视为 internal 而跳过 ask/deny（与 RuntimePromptRail 对齐）。
+        # PermissionInterruptRail: file_guard 工作目录是 session 任务目录；
+        # 每轮把 trusted_dirs 与前端 project_dir 合并成信任前缀。
         # 用 getattr 兼容绕过 __init__ 的测试构造（_permission_rail 仅在 rail 构建流程赋值）。
         permission_rail = getattr(self, "_permission_rail", None)
-        if permission_rail is not None and bind_request:
+        if permission_rail is not None:
             try:
-                permission_rail.set_trusted_dirs(runtime_config.trusted_dirs)
+                apply_permission_trusted_dirs(
+                    permission_rail,
+                    trusted_dirs=runtime_config.trusted_dirs,
+                    project_dir=runtime_config.project_dir or self._project_dir,
+                )
             except Exception:
                 logger.debug(
                     "[JiuWenSwarmDeepAdapter] permission_rail.set_trusted_dirs failed",

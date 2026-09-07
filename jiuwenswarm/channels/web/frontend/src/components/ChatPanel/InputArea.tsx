@@ -99,6 +99,7 @@ import sendActiveIcon from '../../assets/send_active.svg';
 import { TeamMemberAvatar } from '../TeamMemberAvatar';
 import { CodeBranchSelector } from '../../features/code-mode/CodeBranchSelector';
 import { generateUuidV4 } from '../../utils/uuid';
+import { buildInstalledSkillNames, filterEnabledMySkills } from '../../utils/mySkills';
 import { createAgentManagementClient, getAgentAvatarUrl, type AgentCatalogItem } from '../../features/agentManagement';
 import { ContextUsageIndicator } from './ContextUsageIndicator';
 import { isImeCompositionKey } from './imeComposition';
@@ -115,6 +116,7 @@ type InputAreaSkillItem = {
   enabled?: boolean;
   installed?: boolean;
   tags?: string[];
+  skill_type?: 'skill' | 'swarm_skill' | 'multimodal_skill';
 };
 
 type SlashCommandMeta = {
@@ -137,7 +139,7 @@ type InputAreaInstalledPlugin = {
   version: string;
   installed_at: string;
   git_commit?: string | null;
-  skills: string[];
+  skills: Array<string | { name: string; version?: string | null }>;
 };
 
 type InputAreaTeamMember = {
@@ -160,7 +162,6 @@ type ComposerSuggestionItem = {
   status?: string;
   description?: string;
   itemKind?: 'command' | 'skill';
-  source?: string;
   takesArgs?: boolean;
   disabled?: boolean;
   disabledReason?: string;
@@ -171,6 +172,7 @@ function getComposerSuggestionItems(
   members: ComposerSuggestionItem[],
   slashCommands: SlashCommandMeta[],
   slashSkills: InputAreaSkillItem[],
+  isTeamMode: boolean,
 ): ComposerSuggestionItem[] {
   if (!suggestion) return [];
   if (suggestion.kind === 'slash') {
@@ -185,9 +187,14 @@ function getComposerSuggestionItems(
         takesArgs: command.takesArgs,
       }));
     const skills = slashSkills
+      .filter((skill) => (
+        isTeamMode
+          ? skill.skill_type === 'swarm_skill'
+          : !skill.skill_type || skill.skill_type === 'skill'
+      ))
       .filter((skill) => {
         if (!query) return true;
-        return [skill.name, skill.display_name, skill.description, ...(skill.tags ?? [])]
+        return [skill.name, skill.display_name, skill.description]
           .filter(Boolean)
           .join(' ')
           .toLowerCase()
@@ -198,7 +205,6 @@ function getComposerSuggestionItems(
         label: skill.display_name || skill.name,
         description: skill.description,
         itemKind: 'skill' as const,
-        source: skill.source,
       }));
     return [...commands, ...skills];
   }
@@ -616,10 +622,12 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
   const [projectSearch, setProjectSearch] = useState('');
   const [projectCreateMode, setProjectCreateMode] = useState<ProjectCreateMode>('blank');
   const [menuDirection, setMenuDirection] = useState<'up' | 'down'>('up');
-  const [hoveredOptionDesc, setHoveredOptionDesc] = useState<string | null>(null);
   const [agentPickerOpen, setAgentPickerOpen] = useState(false);
   const [agentPickerQuery, setAgentPickerQuery] = useState('');
   const { tooltip: agentTooltipNode, handlers: agentTooltipHandlers } = useAdaptiveTooltip({ offsetX: -50 });
+  const { tooltip: attachTooltipNode, handlers: attachTooltipHandlers } = useAdaptiveTooltip();
+  const [hoveredOptionDesc, setHoveredOptionDesc] = useState<string | null>(null);
+  const [hoveredOptionRect, setHoveredOptionRect] = useState<DOMRect | null>(null);
   const [agentOptions, setAgentOptions] = useState<AgentCatalogItem[]>([]);
   const [agentOptionsStatus, setAgentOptionsStatus] = useState<'idle' | 'loading' | 'success' | 'error'>('idle');
   const agentManagementClient = useMemo(() => createAgentManagementClient(), []);
@@ -822,13 +830,14 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
       mentionableMembers,
       getWebSlashCommandsForMode(slashCommands, mode),
       slashSkills,
+      isTeamMode,
     );
     return items.map((item) => (
       item.itemKind === 'command' && isSlashCommandDisabledByGoal(item.id, hasUnfinishedGoal)
         ? { ...item, disabled: true, disabledReason: t('plan.toolbarUnavailableGoal') }
         : item
     ));
-  }, [composerSuggestion, hasUnfinishedGoal, mentionableMembers, mode, slashCommands, slashSkills, t]);
+  }, [composerSuggestion, hasUnfinishedGoal, isTeamMode, mentionableMembers, mode, slashCommands, slashSkills, t]);
 
   const selectableComposerSuggestionIndices = useMemo(
     () => composerSuggestionItems.reduce<number[]>((indices, item, index) => {
@@ -852,22 +861,8 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
         { timeoutMs: 30_000 },
       ),
     ]).then(([commandData, skillData]) => {
-      const installedNames = new Set(
-        (skillData.plugins ?? []).flatMap((plugin) => plugin.skills ?? []),
-      );
-      const availableSkills = (skillData.skills ?? []).filter((skill) => (
-        Boolean(skill.name) &&
-        skill.enabled !== false &&
-        Boolean(
-          skill.installed ||
-          skill.is_builtin ||
-          skill.is_builtin_source ||
-          skill.source === 'builtin' ||
-          skill.source === 'local' ||
-          skill.source === 'project' ||
-          installedNames.has(skill.name)
-        )
-      ));
+      const installedNames = buildInstalledSkillNames(skillData.plugins ?? []);
+      const availableSkills = filterEnabledMySkills(skillData.skills ?? [], installedNames);
       setSlashCommands(commandData.commands ?? []);
       setSlashSkills(availableSkills);
       setSlashCatalogLoaded(true);
@@ -1666,7 +1661,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
     const trimmedBase = (richContent + pendingVoiceText).trim();
 
     // 单 Agent 下拦截斜杠命令：控制命令不走 chat.send / 队列 / 中断逻辑。
-    // Team 下不拦截，以普通文本发送，不会触发 command.btw / command.compact 等 RPC。
+    // Team 下不拦截，以普通文本发送，不会触发 command.compact 等 RPC。
     if (trimmedBase.startsWith('/')) {
       const { name, args } = parseSlashLine(trimmedBase);
       const cmd = findSlashCommand(name);
@@ -1965,7 +1960,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
         }
         return;
       }
-      // 有参命令（/btw）：把 "/query" 替换成蓝色原子 chip。提取文本时再还原为
+      // 有参命令（如 /persist）：把 "/query" 替换成蓝色原子 chip。提取文本时再还原为
       // "/<name>"，因此视觉表现和技能一致，同时保留既有命令解析/提交语义。
       const trigger = getCurrentComposerTrigger();
       if (trigger) {
@@ -2542,12 +2537,21 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
 
   const handleModeSelect = useCallback(async (targetMode: AgentMode) => {
     setIsModeMenuOpen(false);
+    setHoveredOptionDesc(null);
+    setHoveredOptionRect(null);
     await handleModeSwitch(targetMode);
   }, [handleModeSwitch]);
 
   useEffect(() => {
     setIsModeMenuOpen(false);
   }, [isProcessing, mode]);
+
+  useEffect(() => {
+    if (!isModeMenuOpen) {
+      setHoveredOptionDesc(null);
+      setHoveredOptionRect(null);
+    }
+  }, [isModeMenuOpen]);
 
   const openProjectCreateDialog = useCallback(async (mode: ProjectCreateMode) => {
     setProjectDirError(null);
@@ -2893,13 +2897,16 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                 attachTriggerDisabled && 'chat-input-btn--disabled',
                 attachMenuOpen && 'chat-input-btn--menu-open',
               )}
-              title={attachTriggerDisabled ? t('chat.addFileDisabled') : t('chat.addFile')}
+              title={attachTriggerDisabled ? t('chat.addFileDisabled') : undefined}
               aria-label={attachTriggerDisabled ? t('chat.addFileDisabled') : t('chat.addFile')}
               aria-haspopup="menu"
               aria-expanded={attachMenuOpen}
+              data-tooltip={attachTriggerDisabled ? t('chat.addFileDisabled') : t('chat.addFileTooltip')}
+              {...attachTooltipHandlers}
             >
               <Plus className="chat-input-btn-icon" strokeWidth={1.8} />
             </button>
+            {attachTooltipNode}
             {attachMenuOpen && attachMenuAnchor && createPortal(
               <div
                 ref={attachMenuPortalRef}
@@ -2940,6 +2947,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                   role="menuitem"
                   aria-haspopup="menu"
                   aria-expanded={agentPickerOpen}
+                  data-testid="chat-panel-input-attach-menu-agent"
                   onClick={() => {
                     setAgentPickerOpen((open) => !open);
                     setExtensionPanelOpen(false);
@@ -2959,6 +2967,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                     className="chat-agent-picker"
                     direction={attachMenuDirection}
                     ariaLabel={t('chat.agent')}
+                    testId="chat-panel-agent-picker-panel"
                     onMouseEnter={() => setAgentPickerOpen(true)}
                     rowHeight={AGENT_PICKER_ROW_HEIGHT}
                     itemCount={filteredAgentOptions.length}
@@ -2976,6 +2985,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                             value={agentPickerQuery}
                             onChange={(event) => setAgentPickerQuery(event.target.value)}
                             placeholder={t('chat.agentSearchPlaceholder')}
+                            data-testid="chat-panel-agent-picker-search-input"
                           />
                         </div>
                       </label>
@@ -2989,11 +2999,11 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                     }}
                   >
                     {agentOptionsStatus === 'loading' ? (
-                      <div className="chat-agent-picker__state">{t('common.loading')}</div>
+                      <div className="chat-agent-picker__state" data-testid="chat-panel-agent-picker-state" data-variant="loading">{t('common.loading')}</div>
                     ) : agentOptionsStatus === 'error' ? (
-                      <div className="chat-agent-picker__state">{t('agentManagement.states.loadError')}</div>
+                      <div className="chat-agent-picker__state" data-testid="chat-panel-agent-picker-state" data-variant="error">{t('agentManagement.states.loadError')}</div>
                     ) : filteredAgentOptions.length === 0 ? (
-                      <div className="chat-agent-picker__state">
+                      <div className="chat-agent-picker__state" data-testid="chat-panel-agent-picker-state" data-variant={installedAgentOptions.length === 0 ? 'no-installed' : 'no-matches'}>
                         {installedAgentOptions.length === 0 ? t('chat.agentNoInstalled') : t('chat.agentNoMatches')}
                       </div>
                     ) : (
@@ -3007,6 +3017,8 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                             className={clsx('chat-agent-picker__item', isSelected && 'is-selected')}
                             role="menuitemradio"
                             aria-checked={isSelected}
+                            data-testid="chat-panel-agent-picker-item"
+                            data-variant={item.id}
                             data-tooltip={item.description || undefined}
                             {...agentTooltipHandlers}
                             onClick={() => {
@@ -3049,6 +3061,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                   role="menuitem"
                   aria-haspopup="menu"
                   aria-expanded={skillPanelOpen}
+                  data-testid="chat-panel-input-attach-menu-skill"
                   onClick={() => {
                     setSkillPanelOpen((open) => !open);
                     setAgentPickerOpen(false);
@@ -3086,6 +3099,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                     role="menuitem"
                     aria-haspopup="menu"
                     aria-expanded={extensionPanelOpen}
+                    data-testid="chat-panel-input-attach-menu-extension"
                     onClick={() => {
                       setExtensionPanelOpen((open) => !open);
                       setAgentPickerOpen(false);
@@ -3329,8 +3343,15 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                     type="button"
                     key={m.value}
                     onClick={() => void handleModeSelect(m.value)}
-                    onMouseEnter={() => setHoveredOptionDesc(m.descriptionI18nKey ?? null)}
-                    onMouseLeave={() => setHoveredOptionDesc(null)}
+                    onMouseEnter={(e) => {
+                      const desc = m.descriptionI18nKey ? t(m.descriptionI18nKey) : null;
+                      setHoveredOptionDesc(desc);
+                      setHoveredOptionRect(desc ? e.currentTarget.getBoundingClientRect() : null);
+                    }}
+                    onMouseLeave={() => {
+                      setHoveredOptionDesc(null);
+                      setHoveredOptionRect(null);
+                    }}
                     className={clsx(
                       'chat-mode-select__option',
                       mode === m.value && 'chat-mode-select__option--active',
@@ -3352,24 +3373,26 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                       </svg>
                     )}
                   </button>
-                ))}
-              </div>,
-              document.body
-            )}
-            {isModeMenuOpen && hoveredOptionDesc && modeMenuAnchor && createPortal(
-              <div
-                className="chat-mode-option-tooltip"
-                data-testid="chat-panel-mode-select-tooltip"
-                style={menuDirection === 'up'
-                  ? { position: 'fixed', bottom: window.innerHeight - modeMenuAnchor.top + 10, left: modeMenuAnchor.left + 188, zIndex: 10000 }
-                  : { position: 'fixed', top: modeMenuAnchor.bottom + 10, left: modeMenuAnchor.left + 188, zIndex: 10000 }
-                }
-              >
-                {t(hoveredOptionDesc)}
-              </div>,
-              document.body
-            )}
-          </div>
+                  ))}
+                </div>,
+                document.body
+              )}
+              {isModeMenuOpen && hoveredOptionDesc && hoveredOptionRect && createPortal(
+                <div
+                  className="adaptive-tooltip"
+                  data-testid="chat-panel-mode-select-tooltip"
+                  style={{
+                    position: 'fixed',
+                    top: hoveredOptionRect.top + (hoveredOptionRect.height / 2) - 17,
+                    left: hoveredOptionRect.right + 11,
+                    zIndex: 10000,
+                  }}
+                >
+                  {hoveredOptionDesc}
+                </div>,
+                document.body
+              )}
+            </div>
           <PermissionSelector permissionsEnabled={permissionsEnabled} onSavePermission={onSavePermission} />
 
           {selectedAgentId && (
@@ -4099,9 +4122,6 @@ function ComposerSuggestionMenu({
                         <span className="chat-composer-suggestion__meta">{item.description}</span>
                       ) : null}
                     </span>
-                    {item.source ? (
-                      <span className="chat-composer-suggestion__source">{item.source}</span>
-                    ) : null}
                   </>
                 ) : (
                   <>

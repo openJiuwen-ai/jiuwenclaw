@@ -280,7 +280,9 @@ async def test_read_pdf_discloses_truncation_of_a_single_page(tmp_path: Path):
     pdf_path.write_bytes(_build_minimal_pdf([("word " * 500).strip()]))
 
     # No page is left unread here, so only the max_chars cut-off is disclosed.
-    result = await read_pdf.invoke({"pdf_path": str(pdf_path), "max_chars": 1000})
+    result = await read_pdf.invoke(
+        {"pdf_path": str(pdf_path), "max_chars": 1000}
+    )
     assert "the rest of the document was NOT read" in result
     assert "unread pages" not in result
     assert "read only in part" in result
