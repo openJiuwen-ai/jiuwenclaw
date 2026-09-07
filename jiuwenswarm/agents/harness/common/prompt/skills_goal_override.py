@@ -32,6 +32,7 @@ import os
 from html import escape
 from typing import Any, Dict, List, Sequence
 
+import openjiuwen.harness.prompts.sections.context as _context
 import openjiuwen.harness.prompts.sections.skills as _skills
 import openjiuwen.harness.rails.skills.skill_use_rail as _sur
 from openjiuwen.harness.prompts.builder import PromptSection
@@ -50,35 +51,21 @@ _SKILLS_PROMPT_MAX_CHARS_ENV = "JIUWENSWARM_SKILLS_PROMPT_MAX_CHARS"
 _DEFAULT_SKILLS_PROMPT_MAX_CHARS = 30_000
 
 # Keep Skills after every static Code/Design prompt section (the highest is
-# Code's session guidance at 55), but before per-request runtime context (60+).
+# output efficiency at 50), but before per-request runtime context (60+).
 # This applies to both all-mode and auto-list mode; upstream assigns 40 to the
 # latter unless the rail result is normalized below.
 _SKILLS_SECTION_PRIORITY = 56
 
 # Keep only the upstream 小艺-first policy as stable prompt text; every skill
 # entry is sourced from the rail's currently loaded user skills.
-_SKILLS_PREAMBLE_EN = """# Tools
-
-## Skill Discovery and Installation (`find-skills`)
-
-- **Default tool:** the `find-skills` skill.
-- **Usage rule:** Complete all skill discovery, retrieval, and installation tasks through this skill by default. Use another discovery or installation method only when the user explicitly requests it.
-
-# Skills
+_SKILLS_PREAMBLE_EN = """# Skills
 
 Prefer the skills and tools below; call `skill_tool` to retrieve the full `SKILL.md` for a skill.
 
 **Tool Selection Principle (xiaoyi First):** In all cases, unless the user explicitly specifies a different tool, you must prioritize using `小艺` related tools or skills whenever they are capable of completing the task.
 """
 
-_SKILLS_PREAMBLE_CN = """# 工具
-
-## 技能发现与安装（`find-skills`）
-
-- **默认工具：** `find-skills` 技能。
-- **使用规则：** 所有技能发现、检索和安装任务默认必须通过该技能完成；仅当用户明确要求其他发现或安装方式时，才可使用其他方法。
-
-# 技能
+_SKILLS_PREAMBLE_CN = """# 技能
 
 优先使用以下技能与工具；使用技能前调用 `skill_tool` 获取该技能的完整 `SKILL.md`。
 
@@ -94,6 +81,17 @@ _STATIC_BLOCK_CN = _SKILLS_PREAMBLE_CN + "\n<available_skills>\n</available_skil
 _STATIC_BLOCK = {"cn": _STATIC_BLOCK_CN, "en": _STATIC_BLOCK_EN}
 
 _AVAILABLE_SKILLS_CLOSE_TAG = "</available_skills>"
+
+_FIND_SKILLS_TOOL_RULES = {
+    "cn": """## 技能发现与安装（`find-skills-win`）
+
+- **默认工具：** `find-skills-win` 技能。
+- **使用规则：** 所有技能发现、检索和安装任务默认必须通过该技能完成；仅当用户明确要求其他发现或安装方式时，才可使用其他方法。""",
+    "en": """## Skill Discovery and Installation (`find-skills-win`)
+
+- **Default tool:** the `find-skills-win` skill.
+- **Usage rule:** Complete all skill discovery, retrieval, and installation tasks through this skill by default. Use another discovery or installation method only when the user explicitly requests it.""",
+}
 
 def _skills_prompt_max_chars() -> int:
     """Return the configured final Skills-section character budget.
@@ -193,7 +191,7 @@ def _build_all_mode_skill_prompt_from_skills(
     Full descriptions are kept only as whole entries. Once the budget is hit,
     later dynamic skills downgrade to name-only entries, so the model can still
     discover and load them. A compact notice directs broad capability discovery
-    to the already-installed ``find-skills`` skill.
+    to the already-installed ``find-skills-win`` skill.
     """
     lang = language or "en"
     static = _STATIC_BLOCK.get(lang, _STATIC_BLOCK_EN)
@@ -270,6 +268,32 @@ def _build_auto_list_mode_skill_prompt(language: str = "en") -> str:
     """Auto-list mode: keep the stable preamble; discover skills on demand."""
     lang = language or "en"
     return _SKILLS_PREAMBLE.get(lang, _SKILLS_PREAMBLE_EN) + "\n"
+
+
+# ---------------------------------------------------------------------------
+# Tool-usage section — retain find-skills-win policy next to other tool rules
+# ---------------------------------------------------------------------------
+
+def _build_tools_content_with_find_skills(ability_manager, language: str = "cn") -> str | None:
+    """Append skill-discovery policy to the upstream Tool Usage Rules section."""
+    content = _ORIGINAL_BUILD_TOOLS_CONTENT(ability_manager, language)
+    if not content:
+        return content
+    lang = language or "cn"
+    rule = _FIND_SKILLS_TOOL_RULES.get(lang, _FIND_SKILLS_TOOL_RULES["en"])
+    return f"{content.rstrip()}\n\n{rule}\n"
+
+
+_ORIGINAL_BUILD_TOOLS_CONTENT = _context.build_tools_content
+
+
+def _apply_tools_patch() -> None:
+    """Patch the upstream content builder without changing its public API."""
+    current = _context.build_tools_content
+    if getattr(current, "__skills_goal_override_wrapped__", False):
+        return
+    _build_tools_content_with_find_skills.__skills_goal_override_wrapped__ = True  # type: ignore[attr-defined]
+    _context.build_tools_content = _build_tools_content_with_find_skills
 
 
 # ---------------------------------------------------------------------------
@@ -379,7 +403,10 @@ def apply_patch() -> None:
         _patched_build_skills_section.__skills_goal_override_wrapped__ = True  # type: ignore[attr-defined]
         _sur.SkillUseRail._build_skills_section = _patched_build_skills_section
 
-    # 3. Goal section removal.
+    # 3. Keep skill discovery policy in the dynamic Tool Usage Rules section.
+    _apply_tools_patch()
+
+    # 4. Goal section removal.
     _apply_goal_patch()
     _PATCHED = True
 
