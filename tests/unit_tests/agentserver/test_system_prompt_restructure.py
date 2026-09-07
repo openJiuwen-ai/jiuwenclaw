@@ -156,6 +156,8 @@ def _tool_call_ctx(
 def test_build_agent_identity_prompt_contains_stable_identity_and_task_strategy():
     prompt = build_agent_identity_prompt(language="zh")
 
+    assert "You are 小艺Work, a personal agent" in prompt
+    assert "小艺 work" not in prompt
     assert "# Identity" in prompt
     assert "# Task Execution Strategy" in prompt
     assert "# JiuwenSwarm 内部数据" not in prompt
@@ -164,6 +166,44 @@ def test_build_agent_identity_prompt_contains_stable_identity_and_task_strategy(
     assert "## Symphony Orchestration" not in prompt
     assert "`symphony_compose_score`" not in prompt
     assert "# 消息说明" not in prompt
+
+
+def test_work_code_and_design_share_the_same_static_prefix():
+    from jiuwenswarm.agents.harness.code.prompt.code_prompt_builder import (
+        build_code_system_prompt,
+    )
+    from jiuwenswarm.agents.harness.design.prompt.design_prompt_builder import (
+        build_design_system_prompt,
+    )
+
+    work_prompt = build_agent_identity_prompt(language="zh")
+    code_prompt = build_code_system_prompt()
+    design_prompt = build_design_system_prompt()
+    shared_prefix = work_prompt[: work_prompt.index("# Task Execution Strategy")]
+
+    assert code_prompt.startswith(shared_prefix)
+    assert design_prompt.startswith(shared_prefix)
+    assert code_prompt[len(shared_prefix) :].startswith("# Code mode")
+    assert design_prompt[len(shared_prefix) :].startswith("# Design mode")
+
+
+def test_design_mode_static_section_priorities_are_explicitly_ordered():
+    from jiuwenswarm.agents.harness.design.prompt.design_prompt_builder import (
+        DesignPromptPriority,
+    )
+
+    ordered = [
+        DesignPromptPriority.INTRO,
+        DesignPromptPriority.SYSTEM,
+        DesignPromptPriority.ROLE,
+        DesignPromptPriority.PRODUCT_FUNDAMENTALS,
+        DesignPromptPriority.BOUNDARIES,
+        DesignPromptPriority.INTERACTION_PRINCIPLES,
+        DesignPromptPriority.CORE_CAPABILITIES,
+    ]
+
+    assert ordered == sorted(ordered)
+    assert len(ordered) == len(set(ordered))
 
 
 @pytest.mark.asyncio
@@ -1040,6 +1080,7 @@ async def test_skill_retrieval_prompt_hides_legacy_list_skill(monkeypatch):
     prompt = builder.build()
     assert "旧 list_skill 提示" not in prompt
     assert "Agentic 技能检索" in prompt
+    assert builder.get_section(rail.SECTION_NAME).priority == 56
 
     await rail.after_model_call(ctx)
 
