@@ -11949,17 +11949,28 @@ class JiuWenSwarmDeepAdapter:
                     )
 
             def _finish_text(success: bool, detail: str = "") -> str:
-                # Fallback only (no DeepAgent interrupt): template text, not a new LLM call.
+                # HITL resume bypasses skill_acceleration_exec / DeliverySummaryRail.
+                # Emit the P10 skeleton (or a safe short sentence), never the
+                # machine artifact dump that used to land in the main bubble.
+                from jiuwenswarm.server.runtime.skill_turbo.skill_codes.ppt.delivery_summary import (
+                    DELIVERY_SUMMARY_START,
+                )
                 from jiuwenswarm.server.runtime.skill_turbo.skill_turbo_tools import (
-                    _build_artifact_summary,
+                    visible_ppt_turbo_finish_text,
                 )
-                summary = _build_artifact_summary(
-                    getattr(skill_turbo, "artifact_holder", None) or {}
+
+                text = visible_ppt_turbo_finish_text(
+                    getattr(skill_turbo, "artifact_holder", None) or {},
+                    success=success,
+                    detail=detail,
                 )
-                head = detail or ("任务已完成" if success else "任务未完成")
-                if summary:
-                    return f"{head}\n\n{summary}"
-                return head
+                if success and text.startswith(DELIVERY_SUMMARY_START):
+                    logger.info(
+                        "[SkillTurboResume] emitted PPT delivery summary via "
+                        "finish_text chars=%d",
+                        len(text),
+                    )
+                return text
 
             finish_text = ""
             try:
@@ -12021,10 +12032,12 @@ class JiuWenSwarmDeepAdapter:
                     payload={"event_type": "chat.delta", "content": finish_text},
                     is_complete=False,
                 )
+            # Body is already on delta. Empty final avoids RelayClaw
+            # computeFinalTextDelta appending a second copy.
             yield AgentResponseChunk(
                 request_id=rid,
                 channel_id=cid,
-                payload={"event_type": "chat.final", "content": finish_text or ""},
+                payload={"event_type": "chat.final", "content": ""},
                 is_complete=True,
             )
 
