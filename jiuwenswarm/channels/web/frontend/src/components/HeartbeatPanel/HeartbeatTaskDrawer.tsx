@@ -10,6 +10,7 @@ import { validateHeartbeatCronExpr } from './heartbeatCronValidation';
 import HeartbeatScheduleEditor from './HeartbeatScheduleEditor';
 import SimpleSelect from '../CronPanel/SimpleSelect';
 import { nowWallClock } from '../CronPanel/scheduleConvert';
+import { Switch } from '../Switch';
 
 const NAME_MAX_LENGTH = 64;
 const PROMPT_MAX_LENGTH = 2000;
@@ -76,6 +77,10 @@ export default function HeartbeatTaskDrawer({ mode, initial, meta, submitting, e
     value: p,
     label: t(`heartbeat.sessionDeletedPolicy.${p}`),
   }));
+
+  // once 模式只触发一次，「最大触发次数」没有意义，整块不显示，提交时也强制 null
+  const isOnce = form.schedule.kind === 'once';
+  const maxRunsUnlimited = form.maxRuns === null;
 
   const missingFieldLabels: string[] = [];
   if (!form.name.trim()) missingFieldLabels.push(t('heartbeat.drawer.fieldName'));
@@ -166,19 +171,36 @@ export default function HeartbeatTaskDrawer({ mode, initial, meta, submitting, e
           />
         </div>
       </div>
-      <div>
-        <label className="mb-1 block text-sm text-text-muted" title={t('heartbeat.drawer.fieldMaxRunsHint') ?? undefined}>
-          {t('heartbeat.drawer.fieldMaxRuns')}
-        </label>
-        <input
-          type="number"
-          min={1}
-          value={form.maxRuns ?? ''}
-          placeholder={t('heartbeat.drawer.fieldMaxRunsUnlimited') ?? ''}
-          onChange={(e) => setForm({ ...form, maxRuns: e.target.value === '' ? null : Math.max(1, Number(e.target.value)) })}
-          className="w-32 rounded-md border border-border bg-card px-2 py-1.5 text-sm"
-        />
-      </div>
+      {!isOnce && (
+        <div data-testid="heartbeat-panel-max-runs-field">
+          <label className="mb-1 block text-sm text-text-muted" title={t('heartbeat.drawer.fieldMaxRunsHint') ?? undefined} data-testid="heartbeat-panel-max-runs-label">
+            {t('heartbeat.drawer.fieldMaxRuns')}
+          </label>
+          {/* 单行：次数输入框在前，「不限次数」开关在后。开关打开 → maxRuns=null，输入框仍显示但禁用、
+              清空、置灰（不再渲染在开关前会太挤，保留输入框让布局稳定）。关闭 → 恢复默认次数并可编辑。 */}
+          <div className="flex items-center gap-2">
+            <input
+              type="number"
+              min={1}
+              value={maxRunsUnlimited ? '' : (form.maxRuns ?? '')}
+              disabled={maxRunsUnlimited}
+              onChange={(e) => setForm({ ...form, maxRuns: e.target.value === '' ? null : Math.max(1, Number(e.target.value)) })}
+              className="w-24 rounded-md border border-border bg-card px-2 py-1.5 text-sm disabled:cursor-not-allowed disabled:bg-bg-muted disabled:opacity-60"
+              data-testid="heartbeat-panel-max-runs-input"
+            />
+            <Switch
+              checked={maxRunsUnlimited}
+              onChange={(unlimited) =>
+                setForm({ ...form, maxRuns: unlimited ? null : (form.maxRuns ?? meta.limits.default_max_runs) })
+              }
+              title={t('heartbeat.drawer.fieldMaxRunsUnlimitedOption') ?? undefined}
+            />
+            <span className="text-sm text-text-muted" data-testid="heartbeat-panel-max-runs-unlimited-label">
+              {t('heartbeat.drawer.fieldMaxRunsUnlimitedOption')}
+            </span>
+          </div>
+        </div>
+      )}
 
       {error && <p className="text-sm text-red-500">{error}</p>}
       {!error && scheduleExpired && (
@@ -199,7 +221,11 @@ export default function HeartbeatTaskDrawer({ mode, initial, meta, submitting, e
         <button
           type="button"
           disabled={!canSubmit}
-          onClick={() => onSubmit(form)}
+          onClick={() => onSubmit({
+            ...form,
+            // once 只触发一次，max_runs 无意义，一律传 null（不限触发）
+            maxRuns: form.schedule.kind === 'once' ? null : form.maxRuns,
+          })}
           className="rounded-full bg-cron-action px-6 py-1.5 text-sm font-bold text-cron-action-foreground hover:bg-cron-action-hover disabled:cursor-not-allowed disabled:opacity-60"
         >
           {mode === 'create' ? t('heartbeat.drawer.submitCreate') : t('heartbeat.drawer.submitUpdate')}
