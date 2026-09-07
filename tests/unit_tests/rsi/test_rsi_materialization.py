@@ -542,6 +542,8 @@ def test_task_service_materializes_private_validation_inputs_and_keeps_manifest_
     with pytest.raises(RuntimeError, match="evaluation-startup-canary"):
         asyncio.run(provider.run(request))
     assert len(evaluated) == 1
+    assert Path(evaluated[0]["output_dir"]).name == "frozen_baseline"
+    assert evaluated[0]["node_ref"] == "h0"
     assert task.config["dataset_id"] == "single_harness_benchmark"
     assert "api_key" not in (task_root / "task.json").read_text(encoding="utf-8")
     assert (task_root / "models" / "evaluation.yaml").is_file()

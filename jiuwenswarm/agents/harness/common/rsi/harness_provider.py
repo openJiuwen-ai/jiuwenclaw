@@ -189,12 +189,19 @@ class HarnessProvider:
         self._validate_materialized_paths(request)
         self._verify_task_materials(request, resume=resume)
         orchestrator = self._resolve_orchestrator(request)
+        # New tasks measure H0 first; resumes retain their original protocol.
+        previous_state = self._read_state_dict(request.task_id) if resume else {}
+        auto_full_baseline = (
+            bool(previous_state.get("fingerprint", {}).get("auto_full_baseline", False))
+            if previous_state else True
+        )
         engine_request_kwargs: dict[str, Any] = {
             "dataset_files": [str(item) for item in request.dataset_files],
             "harness_refs_path": request.harness_refs_path,
             "output_dir": str(Path(request.output_dir).expanduser()),
             "dataset_id": request.dataset_id or "single_harness_benchmark",
             "resume": resume,
+            "auto_full_baseline": auto_full_baseline,
         }
         if "task_id" in inspect.signature(IterativeSingleHarnessRequest).parameters:
             engine_request_kwargs["task_id"] = request.task_id
@@ -226,13 +233,14 @@ class HarnessProvider:
         gates = _gates(state)
         best = _best_gate(gates)
         status = str(state.get("status") or "created").lower()
-        iteration = len(gates)
+        iteration = len(state.get("epoch_checkpoints", [])) if "max_iteration" in state else len(gates)
+        total_iterations = int(state.get("max_iteration") or max(1, iteration))
         baseline = self._baseline_score(task_id, state)
         return EngineState(
             task_id=task_id,
             status=status,
             iteration=iteration,
-            total_iterations=max(1, iteration),
+            total_iterations=total_iterations,
             best_node_id=_gate_node_id(best),
             score=_number(state.get("best_score")),
             baseline=baseline,
