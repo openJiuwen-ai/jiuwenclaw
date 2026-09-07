@@ -91,11 +91,17 @@ build_and_package() {
 
 usage() {
   cat <<EOF
-Usage: $(basename "$0") [all|x86_64|arm64]
+Usage: $(basename "$0") [TARGET]
 
-  all      Build and package linux x86_64 + arm64 (default)
-  x86_64   Build and package linux x86_64 only
-  arm64    Build and package linux arm64 only
+  x86_64   linux/amd64 (default on x86_64/amd64 host)
+  amd64    alias for x86_64
+  arm64    linux/arm64 (default on aarch64/arm64 host)
+  aarch64  alias for arm64
+  all      build both x86_64 + arm64 (requires cross-toolchain)
+
+If TARGET is omitted, defaults to the current host arch via uname -m.
+Pass 'all' explicitly to build both — not the default, because one host
+typically can't cross-compile both arches without extra toolchain.
 
 Environment:
   VERSION  Release version tag (default: git describe or "dev")
@@ -106,7 +112,7 @@ EOF
 }
 
 main() {
-  local mode="${1:-all}"
+  local mode="${1:-$(uname -m)}"
   require_go
   rm -rf "$DIST"
   mkdir -p "$DIST"
