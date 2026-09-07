@@ -210,6 +210,7 @@
       "savedRestartRequired": "Saved; takes effect after restart",
       "validationOk": "Connection test passed",
       "validationFailed": "Connection test failed",
+      "validationFailedWithDetail": "Connection test failed: {{detail}}",
       "testingConnection": "Testing connection…",
       "savingModel": "Saving…",
       "validationBeforeSaveTitle": "Connection test failed",
