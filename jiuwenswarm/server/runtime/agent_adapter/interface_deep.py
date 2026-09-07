@@ -18486,8 +18486,6 @@ class JiuWenSwarmDeepAdapter:
                     if inner_t is None and isinstance(payload, dict):
                         inner_t = payload.get("type")
                     inner_val = getattr(inner_t, "value", inner_t) if inner_t is not None else None
-                    if inner_val == "task_completion":
-                        return None
                     if inner_val == "task_failed":
                         data = getattr(payload, "data", None)
                         if data is None and isinstance(payload, dict):
@@ -18511,6 +18509,20 @@ class JiuWenSwarmDeepAdapter:
                                 "任务执行失败",
                             )
                         return {"event_type": "chat.error", "error": error or "任务执行失败"}
+                    # Close the controller_output enum: HITL cards are emitted via
+                    # ``__interaction__``; remaining types are control-plane metadata.
+                    # Never fall through to ``str(payload)`` → chat.delta (ISSUE #3892).
+                    if inner_val not in (
+                        "task_completion",
+                        "task_interaction",
+                        "processing",
+                        "all_tasks_processed",
+                    ):
+                        logger.debug(
+                            "[interface_deep] drop unhandled controller_output type=%r",
+                            inner_val,
+                        )
+                    return None
 
                 if chunk_type == "llm_output":
                     content = (
