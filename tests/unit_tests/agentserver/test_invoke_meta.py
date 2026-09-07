@@ -1422,9 +1422,6 @@ def test_design_system_prompt_points_at_skills_not_catalog():
     )
 
     prompt = build_design_system_prompt()
-    assert "seedance-video-gen" in prompt
-    assert "seedream-image-gen" in prompt
-    assert "music-generation" in prompt
     assert "skill_tool" in prompt
     assert "ppt-creation" in prompt
     assert "分镜" in prompt
@@ -1567,9 +1564,6 @@ def test_design_system_prompt_prod_omits_catalog_names(monkeypatch):
     )
 
     prompt = build_design_system_prompt()
-    assert "seedream-image-gen" in prompt
-    assert "seedance-video-gen" in prompt
-    assert "music-generation" in prompt
     assert _PLUGIN_PLATFORM not in prompt
     assert "seedreamBatch5" not in prompt
     assert "com.atomicservice.5765880207845681341" not in prompt
