@@ -1744,6 +1744,11 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
    * 前置条件（历史加载中/Team 模式/Goal 续跑中都不动这个状态），不能只搬动作不搬护栏。
    */
   const heartbeatSessionCloseHandledRunIdsRef = useRef<Set<string>>(new Set());
+  // bug003：Heartbeat 自动轮「开始」时（processing_status=true 带 automation）要刷新一次
+  // 心跳面板列表（此时后端已推进 next_run_at 并置 running）。后端可能对同一 run 重复
+  // 下发 processing=true 帧，这里按 run_id 去重，保证每轮只触发一次列表刷新；
+  // Set 会随页面生命周期存在，run_id 含时间戳+随机后缀，不会碰撞，规模也无泄漏之忧。
+  const heartbeatStartRefreshedRunIdsRef = useRef<Set<string>>(new Set());
   const closeHeartbeatSessionState = useCallback((sessionId: string, runId: string) => {
     if (heartbeatSessionCloseHandledRunIdsRef.current.has(runId)) return;
     heartbeatSessionCloseHandledRunIdsRef.current.add(runId);
@@ -3556,6 +3561,14 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         // 不走全局 currentStreamId，避免覆盖上一条普通回答。
         const hbAutomation = extractAutomation(payload);
         if (hbAutomation && isProcessingNow) {
+          // bug003：触发瞬间后端 claim_run 已推进 next_run_at 并把 job 置 running，
+          // 这里立即派发一次心跳列表刷新（面板没打开时没有 listener，事件本身无副作用），
+          // 让卡片上的「下次触发时间/状态」在本轮执行期间就更新，而不是等本轮结束。
+          // 同一 run 可能收到重复的 processing=true 帧，按 run_id 去重只刷一次。
+          if (!heartbeatStartRefreshedRunIdsRef.current.has(hbAutomation.run_id)) {
+            heartbeatStartRefreshedRunIdsRef.current.add(hbAutomation.run_id);
+            window.dispatchEvent(new CustomEvent('heartbeat-list-refresh', { detail: { sessionId } }));
+          }
           const userMsgId = heartbeatUserMessageId(hbAutomation.run_id);
           const prompt = typeof payload.content === 'string' ? payload.content : '';
           const existing = useChatStore.getState().getRuntime(sessionId)?.messages.find((m) => m.id === userMsgId);
