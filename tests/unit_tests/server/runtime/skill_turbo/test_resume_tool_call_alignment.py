@@ -231,3 +231,62 @@ class TestConsumePendingResumeIdxComparison:
             "skill_turbo-tc-ask_user-cccccccc-1", "ask_user"
         )
         assert r1 == ("answer_for_second", expected_tcid)
+
+
+class TestNextToolCallIdSessionSalt:
+    """Parallel sessions with identical ask_user args must not share tcids.
+
+    Repro: officeclaw_0e5efc… / officeclaw_9fe0e6… both used
+    ``skill_turbo-tc-ask_user-18cefd55-0``; answering one card routed via the
+    other session's chat/invocation and left the first stuck on style HITL.
+    """
+
+    def test_same_args_different_sessions_produce_different_tcids(self):
+        kwargs = {
+            "questions": [
+                {
+                    "header": "风格",
+                    "question": "请选择演示文稿的视觉风格",
+                    "options": [{"label": "商务经典"}],
+                }
+            ]
+        }
+        ex_a = _make_executor()
+        ex_b = _make_executor()
+        ex_a._tool_call_id_session_salt = lambda: (  # type: ignore[method-assign]
+            "officeclaw_0e5efc02734bd87226d7e412"
+        )
+        ex_b._tool_call_id_session_salt = lambda: (  # type: ignore[method-assign]
+            "officeclaw_9fe0e6f1f726728808aa3757"
+        )
+        tcid_a = ex_a._next_tool_call_id("ask_user", kwargs)
+        tcid_b = ex_b._next_tool_call_id("ask_user", kwargs)
+        assert tcid_a != tcid_b
+        assert tcid_a.startswith("skill_turbo-tc-ask_user-")
+        assert tcid_b.startswith("skill_turbo-tc-ask_user-")
+        assert tcid_a.endswith("-0")
+        assert tcid_b.endswith("-0")
+
+    def test_same_session_replay_is_deterministic(self):
+        kwargs = {"questions": [{"question": "目标受众是谁？"}]}
+        ex = _make_executor()
+        ex._tool_call_id_session_salt = (  # type: ignore[method-assign]
+            lambda: "officeclaw_9fe0e6f1f726728808aa3757"
+        )
+        first = ex._next_tool_call_id("ask_user", kwargs)
+        # New executor instance (fresh counter) with same session → same hash-0
+        ex2 = _make_executor()
+        ex2._tool_call_id_session_salt = (  # type: ignore[method-assign]
+            lambda: "officeclaw_9fe0e6f1f726728808aa3757"
+        )
+        again = ex2._next_tool_call_id("ask_user", kwargs)
+        assert first == again
+
+    def test_parser_still_extracts_tool_name_with_salted_hash(self):
+        ex = _make_executor()
+        ex._tool_call_id_session_salt = (  # type: ignore[method-assign]
+            lambda: "officeclaw_session_salt_demo"
+        )
+        tcid = ex._next_tool_call_id("ask_user", {"questions": [{"q": "x"}]})
+        assert _parse_tool_name_from_call_id(tcid) == "ask_user"
+        assert _parse_call_idx_from_call_id(tcid) == 0

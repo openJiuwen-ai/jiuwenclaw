@@ -1520,20 +1520,41 @@ class SkillTurboExecutor:
             return user_input, aligned_id
         return None, current_tool_call_id
 
+    def _tool_call_id_session_salt(self) -> str:
+        """Session salt for tool_call_id hashing.
+
+        ask_user questions are often identical across parallel PPT runs, so a
+        pure args hash collides (e.g. ``skill_turbo-tc-ask_user-18cefd55-0``).
+        Upper-layer ask-resume drafts key by tcid alone and then route answers
+        to the wrong session. Mixing session_id into the hash keeps the
+        ``skill_turbo-tc-{tool}-{hash}-{idx}`` wire format while making tcids
+        session-local.
+        """
+        sid = self._tool_trace_session_id()
+        if sid:
+            return sid
+        return self._session_id(_session_var.get())
+
     def _next_tool_call_id(self, tool_name: str, kwargs: dict[str, Any]) -> str:
-        """生成确定性 tool_call_id：基于 (tool_name, canonical_args, call_index) 哈希。
+        """生成确定性 tool_call_id：基于 (session, tool_name, canonical_args, call_index) 哈希。
 
-        - canonical_args：``json.dumps(sort_keys, default=str)`` 后取 sha1[:8]
-        - call_index：本次执行内同 (name, args) 的第几次调用（从 0 起算）
+        - canonical_args：``json.dumps(sort_keys, default=str)``，再与 session salt
+          一并 sha1[:8]（无 session 时退化为纯 args，兼容测试/无会话场景）
+        - call_index：本次执行内同 (name, hash) 的第几次调用（从 0 起算）
 
-        重放时只要 plan_code+inputs 一致，相同顺序的同名同参调用必然得到同样的 id；
-        与 ``PermissionInterruptRail`` 的 ``user_inputs[tool_call_id]`` 对应即可命中。
+        同 session 重放时只要 plan_code+inputs 一致，相同顺序的同名同参调用必然
+        得到同样的 id；与 ``PermissionInterruptRail`` 的
+        ``user_inputs[tool_call_id]`` 对应即可命中。
         """
         try:
             args_canonical = json.dumps(kwargs, sort_keys=True, default=str)
         except (TypeError, ValueError):
             args_canonical = repr(sorted(kwargs.items()))
-        args_hash = hashlib.sha1(args_canonical.encode("utf-8")).hexdigest()[:8]
+        session_salt = self._tool_call_id_session_salt()
+        hash_material = (
+            f"{session_salt}|{args_canonical}" if session_salt else args_canonical
+        )
+        args_hash = hashlib.sha1(hash_material.encode("utf-8")).hexdigest()[:8]
         key = f"{tool_name}|{args_hash}"
         idx = self._tool_call_counter.get(key, 0)
         self._tool_call_counter[key] = idx + 1

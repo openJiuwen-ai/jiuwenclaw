@@ -53,6 +53,7 @@ from jiuwenswarm.common.schema.ask_user import normalize_ask_user_response
 from jiuwenswarm.common.chat_final import (
     ensure_final_mode_inplace,
     fill_reasoning_only_empty_final_content,
+    fill_silent_complete_visible_reply,
 )
 from jiuwenswarm.extensions.hook_event import AgentServerHookEvents
 from jiuwenswarm.extensions.hooks_context import MemoryHookContext
@@ -362,6 +363,50 @@ def _should_defer_a2ui_processing_status(
         and event_type == "chat.processing_status"
         and payload.get("is_processing") is False
     )
+
+
+def _should_facade_silent_complete_rescue(
+    *,
+    is_team_mode: bool,
+    suppress_a2ui_stream: bool,
+    saw_invocation_paused: bool,
+    has_facade_visible_text: bool,
+    request_params: Any,
+    deferred_terminal_has_event: bool = False,
+    saw_chat_error: bool = False,
+) -> bool:
+    """Whether facade should synthesize a short visible reply for a blank turn.
+
+    Skip when a deferred ``is_complete`` chunk already carries a named
+    ``event_type`` (e.g. ``chat.done``): that is a real terminal frame, not a
+    silent blank complete that needs a short-reply rescue.
+
+    Skip after ``chat.error``: forging a short assistant reply would leave
+    history with both the failure and a misleading "no visible reply" message.
+    """
+    if is_team_mode:
+        return False
+    if suppress_a2ui_stream:
+        return False
+    if saw_invocation_paused:
+        return False
+    if saw_chat_error:
+        return False
+    if has_facade_visible_text:
+        return False
+    if deferred_terminal_has_event:
+        return False
+    if isinstance(request_params, dict) and request_params.get("attach_goal") is True:
+        return False
+    return True
+
+
+def _deferred_terminal_has_event_type(chunk: AgentResponseChunk | None) -> bool:
+    """True when a deferred terminal chunk already names a stream event."""
+    if chunk is None:
+        return False
+    payload = chunk.payload
+    return isinstance(payload, dict) and bool(payload.get("event_type"))
 
 
 def _is_duplicate_full_body_delta(pending_chunks: list[str], content: str) -> bool:
@@ -3071,6 +3116,9 @@ class JiuWenSwarm:
         final_answer_content = ""
         final_answer_chunks: list[str] = []
         facade_emitted_terminal_chunk = False
+        saw_invocation_paused = False
+        saw_chat_error = False
+        deferred_terminal_chunk: AgentResponseChunk | None = None
         durable_pending_final_chunks: list[str] = []
         durable_pending_reasoning_chunks: list[str] = []
         durable_final_content = ""
@@ -3254,6 +3302,7 @@ class JiuWenSwarm:
                         mode=request.params.get("mode", "unknown"),
                         extra={"error_type": error_type} if error_type else None,
                     )
+                    saw_chat_error = True
                     yield AgentResponseChunk(
                         request_id=rid,
                         channel_id=cid,
@@ -3268,6 +3317,10 @@ class JiuWenSwarm:
                                 continue
                         if isinstance(data.payload, dict) and isinstance(data.payload.get("event_type"), str):
                             et = str(data.payload.get("event_type"))
+                            if et in {"chat.invocation_paused", "chat.ask_user_question"}:
+                                saw_invocation_paused = True
+                            if et == "chat.error":
+                                saw_chat_error = True
                             should_record = et.startswith("chat.") or et.startswith("task.")
                             if not should_record and et == EventType.TEAM_MESSAGE.value:
                                 should_record = True
@@ -3465,10 +3518,17 @@ class JiuWenSwarm:
                                     data.payload["content"] = ""
                                     final_answer_content = ""
                         if data.is_complete:
-                            facade_emitted_terminal_chunk = True
+                            # Defer WS is_final until after silent-complete rescue.
+                            # Yielding is_complete=True here closes RelayClaw's
+                            # FrameQueue; any later chat.delta is late-delivery
+                            # and dropped (history has the short reply, UI blank).
+                            deferred_terminal_chunk = data
+                            continue
                         yield data
                     elif isinstance(data, dict) and isinstance(data.get("event_type"), str):
                         et = str(data.get("event_type"))
+                        if et in {"chat.invocation_paused", "chat.ask_user_question"}:
+                            saw_invocation_paused = True
                         merged_from_deltas = False
                         should_record = et.startswith("chat.") or et.startswith("task.")
                         if not should_record and et == EventType.TEAM_MESSAGE.value:
@@ -3714,6 +3774,85 @@ class JiuWenSwarm:
                 content=finalized_assistant_message,
             )
 
+        # Facade silent-complete rescue: deep may finish without chat.delta /
+        # chat.final (tool/todo-only or skipped stream-end). Non-team hosts only
+        # render visible body from chat.delta (or non-empty final backfill).
+        has_facade_visible_text = bool(
+            str(final_answer_content or "").strip()
+            or "".join(final_answer_chunks).strip()
+            or "".join(durable_pending_final_chunks).strip()
+            or str(durable_final_content or "").strip()
+        )
+        if _should_facade_silent_complete_rescue(
+            is_team_mode=is_team_mode,
+            suppress_a2ui_stream=suppress_a2ui_stream,
+            saw_invocation_paused=saw_invocation_paused,
+            has_facade_visible_text=has_facade_visible_text,
+            request_params=request.params,
+            deferred_terminal_has_event=_deferred_terminal_has_event_type(
+                deferred_terminal_chunk
+            ),
+            saw_chat_error=saw_chat_error,
+        ):
+            silent_text = fill_silent_complete_visible_reply(
+                content="",
+                has_visible_streamed_text=False,
+                lang=str(get_config().get("preferred_language", "zh")),
+            )
+            if str(silent_text or "").strip():
+                logger.info(
+                    "[JiuWenSwarm] synthesized silent-complete visible reply: "
+                    "request_id=%s",
+                    rid,
+                )
+                self._append_history_record(
+                    session_id=session_id,
+                    request_id=rid,
+                    channel_id=cid,
+                    role="assistant",
+                    event_type="chat.final",
+                    content=silent_text,
+                    timestamp=time.time(),
+                    extra=_attach_reasoning_content({
+                        k: v for k, v in request.params.items()
+                        if k in ("source", "proactive_type", "proactive_target")
+                    }),
+                    mode=request.params.get("mode", "unknown"),
+                )
+                final_answer_content = silent_text
+                yield AgentResponseChunk(
+                    request_id=rid,
+                    channel_id=cid,
+                    payload={"event_type": "chat.delta", "content": silent_text},
+                    is_complete=False,
+                )
+                final_payload = {
+                    "event_type": "chat.final",
+                    "content": "",
+                }
+                ensure_final_mode_inplace(final_payload)
+                yield AgentResponseChunk(
+                    request_id=rid,
+                    channel_id=cid,
+                    payload=final_payload,
+                    is_complete=False,
+                )
+
+        # Emit terminal before post-chat hooks so RelayClaw can close the
+        # FrameQueue even if MEMORY_AFTER_CHAT / reload raises or runs slowly.
+        # Silent-complete / A2UI finals above still precede is_complete (no
+        # late-delivery of rescue deltas).
+        if deferred_terminal_chunk is not None:
+            facade_emitted_terminal_chunk = True
+            yield deferred_terminal_chunk
+        elif not facade_emitted_terminal_chunk:
+            yield AgentResponseChunk(
+                request_id=rid,
+                channel_id=cid,
+                payload={"is_complete": True},
+                is_complete=True,
+            )
+
         # cloud memory: after chat hook
         if memory_mode == "cloud":
             assistant_message = final_answer_content or "".join(final_answer_chunks)
@@ -3737,13 +3876,6 @@ class JiuWenSwarm:
 
         _schedule_symphony_session_feedback(session_id, rid)
         await self._try_apply_adapter_pending_reload()
-        if not facade_emitted_terminal_chunk:
-            yield AgentResponseChunk(
-                request_id=rid,
-                channel_id=cid,
-                payload={"is_complete": True},
-                is_complete=True,
-            )
 
     # ---------- 实例获取 ----------
 

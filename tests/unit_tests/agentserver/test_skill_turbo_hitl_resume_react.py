@@ -270,15 +270,25 @@ async def test_mark_resume_in_flight_persists_across_sessions():
     checkpoint: dict = {}
 
     class _CheckpointSession:
+        """Mirrors SDK Session: post_run is one-shot; commit is repeatable."""
+
         def __init__(self):
             self._state: dict = {}
+            self._post_run_done = False
 
         async def pre_run(self, inputs=None):
             self._state = copy.deepcopy(checkpoint)
 
-        async def post_run(self):
+        async def commit(self):
             checkpoint.clear()
             checkpoint.update(copy.deepcopy(self._state))
+
+        async def post_run(self):
+            if self._post_run_done:
+                return self
+            await self.commit()
+            self._post_run_done = True
+            return self
 
         def update_state(self, mapping):
             self._state.update(mapping)
@@ -307,6 +317,370 @@ async def test_mark_resume_in_flight_persists_across_sessions():
     assert again is not None
     assert again.get("resume_in_flight") is True
     assert again.get("pending_tool_call_id") == "skill_turbo-tc-ask_user-1"
+
+
+@pytest.mark.asyncio
+async def test_clear_resume_in_flight_persists_after_same_session_post_run():
+    """clear must commit even when mark already post_run'd the same Session.
+
+    Production SDK Session.post_run is one-shot (_post_run_done). Resume marks
+    via post_run, then finally clears on the same instance — clear must use
+    commit (or equivalent) so the unlocked flag reaches checkpointer.
+    """
+    checkpoint: dict = {}
+
+    class _CheckpointSession:
+        def __init__(self):
+            self._state: dict = {}
+            self._pre_run_done = False
+            self._post_run_done = False
+            self.commit_calls = 0
+            self.post_run_calls = 0
+
+        async def pre_run(self, inputs=None):
+            if self._pre_run_done:
+                return
+            self._state = copy.deepcopy(checkpoint)
+            self._pre_run_done = True
+
+        async def reload_from_checkpointer(self, inputs=None):
+            self._pre_run_done = False
+            await self.pre_run(inputs=inputs)
+
+        async def commit(self):
+            self.commit_calls += 1
+            checkpoint.clear()
+            checkpoint.update(copy.deepcopy(self._state))
+
+        async def post_run(self):
+            self.post_run_calls += 1
+            if self._post_run_done:
+                return self
+            await self.commit()
+            self._post_run_done = True
+            return self
+
+        def update_state(self, mapping):
+            self._state.update(mapping)
+
+        def get_state(self, key):
+            return self._state.get(key)
+
+    from jiuwenswarm.server.runtime.skill_turbo.permission_bridge import (
+        clear_resume_in_flight,
+    )
+
+    session = _CheckpointSession()
+    await session.pre_run()
+    await mark_resume_in_flight(
+        session,
+        {
+            "plan_code": "plan-x",
+            "pending_tool_call_id": "skill_turbo-tc-ask_user-1",
+            "inputs": {},
+        },
+    )
+    assert session._post_run_done is True
+    assert checkpoint.get(SKILL_TURBO_RESUME_CTX_KEY, {}).get("resume_in_flight") is True
+
+    await clear_resume_in_flight(session)
+    assert session.commit_calls >= 2  # mark's post_run + clear's commit
+    assert session._state[SKILL_TURBO_RESUME_CTX_KEY]["resume_in_flight"] is False
+
+    loaded = await load_resume_ctx(_CheckpointSession())
+    assert loaded is not None
+    assert loaded.get("resume_in_flight") is not True
+    assert loaded.get("pending_tool_call_id") == "skill_turbo-tc-ask_user-1"
+
+
+@pytest.mark.asyncio
+async def test_clear_resume_in_flight_does_not_clobber_nested_save_from_other_session():
+    """Facade clear must not overwrite executor's nested HITL pending tcid.
+
+    Production: S1 (interface_deep mark) keeps audience tcid in memory; S2
+    (executor) save_resume_ctx commits style tcid. HITL abort finally calls
+    clear_resume_in_flight(S1) — without reloading checkpointer first, S1 would
+    commit the stale audience pending and re-pop the same ask cards.
+    """
+    checkpoint: dict = {}
+
+    class _CheckpointSession:
+        def __init__(self):
+            self._state: dict = {}
+            self._pre_run_done = False
+            self._post_run_done = False
+            self.commit_calls = 0
+
+        async def pre_run(self, inputs=None):
+            if self._pre_run_done:
+                return
+            self._state = copy.deepcopy(checkpoint)
+            self._pre_run_done = True
+
+        async def reload_from_checkpointer(self, inputs=None):
+            self._pre_run_done = False
+            await self.pre_run(inputs=inputs)
+
+        async def commit(self):
+            self.commit_calls += 1
+            checkpoint.clear()
+            checkpoint.update(copy.deepcopy(self._state))
+
+        async def post_run(self):
+            if self._post_run_done:
+                return self
+            await self.commit()
+            self._post_run_done = True
+            return self
+
+        def update_state(self, mapping):
+            self._state.update(mapping)
+
+        def get_state(self, key):
+            return self._state.get(key)
+
+    from jiuwenswarm.server.runtime.skill_turbo.permission_bridge import (
+        clear_resume_in_flight,
+        save_resume_ctx,
+    )
+
+    audience = "skill_turbo-tc-ask_user-762c356d-0"
+    style = "skill_turbo-tc-ask_user-18cefd55-0"
+
+    s1 = _CheckpointSession()
+    await s1.pre_run()
+    await mark_resume_in_flight(
+        s1,
+        {
+            "plan_code": "plan-audience",
+            "pending_tool_call_id": audience,
+            "inputs": {"q": "audience"},
+        },
+    )
+    assert checkpoint[SKILL_TURBO_RESUME_CTX_KEY]["pending_tool_call_id"] == audience
+    assert s1._state[SKILL_TURBO_RESUME_CTX_KEY]["pending_tool_call_id"] == audience
+
+    s2 = _CheckpointSession()
+    await s2.pre_run()
+    await save_resume_ctx(
+        s2,
+        plan_code="plan-style",
+        inputs={"q": "style"},
+        pending_tool_call_id=style,
+    )
+    assert checkpoint[SKILL_TURBO_RESUME_CTX_KEY]["pending_tool_call_id"] == style
+    assert checkpoint[SKILL_TURBO_RESUME_CTX_KEY]["resume_in_flight"] is False
+    # S1 memory still holds the stale audience mark
+    assert s1._state[SKILL_TURBO_RESUME_CTX_KEY]["pending_tool_call_id"] == audience
+
+    commits_before_clear = s1.commit_calls
+    await clear_resume_in_flight(s1)
+    # Nested save already cleared in_flight — clear must not re-commit S1 stale memory
+    assert s1.commit_calls == commits_before_clear
+    assert checkpoint[SKILL_TURBO_RESUME_CTX_KEY]["pending_tool_call_id"] == style
+    assert checkpoint[SKILL_TURBO_RESUME_CTX_KEY]["resume_in_flight"] is False
+
+    loaded = await load_resume_ctx(_CheckpointSession())
+    assert loaded is not None
+    assert loaded.get("pending_tool_call_id") == style
+    assert loaded.get("resume_in_flight") is not True
+
+
+@pytest.mark.asyncio
+async def test_save_resume_ctx_persists_nested_tcid_after_same_session_post_run():
+    """Nested ask_user must persist the new pending tcid after mark's post_run.
+
+    Without commit(), save_resume_ctx's post_run is a no-op on the resume Session,
+    so the next answer still loads the old audience tcid and re-pops the same cards.
+    """
+    checkpoint: dict = {}
+
+    class _CheckpointSession:
+        def __init__(self):
+            self._state: dict = {}
+            self._post_run_done = False
+            self.commit_calls = 0
+
+        async def pre_run(self, inputs=None):
+            self._state = copy.deepcopy(checkpoint)
+
+        async def commit(self):
+            self.commit_calls += 1
+            checkpoint.clear()
+            checkpoint.update(copy.deepcopy(self._state))
+
+        async def post_run(self):
+            if self._post_run_done:
+                return self
+            await self.commit()
+            self._post_run_done = True
+            return self
+
+        def update_state(self, mapping):
+            self._state.update(mapping)
+
+        def get_state(self, key):
+            return self._state.get(key)
+
+    from jiuwenswarm.server.runtime.skill_turbo.permission_bridge import save_resume_ctx
+
+    session = _CheckpointSession()
+    await session.pre_run()
+    await mark_resume_in_flight(
+        session,
+        {
+            "plan_code": "plan-x",
+            "pending_tool_call_id": "skill_turbo-tc-ask_user-762c356d-0",
+            "inputs": {"topic": "杭州旅游"},
+        },
+    )
+    assert session._post_run_done is True
+    assert (
+        checkpoint[SKILL_TURBO_RESUME_CTX_KEY]["pending_tool_call_id"]
+        == "skill_turbo-tc-ask_user-762c356d-0"
+    )
+
+    commits_before_nested = session.commit_calls
+    await save_resume_ctx(
+        session,
+        plan_code="plan-x",
+        inputs={"topic": "杭州旅游"},
+        pending_tool_call_id="skill_turbo-tc-ask_user-18cefd55-0",
+        task_states=[{"id": "t1", "status": "in_progress"}],
+    )
+    assert session.commit_calls > commits_before_nested
+    assert (
+        checkpoint[SKILL_TURBO_RESUME_CTX_KEY]["pending_tool_call_id"]
+        == "skill_turbo-tc-ask_user-18cefd55-0"
+    )
+    assert checkpoint[SKILL_TURBO_RESUME_CTX_KEY].get("resume_in_flight") is not True
+
+    loaded = await load_resume_ctx(_CheckpointSession())
+    assert loaded is not None
+    assert loaded.get("pending_tool_call_id") == "skill_turbo-tc-ask_user-18cefd55-0"
+
+
+@pytest.mark.asyncio
+async def test_clear_resume_ctx_persists_after_same_session_post_run():
+    """clear_resume_ctx must commit after mark's one-shot post_run."""
+    checkpoint: dict = {}
+
+    class _CheckpointSession:
+        def __init__(self):
+            self._state: dict = {}
+            self._post_run_done = False
+            self.commit_calls = 0
+
+        async def pre_run(self, inputs=None):
+            self._state = copy.deepcopy(checkpoint)
+
+        async def commit(self):
+            self.commit_calls += 1
+            checkpoint.clear()
+            checkpoint.update(copy.deepcopy(self._state))
+
+        async def post_run(self):
+            if self._post_run_done:
+                return self
+            await self.commit()
+            self._post_run_done = True
+            return self
+
+        def update_state(self, mapping):
+            self._state.update(mapping)
+
+        def get_state(self, key):
+            return self._state.get(key)
+
+    from jiuwenswarm.server.runtime.skill_turbo.permission_bridge import clear_resume_ctx
+
+    session = _CheckpointSession()
+    await session.pre_run()
+    await mark_resume_in_flight(
+        session,
+        {
+            "plan_code": "plan-x",
+            "pending_tool_call_id": "skill_turbo-tc-ask_user-1",
+            "inputs": {},
+        },
+    )
+    assert SKILL_TURBO_RESUME_CTX_KEY in checkpoint
+
+    await clear_resume_ctx(session)
+    # Caller-style second post_run must not be required for persistence.
+    await session.post_run()
+    assert checkpoint.get(SKILL_TURBO_RESUME_CTX_KEY) in (None, {})
+    assert await load_resume_ctx(_CheckpointSession()) is None
+
+
+@pytest.mark.asyncio
+async def test_save_resume_ctx_clears_stale_in_flight_flag_on_nested_hitl():
+    """Nested ask_user save must not keep the prior resume's in_flight flag.
+
+    Deep-merge ``update_state`` would otherwise leave resume_in_flight=True on
+    the new pending tcid and the user's next answer becomes a duplicate no-op.
+    """
+    checkpoint: dict = {}
+
+    class _MergingCheckpointSession:
+        def __init__(self):
+            self._state: dict = {}
+            self._post_run_done = False
+
+        async def pre_run(self, inputs=None):
+            self._state = copy.deepcopy(checkpoint)
+
+        async def commit(self):
+            checkpoint.clear()
+            checkpoint.update(copy.deepcopy(self._state))
+
+        async def post_run(self):
+            if self._post_run_done:
+                return self
+            await self.commit()
+            self._post_run_done = True
+            return self
+
+        def update_state(self, mapping):
+            for key, value in mapping.items():
+                existing = self._state.get(key)
+                if isinstance(existing, dict) and isinstance(value, dict):
+                    self._state[key] = {**existing, **value}
+                else:
+                    self._state[key] = value
+
+        def get_state(self, key):
+            return self._state.get(key)
+
+    from jiuwenswarm.server.runtime.skill_turbo.permission_bridge import save_resume_ctx
+
+    first = _MergingCheckpointSession()
+    await first.pre_run()
+    first.update_state(
+        {
+            SKILL_TURBO_RESUME_CTX_KEY: {
+                "plan_code": "plan-x",
+                "pending_tool_call_id": "skill_turbo-tc-ask_user-1",
+                "inputs": {},
+                "resume_in_flight": True,
+            }
+        }
+    )
+    await first.post_run()
+
+    nested = _MergingCheckpointSession()
+    await save_resume_ctx(
+        nested,
+        plan_code="plan-x",
+        inputs={"topic": "hangzhou"},
+        pending_tool_call_id="skill_turbo-tc-ask_user-2",
+        task_states=[{"id": "t1", "status": "in_progress"}],
+    )
+
+    loaded = await load_resume_ctx(_MergingCheckpointSession())
+    assert loaded is not None
+    assert loaded.get("pending_tool_call_id") == "skill_turbo-tc-ask_user-2"
+    assert loaded.get("resume_in_flight") is not True
 
 
 @pytest.mark.asyncio
