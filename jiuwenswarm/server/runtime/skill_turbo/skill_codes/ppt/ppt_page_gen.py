@@ -1140,6 +1140,7 @@ def _build_content_template_fill_prompt(
     user_query: str = "",
     total_pages: int = 0,
     rewrite_hint: str = "",
+    original_html: str = "",
 ) -> str:
     """内容页 content-template 预铺填槽 prompt（四预设三槽；custom 含 THEME_*）。"""
     user_query_section = ""
@@ -1186,6 +1187,13 @@ def _build_content_template_fill_prompt(
             f"{rewrite_hint}\n"
             "⚠️ 仅修复上述不通过项，不要改动其他正常部分。\n"
         )
+        if original_html:
+            rewrite_section += (
+                "⚠️ 本轮必须以“上次产物（原始 HTML）”为编辑基底做定点修复，"
+                "不要回退为从预铺 seed 模板重新整页填充。\n"
+                "⚠️ `seed_html` 仅用于约束骨架/Chrome/占位符边界；"
+                "`original_html` 才是当前页面已形成状态的来源。\n"
+            )
         if is_chart_candidate:
             if style_id == "custom":
                 rewrite_section += (
@@ -1348,6 +1356,14 @@ def _build_content_template_fill_prompt(
             seed_caption = (
                 "## 预铺模板 HTML（只填槽，勿重写；Chrome 必须与下方稿逐字节一致，除三处占位符外）\n"
             )
+    original_html_section = ""
+    if original_html:
+        original_html_section = (
+            "\n## 上次产物（原始 HTML，作为本轮定点修复基底）\n"
+            "```html\n"
+            f"{original_html}\n"
+            "```\n"
+        )
     return (
         f"{user_query_section}"
         f"{task_line}"
@@ -1366,6 +1382,7 @@ def _build_content_template_fill_prompt(
         f"{designer_section}"
         f"{layout_template}\n"
         f"{rewrite_section}"
+        f"{original_html_section}"
         f"{seed_caption}"
         f"{seed_html}\n"
     )
@@ -5470,7 +5487,7 @@ class PageWorkerNode(DisableThinkingMixin, PlanNode):
         )
 
     async def _generate_content_template_fill(
-        self, ctx: PageGenContext, *, rewrite_hint: str = ""
+        self, ctx: PageGenContext, *, rewrite_hint: str = "", original_html: str = ""
     ) -> tuple[str, str, str]:
         """四预设 ∪ custom 内容页：官方 content-template 预铺填槽。
 
@@ -5510,6 +5527,7 @@ class PageWorkerNode(DisableThinkingMixin, PlanNode):
                     user_query=ctx.user_query,
                     total_pages=ctx.total_pages,
                     rewrite_hint=rewrite_hint,
+                    original_html=original_html,
                 ),
                 system_prompt=_build_content_template_fill_system_prompt(
                     style_id=ctx.style_id,
@@ -5546,7 +5564,7 @@ class PageWorkerNode(DisableThinkingMixin, PlanNode):
             return (filled or "", "", "")
         if _uses_content_template_fill(ctx.style_id, page_type, ctx.outline_page):
             return await self._generate_content_template_fill(
-                ctx, rewrite_hint=rewrite_hint
+                ctx, rewrite_hint=rewrite_hint, original_html=original_html
             )
 
         try:
