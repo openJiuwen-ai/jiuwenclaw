@@ -18,7 +18,7 @@ dependencies = [
     "lark-oapi>=1.5.3,<2",
     "loguru>=0.7.3,<0.8",
     "openjiuwen[claude] @ git+https://gitcode.com/openJiuwen/agent-core.git@develop",
-    "pgvector>=0.4.2,<0.5",
+    "pgvector>=0.4.2,<0.6",
     "portalocker>=3.2.0,<4",
     "websockets>=12.0,<16",
     "psutil>=7.2.2,<8",
@@ -33,7 +33,7 @@ dependencies = [
     "greenlet>=3.3.2,<4",
     "skillnet-ai==0.0.16",
     "mutagen>=1.47.0,<2",
-    "google-genai>=1.68.0,<2",
+    "google-genai>=1.68.0,<3",
     "opentelemetry-api>=1.28.0,<2",
     "opentelemetry-sdk>=1.28.0,<2",
     "opentelemetry-exporter-otlp-proto-grpc>=1.28.0,<2",
@@ -48,7 +48,7 @@ dependencies = [
     "pydantic>=2.0,<3.0",
     "pyyaml>=6.0,<7",
     "httpx[socks]>=0.27,<1.0",
-    "json-repair>=0.30.0,<0.60",
+    "json-repair>=0.30.0,<0.70",
     "gitcode-api>=1.2.20,<2",
     "faiss-cpu>=1.7.0,<2",
     "numpy>=1.24.0,<3",
@@ -95,7 +95,7 @@ harmony = [
     "httpx[socks]>=0.27",
     "json-repair>=0.30.0",
 ]
-a2a = ["a2a-sdk[http-server]==1.0.0"]
+a2a = ["a2a-sdk[http-server]>=1.0.0,<2"]
 ssh = ["asyncssh>=2.14.0,<2.24"]
 desktop = ["pywebview>=5.4,<7"]
 dev = ["pyinstaller>=6.0.0", "pywebview>=5.4,<7"]
@@ -105,7 +105,7 @@ codex = ["openjiuwen[codex]"]
 shell-ast = []
 # Same packages as [dependency-groups] test (pip install -e ".[test]")
 test = [
-    "a2a-sdk[http-server]==1.0.0",
+    "a2a-sdk[http-server]>=1.0.0,<2",
     "asyncssh>=2.14.0,<2.24",
     "pytest>=8.3.5",
     "pytest-asyncio>=1.0.0",
@@ -183,7 +183,7 @@ openjiuwen = { git = "https://gitcode.com/openJiuwen/agent-core.git", branch = "
 [dependency-groups]
 # Testing (keep in sync with optional-dependencies.test)
 test = [
-    "a2a-sdk[http-server]==1.0.0",
+    "a2a-sdk[http-server]>=1.0.0,<2",
     "asyncssh>=2.14.0,<2.24",
     "pytest>=8.3.5",
     "pytest-asyncio>=1.0.0",
