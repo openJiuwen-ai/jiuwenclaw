@@ -132,17 +132,15 @@ def _is_default_agent_workspace(agent_workspace: Path) -> bool:
         ):
             return False
         tenant_root = agent_workspace.parents[1]
-        if tenant_root.name == "workspace_default":
+        tenant_name = tenant_root.name.casefold()
+        if tenant_name == "workspace_default":
             return True
         if (
-            tenant_root.name == "agent_default"
-            and tenant_root.parent.name == "service_default"
+            tenant_name == "agent_default"
+            and tenant_root.parent.name.casefold() == "service_default"
         ):
             return True
-        return not (
-            tenant_root.name.startswith("workspace_")
-            or tenant_root.name.startswith("agent_")
-        )
+        return tenant_name in {".jiuwenswarm", ".jiuwenclaw"}
     except IndexError:
         return False
 
@@ -575,7 +573,7 @@ def prepare_project_coding_memory_dir(
                         "source": source_key,
                         "fingerprint": fingerprint,
                         "state": state,
-                        "complete": truncated == 0,
+                        "complete": True,
                         "completed_at": datetime.now(timezone.utc).isoformat(),
                         "copied": copied,
                         "duplicates": duplicates,
@@ -598,13 +596,13 @@ def prepare_project_coding_memory_dir(
                     report_path,
                     json.dumps(
                         report,
-                        ensure_ascii=False,
+                        ensure_ascii=True,
                         indent=2,
                         sort_keys=True,
                     )
                     + "\n",
                 )
-    except (OSError, portalocker.exceptions.LockException) as exc:
+    except Exception as exc:
         warnings.append(f"failed to prepare {target}: {exc}")
 
     failed = any(item.startswith("failed to ") for item in warnings)

@@ -241,6 +241,31 @@ def test_non_default_unbound_workspace_does_not_import_default_tenant(
     assert not (Path(result.target_dir) / "default-only.md").exists()
 
 
+def test_unknown_unbound_workspace_layout_does_not_import_default_tenant(
+    tmp_path: Path,
+) -> None:
+    tenant_root = tmp_path / "tenant-customer"
+    agent_workspace = tenant_root / "agent" / "workspace"
+    legacy = (
+        tenant_root
+        / "service_default"
+        / "agent_default"
+        / "agent"
+        / "jiuwenclaw_workspace"
+        / "coding_memory"
+    )
+    legacy.mkdir(parents=True)
+    (legacy / "default-only.md").write_text("default tenant", encoding="utf-8")
+
+    result = prepare_project_coding_memory_dir(
+        agent_workspace_dir=agent_workspace,
+        project_dir=None,
+    )
+
+    assert result.sources_found == 0
+    assert not (Path(result.target_dir) / "default-only.md").exists()
+
+
 def test_default_legacy_named_agent_workspace_is_recognized(tmp_path: Path) -> None:
     data_root = tmp_path / ".jiuwenswarm"
     agent_workspace = (
@@ -296,20 +321,12 @@ def test_index_limit_does_not_drop_imported_memory_files(tmp_path: Path) -> None
     assert (target / "legacy-0.md").is_file()
     assert (target / "legacy-1.md").is_file()
 
-    retained_lines = (target / "MEMORY.md").read_text(encoding="utf-8").splitlines()
-    (target / "MEMORY.md").write_text(
-        "\n".join(retained_lines[1:]),
-        encoding="utf-8",
-    )
-    retried = prepare_project_coding_memory_dir(
+    repeated = prepare_project_coding_memory_dir(
         agent_workspace_dir=agent_workspace,
         project_dir=project,
     )
-    retried_index = (target / "MEMORY.md").read_text(encoding="utf-8")
-    assert retried.sources_migrated == 1
-    assert retried.index_truncated == 0
-    assert "(legacy-0.md)" in retried_index
-    assert "(legacy-1.md)" in retried_index
+    assert repeated.sources_migrated == 0
+    assert repeated.index_truncated == 0
 
 
 def test_completed_migration_fast_path_does_not_hash_file_contents(
@@ -407,6 +424,64 @@ def test_failed_copy_is_fail_open_and_retried(
     )
     assert retried.failed is False
     assert (Path(retried.target_dir) / "legacy.md").is_file()
+
+
+def test_report_serialization_handles_surrogate_source_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent_workspace = _agent_workspace(tmp_path / "data")
+    project = tmp_path / "demo"
+    legacy = project / "coding_memory"
+    legacy.mkdir(parents=True)
+    (legacy / "legacy.md").write_text("legacy", encoding="utf-8")
+    original_canonical_path = coding_memory_paths._canonical_path
+
+    def _canonical_path_with_surrogate(path: Path) -> str:
+        value = original_canonical_path(path)
+        return value + "\udcff" if path == legacy else value
+
+    monkeypatch.setattr(
+        coding_memory_paths,
+        "_canonical_path",
+        _canonical_path_with_surrogate,
+    )
+    result = prepare_project_coding_memory_dir(
+        agent_workspace_dir=agent_workspace,
+        project_dir=project,
+    )
+
+    assert result.failed is False
+    report = (
+        Path(result.target_dir) / ".coding-memory-migration-v1.json"
+    ).read_text(encoding="utf-8")
+    assert "\\udcff" in report
+
+
+def test_unexpected_report_write_error_is_fail_open(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent_workspace = _agent_workspace(tmp_path / "data")
+    project = tmp_path / "demo"
+    legacy = project / "coding_memory"
+    legacy.mkdir(parents=True)
+    (legacy / "legacy.md").write_text("legacy", encoding="utf-8")
+    original_atomic_write = coding_memory_paths._atomic_write_text
+
+    def _fail_report(path: Path, content: str) -> None:
+        if path.name == ".coding-memory-migration-v1.json":
+            raise UnicodeEncodeError("utf-8", "\udcff", 0, 1, "surrogate")
+        original_atomic_write(path, content)
+
+    monkeypatch.setattr(coding_memory_paths, "_atomic_write_text", _fail_report)
+    result = prepare_project_coding_memory_dir(
+        agent_workspace_dir=agent_workspace,
+        project_dir=project,
+    )
+
+    assert result.failed is True
+    assert (legacy / "legacy.md").is_file()
 
 
 def test_lock_failure_is_fail_open_and_leaves_source_untouched(

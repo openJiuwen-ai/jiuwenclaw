@@ -104,6 +104,11 @@ merged into the new project bucket automatically:
   fingerprint causes a later initialization to merge only the new content.
 - The target records `.coding-memory-migration-v1.json`. A failed attempt does not
   block Code mode or mark that source complete, so the next initialization retries it.
+- Run the first migration after stopping writes from the legacy backend, and avoid
+  concurrent `MEMORY.md` writes from other sessions. The Rail index lock is
+  process-local and cannot coordinate with a cross-process upgrade migration. Memory
+  content remains available to full-text indexing if such a race drops an index link,
+  but the link may need to be rebuilt.
 
 Only an Agent workspace that can be identified unambiguously as the default space
 considers the legacy `service_default/agent_default` and flat legacy workspace
