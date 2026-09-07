@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import shutil
 from dataclasses import asdict, is_dataclass
@@ -107,7 +108,7 @@ class RsiTaskService:
             tester = str(model_refs.get("tester") or "").strip()
             if not tester:
                 raise RsiBadRequest("harness 优化必填 model_refs.tester")
-        max_iterations = _positive_int(params.get("max_iterations"), default=1, field="max_iterations")
+        requested_max_iterations = params.get("max_iterations")
         search_width = _positive_int(params.get("search_width"), default=1, field="search_width")
         harness_profile_options = (
             _harness_profile_options(params) if scenario is Scenario.HARNESS else {}
@@ -155,6 +156,22 @@ class RsiTaskService:
                     artifact_type=artifact_type.value if artifact_type else None,
                 )
             )
+
+        # Program task bundles own their search budget in ``task.json``.  The
+        # browser intentionally does not expose a second iteration control for
+        # this branch, so use the bundle value when the public request leaves
+        # it unspecified.  An explicit API value remains authoritative.
+        if (
+            requested_max_iterations is None
+            and scenario is Scenario.ARTIFACT
+            and artifact_type is ArtifactType.PROGRAM
+        ):
+            requested_max_iterations = _program_manifest_max_iterations(artifact_path)
+        max_iterations = _positive_int(
+            requested_max_iterations,
+            default=1,
+            field="max_iterations",
+        )
 
         task_id = generate_task_id()
         run_dir = str(self.store.tasks_root / task_id / "run")
@@ -725,6 +742,55 @@ def _positive_int(raw: Any, *, default: int, field: str) -> int:
     if value < 1:
         raise RsiBadRequest(f"{field} 必须是正整数")
     return value
+
+
+def _program_manifest_max_iterations(path: str | None) -> int | None:
+    """Read a program bundle's optional search budget from ``task.json``.
+
+    The bundle manifest is an input owned by the program Provider.  Reading
+    only this scalar here lets the service persist the same budget that the
+    Provider will execute, while leaving all seed/scorecard resolution to the
+    Provider.  A plain program directory/file, or a manifest without the
+    field, keeps the RSI default of one iteration.
+    """
+
+    if not path:
+        return None
+    candidate = Path(path).expanduser()
+    if not candidate.is_dir():
+        return None
+    manifest_path = candidate / "task.json"
+    if not manifest_path.is_file():
+        return None
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RsiDatasetInvalid(
+            f"程序 case 的 task.json 无法读取: {exc}",
+            errors=[
+                {
+                    "reason": "程序 case 的 task.json 不是有效 JSON",
+                    "code": "ARTIFACT_MANIFEST_INVALID",
+                }
+            ],
+        ) from exc
+    if not isinstance(manifest, Mapping):
+        raise RsiDatasetInvalid(
+            "程序 case 的 task.json 顶层必须是对象",
+            errors=[
+                {
+                    "reason": "程序 case 的 task.json 顶层必须是对象",
+                    "code": "ARTIFACT_MANIFEST_INVALID",
+                }
+            ],
+        )
+    if "max_iterations" not in manifest or manifest["max_iterations"] is None:
+        return None
+    return _positive_int(
+        manifest["max_iterations"],
+        default=1,
+        field="task.json.max_iterations",
+    )
 
 
 def _harness_profile_options(params: Mapping[str, Any]) -> dict[str, Any]:

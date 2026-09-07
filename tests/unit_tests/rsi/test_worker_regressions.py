@@ -154,20 +154,37 @@ class TestWorkerRunLoop:
         """A Provider stuck in RUNNING must release the worker with a failure result."""
 
         class StuckAdapter:
+            def __init__(self) -> None:
+                self.terminate_calls: list[str] = []
+
             def read_state(self, task_id: str):
                 del task_id
                 return SimpleNamespace(status="running")
 
+            async def terminate(self, task_id: str):
+                self.terminate_calls.append(task_id)
+                return SimpleNamespace(status="TERMINATED")
+
+        adapter = StuckAdapter()
         ctx.worker.provider_poll_timeout = 0.02
         result = await ctx.worker._wait_for_provider_terminal(  # noqa: SLF001
             "rsi-stuck",
-            StuckAdapter(),
+            adapter,
             SimpleNamespace(status="running"),
         )
 
         assert result.status == "failed"
         assert result.error_code == "PROVIDER_TIMEOUT"
         assert result.error_message == "Provider 超时未进入终态"
+        assert adapter.terminate_calls == ["rsi-stuck"]
+
+    def test_paper_provider_timeout_scales_with_tree_iterations(self, ctx):
+        """Paper runs get one watchdog budget per requested tree iteration."""
+        paper = SimpleNamespace(artifact_type="PAPER", max_iterations=3)
+        program = SimpleNamespace(artifact_type="PROGRAM", max_iterations=3)
+
+        assert ctx.worker._provider_poll_timeout_for(paper) == 3 * 30 * 60  # noqa: SLF001
+        assert ctx.worker._provider_poll_timeout_for(program) == ctx.worker.provider_poll_timeout  # noqa: SLF001
 
     async def test_provider_timeout_does_not_block_next_queued_task(self, ctx):
         """Timeout terminalization lets the following queued task start."""

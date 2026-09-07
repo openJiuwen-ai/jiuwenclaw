@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 """RSI 服务域单测：任务 CRUD + 状态机 + 场景校验（web 契约 v0.3 对齐）。"""
+import json
 import tempfile
 from pathlib import Path
 
@@ -182,6 +183,58 @@ class TestTaskGet:
         assert paper["config"]["optimization_instruction"] == "improve abstract"
         assert paper["config"]["max_iterations"] == 2
         assert paper["config"]["search_width"] == 1
+
+    def test_program_bundle_uses_manifest_max_iterations(self, ctx, tmp_path: Path):
+        ctx.install_mock_artifact_adapters()
+        program = tmp_path / "program-task"
+        (program / "seed").mkdir(parents=True)
+        (program / "seed" / "candidate.py").write_text("print('seed')\n", encoding="utf-8")
+        (program / "run").mkdir()
+        (program / "run" / "scorecard.json").write_text("{}", encoding="utf-8")
+        (program / "task.json").write_text(
+            json.dumps({
+                "artifact_path": "seed",
+                "run_dir": "run",
+                "max_iterations": 6,
+            }),
+            encoding="utf-8",
+        )
+
+        task_id = ctx.task_service.create({
+            "scenario": "ARTIFACT",
+            "artifact_type": "PROGRAM",
+            "name": "program-bundle",
+            "model_refs": {"optimizer": "mock-optimizer"},
+            "artifact_path": str(program),
+        })["task_id"]
+
+        task = ctx.store.get(task_id)
+        assert task.max_iterations == 6
+        adapter = ctx.adapter_for("ARTIFACT", "PROGRAM")
+        request = adapter.build_request(task.to_taskview())
+        assert request.max_iterations == 6
+
+    def test_program_bundle_explicit_max_iterations_overrides_manifest(
+        self, ctx, tmp_path: Path
+    ):
+        ctx.install_mock_artifact_adapters()
+        program = tmp_path / "program-task"
+        program.mkdir()
+        (program / "task.json").write_text(
+            json.dumps({"max_iterations": 6}),
+            encoding="utf-8",
+        )
+
+        task_id = ctx.task_service.create({
+            "scenario": "ARTIFACT",
+            "artifact_type": "PROGRAM",
+            "name": "program-bundle-override",
+            "model_refs": {"optimizer": "mock-optimizer"},
+            "artifact_path": str(program),
+            "max_iterations": 2,
+        })["task_id"]
+
+        assert ctx.store.get(task_id).max_iterations == 2
 
 
 class TestTaskDelete:

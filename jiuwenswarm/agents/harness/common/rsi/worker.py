@@ -31,9 +31,16 @@ logger = logging.getLogger(__name__)
 
 _QUEUE_MAXSIZE = 128
 _PROVIDER_IN_PROGRESS = frozenset({"CREATED", "QUEUED", "RUNNING"})
+# A paper run can spend several minutes in each of its six modules.  The
+# previous 30-minute bound terminated healthy paper runs while the first
+# research pass was still collecting sources.  Keep the generic default at
+# 30 minutes, but allow paper tasks to scale the watchdog with their requested
+# number of tree iterations (see ``_provider_poll_timeout_for`` below).
 _PROVIDER_POLL_TIMEOUT_SECONDS = 30 * 60
+_PAPER_ITERATION_BUDGET_SECONDS = 30 * 60
 _PROVIDER_POLL_INTERVAL_SECONDS = 0.1
 _PROVIDER_HANDOFF_RETRY_SECONDS = 0.05
+_PROVIDER_TERMINATE_TIMEOUT_SECONDS = 5.0
 
 
 class RsiWorker:
@@ -257,7 +264,12 @@ class RsiWorker:
             # otherwise the generic result handler would mark it failed as
             # soon as it saw the initial running result.
             if _provider_status(result) in _PROVIDER_IN_PROGRESS:
-                result = await self._wait_for_provider_terminal(task_id, adapter, result)
+                result = await self._wait_for_provider_terminal(
+                    task_id,
+                    adapter,
+                    result,
+                    timeout=self._provider_poll_timeout_for(task_view),
+                )
             self._apply_result_status(task_id, result)
         except Exception as exc:  # noqa: BLE001
             logger.exception("[RSI] 任务执行失败 task=%s: %s", task_id, exc)
@@ -295,6 +307,23 @@ class RsiWorker:
                 return adapter
         return None
 
+    def _provider_poll_timeout_for(self, task_view: Any) -> float:
+        """Return a watchdog long enough for the requested paper tree.
+
+        The worker's generic timeout remains the safety bound for harness and
+        program providers.  Paper providers execute a full pipeline for every
+        requested tree iteration, so a fixed 30-minute timeout can kill a
+        healthy run during its first survey/design pass.
+        """
+        timeout = self.provider_poll_timeout
+        if str(getattr(task_view, "artifact_type", "")).upper() != "PAPER":
+            return timeout
+        try:
+            iterations = max(1, int(getattr(task_view, "max_iterations", 1) or 1))
+        except (TypeError, ValueError):
+            iterations = 1
+        return max(timeout, iterations * _PAPER_ITERATION_BUDGET_SECONDS)
+
     def _apply_result_status(self, task_id: str, result: Any) -> None:
         status = _provider_status(result, default="COMPLETED")
         if status in _PROVIDER_IN_PROGRESS:
@@ -328,6 +357,8 @@ class RsiWorker:
         task_id: str,
         adapter: Any,
         initial_result: Any,
+        *,
+        timeout: float | None = None,
     ) -> Any:
         """Wait for Providers whose ``run`` returns before execution ends.
 
@@ -345,7 +376,8 @@ class RsiWorker:
             )
             return initial_result
 
-        deadline = time.monotonic() + self.provider_poll_timeout
+        poll_timeout = self.provider_poll_timeout if timeout is None else max(0.1, float(timeout))
+        deadline = time.monotonic() + poll_timeout
         last_status = _provider_status(initial_result, default="RUNNING")
         last_error: Exception | None = None
         while True:
@@ -359,7 +391,7 @@ class RsiWorker:
                 )
             except asyncio.TimeoutError:
                 last_error = asyncio.TimeoutError(
-                    f"Provider.read_state exceeded {self.provider_poll_timeout:.1f}s"
+                    f"Provider.read_state exceeded {poll_timeout:.1f}s"
                 )
                 break
             except (FileNotFoundError, KeyError, OSError) as exc:
@@ -384,7 +416,7 @@ class RsiWorker:
             if sleep_for > 0:
                 await asyncio.sleep(sleep_for)
 
-        elapsed = self.provider_poll_timeout - max(0.0, deadline - time.monotonic())
+        elapsed = poll_timeout - max(0.0, deadline - time.monotonic())
         logger.error(
             "[RSI] Provider 未在 %.1f 秒内进入终态，task=%s status=%s error=%s",
             elapsed,
@@ -392,12 +424,49 @@ class RsiWorker:
             last_status,
             last_error,
         )
+        await self._terminate_provider_after_timeout(task_id, adapter)
         return SimpleNamespace(
             task_id=task_id,
             status="failed",
             final_node_id=getattr(initial_result, "final_node_id", None),
             error_code="PROVIDER_TIMEOUT",
             error_message="Provider 超时未进入终态",
+        )
+
+    async def _terminate_provider_after_timeout(self, task_id: str, adapter: Any) -> None:
+        """Best-effort cleanup for a Provider that missed its terminal deadline.
+
+        ``run()`` may return a live Provider task before its durable snapshot
+        becomes terminal.  If polling times out, simply marking the public RSI
+        task failed leaves that internal task running; a later queued task can
+        then share process-global resources with it.  Ask the Provider to
+        terminate, but keep a short bound so cleanup cannot wedge the worker.
+        """
+        terminate = getattr(adapter, "terminate", None)
+        if not callable(terminate):
+            logger.warning(
+                "[RSI] Provider 超时但不支持 terminate，task=%s",
+                task_id,
+            )
+            return
+        try:
+            result = await asyncio.wait_for(
+                terminate(task_id),
+                timeout=_PROVIDER_TERMINATE_TIMEOUT_SECONDS,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - timeout cleanup is best effort
+            logger.warning(
+                "[RSI] Provider 超时清理失败，task=%s error=%s",
+                task_id,
+                exc,
+            )
+            return
+        logger.warning(
+            "[RSI] Provider 超时后已请求 terminate，task=%s status=%s",
+            task_id,
+            _provider_status(result, default="UNKNOWN"),
         )
 
     def _mark_failed_if_running(self, task_id: str, cause: str) -> None:
