@@ -20,7 +20,7 @@ import {
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { webRequest } from '../../services/webClient';
-import { useFullscreenPanel, useMaxWidth } from '../../hooks';
+import { useFullscreenPanel } from '../../hooks';
 import {
   COMPONENT_CENTER_ATTRACTION_STRENGTH,
   computeConnectedComponents,
@@ -758,7 +758,7 @@ export const SkillGraphPanel = forwardRef<SkillGraphPanelHandle, SkillGraphPanel
   const [selectedNode, setSelectedNode] = useState<GraphNode | null>(null);
   const [detailDrawerOpen, setDetailDrawerOpen] = useState(false);
   const [detailDrawerBounds, setDetailDrawerBounds] = useState({ top: 0, right: 0, height: 0 });
-  const isCompactDetail = useMaxWidth('graph');
+  const isCompactDetail = !isGraphFullscreen;
   const [query, setQuery] = useState('');
   const [minConfidence, setMinConfidence] = useState(DEFAULT_MIN_CONFIDENCE);
   const [loading, setLoading] = useState(false);
@@ -1645,7 +1645,7 @@ export const SkillGraphPanel = forwardRef<SkillGraphPanelHandle, SkillGraphPanel
   }, [onReadingChange]);
 
   return (
-    <div ref={panelRef} data-testid="skill-graph-panel" className="skill-graph-panel">
+    <div ref={panelRef} data-testid="skill-graph-panel" className={`skill-graph-panel${isGraphFullscreen ? ' skill-graph-panel--fullscreen' : ''}`}>
       <aside data-testid="skill-graph-panel-sidebar" className="skill-graph-panel__sidebar">
         <div data-testid="skill-graph-panel-stats" className="skill-graph-panel__stats skill-graph-panel__stats--compact">
           <span data-testid="skill-graph-panel-stats-skill-count"><strong>{visibleSkillNodes.length}</strong>{t('skills.graph.stats.skillsSuffix')}</span>
