@@ -18,6 +18,7 @@ import {
   type TeamMember,
 } from './shared';
 import { CompactTaskList } from './CompactTaskList';
+import { UnassignedTeamAvatar } from './UnassignedTeamAvatar';
 import { getTotalTaskVisualProgressPercent } from './taskProgress';
 import { useAdaptiveTooltip } from '../../hooks/useAdaptiveTooltip';
 import { SwarmflowTreeView } from './SwarmflowTreeView';
@@ -633,20 +634,6 @@ function BoardTaskCard({
           ))}
       </div>
     </article>
-  );
-}
-
-function UnassignedTeamAvatar({ className }: { className?: string }) {
-  const { t } = useTranslation();
-
-  return (
-    <div
-      className={`flex shrink-0 items-center justify-center overflow-hidden border border-border bg-card text-[12px] font-medium text-muted ${className || ''}`}
-      aria-label={t('team.planning.unassignedAvatar')}
-      title={t('team.planning.unassigned')}
-    >
-      --
-    </div>
   );
 }
 
