@@ -30,9 +30,18 @@ def test_rsi_context_binds_installer_to_agent_manager(monkeypatch, tmp_path):
 
 
 def test_rsi_active_harness_precedes_generic_registry(monkeypatch, tmp_path):
-    runtime_path = tmp_path / "rsi" / "harness" / "versions" / "install-a" / "validation_harness"
+    runtime_path = (
+        tmp_path
+        / "workspace"
+        / "rsi"
+        / "rsi-task"
+        / "harness"
+        / "versions"
+        / "install-a"
+        / "validation_harness"
+    )
     runtime_path.mkdir(parents=True)
-    store = RsiHarnessActivationStore(tmp_path / "rsi" / "harness")
+    store = RsiHarnessActivationStore(tmp_path / "workspace" / "rsi")
     store.commit(
         {
             "installation_id": "install-a",
@@ -49,3 +58,17 @@ def test_rsi_active_harness_precedes_generic_registry(monkeypatch, tmp_path):
     server = _bare_server(object())
 
     assert server._rsi_harness_refs_provider() == str(runtime_path.resolve())
+
+
+def test_rsi_initial_refs_are_a_trusted_input_fallback(monkeypatch, tmp_path):
+    initial_refs = tmp_path / "rsi" / "harness" / "initial_harness_refs.yaml"
+    initial_refs.parent.mkdir(parents=True)
+    initial_refs.write_text("version: 1\nharness_refs: {}\n", encoding="utf-8")
+    monkeypatch.setattr(
+        "jiuwenswarm.common.utils.get_user_workspace_dir",
+        lambda: tmp_path,
+    )
+
+    server = _bare_server(object())
+
+    assert server._rsi_harness_refs_provider() == str(initial_refs.resolve())

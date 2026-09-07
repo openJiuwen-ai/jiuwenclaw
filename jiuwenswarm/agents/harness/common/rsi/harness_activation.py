@@ -23,11 +23,13 @@ from typing import Any
 import yaml
 
 from jiuwenswarm.agents.harness.common.rsi.errors import (
+    RsiBadRequest,
     RsiHarnessInstallConflict,
     RsiHarnessInstallFailed,
     RsiHarnessInvalid,
     RsiHarnessNotPublished,
     RsiHarnessNotReady,
+    RsiTaskStateConflict,
 )
 
 logger = logging.getLogger(__name__)
@@ -339,6 +341,42 @@ class RsiHarnessActivationStore:
         history = self._read_document().get("history", [])
         return [dict(item) for item in history if isinstance(item, dict)]
 
+    def list_versions(self) -> list[dict[str, Any]]:
+        """Return every retained installation once, ordered by first install."""
+
+        document = self._read_document()
+        records: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for item in [*document.get("history", []), document.get("active")]:
+            if not isinstance(item, dict):
+                continue
+            installation_id = str(item.get("installation_id") or "").strip()
+            if not installation_id or installation_id in seen:
+                continue
+            seen.add(installation_id)
+            records.append(dict(item))
+
+        def _order(item: dict[str, Any]) -> tuple[int, str]:
+            value = item.get("version_sequence")
+            try:
+                sequence = int(value)
+            except (TypeError, ValueError):
+                sequence = 2**31 - 1
+            return sequence if sequence > 0 else 2**31 - 1, str(item.get("installed_at") or "")
+
+        return sorted(records, key=_order)
+
+    def get_version(self, installation_id: str) -> dict[str, Any] | None:
+        """Return one retained installation record without changing activation."""
+
+        wanted = str(installation_id or "").strip()
+        if not wanted:
+            return None
+        for record in self.list_versions():
+            if record.get("installation_id") == wanted:
+                return record
+        return None
+
     def snapshot(self) -> dict[str, Any]:
         """Return the normalized document for a later transactional restore."""
 
@@ -384,11 +422,34 @@ class RsiHarnessActivationStore:
 
         document = self._read_document()
         previous = document.get("active")
-        history = [item for item in document.get("history", []) if isinstance(item, dict)]
+        history: list[dict[str, Any]] = []
+        for item in document.get("history", []):
+            if not isinstance(item, dict):
+                continue
+            item_id = str(item.get("installation_id") or "").strip()
+            if not item_id or item_id == installation_id:
+                continue
+            history.append(dict(item))
         if isinstance(previous, dict) and previous.get("installation_id") != installation_id:
-            history.append(previous)
+            previous_id = str(previous.get("installation_id") or "").strip()
+            history = [item for item in history if item.get("installation_id") != previous_id]
+            history.append(dict(previous))
         normalized = dict(record)
         normalized["runtime_path"] = str(runtime_path)
+        try:
+            sequence = int(normalized.get("version_sequence"))
+        except (TypeError, ValueError):
+            sequence = 0
+        if sequence < 1:
+            sequences = []
+            for item in [*history, previous] if isinstance(previous, dict) else history:
+                try:
+                    value = int(item.get("version_sequence"))
+                except (AttributeError, TypeError, ValueError):
+                    continue
+                if value > 0:
+                    sequences.append(value)
+            normalized["version_sequence"] = max(sequences, default=0) + 1
         document = {
             "schema_version": _ACTIVATION_SCHEMA_VERSION,
             "active": normalized,
@@ -502,7 +563,10 @@ class RsiHarnessInstaller:
         else:
             root = activation_root
             if root is None:
-                root = Path(store.tasks_root).expanduser().resolve().parent / "harness"
+                # Keep only the activation index at the workspace root.  The
+                # immutable installed copy is task-owned and is written below
+                # ``<tasks_root>/<task_id>/harness/versions``.
+                root = Path(store.tasks_root).expanduser().resolve()
             self.activation_store = RsiHarnessActivationStore(root)
         # The WebSocket handler can receive two clicks for the same task at
         # once.  Serialize copy/load/pointer transitions in this process so
@@ -512,6 +576,127 @@ class RsiHarnessInstaller:
     async def install(self, task_id: str) -> dict[str, Any]:
         async with self._install_lock:
             return await self._install_unlocked(task_id)
+
+    def list_versions(self) -> dict[str, Any]:
+        """List retained RSI Harness versions without exposing local paths."""
+
+        active = self.activation_store.get_active()
+        active_id = str((active or {}).get("installation_id") or "").strip() or None
+        records = self.activation_store.list_versions()
+        initial_id = (
+            str(records[0].get("installation_id") or "").strip() if records else None
+        )
+        versions = []
+        for record in records:
+            runtime = self.activation_store._validate_runtime_path(  # noqa: SLF001 - store boundary validator
+                record.get("runtime_path"), require_exists=False
+            )
+            installation_id = str(record.get("installation_id") or "").strip()
+            versions.append(
+                {
+                    "installation_id": installation_id,
+                    "task_id": record.get("task_id"),
+                    "node_id": record.get("node_id"),
+                    "harness_name": record.get("harness_name") or record.get("extension_name"),
+                    "sha256": record.get("sha256"),
+                    "installed_at": record.get("installed_at"),
+                    "is_active": installation_id == active_id,
+                    "is_initial": installation_id == initial_id,
+                    "available": bool(runtime and runtime.is_dir()),
+                }
+            )
+        return {"active_installation_id": active_id, "versions": versions}
+
+    async def rollback(self, installation_id: str) -> dict[str, Any]:
+        """Activate any retained version after checking all RSI tasks are idle."""
+
+        async with self._install_lock:
+            return await self._rollback_unlocked(installation_id)
+
+    async def _rollback_unlocked(self, installation_id: str) -> dict[str, Any]:
+        wanted = str(installation_id or "").strip()
+        if not wanted:
+            raise RsiBadRequest("installation_id 必填")
+        target = self.activation_store.get_version(wanted)
+        if target is None:
+            raise RsiBadRequest(f"未找到已安装的 RSI Harness 版本: {wanted}")
+        old = self.activation_store.get_active()
+        if old and old.get("installation_id") == wanted:
+            response = self._response(
+                old,
+                task_id=str(old.get("task_id") or ""),
+                node_id=str(old.get("node_id") or "") or None,
+                already_active=True,
+                hot_load=old.get("hot_load") or {"attempted": 0, "succeeded": 0, "failed": []},
+            )
+            response.update({"from_installation_id": wanted, "rolled_back": False})
+            return response
+
+        self._assert_rollback_allowed()
+        self._validate_rollback_target(target)
+        target = dict(target)
+        target["status"] = "ACTIVE"
+        target["activated_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        target["activation_reason"] = "rollback"
+        try:
+            hot_load = await self._broadcast(old, target)
+        except RsiHarnessInstallConflict:
+            raise
+        except Exception as exc:  # noqa: BLE001 - manager guarantees local compensation
+            raise RsiHarnessInstallFailed("RSI Harness 回退热加载失败，旧版本保持激活") from exc
+        target["hot_load"] = hot_load
+        try:
+            self.activation_store.commit(target)
+        except Exception as exc:
+            live_restored = await self._restore_live(target, old)
+            if not live_restored:
+                raise RsiHarnessInstallConflict(
+                    "RSI Harness 回退指针写入失败且 live Agent 恢复失败"
+                ) from exc
+            raise RsiHarnessInstallFailed(
+                "RSI Harness 回退指针写入失败，已恢复旧版本"
+            ) from exc
+
+        response = self._response(
+            target,
+            task_id=str(target.get("task_id") or ""),
+            node_id=str(target.get("node_id") or "") or None,
+            already_active=False,
+            hot_load=hot_load,
+        )
+        response.update(
+            {
+                "from_installation_id": old.get("installation_id") if old else None,
+                "rolled_back": True,
+            }
+        )
+        return response
+
+    def _assert_rollback_allowed(self) -> None:
+        blocking = [
+            task.task_id
+            for task in self.store.list()
+            if str(task.status or "").upper() in {"QUEUED", "RUNNING", "PAUSED"}
+        ]
+        if blocking:
+            raise RsiTaskStateConflict(
+                "存在排队、运行或暂停的 RSI 任务，不能回退 Harness: "
+                + ", ".join(sorted(blocking))
+            )
+
+    def _validate_rollback_target(self, record: dict[str, Any]) -> None:
+        try:
+            runtime = self.activation_store._validate_runtime_path(  # noqa: SLF001 - store boundary validator
+                record.get("runtime_path"), require_exists=True
+            )
+        except ValueError as exc:
+            raise RsiHarnessInvalid("回退目标的 runtime_path 非法") from exc
+        if runtime is None:
+            raise RsiHarnessNotReady("回退目标的本地 Harness 版本不存在")
+        expected_hash = str(record.get("sha256") or "").strip().lower()
+        if hash_harness_package(runtime).lower() != expected_hash:
+            raise RsiHarnessInvalid("回退目标 Harness 内容已变化")
+        _validate_engine_manifest(runtime)
 
     async def _install_unlocked(self, task_id: str) -> dict[str, Any]:
         normalized_task_id = str(task_id or "").strip()
@@ -573,7 +758,15 @@ class RsiHarnessInstaller:
             )
 
         installation_id = f"rsi-harness-{package_sha256[:16]}"
-        version_root = self.activation_store.root / "versions" / installation_id
+        # A published Harness is an output of this task.  Keep its immutable
+        # version and rewritten refs beside the task's other materials so a
+        # task can be inspected or removed as one unit.
+        task_root = run_root.parent
+        version_root = task_root / "harness" / "versions" / installation_id
+        # Keep the temporary path short: Windows still applies the legacy
+        # 248-character directory limit on installations without long-path
+        # support, while the task id and content-addressed version are fixed.
+        staging_root = task_root / f".rsi-harness-{uuid.uuid4().hex[:8]}"
         runtime_path = version_root / extension_name
         created_copy = False
         pointer_committed = False
@@ -585,9 +778,11 @@ class RsiHarnessInstaller:
                     )
             else:
                 version_root.mkdir(parents=True, exist_ok=True)
-                staging = version_root / f".{extension_name}.install-{uuid.uuid4().hex}.tmp"
+                staging_root.mkdir(parents=True, exist_ok=True)
+                staging = staging_root / f".{extension_name}.tmp"
                 shutil.copytree(parsed.package_path, staging, symlinks=False)
                 staging.replace(runtime_path)
+                shutil.rmtree(staging_root, ignore_errors=True)
                 created_copy = True
             installed_refs_path = version_root / "harness_refs.yaml"
             if not installed_refs_path.is_file():
@@ -655,12 +850,15 @@ class RsiHarnessInstaller:
                 hot_load=hot_load,
             )
         except RsiHarnessInstallFailed:
+            shutil.rmtree(staging_root, ignore_errors=True)
             if created_copy and not pointer_committed:
                 shutil.rmtree(version_root, ignore_errors=True)
             raise
         except RsiHarnessInstallConflict:
+            shutil.rmtree(staging_root, ignore_errors=True)
             raise
         except Exception as exc:  # noqa: BLE001 - normalize DeepAgent failures
+            shutil.rmtree(staging_root, ignore_errors=True)
             if created_copy:
                 shutil.rmtree(version_root, ignore_errors=True)
             raise RsiHarnessInstallFailed(f"RSI Harness 热加载失败: {exc}") from exc

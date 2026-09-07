@@ -122,26 +122,58 @@ class RsiProjector:
             self._persist_locked(task_id)
         return tree_node
 
-    def sync_provider_tree(self, task_id: str, tree: Any) -> dict[str, Any]:
-        """Replace the artifact projection from a Provider tree snapshot."""
+    def merge_provider_tree(self, task_id: str, tree: Any) -> dict[str, Any]:
+        """Reconcile a Provider snapshot without discarding richer local fields.
+
+        Provider snapshots are a recovery/backfill source.  The event projection
+        stored in ``tree.json`` owns presentation fields such as staged
+        descriptions, snapshot IDs, and detailed changes.  Search history is
+        append-only, so a partial Provider snapshot must never delete local
+        nodes.
+        """
         from jiuwenswarm.agents.harness.common.rsi.artifact_adapter import provider_tree_to_web
 
         raw = provider_tree_to_web(tree)
-        nodes: dict[str, RsiTreeNode] = {}
-        ref_index: dict[str, str] = {}
+        incoming_nodes: list[RsiTreeNode] = []
         for item in raw.get("nodes", []):
             node = self._tree_node_from_web(item)
-            if node is None:
-                continue
-            nodes[node.node_id] = node
-            ref_index[node.node_id] = node.node_id
+            if node is not None:
+                incoming_nodes.append(node)
         with self._lock:
-            self._nodes[task_id] = nodes
-            self._ref_index[task_id] = ref_index
+            nodes = self._nodes.setdefault(task_id, {})
+            self._ensure_root_locked(task_id)
+            ref_index = self._ref_index.setdefault(task_id, {})
+            for incoming in incoming_nodes:
+                if incoming.node_id == _ROOT:
+                    root = nodes[_ROOT]
+                    if root.score is None and incoming.score is not None:
+                        root.score = incoming.score
+                    if not root.description and incoming.description:
+                        root.description = incoming.description
+                    continue
+                existing = nodes.get(incoming.node_id)
+                nodes[incoming.node_id] = (
+                    self._merge_node(existing, incoming) if existing is not None else self._normalize_node(incoming)
+                )
+                ref_index[incoming.node_id] = incoming.node_id
+            self._normalize_parents_locked(task_id)
             metric = self._metric.setdefault(task_id, {})
-            metric["iteration"] = _safe_int(raw.get("iteration"))
+            node_iteration = max(
+                (node.iteration for node in nodes.values() if node.node_id != _ROOT),
+                default=0,
+            )
+            metric["iteration"] = max(
+                _safe_int(metric.get("iteration")),
+                _safe_int(raw.get("iteration")),
+                node_iteration,
+            )
             self._persist_locked(task_id)
         return self.derive_tree(task_id)
+
+    def sync_provider_tree(self, task_id: str, tree: Any) -> dict[str, Any]:
+        """Compatibility alias for the former replacement-style operation."""
+
+        return self.merge_provider_tree(task_id, tree)
 
     def persist_node_update(self, task_id: str, node: RsiTreeNode) -> None:
         """快照/描述等节点字段变更后回写落盘（单节点更新）。"""
@@ -185,6 +217,8 @@ class RsiProjector:
             for key in ("iteration", "total_iterations", "score", "baseline", "node_ref", "metrics"):
                 if key in payload:
                     metric[key] = payload[key]
+            if self._nodes.get(task_id):
+                self._persist_locked(task_id)
 
     # -- 拉取（web） --
 
@@ -216,12 +250,17 @@ class RsiProjector:
         for node in nodes.values():
             d = 0
             cursor: RsiTreeNode | None = node
-            while cursor is not None and cursor.parent_id is not None:
+            visited: set[str] = set()
+            while cursor is not None and cursor.parent_id is not None and cursor.node_id not in visited:
+                visited.add(cursor.node_id)
                 d += 1
                 cursor = nodes.get(cursor.parent_id)
             depth = max(depth, d)
         return {
-            "nodes": [node.to_dict() for node in sorted(nodes.values(), key=lambda n: n.iteration)],
+            "nodes": [
+                node.to_dict()
+                for node in sorted(nodes.values(), key=lambda n: (n.iteration, n.node_id))
+            ],
             "depth": depth,
             "iteration": _safe_int(metric.get("iteration")),
         }
@@ -240,30 +279,35 @@ class RsiProjector:
 
     # -- 恢复 --
 
-    def load_from_disk(self, task_id: str) -> None:
-        """进程重启/晚订阅：读 tree.json 重建节点缓存（快照兜底）。"""
+    def load_from_disk(self, task_id: str) -> bool:
+        """Load ``tree.json`` once and rebuild the disposable in-memory cache."""
         path = self._tree_path(task_id)
-        if not path.is_file():
-            return
         with self._lock:
+            if task_id in self._nodes:
+                return True
+            if not path.is_file():
+                return False
             try:
                 with path.open("r", encoding="utf-8") as fh:
                     data = json.load(fh)
             except (OSError, json.JSONDecodeError):
-                return
+                return False
             raw_nodes = data.get("nodes") if isinstance(data, dict) else None
             if isinstance(raw_nodes, list):
-                self._nodes[task_id] = {
-                    item.get("node_id"): RsiTreeNode.from_dict(item) if isinstance(item, dict) else item
-                    for item in raw_nodes
-                    if isinstance(item, dict) and item.get("node_id")
-                }
+                nodes: dict[str, RsiTreeNode] = {}
+                for item in raw_nodes:
+                    node = self._tree_node_from_web(item) if isinstance(item, dict) else None
+                    if node is not None:
+                        nodes[node.node_id] = node
+                self._nodes[task_id] = nodes
                 self._ref_index[task_id] = {
                     node_id: node_id for node_id in self._nodes[task_id]
                 }
             if isinstance(data, dict) and isinstance(data.get("metric"), dict):
                 self._metric[task_id] = dict(data["metric"])
-            self._persist_locked(task_id)
+            self._ensure_root_locked(task_id)
+            self._normalize_parents_locked(task_id)
+            return True
 
     # -- 内部 --
 
@@ -273,12 +317,75 @@ class RsiProjector:
         path = Path(self.tasks_root) / task_id
         path.mkdir(parents=True, exist_ok=True)
         payload = {
+            "schema_version": 2,
+            "task_id": task_id,
             "nodes": [n.to_dict() for n in self._nodes[task_id].values()],
             "metric": self._metric.get(task_id, {}),
             "saved_at": utcnow_iso(),
         }
-        with (path / "tree.json").open("w", encoding="utf-8") as fh:
+        target = path / "tree.json"
+        temporary = path / "tree.json.tmp"
+        with temporary.open("w", encoding="utf-8") as fh:
             json.dump(payload, fh, ensure_ascii=False, indent=2)
+        temporary.replace(target)
+
+    def _ensure_root_locked(self, task_id: str) -> None:
+        nodes = self._nodes.setdefault(task_id, {})
+        root = nodes.get(_ROOT)
+        if root is None:
+            nodes[_ROOT] = RsiTreeNode(
+                node_id=_ROOT,
+                iteration=0,
+                parent_id=None,
+                type="ROOT",
+                adopted=True,
+                score=None,
+                description="基线",
+            )
+        else:
+            root.iteration = 0
+            root.parent_id = None
+            root.type = "ROOT"
+            root.adopted = True
+            root.failure_reason = None
+            root.failure_class = None
+        self._ref_index.setdefault(task_id, {})["root"] = _ROOT
+
+    def _normalize_parents_locked(self, task_id: str) -> None:
+        nodes = self._nodes.get(task_id, {})
+        for node in nodes.values():
+            if node.node_id == _ROOT:
+                continue
+            if not node.parent_id or node.parent_id == node.node_id or node.parent_id not in nodes:
+                node.parent_id = _ROOT
+
+    @staticmethod
+    def _normalize_node(node: RsiTreeNode) -> RsiTreeNode:
+        if node.adopted:
+            node.type = "ADOPTED"
+            node.failure_reason = None
+            node.failure_class = None
+        return node
+
+    @classmethod
+    def _merge_node(cls, local: RsiTreeNode, provider: RsiTreeNode) -> RsiTreeNode:
+        adopted = bool(local.adopted or provider.adopted)
+        extra = {**(local.extra or {}), **(provider.extra or {})}
+        merged = RsiTreeNode(
+            node_id=local.node_id,
+            iteration=local.iteration if local.iteration > 0 else provider.iteration,
+            parent_id=local.parent_id or provider.parent_id,
+            type="ADOPTED" if adopted else (local.type or provider.type or "REJECTED"),
+            adopted=adopted,
+            score=local.score if local.score is not None else provider.score,
+            description=local.description or provider.description,
+            snapshot_artifact_id=local.snapshot_artifact_id or provider.snapshot_artifact_id,
+            failure_reason=None if adopted else (local.failure_reason or provider.failure_reason),
+            failure_class=None if adopted else (local.failure_class or provider.failure_class),
+            changes=local.changes if local.changes else provider.changes,
+            extra=extra or None,
+        )
+        return cls._normalize_node(merged)
 
     def _map_parent_id(self, task_id: str, parent_ref: Any) -> str | None:
         """引擎侧稳定引用 → 服务侧节点 ID 反查（node.created 先于子节点出现）。"""

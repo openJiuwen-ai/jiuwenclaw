@@ -30,7 +30,7 @@ class RsiArtifactService:
     """产物/快照服务。
 
     Args:
-        tasks_root: ``workspace/rsi/tasks``（与 TaskStore 同根）；快照落在
+        tasks_root: ``.jiuwenswarm/workspace/rsi``（与 TaskStore 同根）；快照落在
             ``<task_dir>/snapshots/A<node_id>.zip``。
     """
 

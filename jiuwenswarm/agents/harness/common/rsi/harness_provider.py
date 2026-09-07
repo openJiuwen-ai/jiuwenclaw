@@ -140,7 +140,7 @@ class HarnessProvider:
     """HarnessProviderContract 的生产实现（包装 agent-core 编排器）。
 
     Args:
-        tasks_root: ``workspace/rsi/tasks``，引擎 ``output_dir`` 与状态/报告读取根。
+        tasks_root: ``.jiuwenswarm/workspace/rsi``，引擎 ``output_dir`` 与状态/报告读取根。
         orchestrator_config: 顶层 ``AutoCoordinatingHarnessConfig`` dict（最小装配入口，
             经 ``from_dict`` 校验）。与 ``orchestrator_config_path`` 二选一。
         orchestrator_config_path: 编排器 YAML 配置路径（缺省引导内置模板）。

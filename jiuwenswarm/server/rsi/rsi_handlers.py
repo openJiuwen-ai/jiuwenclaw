@@ -23,7 +23,7 @@ RSI_PUSH_STATUS_CHANGED = "rsi.training.status.changed"
 RSI_PUSH_PROGRESS = "rsi.training.progress"
 RSI_PUSH_TREE_DELTA = "rsi.training.tree.delta"
 
-#: 16 个 web method → 服务域方法名（I1–I13 + control/artifact/tree + Harness install）
+#: 18 个 web method → 服务域方法名（I1–I13 + control/artifact/tree + Harness lifecycle）
 _METHOD_DISPATCH: dict[str, str] = {
     "rsi.dataset.validate": "dataset_validate",
     "rsi.task.create": "task_create",
@@ -41,6 +41,8 @@ _METHOD_DISPATCH: dict[str, str] = {
     "rsi.artifact.files.get": "artifact_files_get",
     "rsi.tree.get": "tree_get",
     "rsi.harness.install": "harness_install",
+    "rsi.harness.versions.list": "harness_versions_list",
+    "rsi.harness.rollback": "harness_rollback",
 }
 
 
@@ -61,6 +63,10 @@ class RsiAgentServerHandlers:
         # 服务域接线：harness_refs 快照提供方（默认 auto_harness 激活 refs）
         if harness_refs_provider is not None:
             self.context.bind_task_service(harness_refs_provider=harness_refs_provider)
+        # Provider registration is complete before handlers are constructed.
+        # Reconcile durable active tasks before accepting the first RSI call;
+        # recovery never re-enqueues work or invokes the engine.
+        self.recovery_summary = self.context.recover_workspace()
         # P1 状态钩子：TaskStore.update_status → send_push（服务侧权威，不依赖引擎事件）
         self._bind_status_push()
         # P2/P3 推送：事件链路回调（progress/tree.delta）
@@ -212,6 +218,21 @@ class RsiAgentServerHandlers:
         if installer is None:
             raise RsiNotReady("RSI Harness installer 未装配")
         return installer.install(task_id)
+
+    def _do_harness_versions_list(self, _params: dict[str, Any]) -> dict[str, Any]:
+        installer = getattr(self.context, "harness_installer", None)
+        if installer is None:
+            raise RsiNotReady("RSI Harness installer 未装配")
+        return installer.list_versions()
+
+    def _do_harness_rollback(self, params: dict[str, Any]) -> Any:
+        installation_id = str(params.get("installation_id") or "").strip()
+        if not installation_id:
+            raise RsiBadRequest("installation_id 必填")
+        installer = getattr(self.context, "harness_installer", None)
+        if installer is None:
+            raise RsiNotReady("RSI Harness installer 未装配")
+        return installer.rollback(installation_id)
 
     # -- 推送 --
 

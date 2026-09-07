@@ -10,6 +10,7 @@ from jiuwenswarm.agents.harness.common.rsi.errors import (
     RsiBadRequest,
     RsiPathInvalid,
     RsiScenarioNotSupported,
+    RsiUnsupportedParameter,
     RsiTaskNotFound,
     RsiTaskStateConflict,
 )
@@ -61,6 +62,11 @@ class TestTaskCreate:
     def test_harness_rejects_artifact_path(self, ctx):
         params = _harness_create_params(artifact_path="C:/x.zip")
         with pytest.raises(RsiBadRequest):
+            ctx.task_service.create(params)
+
+    def test_harness_rejects_unsupported_execution_mode(self, ctx):
+        params = _harness_create_params(execution_mode="e2b")
+        with pytest.raises(RsiUnsupportedParameter):
             ctx.task_service.create(params)
 
     def test_invalid_scenario(self, ctx):

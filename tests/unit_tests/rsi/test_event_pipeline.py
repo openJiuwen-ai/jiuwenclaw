@@ -1,8 +1,11 @@
 # -*- coding: utf-8 -*-
 """RSI 事件链路/投影/用量单测（内部 v3 §4.3/§4.4/§4.6）。"""
+
+import json
 from pathlib import Path
 
 import pytest
+from openjiuwen.rsi.events import EventStatus
 
 from jiuwenswarm.agents.harness.common.rsi.artifact_service import RsiArtifactService
 from jiuwenswarm.agents.harness.common.rsi.event_consumer import RsiEventConsumer
@@ -130,6 +133,46 @@ class TestArtifactService:
 
 
 class TestEventConsumer:
+    def test_engine_events_are_appended_to_task_jsonl(
+        self, projector, usage, artifacts, tmp_path
+    ):
+        consumer = RsiEventConsumer("rsi-t1", usage, projector, artifacts)
+        metric = EngineEvent(
+            family="progress",
+            kind="metric",
+            task_id="engine-task-id",
+            event_id=7,
+            ts="2026-09-06T01:00:00+00:00",
+            payload={
+                "iteration": 1,
+                "total_iterations": 3,
+                "score": 0.9,
+                "baseline": 0.5,
+            },
+        )
+
+        import asyncio
+
+        asyncio.run(consumer.on_engine_event(metric))
+        asyncio.run(consumer.on_engine_event(EventStatus(status="running")))
+
+        records = [
+            json.loads(line)
+            for line in (tmp_path / "rsi-t1" / "events.jsonl")
+            .read_text(encoding="utf-8")
+            .splitlines()
+        ]
+        assert [record["event_type"] for record in records] == [
+            "progress.metric",
+            "status",
+        ]
+        assert records[0]["task_id"] == "rsi-t1"
+        assert records[0]["event"]["task_id"] == "engine-task-id"
+        assert records[0]["event"]["event_id"] == 7
+        assert records[1]["event"]["status"] == "running"
+        assert all(record["schema_version"] == 1 for record in records)
+        assert all(record["recorded_at"] for record in records)
+
     def test_metric_event_no_push(self, projector, usage, artifacts):
         consumer = RsiEventConsumer("rsi-t1", usage, projector, artifacts)
         pushed = []

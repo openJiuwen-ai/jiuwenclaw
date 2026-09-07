@@ -7115,7 +7115,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
     _register_harness("harness.deactivate", _HarnessReq.HARNESS_PACKAGES_DEACTIVATE)
     _register_harness("harness.delete", _HarnessReq.HARNESS_PACKAGES_DELETE)
 
-    # RSI 优化平台 16 个 web method（web 契约 v0.3 §4）：经 E2A 转发到 AgentServer。
+    # RSI 优化平台 18 个 web method（web 契约 v0.3 §4）：经 E2A 转发到 AgentServer。
     # 与 harness.* 同构（仅注册 + proxy_unary_request，不承载业务）。
     _RSI_METHODS = [
         ("rsi.dataset.validate", _HarnessReq.RSI_DATASET_VALIDATE),
@@ -7134,6 +7134,8 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         ("rsi.artifact.files.get", _HarnessReq.RSI_ARTIFACT_FILES_GET),
         ("rsi.tree.get", _HarnessReq.RSI_TREE_GET),
         ("rsi.harness.install", _HarnessReq.RSI_HARNESS_INSTALL),
+        ("rsi.harness.versions.list", _HarnessReq.RSI_HARNESS_VERSIONS_LIST),
+        ("rsi.harness.rollback", _HarnessReq.RSI_HARNESS_ROLLBACK),
     ]
     for _method_name, _req_method in _RSI_METHODS:
         _register_harness(_method_name, _req_method)

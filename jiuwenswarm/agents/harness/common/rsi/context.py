@@ -17,6 +17,7 @@ from jiuwenswarm.agents.harness.common.rsi.harness_activation import (
     RsiHarnessInstaller,
 )
 from jiuwenswarm.agents.harness.common.rsi.projector import RsiProjector
+from jiuwenswarm.agents.harness.common.rsi.recovery import RsiWorkspaceRecovery
 from jiuwenswarm.agents.harness.common.rsi.services import (
     RsiArtifactDownloadService,
     RsiDatasetService,
@@ -46,6 +47,8 @@ class RsiServiceContext:
         harness_installer: Any = None,
     ) -> None:
         self.tasks_root = Path(tasks_root)
+        self._workspace_recovered = False
+        self._recovery_summary: dict[str, Any] | None = None
         # Keep the production materialization dependencies on the context so
         # the composition root can inject the exact same instances into the
         # Provider and TaskService.  They remain ``None`` for mock/test roots.
@@ -53,7 +56,10 @@ class RsiServiceContext:
         self.model_resolver = model_resolver
         self.store = RsiTaskStore(self.tasks_root)
         self.harness_activation_store = harness_activation_store or RsiHarnessActivationStore(
-            self.tasks_root.expanduser().resolve().parent / "harness"
+            # The activation pointer is a workspace-level index.  Installed
+            # Harness versions themselves are copied into each task's
+            # ``harness/versions`` directory by RsiHarnessInstaller.
+            self.tasks_root.expanduser().resolve()
         )
         self.harness_installer = harness_installer or RsiHarnessInstaller(
             self.store,
@@ -81,6 +87,7 @@ class RsiServiceContext:
             adapter_resolver=self.adapter_for,
             harness_materializer=harness_materializer,
             model_resolver=model_resolver,
+            harness_activation_store=self.harness_activation_store,
         )
         self.dataset_service = RsiDatasetService(adapter_resolver=self.adapter_for)
         self.tree_service = RsiTreeService(
@@ -106,6 +113,11 @@ class RsiServiceContext:
             adapter_resolver=self.adapter_for,
         )
         self.artifact_files_service = RsiArtifactFilesService(self.store)
+        self.workspace_recovery = RsiWorkspaceRecovery(
+            self.store,
+            self.projector,
+            self.adapter_for,
+        )
 
     def bind_task_service(
         self,
@@ -244,6 +256,16 @@ class RsiServiceContext:
     def ensure_root(self, task_id: str) -> None:
         self.projector.register_root(task_id)
 
+    def recover_workspace(self) -> dict[str, Any]:
+        """Run the one-time AgentServer restart reconciliation for this context."""
+
+        if self._workspace_recovered:
+            return dict(self._recovery_summary or {})
+        summary = self.workspace_recovery.recover()
+        self._workspace_recovered = True
+        self._recovery_summary = dict(summary)
+        return summary
+
 
 def build_rsi_service_context(
     tasks_root: Any,
@@ -252,16 +274,15 @@ def build_rsi_service_context(
     harness_materializer: Any = None,
     model_resolver: Any = None,
     enable_harness_materialization: bool | None = None,
+    allow_missing_harness: bool = False,
     agent_manager: Any = None,
     harness_activation_store: RsiHarnessActivationStore | None = None,
     harness_installer: Any = None,
 ) -> RsiServiceContext:
-    """默认组合根（tasks_root 缺省取 ``workspace/rsi/tasks``）。"""
+    """默认组合根（tasks_root 缺省取 ``.jiuwenswarm/workspace/rsi``）。"""
     use_production_harness = enable_harness_materialization
     if tasks_root is None:
-        from jiuwenswarm.common.utils import get_user_workspace_dir
-
-        tasks_root = get_user_workspace_dir() / "rsi" / "tasks"
+        tasks_root = get_rsi_workspace_root()
         if use_production_harness is None:
             use_production_harness = True
     if use_production_harness:
@@ -274,6 +295,7 @@ def build_rsi_service_context(
                 Path(tasks_root),
                 dataset_root=_configured_root("RSI_DATASET_ROOT"),
                 harness_root=_configured_root("RSI_HARNESS_ROOT"),
+                allow_missing_harness=allow_missing_harness,
             )
         if model_resolver is None:
             from jiuwenswarm.agents.harness.common.rsi.model_resolver import (
@@ -290,6 +312,14 @@ def build_rsi_service_context(
         harness_activation_store=harness_activation_store,
         harness_installer=harness_installer,
     )
+
+
+def get_rsi_workspace_root() -> Path:
+    """Return the canonical workspace root for all RSI task directories."""
+
+    from jiuwenswarm.common.utils import get_user_workspace_dir
+
+    return (Path(get_user_workspace_dir()) / "workspace" / "rsi").expanduser().resolve()
 
 
 def _configured_root(name: str) -> Path | None:
