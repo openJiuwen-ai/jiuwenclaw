@@ -445,67 +445,49 @@ body.workspace-resize-active iframe {
     }
   }
 
+  /* 页面通栏容器：flex 列，自身不限宽也不加横向 padding——
+     滚动条由内层滚动列渲染，始终贴 viewport 最右缘 */
   .page-content {
     display: flex;
     flex: 1 1 0%;
     flex-direction: column;
     min-height: 0;
     overflow: hidden;
-    max-width: 1400px;
-    margin-left: max(48px, calc((100% - 1400px) / 2));
-    margin-right: max(48px, calc((100% - 1400px) / 2));
     background: var(--color-surface-card);
     padding-top: 64px;
     padding-bottom: 24px;
   }
 
-  /* 技能/专家/扩展页通栏：滚动条贴屏幕右缘，内容统一 48px 留白。
-     滚动容器用负 margin 右出血 + 自身右 padding 抵消；
-     scrollbar-gutter: stable 永久预留 8px 滚动条槽位（全局 ::-webkit-scrollbar 宽 8px），
-     滚动条因此"住"在 48px 留白带内（40px padding + 8px 槽），出现/消失都不挤压内容 */
-  [data-testid='skill-content'],
-  [data-testid='connector-market-page'] {
-    max-width: none;
-    margin-right: 0;
-    margin-left: 0;
-    padding-right: 48px;
-    padding-left: 48px;
-  }
-
-  /* 专家页：通栏，滚动条贴屏幕右缘；自身是滚动容器（detail/create 视图整页滚动），
-     预留自己的滚动条槽位（stable） */
-  [data-testid='agent-management-panel'] {
-    max-width: none;
-    margin-right: 0;
-    margin-left: 0;
-    padding-right: 48px;
-    padding-left: 48px;
-    scrollbar-gutter: stable;
-  }
-
-  .skill-list-scroll,
-  [data-testid='agent-management-catalog-content'],
-  [data-testid='connector-market-card-list'] {
-    margin-right: -48px;
-    padding-right: 40px;
-    scrollbar-gutter: stable;
-  }
-
-  /* 详情页统一滚动容器（agent/skill/connector detail）。
-     负 margin 右出血 48px 贴父容器右内缘；scrollbar-gutter 预留 8px 槽，
-     padding-right = 48-8 = 40；滚动条出现在父容器 48px 留白带的最右缘。
-     子元素通过 > * 规则限宽 1400px 并居中。 */
-  .detail-body {
-    margin-right: -48px;
-    padding-right: 40px;
-    scrollbar-gutter: stable;
-  }
-
-  .detail-body > * {
-    width: 100%;
-    max-width: 1400px;
+  /* 限宽骨架：页面不滚动的固定区（header/toolbar 等）使用，
+     与滚动列内层保持同一条 max 1400px 内容线（窄屏两侧至少留 48px） */
+  .page-shell {
+    width: min(1400px, calc(100% - 96px));
     margin-right: auto;
     margin-left: auto;
+  }
+
+  /* 滚动列（技能/专家/扩展的列表）：通栏，滚动条贴 viewport 最右缘。
+     scrollbar-gutter: stable 永久预留 8px 滚动条槽位（全局 ::-webkit-scrollbar 宽 8px），
+     both-edges 两侧对称预留，内容几何居中且滚动条出现/消失都不挤压布局 */
+  .page-scroll {
+    scrollbar-gutter: stable;
+    scrollbar-gutter: stable both-edges;
+  }
+
+  /* 滚动列/详情滚动体的内层限宽：滚动容器两侧已各让出 8px 滚动条槽，
+     故在 100% 基础上扣 96-16=80px，与 .page-shell（100%-96px）内容线严格对齐 */
+  .page-scroll > *,
+  .detail-body > * {
+    width: min(1400px, calc(100% - 80px));
+    margin-right: auto;
+    margin-left: auto;
+  }
+
+  /* 详情页统一滚动容器（agent/skill/connector detail）：同 .page-scroll 通栏滚动，
+     子元素通过 > * 规则限宽 1400px 并居中 */
+  .detail-body {
+    scrollbar-gutter: stable;
+    scrollbar-gutter: stable both-edges;
   }
 
   /* 统一返回按钮（agent/skill/connector detail）。
@@ -522,8 +504,7 @@ body.workspace-resize-active iframe {
     font-family: var(--font-body);
     font-size: 14px;
     line-height: 22px;
-    width: 100%;
-    max-width: 1400px;
+    width: min(1400px, calc(100% - 96px));
     margin-right: auto;
     margin-left: auto;
     flex-shrink: 0;

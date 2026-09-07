@@ -67,7 +67,7 @@ export function CatalogPage({
   return (
     <>
       {!isMine ? (
-        <div className="agent-management-toolbar">
+        <div className="page-shell agent-management-toolbar">
           <CategoryTabs
             items={[
               { value: '', label: t('agentManagement.categoryAll') },
@@ -82,7 +82,7 @@ export function CatalogPage({
         </div>
       ) : null}
 
-      <div className="min-h-0 flex-1 overflow-y-auto" data-testid="agent-management-catalog-content">
+      <div className="page-scroll min-h-0 flex-1 overflow-y-auto" data-testid="agent-management-catalog-content">
         {status === 'loading' && totalItems === 0 ? null : status === 'error' ? (
           <div className="agent-management-state agent-management-state--error" role="alert">
             <p>{error || t('agentManagement.states.loadError')}</p>

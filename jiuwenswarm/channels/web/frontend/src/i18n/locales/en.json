@@ -1860,6 +1860,8 @@
       "zoomIn": "Zoom in",
       "zoomOut": "Zoom out",
       "zoomLevel": "Current zoom {{percent}}%",
+      "fullscreen": "Fullscreen",
+      "exitFullscreen": "Exit fullscreen",
       "actions": {
         "read": "Read graph",
         "incrementalBuild": "Incremental build",
