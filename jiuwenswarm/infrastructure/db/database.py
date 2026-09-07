@@ -1,48 +1,62 @@
-# Copyright (c) Huawei Technologies Co., Ltd. 2026-2026. All rights reserved
-
-"""通用 ``Database``：按 ``Settings`` / 环境变量创建并连接 foundation ``DBHandler``。
-
-无进程级单例；共享实例与 ``ensure_*_handler`` 见 ``core.enterprise_config.gateway_db``。
-"""
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+"""企业库 ``Database``：连接创建与进程内单例。"""
 
 from __future__ import annotations
 
 import asyncio
 import os
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 from openjiuwen_runtime.foundation.db.handler import DBHandler
 from openjiuwen_runtime.foundation.db.mysql_handler import MySQLHandler
-from openjiuwen_runtime.foundation.db import postgresql_handler
 from openjiuwen_runtime.foundation.db.postgresql_handler import PostgreSQLHandler
 from openjiuwen_runtime.foundation.db.sqlite_handler import SQLiteHandler
 from openjiuwen_runtime.foundation.db.utils import is_mysql, is_postgresql, is_sqlite
 from openjiuwen_runtime.foundation.log import get_logger
 
 from jiuwenswarm.gateway.config.enterprise.tables.table_init import init_all_tables
-from .config import Settings, get_settings
+from jiuwenswarm.infrastructure.db.settings import Settings, get_settings
 
 logger = get_logger(__name__)
 
+# jiuwenswarm/infrastructure/db/database.py → parents[3] = 仓库根（相对 sqlite 路径兜底）
+_DEFAULT_RELATIVE_ROOT = Path(__file__).resolve().parents[3]
+
 
 class Database:
-    """数据库连接：解析路径、创建 ``DBHandler``、初始化并连接（幂等）。"""
+    """企业库连接：解析路径、创建 ``DBHandler``、进程内单例。"""
+
+    _current: ClassVar[Database | None] = None
 
     def __init__(
         self,
-        cfg: Settings | None = None,
+        cfg: Settings | Any | None = None,
         *,
         relative_root: Path | None = None,
     ) -> None:
         self._cfg = cfg
-        self._relative_root = relative_root
+        self._relative_root = relative_root if relative_root is not None else _DEFAULT_RELATIVE_ROOT
         self._handler: DBHandler | None = None
         self.tables_registered = False
         self._ready_lock = asyncio.Lock()
 
+    @classmethod
+    def current(cls) -> Database:
+        """进程内唯一企业库实例。"""
+        if cls._current is None:
+            cls._current = cls()
+        return cls._current
+
+    @classmethod
+    async def release(cls) -> None:
+        """断连时释放连接池。"""
+        if cls._current is not None:
+            await cls._current.close()
+            cls._current = None
+
     @property
-    def settings(self) -> Settings:
+    def settings(self) -> Settings | Any:
         return self._cfg or get_settings()
 
     @property
@@ -55,7 +69,7 @@ class Database:
 
     def resolve_sqlite_path(self) -> Path:
         cfg = self.settings
-        raw_path = Path(cfg.gateway_sqlite_path.strip()).expanduser()
+        raw_path = Path(str(cfg.gateway_sqlite_path or "").strip()).expanduser()
         if raw_path.is_absolute():
             return raw_path.resolve()
 
@@ -179,3 +193,8 @@ class Database:
         finally:
             self._handler = None
             self.tables_registered = False
+
+
+__all__ = (
+    "Database",
+)

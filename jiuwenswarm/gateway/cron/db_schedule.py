@@ -264,10 +264,9 @@ async def _update_next_run_at_only(
 async def _execute_claim_sql(sql: str, params: dict[str, Any]) -> int:
     from sqlalchemy import text
 
-    from jiuwenswarm.infrastructure.module_importer import import_manager_config_receiver_module
+    from jiuwenswarm.infrastructure.db.database import Database
 
-    db_mod = import_manager_config_receiver_module("core.enterprise_config.gateway_db")
-    handler = await db_mod.ensure_gateway_db_handler(log_prefix="cron_db_schedule")
+    handler = await Database.current().ensure_ready(log_prefix="cron_db_schedule")
     engine = handler.get_engine()
     async with engine.begin() as conn:
         result = await conn.execute(text(sql), params)
