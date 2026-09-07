@@ -3244,8 +3244,12 @@ class SkillManager:
                     and builtin_skill.resolve() != Path(skill_dir).resolve()
                 ):
                     display = SkillManager._parse_skill_display_md(builtin_skill)
-            except Exception:
-                pass
+            except OSError as exc:
+                logger.debug(
+                    "跳过内置 skill_display 回退 %s: %s",
+                    skill_dir,
+                    exc,
+                )
 
         skill_name = str(meta.get("name") or "").strip()
         skill_description = str(meta.get("description") or "").strip()

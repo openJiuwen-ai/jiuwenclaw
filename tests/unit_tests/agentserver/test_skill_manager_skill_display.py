@@ -166,6 +166,49 @@ async def test_skills_get_returns_display_fields(monkeypatch, tmp_path):
     assert detail["description"] == "详情中文描述"
 
 
+@pytest.mark.asyncio
+async def test_skills_get_uninstalled_builtin_whitelist(monkeypatch, tmp_path):
+    """未安装且在白名单内的内置技能可通过 skills.get 返回."""
+    skills_dir = tmp_path / "skills"
+    builtin_dir = tmp_path / "builtin"
+    _make_skill_dir(
+        builtin_dir,
+        "gitcode-api",
+        description="GitCode CLI trigger description",
+        display={
+            "display_name_zh": "GitCode API",
+            "description_zh": "中文描述",
+            "display_name_en": "GitCode API",
+            "description_en": "English UI description",
+        },
+    )
+    manager = _init_manager(monkeypatch, skills_dir, builtin_dir)
+
+    detail = await manager.handle_skills_get({"name": "gitcode-api"})
+    assert detail["name"] == "gitcode-api"
+    assert detail["source"] == "builtin"
+    assert detail["is_builtin"] is True
+    assert detail["is_builtin_source"] is True
+    assert detail["installed"] is False
+    assert detail["display_name_zh"] == "GitCode API"
+    assert detail["description_zh"] == "中文描述"
+    assert detail["display_name"] == "GitCode API"
+    assert detail["description"] == "中文描述"
+
+
+@pytest.mark.asyncio
+async def test_skills_get_rejects_uninstalled_builtin_outside_whitelist(
+    monkeypatch, tmp_path
+):
+    skills_dir = tmp_path / "skills"
+    builtin_dir = tmp_path / "builtin"
+    _make_skill_dir(builtin_dir, "hidden-builtin", description="Should not be gettable")
+    manager = _init_manager(monkeypatch, skills_dir, builtin_dir)
+
+    with pytest.raises(ValueError, match="未找到 skill"):
+        await manager.handle_skills_get({"name": "hidden-builtin"})
+
+
 def test_builtin_scan_whitelist_filters_non_listed(monkeypatch, tmp_path):
     skills_dir = tmp_path / "skills"
     builtin_dir = tmp_path / "builtin"

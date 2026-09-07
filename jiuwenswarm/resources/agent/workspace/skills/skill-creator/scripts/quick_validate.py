@@ -155,8 +155,11 @@ def validate_skill(skill_path: Path | str) -> tuple[bool, str]:
     else:
         try:
             display_text = display_path.read_text(encoding="utf-8")
+            # 与 SkillManager._parse_skill_display_md 保持一致，兼容尾随空格与 CRLF
             display_match = re.match(
-                r"^---\n(.*?)\n---", display_text, re.DOTALL
+                r"^---\s*\n(.*?)\n---\s*\n?(.*)",
+                display_text,
+                re.DOTALL,
             )
             if not display_match:
                 display_warning = (
