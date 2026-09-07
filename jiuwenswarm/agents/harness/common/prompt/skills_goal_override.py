@@ -41,42 +41,8 @@ from openjiuwen.harness.prompts.sections import SectionName
 from jiuwenswarm.common.utils import logger
 
 # ---------------------------------------------------------------------------
-# Static catalogue — the 15 canonical xiaoyi work skills
+# Skills preamble and dynamic catalogue
 # ---------------------------------------------------------------------------
-
-_STATIC_SKILL_NAMES = frozenset(
-    {
-        "xiaoyi-web-search-win",
-        "find-skills",
-        "xiaoyi-doc-convert",
-        "xiaoyi-ppt-win",
-        "aigc_marker",
-        "execution-validator-skill",
-        "secret-guardian",
-        "skill-creator-win",
-        "skill-scope",
-        "swarmskill-creator",
-        "xiaoyi-pdf-win",
-        "seedream-image-gen",
-        "seedance-video-gen",
-        "music-generation",
-        "xiaoyi-image-understanding-win",
-    }
-)
-
-# The desktop bundle installs these canonical skills with a ``-win`` suffix.
-# Hide their former names too when scanning dynamically so upgrades and older
-# user skill roots cannot surface duplicate catalogue entries.
-_LEGACY_DEDUP_ALIASES = frozenset(
-    {
-        "xiaoyi-web-search",
-        "xiaoyi-ppt",
-        "skill-creator",
-        "xiaoyi-pdf",
-        "xiaoyi-image-understanding",
-    }
-)
-_DEDUP_NAMES = _STATIC_SKILL_NAMES | _LEGACY_DEDUP_ALIASES
 
 # Final system-prompt budget for the Skills section. This lives in the product
 # override rather than agent-core so packaged/runtime dependency refreshes do
@@ -228,6 +194,31 @@ _STATIC_BLOCK_CN = """## 技能
 
 _STATIC_BLOCK: Dict[str, str] = {"cn": _STATIC_BLOCK_CN, "en": _STATIC_BLOCK_EN}
 
+# The historical static catalogue above is deliberately overridden here. Keep
+# only the upstream 小艺-first policy as stable prompt text; every skill entry
+# is sourced from the rail's currently loaded user skills.
+_SKILLS_PREAMBLE_EN = """# Skills
+
+Prefer the skills and tools below; call `skill_tool` to retrieve the full `SKILL.md` for a skill.
+
+**Tool Selection Principle (xiaoyi First):** In all cases, unless the user explicitly specifies a different tool, you must prioritize using `小艺` related tools or skills whenever they are capable of completing the task.
+"""
+
+_SKILLS_PREAMBLE_CN = """# 技能
+
+优先使用以下技能与工具；使用技能前调用 `skill_tool` 获取该技能的完整 `SKILL.md`。
+
+**工具选择原则（小艺优先）：** 除非用户明确指定其他工具，否则在所有情况下，只要小艺相关工具或技能能够完成任务，就必须优先使用。
+"""
+
+_SKILLS_PREAMBLE: Dict[str, str] = {
+    "cn": _SKILLS_PREAMBLE_CN,
+    "en": _SKILLS_PREAMBLE_EN,
+}
+_STATIC_BLOCK_EN = _SKILLS_PREAMBLE_EN + "\n<available_skills>\n</available_skills>\n"
+_STATIC_BLOCK_CN = _SKILLS_PREAMBLE_CN + "\n<available_skills>\n</available_skills>\n"
+_STATIC_BLOCK = {"cn": _STATIC_BLOCK_CN, "en": _STATIC_BLOCK_EN}
+
 _AVAILABLE_SKILLS_CLOSE_TAG = "</available_skills>"
 
 def _skills_prompt_max_chars() -> int:
@@ -262,9 +253,9 @@ def _skills_prompt_max_chars() -> int:
 
 
 def _visible_dynamic_skills(skills: Sequence[Any]) -> List[Any]:
-    """Return de-duplicated non-static skills in their existing stable order."""
+    """Return every loaded skill once, in its existing stable order."""
     visible: List[Any] = []
-    seen_names = set(_DEDUP_NAMES)
+    seen_names: set[str] = set()
     for skill in skills:
         name = str(getattr(skill, "name", "") or "").strip()
         if not name or name in seen_names:
@@ -323,7 +314,7 @@ def _append_until_budget(
 def _build_all_mode_skill_prompt_from_skills(
     skills: Sequence[Any], language: str = "en"
 ) -> str:
-    """Build a bounded XML catalogue from structured static and dynamic skills.
+    """Build a bounded XML catalogue from structured dynamic skills.
 
     Full descriptions are kept only as whole entries. Once the budget is hit,
     later dynamic skills downgrade to name-only entries, so the model can still
@@ -332,9 +323,6 @@ def _build_all_mode_skill_prompt_from_skills(
     """
     lang = language or "en"
     static = _STATIC_BLOCK.get(lang, _STATIC_BLOCK_EN)
-    if _AVAILABLE_SKILLS_CLOSE_TAG not in static:
-        logger.warning("Static skills catalogue is missing its closing XML tag")
-        return static
     prefix, _ = static.rsplit(_AVAILABLE_SKILLS_CLOSE_TAG, 1)
     prefix = prefix.rstrip() + "\n"
     suffix = _AVAILABLE_SKILLS_CLOSE_TAG + "\n"
@@ -351,7 +339,7 @@ def _build_all_mode_skill_prompt_from_skills(
     max_chars = max(configured_max, static_length)
     if configured_max < static_length:
         logger.warning(
-            "%s=%d is smaller than the required static catalogue (%d); using %d",
+            "%s=%d is smaller than the required Skills preamble (%d); using %d",
             _SKILLS_PROMPT_MAX_CHARS_ENV,
             configured_max,
             static_length,
@@ -368,8 +356,7 @@ def _build_all_mode_skill_prompt_from_skills(
 
     notice = (
         "  <catalog_notice>Some dynamic skill descriptions are omitted to stay within "
-        "the prompt budget. Use `find-skills` when you need broader skill discovery."
-        "</catalog_notice>"
+        "the prompt budget.</catalog_notice>"
     )
     # Keep the notice only when it does not displace a skill identity.
     notice_length = len(notice) + (1 if full_kept else 0)
@@ -406,9 +393,9 @@ def _build_all_mode_skill_prompt_from_skills(
 
 
 def _build_auto_list_mode_skill_prompt(language: str = "en") -> str:
-    """Auto-list mode: just the static block (no dynamic skill_lines available)."""
+    """Auto-list mode: keep the stable preamble; discover skills on demand."""
     lang = language or "en"
-    return _STATIC_BLOCK.get(lang, _STATIC_BLOCK_EN) + "\n"
+    return _SKILLS_PREAMBLE.get(lang, _SKILLS_PREAMBLE_EN) + "\n"
 
 
 # ---------------------------------------------------------------------------
@@ -481,6 +468,10 @@ def apply_patch() -> None:
     # Fail fast like safety_override: an agent-core API mismatch must be visible
     # during startup rather than silently changing prompt behavior.
     _skills.build_auto_list_mode_skill_prompt = _build_auto_list_mode_skill_prompt
+    _skills.SKILL_RAIL_NO_SKILL_PROMPT = {
+        "cn": _build_auto_list_mode_skill_prompt("cn"),
+        "en": _build_auto_list_mode_skill_prompt("en"),
+    }
 
     # 2. Preserve Skill objects until their XML rendering boundary. The upstream
     # rail first renders Markdown; parsing it again is ambiguous for multi-line
@@ -523,7 +514,6 @@ apply_patch()
 
 
 __all__ = [
-    "_STATIC_SKILL_NAMES",
     "_build_all_mode_skill_prompt_from_skills",
     "_build_auto_list_mode_skill_prompt",
     "apply_patch",
