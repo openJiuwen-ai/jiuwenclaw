@@ -243,22 +243,25 @@ def _resolve_default_model_config(
     candidates: list[dict[str, Any]] = []
     defaults_raw = models_raw.get("defaults")
     if isinstance(defaults_raw, list):
-        candidates.extend(
-            item
-            for item in defaults_raw
-            if isinstance(item, dict)
-            and isinstance(item.get("model_client_config"), dict)
-            and item["model_client_config"].get("model_name")
-        )
+        for item in defaults_raw:
+            if not isinstance(item, dict):
+                continue
+            model_client_config = item.get("model_client_config")
+            if (
+                isinstance(model_client_config, dict)
+                and model_client_config.get("model_name")
+            ):
+                candidates.append(item)
 
     if not candidates:
         legacy_default = models_raw.get("default")
-        if (
-            isinstance(legacy_default, dict)
-            and isinstance(legacy_default.get("model_client_config"), dict)
-            and legacy_default["model_client_config"].get("model_name")
-        ):
-            candidates.append(legacy_default)
+        if isinstance(legacy_default, dict):
+            model_client_config = legacy_default.get("model_client_config")
+            if (
+                isinstance(model_client_config, dict)
+                and model_client_config.get("model_name")
+            ):
+                candidates.append(legacy_default)
 
     candidates.extend(_collect_agentos_model_entries(models_raw))
 
