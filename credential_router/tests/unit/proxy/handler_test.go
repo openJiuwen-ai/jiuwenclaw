@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -1163,5 +1164,71 @@ func TestIsTimeoutContextCanceled(t *testing.T) {
 	}
 	if proxy.IsTimeoutForTesting(err) {
 		t.Errorf("isTimeout(*url.Error wrapping Canceled) = true, want false (client disconnect is not a timeout)")
+	}
+}
+
+// TestHandlerContextCancelMidStream locks in the fix for the review
+// note: select { ... default: } between body.Reads only checks ctx
+// during the small windows between reads, NOT during a blocked read.
+// Without the context.AfterFunc that closes resp.Body on cancel, an
+// LLM upstream keeps generating tokens for a client that has already
+// gone away. This test cancels the client mid-stream and asserts the
+// upstream server sees its connection close within 2s.
+func TestHandlerContextCancelMidStream(t *testing.T) {
+	var upstreamCancelled atomic.Bool
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		flusher, _ := w.(http.Flusher)
+		for i := 0; ; i++ {
+			select {
+			case <-r.Context().Done():
+				upstreamCancelled.Store(true)
+				return
+			default:
+			}
+			_, _ = fmt.Fprintf(w, "chunk-%d\n", i)
+			if flusher != nil {
+				flusher.Flush()
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}))
+	defer up.Close()
+
+	mv := &mockVault{
+		getFunc: func(proxyKey string) (string, string, error) {
+			return "key", "openai", nil
+		},
+	}
+	cfg := platform.Default()
+	cfg.UpstreamTimeoutMs = 10000
+	srv := httptest.NewServer(newHandlerForTest(cfg, mv))
+	defer srv.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	req, _ := http.NewRequestWithContext(ctx, "GET", srv.URL+"/"+proxyRequestPath(t, up.URL, "api"), nil)
+	req.Header.Set("Authorization", "Bearer "+testProxyKey)
+	client := &http.Client{}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	defer resp.Body.Close()
+
+	buf := make([]byte, 32)
+	if _, err := io.ReadFull(resp.Body, buf); err != nil {
+		t.Fatalf("initial read: %v", err)
+	}
+
+	cancel()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for !upstreamCancelled.Load() && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !upstreamCancelled.Load() {
+		t.Fatal("upstream did not detect client disconnect within 2s — context.AfterFunc missing?")
 	}
 }

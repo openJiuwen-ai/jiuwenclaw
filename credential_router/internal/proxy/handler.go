@@ -211,6 +211,13 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	defer resp.Body.Close()
 
+	// body.Close on ctx cancel unblocks the in-flight body.Read —
+	// otherwise the LLM upstream keeps generating for a dead client.
+	stopCancelWatcher := context.AfterFunc(r.Context(), func() {
+		resp.Body.Close()
+	})
+	defer stopCancelWatcher()
+
 	proxyKeyID := redactProxyKey(proxyKey)
 
 	// Pre-flight: if the upstream advertises a Content-Length that
@@ -292,9 +299,16 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				)
 				return
 			}
-		h.logReject(sourceIP, apiBase,
-			"upstream read failed: "+rerr.Error(), platform.CodeBadGateway)
-		return
+			// AfterFunc may have closed resp.Body on client cancel, making
+			// the read error look generic. Re-check ctx to attribute.
+			if r.Context().Err() != nil {
+				h.logReject(sourceIP, apiBase,
+					"client canceled", platform.CodeBadGateway)
+				return
+			}
+			h.logReject(sourceIP, apiBase,
+				"upstream read failed: "+rerr.Error(), platform.CodeBadGateway)
+			return
 		}
 	}
 
