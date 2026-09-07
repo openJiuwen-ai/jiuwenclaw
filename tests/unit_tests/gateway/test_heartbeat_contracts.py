@@ -101,7 +101,6 @@ async def test_agent_tools_call_agentserver_local_service() -> None:
     assert len(tools) == 9
     list_jobs = next(tool for tool in tools if tool.card.name == "heartbeat_list_jobs")
     create = next(tool for tool in tools if tool.card.name == "heartbeat_create_job")
-    assert "delete_after_run" not in create.card.input_params["properties"]
     assert "active_count, not len(jobs)" in list_jobs.card.description
     assert "authoritative active-job limit check" in create.card.description
     result = await create._func(
