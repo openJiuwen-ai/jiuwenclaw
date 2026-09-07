@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 
 
 def _require_bool(name: str, value: object) -> None:
-    if type(value) is not bool:
+    if not isinstance(value, bool):
         raise TypeError(f"{name} must be a boolean")
 
 
@@ -270,13 +270,14 @@ class PreparedSessionProvision(Generic[_ResultT]):
                 "prepared session provision belongs to a different provisioner"
             )
 
-    async def _commit(
+    async def commit_for_owner(
         self,
         owner_token: object,
         *,
         timing: SessionProvisionCommitTiming,
         context: SessionProvisionCommitContext,
     ) -> _ResultT:
+        """Commit through the capability held by the owning Provisioner."""
         self._assert_owner(owner_token)
         async with self._finalize_lock:
             if timing is not self._commit_timing:
@@ -309,7 +310,8 @@ class PreparedSessionProvision(Generic[_ResultT]):
             self._abort_hook = None
             return self._result
 
-    async def _abort(self, owner_token: object) -> None:
+    async def abort_for_owner(self, owner_token: object) -> None:
+        """Abort through the capability held by the owning Provisioner."""
         self._assert_owner(owner_token)
         async with self._finalize_lock:
             if self._state is SessionProvisionState.ABORTED:
@@ -504,7 +506,7 @@ class RuntimeSessionProvisioner:
         only an optional opaque foreground scope and neither derives nor keeps
         its transport meaning.
         """
-        return await prepared._commit(
+        return await prepared.commit_for_owner(
             self._provision_owner_token,
             timing=timing,
             context=context or SessionProvisionCommitContext(),
@@ -515,7 +517,7 @@ class RuntimeSessionProvisioner:
         prepared: PreparedSessionProvision[_ResultT],
     ) -> None:
         """Abort one prepared operation exactly once."""
-        await prepared._abort(self._provision_owner_token)
+        await prepared.abort_for_owner(self._provision_owner_token)
 
     async def delete_session(
         self,
