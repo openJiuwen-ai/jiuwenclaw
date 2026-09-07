@@ -40,6 +40,11 @@ _PPT_DELIVERY_SUMMARY_POST_TOOL_HINT = (
     "send_file_to_user / skill_tool / skill_acceleration_exec。"
 )
 
+# HITL 续跑没有外层 tool_result / DeliverySummaryRail；可见终稿用骨架或安全短句，
+# 禁止把产物摘要账本发给用户。
+PPT_TURBO_SAFE_DELIVERY_SUMMARY = "PPT 已生成并交付。"
+_SKILL_TURBO_ARTIFACT_SUMMARY_MARKER = "[SkillAccelerationExec 产物摘要]"
+
 # 工具返回值会先被 AbilityManager 收成 ToolMessage。after_tool_call 再用
 # StreamEventRail._tool_interrupted_message（随 prompt 语言中/英）覆写 tool_msg。
 # _fix_incomplete_tool_context 认 rail 文案 + 中英文 legacy 模板，故本常量取中文
@@ -368,7 +373,7 @@ def _build_artifact_summary(holder: dict[str, Any]) -> str:
     """
     if not holder:
         return ""
-    lines = ["[SkillAccelerationExec 产物摘要]"]
+    lines = [_SKILL_TURBO_ARTIFACT_SUMMARY_MARKER]
     for plan_name, node_info in holder.items():
         if not isinstance(node_info, dict):
             continue
@@ -397,6 +402,32 @@ def _ppt_delivery_summary(artifact_holder: dict[str, Any] | None) -> str:
         return ""
     text = node.get("delivery_summary")
     return text.strip() if isinstance(text, str) else ""
+
+
+def visible_ppt_turbo_finish_text(
+    holder: dict[str, Any] | None,
+    *,
+    success: bool,
+    detail: str = "",
+) -> str:
+    """HITL 续跑的用户可见终稿（无外层 skill_acceleration_exec 工具循环）。
+
+    成功时优先发 P10 已填好的交付骨架；没有骨架则用安全短句。
+    失败只回可读错误。产物账本不得出现在返回值里。
+    """
+    from jiuwenswarm.server.runtime.skill_turbo.skill_codes.ppt.delivery_summary import (
+        DELIVERY_SUMMARY_START,
+    )
+
+    if success:
+        skeleton = _ppt_delivery_summary(holder)
+        if skeleton.startswith(DELIVERY_SUMMARY_START):
+            return skeleton
+        return PPT_TURBO_SAFE_DELIVERY_SUMMARY
+    text = str(detail or "").strip() or "任务未完成"
+    if _SKILL_TURBO_ARTIFACT_SUMMARY_MARKER in text:
+        return "任务未完成"
+    return text
 
 
 def _wrap_skill_turbo_result(

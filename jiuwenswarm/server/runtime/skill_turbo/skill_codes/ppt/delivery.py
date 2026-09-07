@@ -125,7 +125,11 @@ class DeliveryNode(PlanNode):
         artifact_tag = f"<!-- artifact:pptx {pages_dir} -->" if need_artifact and pages_dir else ""
 
         summary = self._build_summary(
-            delivery_status, pptx_filename, page_count, pages_dir, send_file_status
+            delivery_status,
+            pptx_filename,
+            total_pages or page_count,
+            pages_dir,
+            send_file_status,
         )
         delivery_summary = ""
         if task_completed:
@@ -162,6 +166,8 @@ class DeliveryNode(PlanNode):
             "task_completed": task_completed,
             "speaker_notes_status": str(inputs.get("speaker_notes_status") or "skipped"),
             "delivery_summary_emitted": bool(delivery_summary),
+            "content_pages": page_count if page_count > 0 else None,
+            "total_pages": total_pages or page_count or None,
         }
         return {
             "delivery_status": delivery_status,

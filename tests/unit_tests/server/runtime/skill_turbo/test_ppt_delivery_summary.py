@@ -14,10 +14,13 @@ from jiuwenswarm.server.runtime.skill_turbo.skill_codes.ppt.delivery_summary imp
 )
 from jiuwenswarm.server.runtime.skill_turbo.skill_codes.ppt.ppt_gen_root import PPTGenRootNode
 from jiuwenswarm.server.runtime.skill_turbo.skill_turbo_tools import (
+    PPT_TURBO_SAFE_DELIVERY_SUMMARY,
+    _SKILL_TURBO_ARTIFACT_SUMMARY_MARKER,
     _wrap_skill_turbo_result,
     clear_pending_ppt_delivery_summary,
     emit_pending_ppt_delivery_summary,
     take_pending_ppt_delivery_summary,
+    visible_ppt_turbo_finish_text,
 )
 
 _SAMPLE_OUTLINE = """# 大纲：杭州旅游
@@ -122,7 +125,11 @@ def test_build_delivery_summary_skeleton_uses_literal_start_and_real_pages() -> 
     assert text.startswith(DELIVERY_SUMMARY_START)
     assert "《杭州旅游.pptx》" in text
     assert "共 3 页" in text
-    assert "- P1：杭州一日游 - 西湖与城市印象" in text
+    assert "一日游路线与必看景点" in text
+    assert "- P1：杭州一日游" in text
+    assert "- P2：上午西湖下午灵隐" in text
+    assert "西湖与城市印象" not in text
+    assert "按时间排列的游览顺序" not in text
     assert "未请求演讲备注" in text
     assert "文件位置" not in text
     assert "D:/" not in text and "C:/" not in text
@@ -144,9 +151,39 @@ def test_build_delivery_summary_keeps_only_real_pages_when_fewer_than_three() ->
         style_id="tech-minimal",
         export_status="ok",
     )
-    assert "- P1：仅一页 - 杭州" in text
+    assert "- P1：仅一页" in text
+    assert "- P1：仅一页 - 杭州" not in text
     assert "- P2：" not in text
     assert "- P3：" not in text
+
+
+def test_build_delivery_summary_omits_long_outline_page_bodies() -> None:
+    long_core = (
+        "以数据卡片+ECharts图表呈现2025年杭州旅游核心成果与2026年趋势研判。"
+        "第一区块规模与增长：全域游客23580.3万人次。"
+    )
+    outline = f"""### P1: 封面
+- **标题**：杭州旅游工作汇报
+- **内容概要**：封面展示汇报主题
+### P2: 数据
+- **标题**：杭州旅游经济稳中向好
+- **内容概要**：{long_core}
+"""
+    text = build_delivery_summary_skeleton(
+        pptx_filename="杭州旅游.pptx",
+        total_pages=2,
+        delivery_status="ok",
+        send_file_status="sent",
+        pages_ok=True,
+        outline_text=outline,
+        topic="杭州旅游",
+        style_id="business-classic",
+        export_status="ok",
+    )
+    assert "- P1：杭州旅游工作汇报" in text
+    assert "- P2：杭州旅游经济稳中向好" in text
+    assert long_core not in text
+    assert "封面展示汇报主题" not in text
 
 
 @pytest.mark.asyncio
@@ -195,6 +232,8 @@ async def test_p10_emits_skeleton_when_send_succeeds(
     assert result["send_file_status"] == "sent"
     assert str(result["delivery_summary"]).startswith(DELIVERY_SUMMARY_START)
     assert result["__artifact__"]["delivery_summary"].startswith(DELIVERY_SUMMARY_START)
+    assert result["__artifact__"]["info"]["total_pages"] == 1
+    assert "页数：1" in result["summary"]
 
 
 @pytest.mark.asyncio
@@ -417,3 +456,136 @@ async def test_delivery_summary_rail_clears_pending_on_tool_interrupt() -> None:
     )
     assert written == []
     assert take_pending_ppt_delivery_summary() == ""
+
+
+def _holder_with_skeleton(skeleton: str) -> dict[str, Any]:
+    return {
+        "p2_requirement_collect": {"info": {"content_pages": 1, "total_pages": 3}},
+        "p10_delivery": {
+            "info": {"send_file_status": "sent", "delivery_summary_emitted": True},
+            "files": [{"path": "杭州旅游.pptx"}],
+            "delivery_summary": skeleton,
+        },
+    }
+
+
+def test_visible_finish_text_prefers_p10_skeleton() -> None:
+    skeleton = f"{DELIVERY_SUMMARY_START}\n\n✅ 已完成：PPT 生成\n"
+    text = visible_ppt_turbo_finish_text(_holder_with_skeleton(skeleton), success=True)
+    assert text == skeleton.strip()
+    assert _SKILL_TURBO_ARTIFACT_SUMMARY_MARKER not in text
+    assert "任务已完成" not in text
+
+
+def test_visible_finish_text_uses_safe_sentence_without_skeleton() -> None:
+    text = visible_ppt_turbo_finish_text(
+        {"p8_ppt_page_gen": {"info": {"total_pages": 3}}},
+        success=True,
+    )
+    assert text == PPT_TURBO_SAFE_DELIVERY_SUMMARY
+    assert _SKILL_TURBO_ARTIFACT_SUMMARY_MARKER not in text
+
+
+def test_visible_finish_text_failure_omits_artifact_dump() -> None:
+    text = visible_ppt_turbo_finish_text(
+        _holder_with_skeleton(f"{DELIVERY_SUMMARY_START}\n"),
+        success=False,
+        detail="SkillAccelerationExec 未处理: boom",
+    )
+    assert text == "SkillAccelerationExec 未处理: boom"
+    assert _SKILL_TURBO_ARTIFACT_SUMMARY_MARKER not in text
+
+
+def test_requirement_artifact_uses_content_and_total_pages() -> None:
+    from jiuwenswarm.server.runtime.skill_turbo.skill_codes.ppt.requirement_collect import (
+        _set_requirement_artifact,
+    )
+
+    ctx: dict[str, Any] = {
+        "topic": "杭州旅游",
+        "page_count": 1,
+        "style_id": "business-classic",
+        "audience": "企业高管",
+        "presentation_purpose": "产品展示",
+    }
+    _set_requirement_artifact(ctx)
+    info = ctx["__artifact__"]["info"]
+    assert info["content_pages"] == 1
+    assert info["total_pages"] == 3
+    assert "page_count" not in info
+
+
+@pytest.mark.asyncio
+async def test_resume_stream_emits_skeleton_not_artifact_dump(monkeypatch: pytest.MonkeyPatch) -> None:
+    from jiuwenswarm.common.schema.agent import AgentRequest
+    from jiuwenswarm.common.schema.message import ReqMethod
+    from jiuwenswarm.server.runtime.agent_adapter.interface_deep import JiuWenSwarmDeepAdapter
+
+    skeleton = f"{DELIVERY_SUMMARY_START}\n\n✅ 已完成：PPT 生成\n"
+
+    class _FakeTurbo:
+        def __init__(self, _config: Any) -> None:
+            self.artifact_holder = _holder_with_skeleton(skeleton)
+
+        async def resume_stream(self, **_kwargs: Any):
+            if False:
+                yield None
+
+    async def _async_none(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.skill_turbo.agent.SkillTurbo",
+        _FakeTurbo,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.agent_adapter.interface_deep._skill_turbo_clear_resume_ctx",
+        _async_none,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.agent_adapter.interface_deep._skill_turbo_clear_resume_in_flight",
+        _async_none,
+    )
+
+    adapter = object.__new__(JiuWenSwarmDeepAdapter)
+    adapter._model = None
+    adapter.build_skill_turbo_config = lambda: {}  # type: ignore[method-assign]
+    adapter._log_and_make_usage_summary_chunk = lambda **_k: None  # type: ignore[method-assign]
+    adapter._rewrite_skill_turbo_usage_chunk = lambda chunk, **_k: (chunk, None)  # type: ignore[method-assign]
+
+    class _Session:
+        async def post_run(self) -> None:
+            return None
+
+    request = AgentRequest(
+        request_id="req-resume",
+        channel_id="officeclaw",
+        session_id="sess-resume",
+        req_method=ReqMethod.CHAT_SEND,
+        params={"source": "ask_user_interrupt", "answers": [{"question": "风格"}]},
+    )
+    stream = adapter._make_skill_turbo_resume_stream(
+        request=request,
+        inputs={},
+        session=_Session(),
+        resume_ctx={"plan_code": "x", "pending_tool_call_id": "tc-1", "inputs": {}},
+        answers=[{"question": "风格", "selected_options": ["商务经典"]}],
+    )
+    assert stream is not None
+    chunks = [chunk async for chunk in stream]
+    deltas = [
+        chunk.payload.get("content", "")
+        for chunk in chunks
+        if isinstance(chunk.payload, dict) and chunk.payload.get("event_type") == "chat.delta"
+    ]
+    finals = [
+        chunk.payload.get("content", "")
+        for chunk in chunks
+        if isinstance(chunk.payload, dict) and chunk.payload.get("event_type") == "chat.final"
+    ]
+    assert deltas
+    assert deltas[-1].startswith(DELIVERY_SUMMARY_START)
+    assert _SKILL_TURBO_ARTIFACT_SUMMARY_MARKER not in deltas[-1]
+    assert finals
+    assert str(finals[-1]).strip() == ""
+    assert chunks[-1].is_complete is True

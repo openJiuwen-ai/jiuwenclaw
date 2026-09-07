@@ -268,10 +268,16 @@ def _has_nonempty_topic(inputs: dict[str, Any]) -> bool:
 
 def _set_requirement_artifact(ctx: dict[str, Any]) -> None:
     """把 P2 需求收集的关键槽位写入 __artifact__，供跨请求复用。"""
+    content_pages = ctx.get("page_count")
+    total_pages = None
+    if isinstance(content_pages, int) and content_pages > 0:
+        # 默认封面+结束页；与 PptCommon.resolve_total_pages 的 +2 兜底一致。
+        total_pages = content_pages + 2
     ctx["__artifact__"] = {
         "info": {
             "topic": ctx.get("topic", ""),
-            "page_count": ctx.get("page_count"),
+            "content_pages": content_pages,
+            "total_pages": total_pages,
             "style_id": ctx.get("style_id", ""),
             "audience": ctx.get("audience", ""),
             "presentation_purpose": ctx.get("presentation_purpose", ""),
