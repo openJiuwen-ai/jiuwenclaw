@@ -18,7 +18,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from openjiuwen.rsi.events import EventNode, EventProgress, EventStatus
+from openjiuwen.rsi.events import EventNode, EventProgress, EventStatus, NodeStageEvent
 from openjiuwen.rsi.schema import (
     ArtifactRef,
     EngineReport,
@@ -36,15 +36,46 @@ from jiuwenswarm.agents.harness.common.rsi.errors import RsiPathInvalid
 from jiuwenswarm.agents.harness.common.rsi.harness_adapter import HarnessEngineRequest
 
 
+_MOCK_EVAL_CASES = 3
+
+
+def _mock_case_stage(case_index: int, total_cases: int, status: str) -> dict[str, Any]:
+    """Build a deterministic harness evaluation case stage (id/name 契约)。"""
+    if status == "passed":
+        name = f"Case {case_index}/{total_cases} passed"
+    elif status == "failed":
+        name = f"Case {case_index}/{total_cases} failed"
+    else:
+        name = f"Case {case_index}/{total_cases}"
+    return {
+        "id": f"evaluate.case.{case_index}",
+        "name": name,
+        "status": status,
+        "case_index": case_index,
+        "total_cases": total_cases,
+    }
+
+
 class MockHarnessProvider:
     """A resumable, disk-backed mock implementation of HarnessProvider."""
 
     supports_pause = True
     supports_resume = True
 
-    def __init__(self, tasks_root: str | Path, *, iteration_delay: float = 0.1) -> None:
+    def __init__(
+        self,
+        tasks_root: str | Path,
+        *,
+        iteration_delay: float = 0.1,
+        case_delay: float | None = None,
+    ) -> None:
         self.tasks_root = Path(tasks_root)
         self.iteration_delay = max(0.0, float(iteration_delay))
+        self.case_delay = (
+            max(0.0, float(case_delay))
+            if case_delay is not None
+            else max(0.0, self.iteration_delay * 0.25)
+        )
 
     def validate_input(self, dataset_path: str | None) -> Any:
         if not dataset_path:
@@ -254,6 +285,52 @@ class MockHarnessProvider:
                     target=f"candidate:{candidate}",
                     summary=f"mock harness candidate {candidate}",
                 )
+                # Emit a provisional node first so the per-case evaluation
+                # stages below have a live node_ref.  The final EventNode at
+                # the end of this iteration replaces it with the final score.
+                provisional_node = RsiTreeNode(
+                    node_id=node_id,
+                    iteration=iteration,
+                    parent_id=previous_node_id,
+                    type="provisional",
+                    adopted=False,
+                    score=None,
+                    summary=f"mock harness candidate {candidate} evaluating",
+                    snapshot_artifact_id=None,
+                    reason=None,
+                    failure_class=None,
+                    changes=[change],
+                    extra={
+                        "candidate": candidate,
+                        "search_width": request.search_width,
+                        "content": {
+                            "kind": "mock_harness_candidate",
+                            "status": "provisional",
+                            "iteration": iteration,
+                            "candidate": candidate,
+                            "node_id": node_id,
+                            "parent_node_id": previous_node_id,
+                        },
+                    },
+                )
+                await _emit(on_event, EventNode(node=provisional_node))
+                for case_index in range(1, _MOCK_EVAL_CASES + 1):
+                    await _emit(
+                        on_event,
+                        NodeStageEvent(
+                            node_ref=node_id,
+                            stage=_mock_case_stage(case_index, _MOCK_EVAL_CASES, "running"),
+                        ),
+                    )
+                    await asyncio.sleep(self.case_delay)
+                    await _emit(
+                        on_event,
+                        NodeStageEvent(
+                            node_ref=node_id,
+                            stage=_mock_case_stage(case_index, _MOCK_EVAL_CASES, "passed"),
+                        ),
+                    )
+                    await asyncio.sleep(self.case_delay)
                 artifact_path = run_dir / "artifacts" / f"harness-{iteration:03d}-{candidate:02d}.zip"
                 artifact_id = f"{task_id}:artifact:{iteration}:{candidate}"
                 self._write_artifact(

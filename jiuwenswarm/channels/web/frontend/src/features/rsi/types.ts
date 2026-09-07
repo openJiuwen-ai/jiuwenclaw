@@ -40,7 +40,6 @@ export interface RsiDatasetValidateResult {
 interface RsiTaskCreateBase {
   name: string;
   max_iterations?: number;
-  search_width?: number;
   optimization_instruction?: string;
 }
 
@@ -109,7 +108,6 @@ export interface RsiTaskGetResult {
     model: { optimizer: string; tester: string | null };
     input_file: string | null;
     max_iterations: number;
-    search_width: number;
     optimization_instruction: string | null;
     artifact_path: string | null;
   };

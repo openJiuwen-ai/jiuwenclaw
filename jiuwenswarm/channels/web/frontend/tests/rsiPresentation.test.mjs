@@ -3,6 +3,8 @@ import test from 'node:test';
 import {
   nodeChangeDisplayLabel,
   nodeStageLabel,
+  nodeStageLocalizedLabel,
+  nodeStageSpec,
   nodeScoreLines,
   presentRsiNode,
 } from '../node_modules/.cache/rsi-presentation/rsiPresentation.mjs';
@@ -139,7 +141,7 @@ test('paper score_overall is rendered and rejected reason is human-readable', ()
   assert.equal(presentation.reasonLabel, '得分未超过父节点');
   assert.equal(presentation.score, 0.79);
   assert.equal(presentation.parentScore, 0.82);
-  assert.deepEqual(nodeScoreLines(rejected)[0], { value: '0.8', label: '得分' });
+  assert.deepEqual(nodeScoreLines(rejected)[0], { value: '0.8', label: '分数' });
 });
 
 test('parallel program candidates get attempt numbering without exposing provider ids', () => {
@@ -210,4 +212,61 @@ test('runtime failures are separated from score-based rejection', () => {
   assert.equal(presentation.title, '第 3 轮 · 论文尝试');
   assert.equal(presentation.lifecycle, 'failed');
   assert.equal(presentation.reasonLabel, '管理器决策失败');
+});
+
+test('structured harness stage payloads localize by status instead of using the provider name', () => {
+  const node = {
+    node_id: 'rsi:node:case',
+    iteration: 1,
+    parent_id: 'ROOT',
+    type: 'PROVISIONAL',
+    adopted: false,
+    score: null,
+    description: 'Case 2/5 passed',
+    failure_reason: null,
+    failure_class: null,
+    changes: [],
+    extra: {
+      stage: {
+        id: 'evaluate.case.2',
+        name: 'Case 2/5 passed · score 0.85',
+        status: 'passed',
+        case_index: 2,
+        total_cases: 5,
+        case_id: 'case-a',
+        score: 0.85,
+      },
+    },
+  };
+
+  assert.deepEqual(nodeStageSpec(node), {
+    id: 'evaluate.case.2',
+    status: 'passed',
+    name: 'Case 2/5 passed · score 0.85',
+    failedCaseCount: null,
+    caseIndex: 2,
+    totalCases: 5,
+    caseId: 'case-a',
+    score: 0.85,
+    candidateIndex: null,
+    totalCandidates: null,
+  });
+
+  const t = (key, options = {}) => {
+    if (key === 'rsi.stage.casePassed') {
+      return `评测用例 ${options.index}/${options.total} 通过`;
+    }
+    if (key === 'rsi.stage.scoreSuffix') {
+      return ` · 得分 ${options.score}`;
+    }
+    return null;
+  };
+  assert.equal(
+    nodeStageLocalizedLabel(node, t),
+    '评测用例 2/5 通过 · 得分 0.85',
+  );
+
+  const presentation = presentRsiNode(node, context('HARNESS', null, [node], true));
+  assert.equal(presentation.lifecycle, 'evaluating');
+  assert.equal(presentation.runtimeLabel, '评测中');
 });

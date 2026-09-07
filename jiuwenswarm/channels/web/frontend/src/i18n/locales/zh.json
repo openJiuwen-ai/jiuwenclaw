@@ -3258,6 +3258,7 @@
       "actionConfig": "配置信息",
       "actionDelete": "删除",
       "actionPause": "暂停",
+      "actionStop": "停止任务",
       "pauseUnsupported": "当前 Harness 引擎暂不支持运行中暂停",
       "actionUnknownError": "未知错误",
       "actionFailed": "操作失败：{{message}}",
@@ -3300,8 +3301,24 @@
       "deleteBody": "删除后实验数据不可恢复，确定删除该实验吗？",
       "pauseTitle": "暂停实验",
       "pauseBody": "暂停后将停止当前优化进程，确定暂停该实验吗？",
+      "stopTitle": "停止任务",
+      "stopBody": "停止后将终止当前优化任务，确定停止该实验吗？",
       "queuedTitle": "本实验正在排队中",
       "queuedHint": "下面还有 1 个任务正在优化中，请耐心等待"
+    },
+    "stage": {
+      "caseRunning": "评测用例 {{index}}/{{total}} 评测中",
+      "casePassed": "评测用例 {{index}}/{{total}} 通过",
+      "caseFailed": "评测用例 {{index}}/{{total}} 未通过",
+      "caseError": "评测用例 {{index}}/{{total}} 执行异常",
+      "caseSkipped": "评测用例 {{index}}/{{total}} 已跳过",
+      "analysisRunning": "正在分析失败用例",
+      "analysisDone": "失败用例分析完成",
+      "analysisError": "失败用例分析异常",
+      "candidateRunning": "正在生成候选 {{index}}/{{total}}",
+      "candidateDone": "候选 {{index}}/{{total}} 生成完成",
+      "candidateError": "候选 {{index}}/{{total}} 生成失败",
+      "scoreSuffix": " · 得分 {{score}}"
     }
   }
 }

@@ -136,7 +136,7 @@ class TestTaskGet:
         assert data["config"]["model"]["tester"] == "tst-model"
         assert data["config"]["input_file"] == "C:/data/dataset.json"
         assert data["config"]["max_iterations"] == 3
-        assert data["config"]["search_width"] == 2
+        assert "search_width" not in data["config"]
         assert data["progress"]["iteration"] == 0
 
     def test_artifact_config_projection(self, ctx, tmp_path: Path):
@@ -181,7 +181,7 @@ class TestTaskGet:
         assert paper["config"]["artifact_path"] == str(paper_path)
         assert paper["config"]["optimization_instruction"] == "improve abstract"
         assert paper["config"]["max_iterations"] == 2
-        assert paper["config"]["search_width"] == 1
+        assert "search_width" not in paper["config"]
 
 
 class TestTaskDelete:

@@ -213,11 +213,10 @@ class RsiProjector:
             if node is None:
                 return None
             if stage_name:
-                if (node.extra or {}).get("paper") is not None or (node.extra or {}).get("program") is not None:
-                    node.description = stage_name
-                else:
-                    base = node.description or ""
-                    node.description = f"{base} › {stage_name}" if base and not base.endswith(stage_name) else base or stage_name
+                # 统一动态阶段语义：description 反映「当前」阶段（覆盖而非追加），
+                # 阶段详情落在 extra.stage。终态由后续 EventNode/Provider 树快照
+                # 整体替换节点，避免中间态文案残留覆盖最终结果（web §9.2）。
+                node.description = stage_name
                 node.extra = {**(node.extra or {}), "stage": dict(stage)}
             self._persist_locked(task_id)
             return node

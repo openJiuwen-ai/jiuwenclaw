@@ -120,7 +120,12 @@ class RsiTask:
     status_history: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        payload = asdict(self)
+        # ``search_width`` is deprecated and must not leak into new task.json
+        # snapshots.  Older persisted task files remain readable via
+        # ``from_dict``, but new serialization omits the field.
+        payload.pop("search_width", None)
+        return payload
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "RsiTask":
@@ -162,7 +167,6 @@ class RsiTask:
             },
             "input_file": self.input_file,
             "max_iterations": self.max_iterations,
-            "search_width": self.search_width,
             "optimization_instruction": self.optimization_instruction,
             "artifact_path": self.artifact_path,
         }

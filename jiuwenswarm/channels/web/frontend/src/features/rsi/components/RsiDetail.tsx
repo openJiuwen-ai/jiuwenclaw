@@ -50,6 +50,7 @@ export function RsiDetail() {
       <RsiDetailHeader
         task={detail.task}
         report={detail.report}
+        tree={detail.tree}
         liveCost={liveCost}
         createdAt={createdAt}
         onOpenConfig={() => setConfigOpen(true)}

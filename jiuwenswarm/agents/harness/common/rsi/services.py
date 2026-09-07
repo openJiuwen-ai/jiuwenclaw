@@ -108,7 +108,9 @@ class RsiTaskService:
             if not tester:
                 raise RsiBadRequest("harness 优化必填 model_refs.tester")
         max_iterations = _positive_int(params.get("max_iterations"), default=1, field="max_iterations")
-        search_width = _positive_int(params.get("search_width"), default=1, field="search_width")
+        # ``search_width`` is deprecated.  Do not read it from the public
+        # request; keep the engine/materializer defaults instead.
+        search_width = 1
         harness_profile_options = (
             _harness_profile_options(params) if scenario is Scenario.HARNESS else {}
         )
