@@ -30,12 +30,12 @@ from jiuwenswarm.agents.harness.common.prompt.prompt_builder import (
 
 class CodePromptPriority(IntEnum):
     SAFETY = 13
-    INTRO = 14
+    TONE_AND_STYLE = 15
+    INTRO = 16
     SYSTEM = 11
     DOING_TASKS = 25
     USING_YOUR_TOOLS = 31
     ACTIONS_WITH_CARE = 35
-    TONE_AND_STYLE = 45
     SESSION_GUIDANCE = 34
 
 

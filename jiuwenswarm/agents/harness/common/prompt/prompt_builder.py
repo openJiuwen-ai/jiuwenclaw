@@ -21,7 +21,7 @@ class PromptPriority(IntEnum):
     CONTENT_POLICY = 11
     REGIONAL_CONVENTIONS = 12
     SAFETY = 13
-    TASK_EXECUTION = 14
+    TASK_EXECUTION = 15
     SKILLS = 40
     MEMORY = 55
     INPUT = 60
@@ -236,23 +236,27 @@ System message types:
 - When asked for the current model name, use the current model value in `runtime.setting` and state only the model name.
 - When asked which models are supported or configured, use the available model list in `runtime.setting`.
 
-## Subagent Usage Rules
+"""
+
+_SUBAGENT_USAGE_RULES_TEXT = """## Subagent Usage Rules
 
 - Invoke task_tool with a specialized agent when the work at hand fits that agent's description. Subagents help you parallelize independent queries or keep the main context window free of bulky results, but do not reach for them when they are not needed. Critically, never duplicate work a subagent is already handling — once you hand research to a subagent, do not run the same searches yourself.
 - For browser automation tasks (taking screenshots, navigating pages, interacting with web UIs, or scraping dynamic content), use task_tool with subagent_type="browser_agent". Do not write Playwright scripts or use bash/subprocess to launch a browser — delegate to browser_agent instead.
 """
 
 
-def _runtime_env_message_rules_text() -> str:
-    """Return the Input Instructions / Output Rules / Subagent Usage Rules
+def _runtime_env_message_rules_text(include_subagent_usage_rules: bool = True) -> str:
+    """Return Input/Output rules and optional Subagent Usage Rules.
+
+    Office deliberately omits subagent guidance; Code and Design retain it.
     subsections that are appended to the Runtime Environment (``env``) section
     by :class:`RuntimePromptRail`.
 
-    Headings are demoted one level (``##`` / ``###``) so the three blocks read
+    Headings are demoted one level (``##`` / ``###``) so the blocks read
     as subsections of ``# Runtime Environment`` rather than top-level sections.
-    Shared across office / code / design / team profiles because they all
-    register the same :class:`RuntimePromptRail`.
     """
+    if include_subagent_usage_rules:
+        return _RUNTIME_ENV_MESSAGE_RULES_TEXT + "\n\n" + _SUBAGENT_USAGE_RULES_TEXT
     return _RUNTIME_ENV_MESSAGE_RULES_TEXT
 
 

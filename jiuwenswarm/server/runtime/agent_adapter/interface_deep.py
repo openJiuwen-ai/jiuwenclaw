@@ -4788,6 +4788,10 @@ class JiuWenSwarmDeepAdapter(ExpertCapabilityMixin):
             logger.warning("[JiuWenSwarmDeepAdapter] CsplSentinelRail create failed: %s", exc)
             return None
 
+    def _include_subagent_usage_rules(self) -> bool:
+        """Office mode does not expose generic subagent prompt guidance."""
+        return False
+
     def _build_runtime_prompt_rail(self) -> RuntimePromptRail | None:
         """Build RuntimePromptRail for per-model-call time/channel/runtime injection."""
         try:
@@ -4799,6 +4803,7 @@ class JiuWenSwarmDeepAdapter(ExpertCapabilityMixin):
             rail = RuntimePromptRail(
                 language=self._resolve_runtime_language(),
                 channel=default_channel,
+                include_subagent_usage_rules=self._include_subagent_usage_rules(),
             )
             logger.info("[JiuWenSwarmDeepAdapter] RuntimePromptRail create success")
         except Exception as exc:

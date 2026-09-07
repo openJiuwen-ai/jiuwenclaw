@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
-from openjiuwen.harness.prompts.sections.context import build_tools_section
+import openjiuwen.harness.prompts.sections.context as context_sections
 from openjiuwen.harness.rails.base import DeepAgentRail
 
 
@@ -15,8 +15,9 @@ class ToolUsagePromptRail(DeepAgentRail):
     Code and Design intentionally do not register ``ContextAssembleRail``:
     that rail also injects workspace context files.  This narrow rail reuses
     its tool-section builder while keeping those mode prompts free of unrelated
-    workspace content.  The section's upstream priority is 30, after Safety
-    (12), regardless of rail execution order.
+    workspace content.  The product patch gives the section priority 14,
+    immediately after the shared Safety section (13), regardless of rail
+    execution order.
     """
 
     priority = 6
@@ -40,7 +41,9 @@ class ToolUsagePromptRail(DeepAgentRail):
         if self.system_prompt_builder is None:
             return
         language = getattr(self.system_prompt_builder, "language", "en") or "en"
-        section = build_tools_section(self._ability_manager, language)
+        # Resolve from the module at call time so the shared prompt override's
+        # placement patch also applies to Code and Design.
+        section = context_sections.build_tools_section(self._ability_manager, language)
         if section is None:
             self.system_prompt_builder.remove_section("tools")
             return

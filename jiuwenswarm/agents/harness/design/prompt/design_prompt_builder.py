@@ -31,10 +31,10 @@ from jiuwenswarm.agents.harness.common.prompt.prompt_builder import (
 
 class DesignPromptPriority(IntEnum):
     SAFETY = 13
-    INTRO = 14
+    TONE_AND_STYLE = 15
+    INTRO = 16
     SYSTEM = 11
     CORE_CAPABILITIES = 19
-    TONE_AND_STYLE = 45
 
 
 # ─── Intro ────────────────────────────────────────
@@ -79,7 +79,7 @@ def _design_core_capabilities_prompt() -> PromptSection:
     content = (
         "# Core capabilities\n"
         "\n"
-        "## 1. PPT Design (v1 primary capability)\n"
+        "## 1. PPT Design\n"
         "\n"
         "When the user wants to create or modify a presentation — triggers "
         "include \"创建 PPT\", \"做幻灯片\", \"生成演示文稿\", \"make slides\", "

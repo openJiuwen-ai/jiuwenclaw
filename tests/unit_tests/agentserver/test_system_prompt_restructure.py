@@ -212,12 +212,25 @@ def test_design_mode_static_section_priorities_are_explicitly_ordered():
 
     ordered = [
         DesignPromptPriority.SYSTEM,
+        DesignPromptPriority.TONE_AND_STYLE,
         DesignPromptPriority.INTRO,
         DesignPromptPriority.CORE_CAPABILITIES,
     ]
 
     assert ordered == sorted(ordered)
     assert len(ordered) == len(set(ordered))
+
+
+def test_code_and_design_tone_follow_tool_usage_rules_priority():
+    from jiuwenswarm.agents.harness.code.prompt.code_prompt_builder import CodePromptPriority
+    from jiuwenswarm.agents.harness.design.prompt.design_prompt_builder import (
+        DesignPromptPriority,
+    )
+
+    for priority in (CodePromptPriority, DesignPromptPriority):
+        assert priority.SAFETY == 13
+        assert priority.TONE_AND_STYLE == 15
+        assert priority.INTRO == 16
 
 
 def test_code_session_guidance_precedes_executing_actions_with_care():
@@ -241,9 +254,42 @@ def test_find_skills_policy_lives_in_tool_usage_rules_not_skills_preamble():
 
     assert tools_content is not None
     assert "# Tool Usage Rules" in tools_content
+    assert "Only call tools that are actually available in the current request." in tools_content
+    assert "Tool results are the source of truth" not in tools_content
     assert "## Skill Discovery and Installation (`find-skills-win`)" in tools_content
     assert "Skill Discovery and Installation" not in skills_goal_override._SKILLS_PREAMBLE_EN
     assert skills_goal_override._SKILLS_PREAMBLE_EN.startswith("# Skills")
+
+
+def test_tool_usage_section_priority_follows_shared_safety_for_office_mode():
+    """Office resolves the context section directly, without the narrow rail."""
+    from openjiuwen.core.foundation.tool.base import ToolCard
+    from openjiuwen.harness.prompts.sections import context
+
+    ability_manager = SimpleNamespace(list=lambda: [ToolCard(name="read_file")])
+    section = context.build_tools_section(ability_manager, language="en")
+
+    assert section is not None
+    assert section.priority == 14
+
+    builder = SystemPromptBuilder(language="en")
+    builder.add_section(PromptSection(name="safety", content={"en": "# Safety\n"}, priority=13))
+    builder.add_section(section)
+    builder.add_section(PromptSection(name="task", content={"en": "# Task\n"}, priority=15))
+    prompt = builder.build()
+    assert prompt.index("# Safety") < prompt.index("# Tool Usage Rules") < prompt.index("# Task")
+
+
+def test_subagent_usage_rules_are_omitted_only_for_office_mode():
+    from jiuwenswarm.agents.harness.common.prompt.prompt_builder import (
+        _runtime_env_message_rules_text,
+    )
+    from jiuwenswarm.server.runtime.agent_adapter.interface_code import JiuwenSwarmCodeAdapter
+
+    assert "## Subagent Usage Rules" not in _runtime_env_message_rules_text(False)
+    assert "## Subagent Usage Rules" in _runtime_env_message_rules_text(True)
+    assert JiuWenSwarmDeepAdapter._include_subagent_usage_rules(None) is False
+    assert JiuwenSwarmCodeAdapter._include_subagent_usage_rules(None) is True
 
 
 @pytest.mark.asyncio
@@ -255,8 +301,9 @@ async def test_code_tool_usage_rail_injects_rules_after_safety():
 
     builder = SystemPromptBuilder(language="en")
     builder.add_section(
-        PromptSection(name="safety", content={"en": "# Safety\n"}, priority=12)
+        PromptSection(name="safety", content={"en": "# Safety\n"}, priority=13)
     )
+    builder.add_section(PromptSection(name="intro", content={"en": "# Intro\n"}, priority=15))
     agent = SimpleNamespace(
         system_prompt_builder=builder,
         ability_manager=SimpleNamespace(list=lambda: [ToolCard(name="read_file")]),
@@ -268,6 +315,7 @@ async def test_code_tool_usage_rail_injects_rules_after_safety():
 
     prompt = builder.build()
     assert prompt.index("# Safety") < prompt.index("# Tool Usage Rules")
+    assert prompt.index("# Tool Usage Rules") < prompt.index("# Intro")
     assert "## Skill Discovery and Installation (`find-skills-win`)" in prompt
 
 

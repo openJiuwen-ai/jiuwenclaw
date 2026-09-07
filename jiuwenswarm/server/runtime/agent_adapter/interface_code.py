@@ -375,6 +375,10 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
         "FileSystemRail",  # 别名
     })
 
+    def _include_subagent_usage_rules(self) -> bool:
+        """Code and Design retain the shared subagent guidance."""
+        return True
+
     def __init__(self) -> None:
         super().__init__()
         # Code 模式专属 rails — 父类不定义这些属性
