@@ -247,6 +247,31 @@ def test_find_skills_policy_lives_in_tool_usage_rules_not_skills_preamble():
 
 
 @pytest.mark.asyncio
+async def test_code_tool_usage_rail_injects_rules_after_safety():
+    from openjiuwen.core.foundation.tool.base import ToolCard
+    from jiuwenswarm.agents.harness.common.rails.tool_usage_prompt_rail import (
+        ToolUsagePromptRail,
+    )
+
+    builder = SystemPromptBuilder(language="en")
+    builder.add_section(
+        PromptSection(name="safety", content={"en": "# Safety\n"}, priority=12)
+    )
+    agent = SimpleNamespace(
+        system_prompt_builder=builder,
+        ability_manager=SimpleNamespace(list=lambda: [ToolCard(name="read_file")]),
+    )
+    rail = ToolUsagePromptRail()
+    rail.init(agent)
+
+    await rail.before_model_call(SimpleNamespace())
+
+    prompt = builder.build()
+    assert prompt.index("# Safety") < prompt.index("# Tool Usage Rules")
+    assert "## Skill Discovery and Installation (`find-skills-win`)" in prompt
+
+
+@pytest.mark.asyncio
 async def test_response_prompt_rail_no_longer_injects_input_or_output_sections():
     """Input/Output rules moved from ResponsePromptRail into RuntimePromptRail's
     ``env`` section. ResponsePromptRail now only syncs the A2UI section, so it
