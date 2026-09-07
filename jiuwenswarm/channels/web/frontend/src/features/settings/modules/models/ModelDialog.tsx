@@ -259,8 +259,11 @@ export function ModelDialog({
       }
     } catch (error) {
       if (currentRequestId === validationRequestId.current) {
+        const detail = error instanceof Error ? error.message.trim() : '';
         setValidationFailure({
-          error: error instanceof Error ? error.message : t('settingsPanel.models.validationFailed'),
+          error: detail
+            ? t('settingsPanel.models.validationFailedWithDetail', { detail })
+            : t('settingsPanel.models.validationFailed'),
           snapshot,
         });
       }
