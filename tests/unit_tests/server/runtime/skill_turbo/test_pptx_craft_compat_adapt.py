@@ -232,6 +232,86 @@ def test_is_chart_candidate_structural_never_elevates():
     )
 
 
+def test_count_agenda_items_accepts_custom_target_page_markers():
+    html = """
+    <div class="ppt-slide" type="agenda">
+      <main>
+        <section><span>P03</span><p>市场概览</p></section>
+        <section><span>P05</span><p>竞争格局</p></section>
+        <section><span>P07</span><p>落地路径</p></section>
+      </main>
+    </div>
+    """
+
+    assert _count_agenda_items(html) == 3
+
+
+def test_count_agenda_items_accepts_preset_roman_anchor_comments():
+    html = """
+    <div class="ppt-slide agenda-stage" type="agenda">
+      <div class="grid">
+        <!-- Ⅰ -->
+        <div><span>Ⅰ</span><p>背景</p></div>
+        <!-- Ⅱ -->
+        <div><span>Ⅱ</span><p>策略</p></div>
+        <!-- Ⅲ -->
+        <div><span>Ⅲ</span><p>执行</p></div>
+      </div>
+    </div>
+    """
+
+    assert _count_agenda_items(html) == 3
+
+
+def test_count_agenda_items_ignores_visible_page_marker_outside_main():
+    html = """
+    <div class="ppt-slide" type="agenda">
+      <main>
+        <section><span>P03</span><p>市场概览</p></section>
+        <section><span>P05</span><p>竞争格局</p></section>
+        <section><span>P07</span><p>落地路径</p></section>
+      </main>
+      <span data-skill-turbo-page-number="true">第 03 页 / 共 12 页</span>
+    </div>
+    """
+
+    assert _count_agenda_items(html) == 3
+
+
+def test_count_agenda_items_deduplicates_repeated_comment_anchors():
+    html = """
+    <div class="ppt-slide agenda-stage" type="agenda">
+      <div class="grid">
+        <!-- 01 -->
+        <div><span>01</span><p>背景</p></div>
+        <!-- 01 -->
+        <div><span>01</span><p>背景</p></div>
+        <!-- 02 -->
+        <div><span>02</span><p>策略</p></div>
+      </div>
+    </div>
+    """
+
+    assert _count_agenda_items(html) == 2
+
+
+def test_count_agenda_items_accepts_double_digit_comment_anchors():
+    html = """
+    <div class="ppt-slide agenda-stage" type="agenda">
+      <div class="grid">
+        <!-- 09 -->
+        <div><span>09</span><p>阶段一</p></div>
+        <!-- 10 -->
+        <div><span>10</span><p>阶段二</p></div>
+        <!-- 11 -->
+        <div><span>11</span><p>阶段三</p></div>
+      </div>
+    </div>
+    """
+
+    assert _count_agenda_items(html) == 3
+
+
 def test_content_fill_prompt_content_type_elevated_by_data_needs():
     prompt = _minimal_fill_prompt(
         style_id="business-classic",
