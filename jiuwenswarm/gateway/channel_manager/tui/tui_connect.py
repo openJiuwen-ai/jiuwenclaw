@@ -22,7 +22,7 @@ from openjiuwen.core.foundation.llm.schema.config import (
     ModelClientConfig,
     ModelRequestConfig,
 )
-from openjiuwen.rsi.harness_rsi.auto_harness.schema import load_auto_harness_config
+from openjiuwen.rsi.auto_harness.schema import load_auto_harness_config
 
 from jiuwenswarm.common.config import (
     get_config,
