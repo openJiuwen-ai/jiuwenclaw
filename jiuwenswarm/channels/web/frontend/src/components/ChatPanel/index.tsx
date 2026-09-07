@@ -939,6 +939,10 @@ export const ChatPanel = React.memo(function ChatPanel({
   const sessionScrollTopMapRef = useRef<Map<string, number>>(new Map());
   // 记录 tab 从隐藏恢复为可见的时间，用于抑制恢复后的自动滚底
   const visibilityRestoredAtRef = useRef<number>(0);
+  // macOS trackpads can emit several scroll events within one paint frame.
+  // Coalesce their layout reads so WKWebView does not repeatedly measure a long
+  // Markdown/tool timeline while it is already trying to paint the scroll.
+  const scrollFrameRef = useRef<number | null>(null);
 
   const rememberSessionScrollTop = useCallback((sessionId: string, el: HTMLDivElement) => {
     if (sessionId) {
@@ -970,7 +974,7 @@ export const ChatPanel = React.memo(function ChatPanel({
   }, [updateHistoryLayoutSnapshot]);
 
   // 检测用户滚动位置
-  const handleScroll = useCallback(() => {
+  const processScroll = useCallback(() => {
     const el = scrollContainerRef.current;
     if (!el) return;
 
@@ -988,6 +992,21 @@ export const ChatPanel = React.memo(function ChatPanel({
       void historyOnLoadMore();
     }
   }, [activeSessionId, canRequestOlderHistory, historyOnLoadMore, rememberSessionScrollTop]);
+
+  const handleScroll = useCallback(() => {
+    if (scrollFrameRef.current !== null) return;
+    scrollFrameRef.current = window.requestAnimationFrame(() => {
+      scrollFrameRef.current = null;
+      processScroll();
+    });
+  }, [processScroll]);
+
+  useEffect(() => () => {
+    if (scrollFrameRef.current !== null) {
+      window.cancelAnimationFrame(scrollFrameRef.current);
+      scrollFrameRef.current = null;
+    }
+  }, []);
 
   useEffect(() => {
     const el = scrollContainerRef.current;
