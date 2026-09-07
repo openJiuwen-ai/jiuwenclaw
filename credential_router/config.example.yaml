@@ -9,6 +9,11 @@ server:
   bind_address: 127.0.0.1:8080
 
 admin:
+  # bind address. Must be loopback (127.0.0.1, ::1) or a private range
+  # (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16). Public IPs and
+  # wildcards are rejected at startup because admin has no
+  # authentication and we do not provide TLS. For internet access,
+  # terminate TLS at a reverse proxy in front of admin.
   addr: 127.0.0.1:8081
 
 data_dir: ./data

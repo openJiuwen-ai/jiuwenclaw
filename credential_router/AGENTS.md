@@ -168,7 +168,7 @@ if apiKey == "" {
 - **`POST /v1/keystore/rotate-dek`**：body 空。DEK 轮转不需要预放文件
 
 ### 常见踩坑 / Common pitfalls
-- **admin 无认证**：admin API（:8081）默认不鉴权，仅 bind `127.0.0.1`。暴露到网络前必须前置 reverse proxy 加 basic auth / mTLS / IP 白名单，否则同网任何人可 CRUD 所有凭据
+- **admin 无认证 + 公网 bind 拒绝**：admin API（:8081）默认不鉴权。`Config.Validate()` 强制 `admin.addr` 必须在 loopback（`127.0.0.0/8`、`::1`）或 private range（`10.0.0.0/8`、`172.16.0.0/12`、`192.168.0.0/16`、`fc00::/7`、`169.254.0.0/16`）——通配符（`0.0.0.0` / `::`）和公网 IP 在 startup 阶段被拒绝。理由：admin 无 auth，binary 不提供 TLS，把 admin 暴露到 LAN 以外等同把凭据明文送给同网段所有机器。合法三种配置：(a) loopback（仅本机），(b) docker bridge（容器间互访，典型 172.17.0.1），(c) LAN private（内网运维）。**从公网访问 admin 的唯一正确方式**：前置 reverse proxy（nginx / caddy）终止 TLS，admin 仍 bind private；proxy 自身可以 `0.0.0.0:443` + mTLS / basic auth / IP 白名单
 - **CORS**：浏览器从其他 origin（`file://`、不同 host/port）发 `fetch()` 到 admin 会被跨域策略拦。绕开方法：(a) 起一个同源 reverse proxy 转发到 admin，(b) 敏感响应不要缓存（`Cache-Control: no-store`）
 - **PUT/DELETE 不需要 `If-Match` header**（last-write-wins，外部并发不做乐观锁）
 - **rotations 状态字段**：`/v1/keystore/status` 返回 `rotation_state ∈ {idle, swap_pending, reencrypting, ready_to_commit}`。`swap_pending` = KEK swap 已发起但未提交（`PendingKekVersion > 0`）；`reencrypting` = DEK 轮转重加密阶段，`straggler_count` 字段表示还有多少 api_key 未重加密；`ready_to_commit` = 重加密完成待提交（`straggler_count == 0`）

@@ -410,8 +410,10 @@ func (c Config) Validate() error {
 	if strings.TrimSpace(c.Admin.Addr) == "" {
 		return fmt.Errorf("admin.addr is required")
 	}
-	if _, _, err := net.SplitHostPort(c.Admin.Addr); err != nil {
-		return fmt.Errorf("admin.addr %q is not a valid host:port: %w", c.Admin.Addr, err)
+	if adminHost, _, splitErr := net.SplitHostPort(c.Admin.Addr); splitErr != nil {
+		return fmt.Errorf("admin.addr %q is not a valid host:port: %w", c.Admin.Addr, splitErr)
+	} else if err := validateAdminBindHost(adminHost); err != nil {
+		return err
 	}
 
 	// Numeric / duration fields. Two classes:
@@ -556,4 +558,58 @@ func mustBePositiveDuration(field string, v time.Duration) error {
 
 func (c Config) UpstreamTimeout() time.Duration {
 	return time.Duration(c.UpstreamTimeoutMs) * time.Millisecond
+}
+
+// validateAdminBindHost rejects non-loopback/non-private binds — admin is no-auth + no-TLS.
+func validateAdminBindHost(host string) error {
+	if ip := net.ParseIP(host); ip != nil {
+		if ip.IsUnspecified() {
+			return fmt.Errorf(
+				"admin.addr host %s is wildcard — refusing to bind admin to "+
+					"all interfaces (admin has no authentication and we do not "+
+					"provide TLS). Use loopback (127.0.0.1, ::1) or a private "+
+					"range (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16). For "+
+					"internet access, terminate TLS at a reverse proxy in front "+
+					"of admin",
+				ip,
+			)
+		}
+		if !isLoopbackOrPrivateIP(ip) {
+			return fmt.Errorf(
+				"admin.addr host %s is not loopback or private — refusing to "+
+					"bind admin to public network (admin has no authentication "+
+					"and we do not provide TLS). For internet access, terminate "+
+					"TLS at a reverse proxy in front of admin",
+				ip,
+			)
+		}
+		return nil
+	}
+	ips, err := net.LookupIP(host)
+	if err != nil {
+		return fmt.Errorf("admin.addr host %q: lookup failed: %w", host, err)
+	}
+	for _, ip := range ips {
+		if ip.IsUnspecified() {
+			return fmt.Errorf(
+				"admin.addr host %q resolves to wildcard %s — refusing to "+
+					"bind admin to all interfaces (admin has no authentication "+
+					"and we do not provide TLS)",
+				host, ip,
+			)
+		}
+		if !isLoopbackOrPrivateIP(ip) {
+			return fmt.Errorf(
+				"admin.addr host %q resolves to %s which is not loopback or "+
+					"private — refusing to bind admin to public network (admin "+
+					"has no authentication and we do not provide TLS)",
+				host, ip,
+			)
+		}
+	}
+	return nil
+}
+
+func isLoopbackOrPrivateIP(ip net.IP) bool {
+	return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast()
 }

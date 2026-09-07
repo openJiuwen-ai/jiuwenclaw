@@ -183,7 +183,7 @@ cache:
   entry_ttl: 5m
 
 admin:
-  addr: 0.0.0.0:9091
+  addr: 10.0.0.1:9091
   validation:
     user_id_max_len: 128
     real_url_max_len: 1024
@@ -256,7 +256,7 @@ recovery:
 	}
 
 	// Admin
-	if cfg.Admin.Addr != "0.0.0.0:9091" {
+	if cfg.Admin.Addr != "10.0.0.1:9091" {
 		t.Errorf("admin.addr = %q", cfg.Admin.Addr)
 	}
 	if cfg.Admin.Validation.UserIDMaxLen != 128 {
@@ -440,7 +440,7 @@ rotation:
 cache:
   max_entries: 2000
 admin:
-  addr: 0.0.0.0:9091
+  addr: 10.0.0.1:9091
 `
 
 	dir := t.TempDir()
@@ -776,5 +776,73 @@ func TestUpstreamTimeout(t *testing.T) {
 	cfg := platform.Default()
 	if cfg.UpstreamTimeout() != 30*time.Second {
 		t.Errorf("UpstreamTimeout() = %v", cfg.UpstreamTimeout())
+	}
+}
+
+// TestValidateRejectsAdminPublicBind locks in the security policy:
+// admin.addr cannot bind to a wildcard or public IP because admin has
+// no authentication and we do not provide TLS. For internet access,
+// the operator must terminate TLS at a reverse proxy in front of
+// admin (the proxy can bind publicly; admin stays on a private addr).
+func TestValidateRejectsAdminPublicBind(t *testing.T) {
+	cases := []struct {
+		name    string
+		addr    string
+		wantSub string
+	}{
+		{"v4 wildcard", "0.0.0.0:8081", "wildcard"},
+		{"v6 wildcard", "[::]:8081", "wildcard"},
+		{"v6 wildcard long-form", "[0:0:0:0:0:0:0:0]:8081", "wildcard"},
+		{"v4 broadcast", "255.255.255.255:8081", "not loopback or private"},
+		{"v4-mapped v6 public", "[::ffff:8.8.8.8]:8081", "not loopback or private"},
+		{"v4 public IP", "8.8.8.8:8081", "not loopback or private"},
+		{"v4 just-below private (172.15)", "172.15.0.1:8081", "not loopback or private"},
+		{"v4 just-above private (172.32)", "172.32.0.1:8081", "not loopback or private"},
+		{"v6 public documentation prefix", "[2001:db8::1]:8081", "not loopback or private"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := platform.Default()
+			cfg.Admin.Addr = tc.addr
+			err := cfg.Validate()
+			if err == nil {
+				t.Fatalf("admin.addr=%q accepted, want error", tc.addr)
+			}
+			if !strings.Contains(err.Error(), tc.wantSub) {
+				t.Errorf("error=%q, want substring %q", err.Error(), tc.wantSub)
+			}
+		})
+	}
+}
+
+// TestValidateAllowsAdminLoopbackOrPrivate: the policy admits
+// loopback (incl. systemd-resolved's 127.0.0.53), private IPv4
+// (10/8, 172.16/12, 192.168/16 — including the 172.31.255.255
+// top of the 172.16/12 range and the docker bridge 172.17.0.1),
+// IPv6 loopback, IPv6 ULA, and link-local.
+func TestValidateAllowsAdminLoopbackOrPrivate(t *testing.T) {
+	cases := []struct {
+		name string
+		addr string
+	}{
+		{"v4 loopback", "127.0.0.1:8081"},
+		{"v4 systemd-resolved stub", "127.0.0.53:8081"},
+		{"v6 loopback", "[::1]:8081"},
+		{"v4 private 10/8", "10.0.0.1:8081"},
+		{"v4 private 172.16/12 low end", "172.16.0.1:8081"},
+		{"v4 docker bridge 172.17.0.1", "172.17.0.1:8081"},
+		{"v4 private 172.16/12 top end", "172.31.255.255:8081"},
+		{"v4 private 192.168/16", "192.168.1.1:8081"},
+		{"v6 ULA", "[fc00::1]:8081"},
+		{"v4 link-local", "169.254.1.1:8081"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := platform.Default()
+			cfg.Admin.Addr = tc.addr
+			if err := cfg.Validate(); err != nil {
+				t.Errorf("admin.addr=%q rejected: %v", tc.addr, err)
+			}
+		})
 	}
 }
