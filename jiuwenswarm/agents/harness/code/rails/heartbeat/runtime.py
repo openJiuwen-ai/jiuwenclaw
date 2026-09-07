@@ -25,6 +25,17 @@ from .store import HeartbeatJobStore
 logger = logging.getLogger(__name__)
 
 
+def _float_limit(
+    limits: dict[str, Any],
+    key: str,
+    default: float,
+) -> float:
+    try:
+        return float(limits.get(key, default))
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{key} must be number") from exc
+
+
 def _load_limits() -> dict[str, Any]:
     config = get_config()
     heartbeat = config.get("heartbeat") if isinstance(config, dict) else None
@@ -82,23 +93,23 @@ class HeartbeatRailRuntime:
     def __init__(self, server: Any) -> None:
         self._server = server
         limits = _load_limits()
+        user_preemption_timeout_seconds = _float_limit(
+            limits,
+            "user_preemption_timeout_seconds",
+            DEFAULT_USER_PREEMPTION_TIMEOUT_SECONDS,
+        )
+        execution_timeout_seconds = _float_limit(
+            limits,
+            "execution_timeout_seconds",
+            DEFAULT_EXECUTION_TIMEOUT_SECONDS,
+        )
         self.admission = SessionRunAdmission(
-            user_preemption_timeout_seconds=float(
-                limits.get(
-                    "user_preemption_timeout_seconds",
-                    DEFAULT_USER_PREEMPTION_TIMEOUT_SECONDS,
-                )
-            )
+            user_preemption_timeout_seconds=user_preemption_timeout_seconds
         )
         self.execution = HeartbeatExecutionService(
             server,
             self.admission,
-            execution_timeout_seconds=float(
-                limits.get(
-                    "execution_timeout_seconds",
-                    DEFAULT_EXECUTION_TIMEOUT_SECONDS,
-                )
-            ),
+            execution_timeout_seconds=execution_timeout_seconds,
         )
         self.store = HeartbeatJobStore(path=get_heartbeat_jobs_path())
         self.scheduler = HeartbeatSchedulerService(

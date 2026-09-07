@@ -187,6 +187,19 @@ def test_runtime_applies_heartbeat_timeout_config(tmp_path) -> None:
     assert runtime.controller.limits["user_preemption_timeout_seconds"] == 2.5
 
 
+@pytest.mark.parametrize(
+    "key",
+    ["execution_timeout_seconds", "user_preemption_timeout_seconds"],
+)
+def test_runtime_rejects_non_numeric_heartbeat_timeout(key: str) -> None:
+    with patch(
+        "jiuwenswarm.agents.harness.code.rails.heartbeat.runtime.get_config",
+        return_value={"heartbeat": {"jobs": {key: "abc"}}},
+    ):
+        with pytest.raises(ValueError, match=rf"^{key} must be number$"):
+            HeartbeatRailRuntime(object())
+
+
 async def test_user_waiter_has_priority_over_next_heartbeat() -> None:
     admission = SessionRunAdmission()
     assert await admission.try_begin_heartbeat("s1", "hb-1") is True
@@ -625,6 +638,24 @@ async def test_user_preemption_timeout_fails_fast_and_drops_waiter() -> None:
     await admission.end_heartbeat("s1", "run-stuck")
 
 
+async def test_user_preemption_requires_admission_release() -> None:
+    admission = SessionRunAdmission(user_preemption_timeout_seconds=0.01)
+    assert await admission.try_begin_heartbeat("s1", "run-not-released") is True
+
+    async def incomplete_preemptor(run_id: str) -> bool:
+        return True
+
+    admission.set_heartbeat_preemptor(incomplete_preemptor)
+
+    with pytest.raises(
+        RuntimeError, match="active heartbeat run-not-released could not be preempted"
+    ):
+        await admission.begin_user("s1")
+
+    assert admission.is_user_active("s1") is False
+    await admission.end_heartbeat("s1", "run-not-released")
+
+
 async def test_concurrent_users_share_one_heartbeat_preemption() -> None:
     started = asyncio.Event()
 
@@ -693,6 +724,54 @@ async def test_cancel_before_execution_task_starts_releases_admission() -> None:
         "job-cancel-before-start", "run-before-start", "cancelled"
     )]
     assert service.active_session_ids() == set()
+
+
+async def test_cancel_before_start_contains_finish_error() -> None:
+    class Scheduler:
+        async def on_run_finished(self, *args, **kwargs):  # noqa: ANN001
+            raise RuntimeError("persist failed")
+
+    admission = SessionRunAdmission()
+    service = HeartbeatExecutionService(object(), admission)
+    service.set_scheduler(Scheduler())
+    job = SimpleNamespace(id="job-cancel-error", session_id="s-cancel-error")
+
+    assert await service.dispatch(job, "run-cancel-error", SimpleNamespace()) is True
+    assert await service.cancel("run-cancel-error", reason="user_request") is True
+
+    assert service.active_session_ids() == set()
+    assert service._tasks == {}
+    assert service._jobs == {}
+
+
+async def test_stop_continues_after_finish_error() -> None:
+    finished_runs: list[str] = []
+
+    class Scheduler:
+        async def on_run_finished(
+            self, job_id, run_id, *, outcome, **kwargs
+        ):  # noqa: ANN001
+            finished_runs.append(run_id)
+            if run_id == "run-stop-error":
+                raise RuntimeError("persist failed")
+
+    admission = SessionRunAdmission()
+    service = HeartbeatExecutionService(object(), admission)
+    service.set_scheduler(Scheduler())
+    message = SimpleNamespace()
+    jobs = [
+        SimpleNamespace(id="job-stop-error", session_id="s-stop-error"),
+        SimpleNamespace(id="job-stop-next", session_id="s-stop-next"),
+    ]
+
+    assert await service.dispatch(jobs[0], "run-stop-error", message) is True
+    assert await service.dispatch(jobs[1], "run-stop-next", message) is True
+    await service.stop()
+
+    assert finished_runs == ["run-stop-error", "run-stop-next"]
+    assert service.active_session_ids() == set()
+    assert service._tasks == {}
+    assert service._jobs == {}
 
 
 async def test_gateway_disconnect_does_not_abort_protected_heartbeat_session() -> None:

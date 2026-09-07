@@ -154,12 +154,10 @@ class SessionRunAdmission:
             raise RuntimeError(
                 f"heartbeat preemption timed out after {timeout:g} seconds"
             )
-        cancelled = preemption_task.result()
+        preemption_task.result()
 
-        if cancelled:
-            return
-        # Another concurrent user request may already be cancelling this run.
-        # Wait for that exact cleanup instead of failing one of the users.
+        # A cancellation is complete only after the exact admission marker is
+        # released. Another concurrent user may also already own that cleanup.
         try:
             async with asyncio.timeout(self._user_preemption_timeout_seconds):
                 async with self._condition:
@@ -473,6 +471,31 @@ class HeartbeatExecutionService:
         finally:
             self._user_preempted_runs.discard(run_id)
 
+    async def _finish_run_safely(
+        self,
+        job: HeartbeatJob,
+        run_id: str,
+        *,
+        outcome: str,
+        error: str | None,
+        operation: str,
+    ) -> bool:
+        try:
+            await self._finish_run(
+                job,
+                run_id,
+                outcome=outcome,
+                error=error,
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "[HeartbeatExecution] %s cleanup failed: run=%s",
+                operation,
+                run_id,
+            )
+            return False
+        return True
+
     async def cancel(self, run_id: str, *, reason: str = "") -> bool:
         task = self._tasks.get(run_id)
         if task is None or task.done():
@@ -490,11 +513,12 @@ class HeartbeatExecutionService:
                     if reason == "user_request"
                     else None
                 )
-                await self._finish_run(
+                await self._finish_run_safely(
                     job,
                     run_id,
                     outcome="cancelled",
                     error=error,
+                    operation="cancel",
                 )
         return True
 
@@ -508,19 +532,23 @@ class HeartbeatExecutionService:
             task.cancel()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
-        for run_id, task in runs:
-            if self._tasks.get(run_id) is not task:
-                continue
-            job = self._jobs.get(run_id)
-            if job is not None:
-                await self._finish_run(
-                    job,
-                    run_id,
-                    outcome="cancelled",
-                    error=None,
-                )
-        self._tasks.clear()
-        self._jobs.clear()
+        try:
+            for run_id, task in runs:
+                if self._tasks.get(run_id) is not task:
+                    continue
+                job = self._jobs.get(run_id)
+                if job is not None:
+                    await self._finish_run_safely(
+                        job,
+                        run_id,
+                        outcome="cancelled",
+                        error=None,
+                        operation="stop",
+                    )
+        finally:
+            self._tasks.clear()
+            self._jobs.clear()
+            self._user_preempted_runs.clear()
 
 
 __all__ = [
