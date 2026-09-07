@@ -18,7 +18,10 @@
     "pagination": {
       "total": "{{count}} total",
       "prev": "Previous",
-      "next": "Next"
+      "next": "Next",
+      "pageSize": "Per page",
+      "jumpTo": "Go to",
+      "go": "Go"
     }
   },
   "a2ui": {

@@ -9,6 +9,11 @@ from pathlib import Path
 import pytest
 
 from jiuwenswarm.server.runtime.skill.skill_manager import SkillManager
+from jiuwenswarm.server.runtime.skill.skill_prebuilt import (
+    SkillPrebuiltItem,
+    SkillPrebuiltSyncResult,
+    SkillPrebuiltSynchronizer,
+)
 
 
 def _write_skill(workspace: Path, name: str) -> Path:
@@ -204,3 +209,201 @@ def test_enterprise_skills_list_does_not_wait_for_marketplace_sync(
     )
 
     assert isinstance(payload["skills"], list)
+
+
+def test_user_skill_toggle_does_not_overwrite_another_pod_install(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "tenant"
+    builtin_dir = tmp_path / "builtin"
+    builtin_dir.mkdir()
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.skill.skill_manager.is_enterprise",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.skill.skill_manager.get_builtin_skills_dir",
+        lambda: builtin_dir,
+    )
+    first = SkillManager(workspace_dir=str(workspace))
+    first.record_skill_installation(
+        name="first-user-skill", source_type="user", origin="skillhub:first"
+    )
+    stale = SkillManager(workspace_dir=str(workspace))
+    another_pod = SkillManager(workspace_dir=str(workspace))
+    another_pod.record_skill_installation(
+        name="second-user-skill", source_type="user", origin="skillhub:second"
+    )
+
+    result = asyncio.run(
+        stale.handle_skills_toggle(
+            {"name": "first-user-skill", "origin": "skillhub:first", "enabled": False}
+        )
+    )
+
+    assert result["success"] is True
+    persisted = SkillManager(workspace_dir=str(workspace)).list_skill_installations()
+    assert {row["name"] for row in persisted} == {
+        "first-user-skill",
+        "second-user-skill",
+    }
+
+
+def test_prebuilt_sync_never_promotes_or_replaces_same_name_user_skill(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "tenant"
+    builtin_dir = tmp_path / "builtin"
+    builtin_dir.mkdir()
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.skill.skill_manager.is_enterprise",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.skill.skill_manager.get_builtin_skills_dir",
+        lambda: builtin_dir,
+    )
+    manager = SkillManager(workspace_dir=str(workspace))
+    _write_skill(workspace, "user-skill")
+    user_record = manager.record_skill_installation(
+        name="user-skill",
+        source_type="user",
+        source="swarmskillhub",
+        origin="swarmskillhub:user-asset",
+        source_id="swarmskillhub",
+        skill_id="user-asset",
+        version_id="user-version",
+        version="1.0.0",
+    )
+    synchronizer = SkillPrebuiltSynchronizer(
+        workspace,
+        service_id="service-a",
+        agent_id="agent-a",
+        skill_manager=manager,
+    )
+    skill_md = workspace / "skills" / "user-skill" / "SKILL.md"
+    original_content = skill_md.read_text(encoding="utf-8")
+    monkeypatch.setattr(
+        manager,
+        "_assert_skill_download_url_allowed",
+        lambda _url: None,
+    )
+    monkeypatch.setattr(
+        manager,
+        "_download_http_archive_bytes_sync",
+        lambda _url: _skill_archive("user-skill", "2.0.0"),
+    )
+    outcome = asyncio.run(
+        synchronizer._ensure_prebuilt_installed(
+            SkillPrebuiltItem(
+                id="prebuilt-asset",
+                source="https://skills.example/prebuilt.zip",
+                version="2.0.0",
+            ),
+            {"user-skill": user_record},
+        )
+    )
+
+    assert outcome["ok"] is False
+    assert outcome["error_code"] == "skill_name_conflict"
+    assert manager.list_skill_installations() == [user_record]
+    assert skill_md.read_text(encoding="utf-8") == original_content
+
+
+def test_update_status_commit_preserves_another_pod_install(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "tenant"
+    builtin_dir = tmp_path / "builtin"
+    builtin_dir.mkdir()
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.skill.skill_manager.is_enterprise",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.skill.skill_manager.get_builtin_skills_dir",
+        lambda: builtin_dir,
+    )
+    first = SkillManager(workspace_dir=str(workspace))
+    first_record = first.record_skill_installation(
+        name="first-user-skill",
+        source_type="user",
+        source_id="swarmskillhub",
+        skill_id="first",
+        version_id="v1",
+    )
+    stale = SkillManager(workspace_dir=str(workspace))
+    another_pod = SkillManager(workspace_dir=str(workspace))
+    another_pod.record_skill_installation(
+        name="second-user-skill",
+        source_type="user",
+        source_id="swarmskillhub",
+        skill_id="second",
+        version_id="v1",
+    )
+
+    stale._commit_skill_update_statuses(
+        {first_record["installation_id"]: {"updatable": True}}
+    )
+
+    persisted = SkillManager(workspace_dir=str(workspace)).list_skill_installations()
+    assert {row["name"] for row in persisted} == {
+        "first-user-skill",
+        "second-user-skill",
+    }
+    assert next(row for row in persisted if row["name"] == "first-user-skill")[
+        "updatable"
+    ] is True
+
+
+def test_stale_prebuilt_removal_does_not_delete_same_name_user_skill(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "tenant"
+    builtin_dir = tmp_path / "builtin"
+    builtin_dir.mkdir()
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.skill.skill_manager.is_enterprise",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.skill.skill_manager.get_builtin_skills_dir",
+        lambda: builtin_dir,
+    )
+    manager = SkillManager(workspace_dir=str(workspace))
+    skill_dir = _write_skill(workspace, "shared-name")
+    user_record = manager.record_skill_installation(
+        name="shared-name",
+        source_type="user",
+        source_id="swarmskillhub",
+        skill_id="user-asset",
+        version_id="v1",
+    )
+    synchronizer = SkillPrebuiltSynchronizer(
+        workspace,
+        service_id="service-a",
+        agent_id="agent-a",
+        skill_manager=manager,
+    )
+    stale_prebuilt_row = {
+        "name": "shared-name",
+        "source_type": "prebuilt",
+        "origin": "https://skills.example/old-prebuilt.zip",
+    }
+    result = SkillPrebuiltSyncResult()
+
+    asyncio.run(
+        synchronizer._remove_prebuilt_not_in_template(
+            {"shared-name": stale_prebuilt_row},
+            set(),
+            result,
+        )
+    )
+
+    assert skill_dir.is_dir()
+    assert manager.list_skill_installations() == [user_record]
+    assert result.succeeded == []
