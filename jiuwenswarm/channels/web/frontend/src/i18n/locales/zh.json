@@ -1656,8 +1656,8 @@
       "title": "上传技能",
       "pathLabel": "本地技能路径",
       "pathPlaceholder": "请输入技能文件/目录路径",
-      "notice": "文件夹或者.zip需要包含SKILL.md文件，.md 文件需包含 YAML 格式的技能名称和描述。",
-      "dropHint": "点击或拖动压缩包或文件到此处",
+      "notice": "仅支持上传 .zip 压缩包，且需包含 SKILL.md 文件，其中 YAML 头部需声明技能名称（name）和描述（description）。",
+      "dropHint": "点击或拖动 .zip 压缩包到此处",
       "confirm": "导入",
       "cancel": "取消"
     },
