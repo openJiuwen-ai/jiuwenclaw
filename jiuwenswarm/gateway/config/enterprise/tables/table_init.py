@@ -1,7 +1,7 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026-2026. All rights reserved
 
-"""Manager WS Client 同步所需的表初始化。"""
+"""企业版 Gateway 本地库表初始化。"""
 
 from __future__ import annotations
 

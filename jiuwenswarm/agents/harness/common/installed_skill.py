@@ -119,11 +119,10 @@ def _row_to_dict(row: Any) -> dict[str, Any]:
 
 
 async def _handler() -> Any:
-    from jiuwenswarm.infrastructure.module_importer import import_manager_config_receiver_module
+    from jiuwenswarm.infrastructure.db.database import Database
 
-    db_mod = import_manager_config_receiver_module("core.enterprise_config.gateway_db")
-    # AgentServer 无 PersistentStore；直连 GatewayDb。
-    return await db_mod.ensure_gateway_db_handler(log_prefix=TABLE)
+    # AgentServer 无 PersistentStore；直连 Database 单例。
+    return await Database.current().ensure_ready(log_prefix=TABLE)
 
 
 async def list_installed_skills(

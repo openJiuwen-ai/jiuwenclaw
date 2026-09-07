@@ -51,7 +51,7 @@ DEFAULT_AGENT_LOAD_SLOTS = frozenset({
 
 
 def normalize_template_ref(value: Any) -> dict[str, list[str]]:
-    """将 ``template_ref`` 规范为 ``{slot: [ref_string, ...]}``；空值键省略。"""
+    """将 ``template_ref`` 规范为 ``{slot: [ref_string, ...]}``；空值键省略，同槽位去重保序。"""
     if value is None:
         return {}
     if not isinstance(value, dict):
@@ -63,11 +63,16 @@ def normalize_template_ref(value: Any) -> dict[str, list[str]]:
             continue
         if not isinstance(raw, list):
             raise ValueError(f"template_ref[{slot!r}] must be a list")
-        refs = [
-            str(item).strip()
-            for item in raw
-            if item is not None and str(item).strip()
-        ]
+        refs: list[str] = []
+        seen: set[str] = set()
+        for item in raw:
+            if item is None:
+                continue
+            text = str(item).strip()
+            if not text or text in seen:
+                continue
+            seen.add(text)
+            refs.append(text)
         if refs:
             out[slot] = refs
     return out
@@ -94,6 +99,10 @@ class EffectiveEnterpriseConfig:
     """单次路由上下文下解析完成的企业级配置快照。"""
 
     routing: RoutingContext
+    resource_id: str | None = None
+    instance_agent_resource: dict[str, Any] | None = None
+    ref_template_id: str | None = None
+    agent_template: dict[str, Any] | None = None
     template_ref: dict[str, list[str]] = field(default_factory=dict)
     models: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
     embedding: list[dict[str, Any]] | None = None
@@ -102,18 +111,16 @@ class EffectiveEnterpriseConfig:
     mcp: list[dict[str, Any]] | None = None
     permissions: list[dict[str, Any]] | None = None
     service_id: str | None = None
-    agent_id: str | None = None
-    workspace_dir: str | None = None
     send_file_allowed: bool = True
-    resource_id: str | None = None
-    ref_template_id: str | None = None
-    agent_template: dict[str, Any] | None = None
-    instance_agent_resource: dict[str, Any] | None = None
     debug: dict[str, Any] = field(default_factory=dict)
 
     def as_dict(self) -> dict[str, Any]:
         return {
             "routing": self.routing.as_dict(),
+            "resource_id": self.resource_id,
+            "instance_agent_resource": self.instance_agent_resource,
+            "ref_template_id": self.ref_template_id,
+            "agent_template": self.agent_template,
             "template_ref": dict(self.template_ref),
             "models": dict(self.models),
             "embedding": self.embedding,
@@ -122,13 +129,7 @@ class EffectiveEnterpriseConfig:
             "mcp": self.mcp,
             "permissions": self.permissions,
             "service_id": self.service_id,
-            "agent_id": self.agent_id,
-            "workspace_dir": self.workspace_dir,
             "send_file_allowed": self.send_file_allowed,
-            "resource_id": self.resource_id,
-            "ref_template_id": self.ref_template_id,
-            "agent_template": self.agent_template,
-            "instance_agent_resource": self.instance_agent_resource,
             "debug": dict(self.debug),
         }
 
