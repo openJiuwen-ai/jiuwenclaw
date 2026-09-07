@@ -43,8 +43,8 @@ migrate_legacy_user_config_if_needed()
 # Ensure workspace initialized
 _workspace_dir = get_user_workspace_dir()
 _config_file = _workspace_dir / "config" / "config.yaml"
-_new_workspace = _workspace_dir / "agent" / "workspace"
-_old_workspace = _workspace_dir / "agent" / "jiuwenclaw_workspace"
+_new_workspace = _workspace_dir / "agent" / "jiuwenclaw_workspace"
+_old_workspace = _workspace_dir / "agent" / "workspace"
 if not _config_file.exists() or (_old_workspace.exists() and not _new_workspace.exists()):
     prepare_workspace(overwrite=False)
 else:

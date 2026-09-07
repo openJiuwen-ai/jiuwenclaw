@@ -2163,7 +2163,7 @@
     "markdownOnly": "仅支持 Markdown/JSON（.md/.mdx/.json）预览",
     "errors": {
       "refreshFailed": "刷新失败：无法重建 agent 文件索引，请检查生成脚本日志。",
-      "loadFailed": "无法读取 agent 文件列表，请检查 agent/workspace/agent-data.json 是否已生成。"
+      "loadFailed": "无法读取 agent 文件列表，请检查 agent/jiuwenclaw_workspace/agent-data.json 是否已生成。"
     }
   },
   "fileViewer": {
@@ -2487,7 +2487,7 @@
     "helpTitle": "使用说明",
     "help0": "扩展文件夹必须包含 rail.py 作为入口文件",
     "help1": "Rail 扩展文件必须继承 DeepAgentRail 或 AgentRail 基类",
-    "help2": "扩展文件会被保存到 ~/.jiuwenswarm/agent/workspace/extensions/ 目录",
+    "help2": "扩展文件会被保存到 ~/.jiuwenswarm/agent/jiuwenclaw_workspace/extensions/ 目录",
     "errors": {
       "missingFolderPath": "缺少 folder_path 参数",
       "folderNotFound": "文件夹不存在或不是目录：{{path}}",
