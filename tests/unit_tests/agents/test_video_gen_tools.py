@@ -582,7 +582,8 @@ async def test_download_video_non_200_returns_error(monkeypatch: pytest.MonkeyPa
     _patch_async_client(monkeypatch, handler)
 
     async with httpx.AsyncClient() as client:
-        result = await vg._download_video(client, {}, _TEST_API_BASE, "job-x", None)
+        ctx = vg._JobContext(client=client, headers={}, job_id="job-x")
+        result = await vg._download_video(ctx, _TEST_API_BASE, None)
 
     assert result == "[ERROR]: video job job-x completed but downloading content failed: 500"
 
@@ -597,5 +598,6 @@ async def test_poll_job_raises_on_non_200_poll_response(monkeypatch: pytest.Monk
     _patch_async_client(monkeypatch, handler)
 
     async with httpx.AsyncClient() as client:
+        ctx = vg._JobContext(client=client, headers={}, job_id="job-y")
         with pytest.raises(RuntimeError, match="polling video job job-y failed: 503"):
-            await vg._poll_job(client, {}, "job-y", f"{_TEST_API_BASE}/videos/job-y", "pending")
+            await vg._poll_job(ctx, f"{_TEST_API_BASE}/videos/job-y", "pending")

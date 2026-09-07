@@ -27,6 +27,7 @@ import base64
 import logging
 import mimetypes
 import os
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -94,32 +95,40 @@ def _resolve_save_path(save_dir: str | None, filename: str) -> Path:
     return root / filename
 
 
-async def _download_video(
-    client: httpx.AsyncClient, headers: dict[str, str], api_base: str, job_id: str, save_dir: str | None
-) -> str:
+@dataclass(frozen=True)
+class _JobContext:
+    """Shared per-request transport/identity context for a video-generation
+    job - bundles what would otherwise be 3 separate, always-travel-together
+    parameters (client/headers/job_id) across _poll_job/_download_video and
+    their callers (see G.FNM.03: too many arguments)."""
+
+    client: httpx.AsyncClient
+    headers: dict[str, str]
+    job_id: str
+
+
+async def _download_video(ctx: _JobContext, api_base: str, save_dir: str | None) -> str:
     try:
-        content = await client.get(
-            f"{api_base}/videos/{job_id}/content", params={"index": 0}, headers=headers
+        content = await ctx.client.get(
+            f"{api_base}/videos/{ctx.job_id}/content", params={"index": 0}, headers=ctx.headers
         )
     except httpx.HTTPError as exc:
-        return f"[ERROR]: downloading video job {job_id} failed: {exc!r}"
+        return f"[ERROR]: downloading video job {ctx.job_id} failed: {exc!r}"
     if content.status_code != 200:
-        return f"[ERROR]: video job {job_id} completed but downloading content failed: {content.status_code}"
+        return f"[ERROR]: video job {ctx.job_id} completed but downloading content failed: {content.status_code}"
 
-    target = _resolve_save_path(save_dir, f"video_{job_id}.mp4")
+    target = _resolve_save_path(save_dir, f"video_{ctx.job_id}.mp4")
     target.write_bytes(content.content)
     return (
         "Video generated successfully!\n"
         f"Saved to: {target}\n"
-        f"(job {job_id} - the remote source URL expires 24h after completion, so this "
+        f"(job {ctx.job_id} - the remote source URL expires 24h after completion, so this "
         "local file is now the durable copy.)"
     )
 
 
 async def _poll_job(
-    client: httpx.AsyncClient,
-    headers: dict[str, str],
-    job_id: str,
+    ctx: _JobContext,
     polling_url: str,
     status: str,
     job: dict[str, Any] | None = None,
@@ -133,9 +142,9 @@ async def _poll_job(
     while status not in _TERMINAL_STATUSES and elapsed < _MAX_POLL_SECONDS:
         await asyncio.sleep(_POLL_INTERVAL_SECONDS)
         elapsed += _POLL_INTERVAL_SECONDS
-        poll = await client.get(polling_url, headers=headers)
+        poll = await ctx.client.get(polling_url, headers=ctx.headers)
         if poll.status_code != 200:
-            raise RuntimeError(f"polling video job {job_id} failed: {poll.status_code} {poll.text}")
+            raise RuntimeError(f"polling video job {ctx.job_id} failed: {poll.status_code} {poll.text}")
         job = poll.json()
         status = job.get("status", "pending")
     return status, job, elapsed
@@ -151,7 +160,7 @@ async def _poll_job(
         "check_video_status with that job_id to keep waiting for it instead of resubmitting."
     ),
 )
-async def generate_video(
+async def generate_video(  # pylint: disable=huawei-too-many-arguments
     prompt: str,
     aspect_ratio: str = "16:9",
     resolution: str = "480p",
@@ -162,6 +171,19 @@ async def generate_video(
 ) -> str:
     """
     Generate a video from a text prompt.
+
+    Deliberately not bundled into a dataclass/BaseModel despite the arg
+    count (see G.FNM.03): this signature is what CallableSchemaExtractor
+    (openjiuwen) auto-extracts into the tool's JSON tool-calling schema for
+    the LLM. A plain dataclass param collapses to an opaque, propertyless
+    `{"type": "object"}` there (no registered extractor for dataclasses,
+    only pydantic BaseModel) - confirmed directly against
+    CallableSchemaExtractor.get_type_schema - which would leave the model
+    with no visible fields to call this tool with at all. A BaseModel would
+    expand correctly, but changes the calling convention from flat
+    top-level args to one nested object, which is a real behavioral change
+    to an already-verified tool, not a mechanical refactor - flat args are
+    kept intentionally.
 
     Args:
         prompt: Text description of the video to generate.
@@ -225,8 +247,9 @@ async def generate_video(
                 return f"[ERROR]: video generation submit returned no job id: {job}"
             polling_url = job.get("polling_url") or f"{api_base}/videos/{job_id}"
             status = job.get("status", "pending")
+            ctx = _JobContext(client=client, headers=headers, job_id=job_id)
 
-            status, job, elapsed = await _poll_job(client, headers, job_id, polling_url, status, job)
+            status, job, elapsed = await _poll_job(ctx, polling_url, status, job)
 
             if status not in _TERMINAL_STATUSES:
                 return (
@@ -240,7 +263,7 @@ async def generate_video(
                     f"{job.get('error', 'no error detail provided')}"
                 )
 
-            return await _download_video(client, headers, api_base, job_id, save_dir)
+            return await _download_video(ctx, api_base, save_dir)
     except httpx.HTTPError as exc:
         return f"[ERROR]: video generation request failed: {exc!r}"
 
@@ -283,7 +306,8 @@ async def check_video_status(job_id: str, save_dir: str | None = None) -> str:
             job = poll.json()
             status = job.get("status", "unknown")
             if status == "completed":
-                return await _download_video(client, headers, api_base, job_id, save_dir)
+                ctx = _JobContext(client=client, headers=headers, job_id=job_id)
+                return await _download_video(ctx, api_base, save_dir)
             if status in _TERMINAL_STATUSES:
                 return (
                     f"[ERROR]: video job {job_id} ended with status {status}: "
