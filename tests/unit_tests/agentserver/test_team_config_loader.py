@@ -1072,6 +1072,27 @@ def test_load_team_spec_dict_agentos_only_config_uses_agentos_as_default():
     assert model["model_client_config"]["api_base"] == "https://agentos.example.test/v1"
 
 
+def test_load_team_spec_dict_empty_defaults_entry_uses_agentos_as_default():
+    """An unresolved defaults placeholder must not shadow a usable agentos model."""
+    config = _agentos_test_config()
+    config["models"]["defaults"] = [
+        {
+            "model_client_config": {
+                "model_name": "",
+                "client_provider": "",
+            },
+            "model_config_obj": {},
+        }
+    ]
+
+    spec = load_team_spec_dict(config_base=config)
+
+    model = spec["agents"]["leader"]["model"]
+    assert model["model_client_config"]["model_name"] == "agentos-model"
+    assert model["model_client_config"]["client_provider"] == "OpenAI"
+    assert model["model_client_config"]["api_base"] == "https://agentos.example.test/v1"
+
+
 def test_load_team_spec_dict_same_name_defaults_entry_shadows_agentos():
     """A pure-name request matching both defaults and agentos picks the defaults one."""
     config = _agentos_test_config()
