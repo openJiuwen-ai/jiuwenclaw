@@ -30,6 +30,7 @@ import {
   useWorkspaceStore,
 } from '../../stores';
 import { supportsPlanMode } from '../../features/planMode/wireMode';
+import { applyPlanToggle, evaluatePlanToggle } from '../../features/planMode/planModeGate';
 import { queueOrAddGoalObjectiveMessage } from '../../features/goalPendingObjectiveBubble';
 import { AgentMode, MediaItem, Permission, type ProjectInfo } from '../../types';
 import { NEW_CONVERSATION_ID } from '../../multi-session/state/newConversationLifecycle';
@@ -1627,6 +1628,20 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
 
   const executeSlashCommand = useCallback(
     async (command: SlashCommand, context: SlashCommandContext, args: string) => {
+      // /plan 是计划开关的命令入口。两条调用路径都汇聚到这里：
+      //   1) handleSubmit 里精确输入 `/plan` 回车
+      //   2) insertComposerToken 里在建议菜单选中 /plan（回车或点击）
+      // 能否切换由 planModeGate 统一判断，与输入框旁的 Plan 开关、下拉菜单项、
+      // 「计划」chip 关闭按钮同一套限制（会话进行中 / 等待 ask_user 回答 /
+      // 有未完成目标）。命中就弹轻量提示条、消费掉这次输入，不翻转开关、
+      // 不入会话历史、不发消息。
+      if (command.name === 'plan') {
+        const decision = evaluatePlanToggle(activeSessionId, !planActive);
+        if (!decision.ok) {
+          if (decision.reason) pushAttachmentAlert(t(decision.reason));
+          return;
+        }
+      }
       if (command.name !== 'compact') {
         await command.execute(context, args);
         return;
@@ -1644,7 +1659,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
         setCompactingSessionIds(new Set(compactingSessionIdsRef.current));
       }
     },
-    [],
+    [activeSessionId, planActive, pushAttachmentAlert, t],
   );
 
   const handleSubmit = useCallback(() => {
@@ -3110,38 +3125,30 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                 )}
                 <div className="chat-mode-select__divider" role="separator" />
                 {canUsePlanMenu && (() => {
-                  // 对称地：已有未完成目标时不能选计划；对话进行中（isProcessing）时也先禁掉，
-                  // 避免在当前这轮还没结束时又叠加切一次模式。这条"打开"方向的限制沿用原逻辑；
-                  // "关闭"方向只受 isProcessing 限制（跟输入框旁边现有的计划 chip 关闭按钮一致）。
-                  const planDisabledOn = hasUnfinishedGoal || isProcessing;
-                  const planDisabledOnTitle = hasUnfinishedGoal
-                    ? t('plan.toolbarUnavailableGoal')
-                    : isProcessing
-                      ? t('plan.toolbarUnavailableProcessing')
-                      : undefined;
-                  const planDisabled = planActive ? isProcessing : planDisabledOn;
-                  const planTitle = planActive
-                    ? (isProcessing ? t('plan.closeTagDisabled') : undefined)
-                    : planDisabledOnTitle;
+                  // 能否切换计划模式由 planModeGate 统一判断，与 `/plan` 命令、
+                  // 「计划」chip 关闭按钮共用同一套限制：打开方向受「有未完成目标 /
+                  // 会话忙」限制，关闭方向受「会话忙」限制。「会话忙」= 对话进行中 /
+                  // 暂停中 / 等待 ask_user 回答（后者 isProcessing 已回到 false，
+                  // 但会话没结束，必须一并算忙）。
+                  const planToggleDecision = evaluatePlanToggle(activeSessionId, !planActive);
+                  const planDisabled = !planToggleDecision.ok;
+                  const planTitle = planToggleDecision.reason ? t(planToggleDecision.reason) : undefined;
                   const togglePlan = (next: boolean) => {
                     if (!activeSessionId) return;
+                    // 命中限制直接返回（UI 靠 disabled 视觉，无需额外提示条）；
+                    // 通过后再跑「打开方向」的互斥副作用，最后由 applyPlanToggle 落状态。
+                    if (!evaluatePlanToggle(activeSessionId, next).ok) return;
                     if (next) {
-                      if (planDisabledOn) return;
                       // Plan 与 Swarmflow 互斥：开启 Plan 前先关掉 Swarmflow。
                       if (useSessionStore.getState().getRuntime(activeSessionId)?.enableSwarmflow) {
                         useSessionStore.getState().setSwarmflowActive(activeSessionId, false);
                         setSwarmflowConfigPanelOpen(false);
                       }
-                      // 走到这里 hasUnfinishedGoal 一定是 false，goalArmed 为 true 时只可能是
-                      // "刚选了目标、还没发消息"的未提交态，顶掉换成 Plan。
+                      // goalArmed 为 true 时只可能是"刚选了目标、还没发消息"的
+                      // 未提交态，顶掉换成 Plan。
                       useGoalStore.getState().setArmed(activeSessionId, false);
-                      // explicitEntry：这是用户手动打开开关，下一条 Plan 消息要带
-                      // plan_entry_source，否则会被后端的防重入闸门拦下。
-                      usePlanStore.getState().setActive(activeSessionId, true, { explicitEntry: true });
-                    } else {
-                      if (isProcessing) return;
-                      usePlanStore.getState().setActive(activeSessionId, false);
                     }
+                    applyPlanToggle(activeSessionId, next, { entrySource: 'plan_toggle' });
                     // 不关闭菜单：用户拨动开关后保持菜单打开，便于看到开关状态变化并继续操作。
                   };
                   return (
@@ -3169,6 +3176,8 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                   const toggleSwarmflow = (next: boolean) => {
                     if (!activeSessionId || swarmflowToggleDisabled) return;
                     // Swarmflow 与 Plan 互斥：开启 Swarmflow 前先关掉 Plan。
+                    // 这是内部互斥复位（只在 Plan 未提交且会话空闲时可达），不是
+                    // 用户主动退出计划模式，故直接 setActive、不过 planModeGate。
                     if (next && planActive) {
                       usePlanStore.getState().setActive(activeSessionId, false);
                     }
@@ -3236,6 +3245,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                       if (goalDisabledOn) return;
                       // 走到这里 planCommitted 一定是 false（否则上面已 disabled），所以 planActive
                       // 为 true 时只可能是"刚打开开关、还没发过消息"的未提交态，可以放心顶掉。
+                      // 内部互斥复位（非用户主动退出计划模式），直接 setActive、不过 planModeGate。
                       if (planActive) {
                         usePlanStore.getState().setActive(activeSessionId, false);
                       }
@@ -3434,21 +3444,26 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                 <PlanIcon aria-hidden="true" />
               </span>
               <span className="chat-agent-tag__label" data-testid="chat-panel-plan-tag-label">{t('plan.toolbarTag')}</span>
-              <button
-                type="button"
-                className="chat-agent-tag__close"
-                data-testid="chat-panel-plan-tag-close"
-                disabled={isProcessing}
-                title={isProcessing ? t('plan.closeTagDisabled') : t('plan.closeTag')}
-                aria-label={isProcessing ? t('plan.closeTagDisabled') : t('plan.closeTag')}
-                onClick={() => {
-                  if (isProcessing) return;
-                  if (!activeSessionId) return;
-                  usePlanStore.getState().setActive(activeSessionId, false);
-                }}
-              >
-                <X size={16} strokeWidth={2.5} aria-hidden="true" />
-              </button>
+              {(() => {
+                // 关闭「计划」chip 与输入框旁 Plan 开关、`/plan` 命令共用同一套限制
+                // （planModeGate）：会话进行中 / 暂停 / 等待 ask_user 回答时不可退出。
+                const closeBlocked = !evaluatePlanToggle(activeSessionId, false).ok;
+                return (
+                  <button
+                    type="button"
+                    className="chat-agent-tag__close"
+                    data-testid="chat-panel-plan-tag-close"
+                    disabled={closeBlocked}
+                    title={closeBlocked ? t('plan.closeTagDisabled') : t('plan.closeTag')}
+                    aria-label={closeBlocked ? t('plan.closeTagDisabled') : t('plan.closeTag')}
+                    onClick={() => {
+                      applyPlanToggle(activeSessionId, false);
+                    }}
+                  >
+                    <X size={16} strokeWidth={2.5} aria-hidden="true" />
+                  </button>
+                );
+              })()}
             </div>
           )}
 
