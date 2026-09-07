@@ -28,6 +28,13 @@ const videoGenFields = [
   'video_gen_api_key',
   'video_gen_model',
 ] as const;
+const visualGenFields = [
+  'visual_gen_provider',
+  'visual_gen_protocol',
+  'visual_gen_api_base',
+  'visual_gen_api_key',
+  'visual_gen_model',
+] as const;
 
 function isSearchKeyField(name: string): name is (typeof keyFields)[number] {
   return keyFields.some((field) => field === name);
@@ -37,8 +44,12 @@ function isVideoGenField(name: string): name is (typeof videoGenFields)[number] 
   return videoGenFields.some((field) => field === name);
 }
 
+function isVisualGenField(name: string): name is (typeof visualGenFields)[number] {
+  return visualGenFields.some((field) => field === name);
+}
+
 function isRequiredAgentConfigField(name: string): boolean {
-  return isSearchKeyField(name) || isVideoGenField(name);
+  return isSearchKeyField(name) || isVideoGenField(name) || isVisualGenField(name);
 }
 
 type SaveConfig = (updates: Record<string, string>, operation: string) => Promise<unknown>;
@@ -338,6 +349,79 @@ export function VideoGenSettings({ disabled }: SettingsCustomItemProps) {
           save={
             dialog.enableOnSave
               ? (updates, operation) => saveConfig({ ...updates, video_gen_enabled: toConfigBoolean(true) }, operation)
+              : saveConfig
+          }
+          onClose={() => setDialog(null)}
+        />
+      ) : null}
+    </>
+  );
+}
+
+export function VisualGenSettings({ disabled }: SettingsCustomItemProps) {
+  const { t } = useTranslation();
+  const { isConnected } = useSettingsServices();
+  const { values, savingKeys, save } = useSettingsSource();
+  const [dialog, setDialog] = useState<{ enableOnSave: boolean } | null>(null);
+  const saveConfig: SaveConfig = (updates, operation) => save(updates, operation);
+
+  const configured = visualGenFields.every((name) => String(values[name] ?? '').trim());
+  const enabled = configured && parseConfigBoolean(values.visual_gen_enabled);
+  const busy = [...visualGenFields, 'visual_gen_enabled'].some((field) => savingKeys.has(field));
+  const name = t('settingsPanel.fields.visual_gen_enabled.title');
+
+  const toggle = async (nextEnabled: boolean) => {
+    if (nextEnabled && !configured) {
+      setDialog({ enableOnSave: true });
+      return;
+    }
+    try {
+      await saveConfig({ visual_gen_enabled: toConfigBoolean(nextEnabled) }, 'settingsPanel.fields.visual_gen_enabled.title');
+    } catch {
+      // Surfaced via savingKeys/isConnected state already; nothing further to do here.
+    }
+  };
+
+  return (
+    <>
+      <SettingRow
+        className="settings-agent-media__row"
+        title={name}
+        description={t('settingsPanel.fields.visual_gen_enabled.description')}
+        subSettings={
+          configured ? (
+            <div className="settings-agent-media__model-card">
+              <strong className="settings-agent-media__model-name">{String(values.visual_gen_model)}</strong>
+              <div className="settings-agent-media__actions">
+                <Button
+                  variant="quiet"
+                  size="sm"
+                  icon={<settingsActionIcons.edit aria-hidden />}
+                  title={t('common.modify')}
+                  aria-label={`${t('common.modify')} ${name}`}
+                  disabled={disabled || !isConnected || busy}
+                  onClick={() => setDialog({ enableOnSave: false })}
+                />
+              </div>
+            </div>
+          ) : null
+        }
+      >
+        <Switch
+          checked={enabled}
+          disabled={disabled || !isConnected || busy}
+          aria-label={t('settingsPanel.agent.toggleCapability', { name })}
+          onChange={(nextEnabled) => void toggle(nextEnabled)}
+        />
+      </SettingRow>
+      {dialog ? (
+        <AgentConfigDialog
+          titleKey="settingsPanel.agent.visualGenConfigTitle"
+          fields={visualGenFields}
+          config={values}
+          save={
+            dialog.enableOnSave
+              ? (updates, operation) => saveConfig({ ...updates, visual_gen_enabled: toConfigBoolean(true) }, operation)
               : saveConfig
           }
           onClose={() => setDialog(null)}

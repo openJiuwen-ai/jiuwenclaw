@@ -313,6 +313,11 @@ from jiuwenswarm.agents.harness.common.tools.video_gen_tools import (
     _get_video_gen_api_credentials,
     video_gen_enabled,
 )
+from jiuwenswarm.agents.harness.common.tools.visual_gen_tools import (
+    generate_visual,
+    _get_visual_gen_api_credentials,
+    visual_gen_enabled,
+)
 
 from jiuwenswarm.agents.harness.common.tools import (
     SendFileToolkit,
@@ -1532,6 +1537,7 @@ class JiuWenSwarmDeepAdapter:
         self._video_tool_registered: bool = False
         self._image_gen_tool_registered: bool = False
         self._video_gen_tool_registered: bool = False
+        self._visual_gen_tool_registered: bool = False
         self._model: Model | None = None
         self._model_client_config: ModelClientConfig | None = None
         self._model_request_config: ModelRequestConfig | None = None
@@ -1621,6 +1627,7 @@ class JiuWenSwarmDeepAdapter:
         self._video_model_config: bool = False
         self._image_gen_model_config: bool = False
         self._video_gen_model_config: bool = False
+        self._visual_gen_model_config: bool = False
         self._vision_tools: list[Any] = []
         self._audio_tools: list[Any] = []
         self._instance_overrides: dict[str, Any] = {}
@@ -4498,6 +4505,21 @@ class JiuWenSwarmDeepAdapter:
             return False
         return True
 
+    @staticmethod
+    def _build_visual_gen_model_config(
+        config_base: dict[str, Any],
+    ) -> bool:
+        """Build DeepAgent image generation config from service config/env mapping."""
+        _ = config_base
+        if not visual_gen_enabled():
+            logger.info("[JiuWenSwarmDeepAdapter] visual_gen tool skipped: Visual processing disabled")
+            return False
+        api_key, api_base, model = _get_visual_gen_api_credentials()
+        if not (api_key and api_base and model):
+            logger.info("[JiuWenSwarmDeepAdapter] visual_gen tool skipped: Visual processing config incomplete")
+            return False
+        return True
+
     def _iter_runtime_audio_tools(self, agent_id: str | None) -> list[Any]:
         """Return audio tools only while the audio capability is enabled."""
         if self._audio_model_config is None:
@@ -4520,6 +4542,7 @@ class JiuWenSwarmDeepAdapter:
         self._video_model_config = self._build_video_model_config(config_base)
         self._image_gen_model_config = self._build_image_gen_model_config(config_base)
         self._video_gen_model_config = self._build_video_gen_model_config(config_base)
+        self._visual_gen_model_config = self._build_visual_gen_model_config(config_base)
 
         for tool in self._vision_tools:
             tool.vision_model_config = self._vision_model_config
@@ -5008,6 +5031,14 @@ class JiuWenSwarmDeepAdapter:
             enabled=bool(self._video_gen_model_config),
             create_fn=lambda: mark_stateless([generate_video, check_video_status]),
             warn_label="generate_video tools",
+        )
+
+        _, self._visual_gen_tool_registered = self._sync_tool_group(
+            current_tools=mark_stateless([generate_visual]),
+            registered=self._visual_gen_tool_registered,
+            enabled=bool(self._visual_gen_model_config),
+            create_fn=lambda: mark_stateless([generate_visual]),
+            warn_label="generate_visual tool",
         )
 
     def _sync_paid_search_tool_for_runtime(self) -> None:
@@ -7773,6 +7804,19 @@ class JiuWenSwarmDeepAdapter:
             except Exception as exc:
                 logger.warning(
                     "[JiuWenSwarmDeepAdapter] generate_video tools registration failed: %s",
+                    exc,
+                )
+
+        # generate_visual tool: dedicated visual_gen model config
+        self._visual_gen_tool_registered = False
+        if self._visual_gen_model_config:
+            try:
+                self._register_shared_tool(generate_visual)
+                tool_cards.append(generate_visual.card)
+                self._visual_gen_tool_registered = True
+            except Exception as exc:
+                logger.warning(
+                    "[JiuWenSwarmDeepAdapter] generate_visual tool registration failed: %s",
                     exc,
                 )
 

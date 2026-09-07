@@ -110,6 +110,16 @@ export const SETTINGS_CONFIG_FIELDS: readonly ConfigFieldContract[] = [
   envField('video_gen_provider', 'agent', 'text', 'VIDEO_GEN_PROVIDER'),
   envField('video_gen_protocol', 'agent', 'text', 'VIDEO_GEN_PROTOCOL'),
   envField('video_gen_enabled', 'agent', 'boolean', 'VIDEO_GEN_ENABLED'),
+  // Visual processing (image generation) - dedicated slot, independent of
+  // both the Image processing (vision) fields above and image_tools.py's
+  // DashScope-only generate_image (IMAGE_GEN_* - not exposed as a settings
+  // field at all, since that tool cannot serve a non-DashScope model).
+  envField('visual_gen_api_base', 'agent', 'text', 'VISUAL_GEN_API_BASE'),
+  envField('visual_gen_api_key', 'agent', 'text', 'VISUAL_GEN_API_KEY'),
+  envField('visual_gen_model', 'agent', 'text', 'VISUAL_GEN_MODEL_NAME'),
+  envField('visual_gen_provider', 'agent', 'text', 'VISUAL_GEN_PROVIDER'),
+  envField('visual_gen_protocol', 'agent', 'text', 'VISUAL_GEN_PROTOCOL'),
+  envField('visual_gen_enabled', 'agent', 'boolean', 'VISUAL_GEN_ENABLED'),
 
   yamlField('permissions_enabled', 'security', 'boolean', 'permissions.enabled'),
 
