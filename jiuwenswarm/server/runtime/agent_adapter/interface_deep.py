@@ -12485,6 +12485,32 @@ class JiuWenSwarmDeepAdapter:
         return not self._goal_record_is_active()
 
     @staticmethod
+    def _should_emit_silent_visible_reply(
+        *,
+        stream_is_user_originated: bool,
+        had_visible_text_ever: bool,
+        hitl_pending_stream: bool,
+        run_failure: tuple[str, str] | None = None,
+        emitted_chat_error: bool = False,
+    ) -> bool:
+        """Whether to synthesize a short visible reply for a blank user turn.
+
+        User ``chat.send`` consumers must not finish with only reasoning/tools
+        and no body — even when GoalRecord is ACTIVE (which skips terminal
+        final). Pure goal/attach streams keep the old skip behavior.
+
+        Failed turns (``chat.error`` / ``run_failure``) must not get a forged
+        assistant short reply that coexists with the error in history.
+        """
+        if hitl_pending_stream:
+            return False
+        if had_visible_text_ever:
+            return False
+        if run_failure is not None or emitted_chat_error:
+            return False
+        return bool(stream_is_user_originated)
+
+    @staticmethod
     def _approved_plan_exit_resume_tool_call_id(params: Any) -> str:
         """返回已批准 plan-exit resume 对应的工具调用 ID。
 
@@ -12636,6 +12662,24 @@ class JiuWenSwarmDeepAdapter:
         if not had_reasoning_output:
             return fallback_content
         return reasoning_only_fallback
+
+    @staticmethod
+    def _apply_silent_complete_visible_reply(
+        *,
+        has_streamed_content: bool,
+        fallback_content: str,
+        silent_fallback: str,
+    ) -> str:
+        """Fill empty terminal body for silent completes (no visible chat.delta).
+
+        Unlike reasoning-only fill, tool/todo-only rounds also get ``silent_fallback``.
+        Dedicated non-empty fallbacks (e.g. plan-exit) are preserved.
+        """
+        if str(fallback_content or "").strip():
+            return fallback_content
+        if has_streamed_content:
+            return fallback_content
+        return silent_fallback
 
     async def _reattach_interrupt_output(self, session_id: str) -> Any | None:
         """Briefly wait for the interrupted consumer to release its output lease."""
@@ -17969,25 +18013,38 @@ class JiuWenSwarmDeepAdapter:
             # chat.invocation_paused 终结帧收尾，避免 relayclaw sidecar 提前关闭
             # FrameQueue 导致 recoverable_pause 丢失；in-place 续跑后 suppress 已
             # 清除，轮次完成/取消时必须合成 final 让前端 stopStreaming。
-            if not suppress_stream_after_hitl and self._should_emit_stream_end_chat_final(
-                had_assistant_output=had_assistant_output,
-                emitted_terminal_chat_final=emitted_terminal_chat_final,
-            ):
+            #
+            # Silent-complete (tool/todo/reasoning-only, no chat.delta): user
+            # chat.send must still get a short visible reply even when GoalRecord
+            # is ACTIVE (which skips the plain terminal-final path).
+            # 与上方 flush 一致：用 suppress_stream_after_hitl 判断当前是否仍在
+            # HITL 抑制中；hitl_pending_stream 不随续跑复位，不能单独用来挡合成。
+            should_emit_terminal_final = (
+                not suppress_stream_after_hitl
+                and self._should_emit_stream_end_chat_final(
+                    had_assistant_output=had_assistant_output,
+                    emitted_terminal_chat_final=emitted_terminal_chat_final,
+                )
+            )
+            should_emit_silent_reply = self._should_emit_silent_visible_reply(
+                stream_is_user_originated=stream_is_user_originated,
+                had_visible_text_ever=had_visible_text_ever,
+                hitl_pending_stream=suppress_stream_after_hitl,
+                run_failure=run_failure,
+                emitted_chat_error=emitted_chat_error,
+            )
+            if should_emit_terminal_final or should_emit_silent_reply:
                 self._stream_content_run_kind = None
                 fallback_content = ""
                 if saw_approved_plan_exit_result and not had_assistant_output:
                     fallback_content = self._plan_exit_fallback_content()
-                # Reasoning-only models (e.g. glm-5.2) may emit chat.reasoning with
-                # empty answer content. Non-team hosts skip empty chat.final for
-                # bubble text — fill a short stable reply so the UI is not blank.
-                # Use had_visible_text_ever (not visible_text_since_last_final): the
-                # latter is cleared on tool_call, which would wrongly inject the
-                # "no visible reply" text after pre-tool deltas + post-tool reasoning.
-                fallback_content = self._apply_reasoning_only_empty_reply_fallback(
+                # Prefer silent-complete fill (no reasoning required) so
+                # tool/todo-only rounds are not blank. Dedicated plan-exit text
+                # is preserved by the helper.
+                fallback_content = self._apply_silent_complete_visible_reply(
                     has_streamed_content=had_visible_text_ever,
-                    had_reasoning_output=had_reasoning_output,
                     fallback_content=fallback_content,
-                    reasoning_only_fallback=self._reasoning_only_empty_reply_fallback(),
+                    silent_fallback=self._reasoning_only_empty_reply_fallback(),
                 )
                 if str(fallback_content or "").strip():
                     for _delta in self._iter_delta_for_unstreamed_final(
@@ -18000,18 +18057,37 @@ class JiuWenSwarmDeepAdapter:
                             payload=note_chat_payload(_delta),
                             is_complete=False,
                         )
+                    logger.info(
+                        "[JiuWenSwarmDeepAdapter] synthesized silent-complete "
+                        "visible reply: request_id=%s had_visible_text_ever=%s "
+                        "had_reasoning=%s terminal_final=%s",
+                        rid,
+                        had_visible_text_ever,
+                        had_reasoning_output,
+                        should_emit_terminal_final,
+                    )
                     # Body already on delta; keep final empty to avoid RelayClaw
                     # computeFinalTextDelta appending a duplicate copy.
                     fallback_content = ""
-                yield AgentResponseChunk(
-                    request_id=rid,
-                    channel_id=cid,
-                    payload=note_chat_payload({
-                        "event_type": "chat.final",
-                        "content": fallback_content,
-                    }),
-                    is_complete=False,
-                )
+                    yield AgentResponseChunk(
+                        request_id=rid,
+                        channel_id=cid,
+                        payload=note_chat_payload({
+                            "event_type": "chat.final",
+                            "content": "",
+                        }),
+                        is_complete=False,
+                    )
+                elif should_emit_terminal_final:
+                    yield AgentResponseChunk(
+                        request_id=rid,
+                        channel_id=cid,
+                        payload=note_chat_payload({
+                            "event_type": "chat.final",
+                            "content": fallback_content,
+                        }),
+                        is_complete=False,
+                    )
 
             if self._skill_evolution_rail is not None:
                 task = asyncio.create_task(

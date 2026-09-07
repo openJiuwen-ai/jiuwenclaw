@@ -221,11 +221,37 @@ def _get_sid(session: Any) -> str:
 # resume_ctx 走 session state + checkpointer 持久化，保证多 worker/多实例
 # 部署的 HITL 恢复可靠（同一 session_id 在任何进程都能从 checkpointer 读到）。
 #
-# save: session.update_state() + post_run 落盘。
+# save: session.update_state() + commit 落盘（可重复；勿依赖二次 post_run）。
 # load: session.pre_run() + get_state() 从 checkpointer 恢复。
 # clear: session.update_state(key=None)。
 #
 # 与 node_artifacts 共享同一持久化语义，避免「产物在、断点不在」的半恢复状态。
+
+
+async def _persist_session_state(session: Any, *, op: str, sid: str) -> bool:
+    """Flush session state to checkpointer without relying on one-shot post_run.
+
+    SDK ``Session.post_run`` is guarded by ``_post_run_done`` and becomes a no-op
+    after the first call on the same instance (and may close the stream). Nested
+    HITL / clear-in-flight paths therefore must prefer ``commit()``.
+
+    Returns True when persistence ran without raising.
+    """
+    try:
+        commit = getattr(session, "commit", None)
+        if callable(commit):
+            await commit()
+            return True
+        await session.post_run()
+        return True
+    except Exception as e:
+        logger.warning(
+            "[SkillTurboResume] %s persist failed: sid=%s err=%s",
+            op,
+            sid,
+            e,
+        )
+        return False
 
 
 async def save_resume_ctx(
@@ -239,7 +265,11 @@ async def save_resume_ctx(
     """中断时保存断点上下文到 session state（checkpointer 持久化）。
 
     调用方应已 pre_run（executor 在 _persist_node_artifacts 中 pre_run 过），
-    本函数负责 update_state + post_run 完成落盘（与 node_artifacts 共一次 post_run）。
+    本函数负责 update_state + commit 完成落盘。
+
+    嵌套 ask_user 发生在同一次 resume Session 上时，``mark_resume_in_flight``
+    往往已执行过 ``post_run``；若此处再 ``post_run`` 会被 SDK 短路，新 tcid
+    只留在内存，下一轮作答仍读到旧 pending → 反复弹同一组 ask 卡。
 
     ``task_states``：中断时的二层任务全量快照（含稳定 ``task_id``）。
     resume 时复用同一套 id，避免前端 taskRuns 因新 UUID 叠出两套 Stage。
@@ -248,10 +278,15 @@ async def save_resume_ctx(
         logger.warning("[SkillTurboResume] save_resume_ctx: session is None, skipping")
         return
     sid = _get_sid(session)
+    # Nested HITL during an in-flight resume must clear ``resume_in_flight``.
+    # Some session ``update_state`` implementations deep-merge dict values, so a
+    # fresh entry that omits the key would keep the previous resume's flag and
+    # the next user answer would be treated as a duplicate no-op.
     entry: dict[str, Any] = {
         "plan_code": plan_code,
         "inputs": dict(inputs),
         "pending_tool_call_id": pending_tool_call_id,
+        "resume_in_flight": False,
     }
     if task_states:
         entry["task_states"] = copy.deepcopy(task_states)
@@ -277,11 +312,8 @@ async def save_resume_ctx(
         len(plan_code or ""),
         len(entry.get("task_states") or []),
     )
-    try:
-        await session.post_run()
+    if await _persist_session_state(session, op="save_resume_ctx", sid=sid):
         logger.info("[SkillTurboResume] save_resume_ctx: persisted OK sid=%s", sid)
-    except Exception as e:
-        logger.warning("[SkillTurboResume] save_resume_ctx post_run failed: sid=%s err=%s", sid, e)
 
 
 async def load_resume_ctx(session: Any) -> dict[str, Any] | None:
@@ -315,7 +347,13 @@ async def load_resume_ctx(session: Any) -> dict[str, Any] | None:
 
 
 async def clear_resume_ctx(session: Any) -> None:
-    """清除断点上下文（resume 跑通后调用）。"""
+    """清除断点上下文（resume 跑通后调用）。
+
+    Must persist: callers often ``post_run`` after clear, but on the resume
+    Session ``post_run`` is frequently already done (``mark_resume_in_flight``),
+    so a memory-only clear would leave the old pending tcid in checkpointer and
+    the next answer can re-enter HITL / re-pop ask cards.
+    """
     if session is None:
         return
     sid = _get_sid(session)
@@ -325,6 +363,8 @@ async def clear_resume_ctx(session: Any) -> None:
         logger.debug(
             "[SkillTurboResume] clear_resume_ctx update_state failed", exc_info=True
         )
+        return
+    await _persist_session_state(session, op="clear_resume_ctx", sid=sid)
     logger.info("[SkillTurboResume] clear_resume_ctx: cleared sid=%s", sid)
 
 
@@ -368,10 +408,60 @@ async def mark_resume_in_flight(session: Any, resume_ctx: dict[str, Any]) -> Non
         )
 
 
+async def _call_session_reload(session: Any) -> None:
+    """Refresh session memory via public Session APIs.
+
+    Prefer ``reload_from_checkpointer`` (re-runs even after one-shot ``pre_run``).
+    Stubs that always reload in ``pre_run`` fall back to that public method.
+    """
+    reload = getattr(session, "reload_from_checkpointer", None)
+    if callable(reload):
+        try:
+            await reload(inputs=None)
+        except TypeError:
+            await reload()
+        return
+    await session.pre_run(inputs=None)
+
+
+async def _reload_session_state_from_checkpointer(
+    session: Any, *, op: str, sid: str
+) -> None:
+    """Force checkpointer → memory refresh even when ``pre_run`` already ran.
+
+    Resume uses two Session instances (facade mark vs executor save). Clearing
+    flags on the mark Session must re-read the latest committed ctx first, or a
+    commit would clobber a newer nested-HITL pending tcid.
+    """
+    try:
+        await _call_session_reload(session)
+    except Exception as e:
+        logger.warning(
+            "[SkillTurboResume] %s re-pre_run failed: sid=%s err=%s",
+            op,
+            sid,
+            e,
+        )
+
+
 async def clear_resume_in_flight(session: Any) -> None:
-    """Clear the in-flight flag if resume_ctx is still present."""
+    """Clear the in-flight flag if resume_ctx is still present.
+
+    Must persist after clearing so a failed resume does not leave
+    ``resume_in_flight=True`` blocking the next answer as a duplicate.
+
+    Critical: reload from checkpointer before writing. The resume facade Session
+    that called ``mark_resume_in_flight`` is not the executor Session that
+    ``save_resume_ctx`` uses for nested ask_user. Committing the facade's stale
+    memory (old pending tcid) would overwrite the nested HITL save and cause
+    repeated ask_user popups (audience↔style loop).
+    """
     if session is None:
         return
+    sid = _get_sid(session)
+    await _reload_session_state_from_checkpointer(
+        session, op="clear_resume_in_flight", sid=sid
+    )
     try:
         state = session.get_state(SKILL_TURBO_RESUME_CTX_KEY)
     except Exception as e:
@@ -381,9 +471,11 @@ async def clear_resume_in_flight(session: Any) -> None:
         )
         return
     if not isinstance(state, dict) or not state.get("resume_in_flight"):
+        # Nested save_resume_ctx already committed resume_in_flight=False with
+        # the newer pending tcid — do not re-commit stale facade memory.
         return
     cleaned = dict(state)
-    cleaned.pop("resume_in_flight", None)
+    cleaned["resume_in_flight"] = False
     try:
         session.update_state({SKILL_TURBO_RESUME_CTX_KEY: cleaned})
     except Exception:
@@ -391,3 +483,5 @@ async def clear_resume_in_flight(session: Any) -> None:
             "[SkillTurboResume] clear_resume_in_flight update_state failed",
             exc_info=True,
         )
+        return
+    await _persist_session_state(session, op="clear_resume_in_flight", sid=sid)

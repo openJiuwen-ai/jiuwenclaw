@@ -79,3 +79,23 @@ def fill_reasoning_only_empty_final_content(
     if not has_reasoning:
         return content
     return reasoning_only_empty_reply_fallback_text(lang)
+
+
+def fill_silent_complete_visible_reply(
+    *,
+    content: str,
+    has_visible_streamed_text: bool,
+    lang: str = "zh",
+) -> str:
+    """Fill a short visible reply when a turn completed with no user-visible body.
+
+    Wider than :func:`fill_reasoning_only_empty_final_content`: tool/todo-only
+    rounds (no reasoning) still get a stable short sentence. Does not promote
+    chain-of-thought and never overrides non-empty content or an already-streamed
+    visible ``chat.delta`` body.
+    """
+    if str(content or "").strip():
+        return content
+    if has_visible_streamed_text:
+        return content
+    return reasoning_only_empty_reply_fallback_text(lang)
