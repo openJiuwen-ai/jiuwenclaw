@@ -6,20 +6,25 @@ from __future__ import annotations
 
 import copy
 import json
+from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any
 
+from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
 from openjiuwen.core.single_agent.interrupt.exception import ToolInterruptException
 from openjiuwen.core.single_agent.interrupt.state import RESUME_USER_INPUT_KEY
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, ToolCallInputs
-from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
 from openjiuwen.harness.rails.base import DeepAgentRail
 from openjiuwen.harness.rails.interrupt.ask_user_rail import AskUserRequest
+from openjiuwen.harness.workspace.workspace import WorkspaceNode
 
 from jiuwenswarm.agents.harness.common.tools.deepresearch.execution import (
     EXECUTION_SCHEMA,
     bind_deepresearch_execution_context,
     reset_deepresearch_execution_context,
+)
+from jiuwenswarm.agents.harness.common.tools.deepresearch.todo_progress import (
+    deepresearch_todo_path,
 )
 from jiuwenswarm.common.schema.ask_user import ask_user_response_schema
 from jiuwenswarm.common.utils import logger
@@ -52,7 +57,7 @@ def _is_current_research_todo(task_id: str) -> bool:
 
 
 def _session_id_from_ctx(ctx: AgentCallbackContext) -> str:
-    session = ctx.session
+    session = getattr(ctx, "session", None)
     if session is None:
         return ""
     get_sid = getattr(session, "get_session_id", None)
@@ -60,42 +65,37 @@ def _session_id_from_ctx(ctx: AgentCallbackContext) -> str:
         return ""
     try:
         return str(get_sid() or "").strip()
-    except Exception:
+    except (TypeError, ValueError, AttributeError):
         return ""
 
 
+def _agent_todo_json_path(agent: Any, session_id: str) -> Path | None:
+    deep_config = getattr(agent, "deep_config", None)
+    if deep_config is None:
+        nested = getattr(agent, "deep_agent", None)
+        deep_config = getattr(nested, "deep_config", None)
+    workspace = getattr(deep_config, "workspace", None)
+    get_node_path = getattr(workspace, "get_node_path", None)
+    if not callable(get_node_path):
+        return None
+    try:
+        return Path(get_node_path(WorkspaceNode.TODO)) / session_id / "todo.json"
+    except (TypeError, ValueError, OSError, AttributeError):
+        return None
+
+
 def _todo_json_path(ctx: AgentCallbackContext) -> Path | None:
-    """Resolve outer harness todo.json; prefer TaskExecutionRail workspace."""
+    """Resolve outer harness todo.json from agent workspace, then default path."""
     session_id = _session_id_from_ctx(ctx)
     if not session_id:
         return None
     agent = getattr(ctx, "agent", None)
+    path = _agent_todo_json_path(agent, session_id)
+    if path is not None:
+        return path
     try:
-        from jiuwenswarm.agents.harness.common.rails.task_execution_rail import (  # noqa: PLC0415
-            TaskExecutionRail,
-        )
-
-        rail = TaskExecutionRail()
-        rail.init(agent)
-        path = rail._get_todo_workspace_path(session_id)
-        if path is not None:
-            return path
-    except Exception:
-        logger.debug(
-            "[DeepResearchExecutionRail] todo path via TaskExecutionRail failed",
-            exc_info=True,
-        )
-    try:
-        from jiuwenswarm.agents.harness.common.tools.deepresearch.todo_progress import (  # noqa: PLC0415
-            deepresearch_todo_path,
-        )
-
         return deepresearch_todo_path(session_id=session_id)
-    except Exception:
-        logger.debug(
-            "[DeepResearchExecutionRail] todo path via deepresearch workspace failed",
-            exc_info=True,
-        )
+    except ValueError:
         return None
 
 
@@ -183,15 +183,9 @@ def _compact_followup_tool_content(
     )
 
 
-def _apply_followup_handoff(
-    ctx: AgentCallbackContext,
-    payload: dict[str, Any],
-) -> None:
-    """Mark research done, advance the next outer todo, compact the tool result."""
-    items = _load_todo_items(ctx)
-    if not items:
-        return
-
+def _advance_outer_todo_items(
+    items: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], dict[str, Any] | None, bool]:
     changed = False
     next_followup: dict[str, Any] | None = None
     for item in items:
@@ -213,18 +207,15 @@ def _apply_followup_handoff(
         if followup_status != "in_progress":
             next_followup["status"] = "in_progress"
             changed = True
+    return items, next_followup, changed
 
-    if changed:
-        _save_todo_items(ctx, items)
 
-    content = str(payload.get("content") or "").rstrip()
-    if not content:
-        return
-    handoff_content = _compact_followup_tool_content(next_followup)
+def _rewrite_followup_tool_result(
+    ctx: AgentCallbackContext,
+    payload: dict[str, Any],
+    handoff_content: str,
+) -> None:
     payload["content"] = handoff_content
-    # Keep kind/status as the tool's real completed result. RelayClaw must not
-    # be steered by camouflaged followup statuses.
-
     tool_result = ctx.inputs.tool_result
     detailed = getattr(tool_result, "detailed_output", None)
     if isinstance(detailed, dict):
@@ -235,15 +226,35 @@ def _apply_followup_handoff(
         ctx.inputs.tool_result = dict(payload)
 
     tool_msg = getattr(ctx.inputs, "tool_msg", None)
-    if tool_msg is not None and hasattr(tool_msg, "content"):
-        try:
-            tool_msg.content = handoff_content
-        except Exception:
-            logger.debug(
-                "[DeepResearchExecutionRail] failed to rewrite tool_msg content",
-                exc_info=True,
-            )
+    if tool_msg is None or not hasattr(tool_msg, "content"):
+        return
+    try:
+        tool_msg.content = handoff_content
+    except (AttributeError, TypeError, ValueError):
+        logger.debug(
+            "[DeepResearchExecutionRail] failed to rewrite tool_msg content",
+            exc_info=True,
+        )
 
+
+def _apply_followup_handoff(
+    ctx: AgentCallbackContext,
+    payload: dict[str, Any],
+) -> None:
+    """Mark research done, advance the next outer todo, compact the tool result."""
+    items = _load_todo_items(ctx)
+    if not items:
+        return
+
+    items, next_followup, changed = _advance_outer_todo_items(items)
+    if changed:
+        _save_todo_items(ctx, items)
+
+    content = str(payload.get("content") or "").rstrip()
+    if not content:
+        return
+    handoff_content = _compact_followup_tool_content(next_followup)
+    _rewrite_followup_tool_result(ctx, payload, handoff_content)
     logger.info(
         "[DeepResearchExecutionRail] followup handoff applied; "
         "next_todo=%s content_chars=%s",
@@ -331,6 +342,58 @@ def _result_payload(value: Any) -> dict[str, Any] | None:
     return dict(value) if isinstance(value, Mapping) else None
 
 
+def _handle_interaction_payload(
+    ctx: AgentCallbackContext,
+    payload: dict[str, Any],
+    workflow_id: str,
+) -> bool:
+    if payload.get("kind") != "interaction":
+        return False
+    interaction = payload.get("interaction")
+    if not isinstance(interaction, Mapping):
+        return True
+    questions = interaction.get("questions")
+    if not isinstance(questions, list):
+        return True
+    state = payload.get("state")
+    request = AskUserRequest(
+        message=str(interaction.get("query") or ""),
+        payload_schema=ask_user_response_schema(),
+        questions=questions,
+    )
+    revision = int(state.get("revision") or 0) if isinstance(state, Mapping) else 0
+    interaction_id = f"{workflow_id}_interaction_{revision}"
+    aliases = _load_aliases(ctx.session)
+    aliases[interaction_id] = workflow_id
+    _save_aliases(ctx.session, aliases)
+    ctx.inputs.tool_result = ToolInterruptException(
+        request=request,
+        tool_call=_interaction_tool_call(ctx.inputs.tool_call, interaction_id),
+    )
+    ctx.inputs.tool_msg = None
+    return True
+
+
+def _handle_terminal_execute_result(
+    ctx: AgentCallbackContext,
+    payload: dict[str, Any],
+) -> None:
+    content = payload.get("content")
+    if not isinstance(content, str) or not content.strip():
+        return
+    if _has_followup_todos(ctx):
+        if payload.get("kind") == "completed":
+            _apply_followup_handoff(ctx, payload)
+        logger.info(
+            "[DeepResearchExecutionRail] skip force_finish; "
+            "outer todos still pending after deepresearch_execute"
+        )
+        return
+    ctx.request_force_finish(
+        {"output": content.strip(), "result_type": "answer"}
+    )
+
+
 class DeepResearchExecutionRail(DeepAgentRail):
     """Persist the workflow state and turn tool envelopes into native HITL."""
 
@@ -396,31 +459,7 @@ class DeepResearchExecutionRail(DeepAgentRail):
                 states[workflow_id] = dict(state)
                 _save_states(ctx.session, states)
 
-            if payload.get("kind") == "interaction":
-                interaction = payload.get("interaction")
-                if not isinstance(interaction, Mapping):
-                    return
-                questions = interaction.get("questions")
-                if not isinstance(questions, list):
-                    return
-                request = AskUserRequest(
-                    message=str(interaction.get("query") or ""),
-                    payload_schema=ask_user_response_schema(),
-                    questions=questions,
-                )
-                revision = int(state.get("revision") or 0) if isinstance(state, Mapping) else 0
-                interaction_id = f"{workflow_id}_interaction_{revision}"
-                aliases = _load_aliases(ctx.session)
-                aliases[interaction_id] = workflow_id
-                _save_aliases(ctx.session, aliases)
-                ctx.inputs.tool_result = ToolInterruptException(
-                    request=request,
-                    tool_call=_interaction_tool_call(
-                        ctx.inputs.tool_call,
-                        interaction_id,
-                    ),
-                )
-                ctx.inputs.tool_msg = None
+            if _handle_interaction_payload(ctx, payload, workflow_id):
                 return
 
             states.pop(workflow_id, None)
@@ -431,19 +470,7 @@ class DeepResearchExecutionRail(DeepAgentRail):
                 if target != workflow_id
             }
             _save_aliases(ctx.session, aliases)
-            content = payload.get("content")
-            if isinstance(content, str) and content.strip():
-                if _has_followup_todos(ctx):
-                    if payload.get("kind") == "completed":
-                        _apply_followup_handoff(ctx, payload)
-                    logger.info(
-                        "[DeepResearchExecutionRail] skip force_finish; "
-                        "outer todos still pending after deepresearch_execute"
-                    )
-                else:
-                    ctx.request_force_finish(
-                        {"output": content.strip(), "result_type": "answer"}
-                    )
+            _handle_terminal_execute_result(ctx, payload)
         finally:
             tool_call_id = _tool_call_id(ctx)
             tokens = ctx.extra.get(_TOKENS_KEY, {})

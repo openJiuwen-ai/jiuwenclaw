@@ -22,14 +22,18 @@ from jiuwenswarm.agents.harness.common.tools.deepresearch import execution as de
 
 
 class _Session:
-    def __init__(self):
+    def __init__(self, session_id: str = ""):
         self.state: dict[str, object] = {}
+        self._session_id = session_id
 
     def get_state(self, key):
         return self.state.get(key)
 
     def update_state(self, values):
         self.state.update(values)
+
+    def get_session_id(self):
+        return self._session_id
 
 
 class _Model:
@@ -849,6 +853,83 @@ async def test_execution_rail_force_finishes_when_only_research_todo_remains():
     assert ctx.force_finish_requests == [
         {"output": "研究报告已生成并交付。", "result_type": "answer"}
     ]
+
+
+@pytest.mark.asyncio
+async def test_execution_rail_reads_followup_todos_from_disk(tmp_path):
+    result = {
+        "schema_version": de.EXECUTION_SCHEMA,
+        "kind": "completed",
+        "content": "研究报告已生成并交付。",
+        "state": {"schema_version": 1, "phase": "completed", "revision": 5},
+    }
+    session = _Session(session_id="session-disk")
+    rail = DeepResearchExecutionRail(model_provider=lambda: None)
+    ctx = _rail_ctx(result=result, session=session)
+    todo_path = tmp_path / "todo.json"
+    todo_path.write_text(
+        json.dumps(
+            [
+                {"id": "deepresearch", "status": "in_progress"},
+                {"id": "write_html", "status": "pending", "content": "写汇报"},
+            ],
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    with patch(
+        "jiuwenswarm.agents.harness.common.rails.deepresearch_execution_rail."
+        "deepresearch_todo_path",
+        return_value=todo_path,
+    ):
+        await rail.before_tool_call(ctx)
+        await rail.after_tool_call(ctx)
+
+    assert ctx.force_finish_requests == []
+    saved = json.loads(todo_path.read_text(encoding="utf-8"))
+    assert saved[0]["status"] == "completed"
+    assert saved[1]["status"] == "in_progress"
+    assert "write_html" in ctx.inputs.tool_result["content"]
+
+
+@pytest.mark.asyncio
+async def test_execution_rail_uses_agent_workspace_todo_path(tmp_path):
+    result = {
+        "schema_version": de.EXECUTION_SCHEMA,
+        "kind": "completed",
+        "content": "研究报告已生成并交付。",
+        "state": {"schema_version": 1, "phase": "completed", "revision": 5},
+    }
+    session = _Session(session_id="session-agent")
+    todo_path = tmp_path / "session-agent" / "todo.json"
+    todo_path.parent.mkdir(parents=True)
+    todo_path.write_text(
+        json.dumps(
+            [
+                {"id": "deepresearch", "status": "in_progress"},
+                {"id": "next_task", "status": "pending"},
+            ],
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    agent = SimpleNamespace(
+        deep_config=SimpleNamespace(
+            workspace=SimpleNamespace(get_node_path=lambda _node: tmp_path)
+        )
+    )
+    rail = DeepResearchExecutionRail(model_provider=lambda: None)
+    ctx = _rail_ctx(result=result, session=session)
+    ctx.agent = agent
+
+    await rail.before_tool_call(ctx)
+    await rail.after_tool_call(ctx)
+
+    assert ctx.force_finish_requests == []
+    saved = json.loads(todo_path.read_text(encoding="utf-8"))
+    assert saved[1]["status"] == "in_progress"
+    assert "next_task" in ctx.inputs.tool_result["content"]
 
 
 @pytest.mark.asyncio
