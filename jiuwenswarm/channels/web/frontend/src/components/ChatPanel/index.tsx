@@ -1044,6 +1044,13 @@ export const ChatPanel = React.memo(function ChatPanel({
     // 只有向上滚动时才触发
     if (e.deltaY < 0) {
       stickToBottomUntilStableRef.current = false;
+      // Record the user's intent before the native scroll event. A streaming
+      // render can otherwise run between wheel and scroll and pull the viewport
+      // back to the bottom, which is especially visible with macOS trackpads.
+      const el = scrollContainerRef.current;
+      if (el && el.scrollHeight > el.clientHeight) {
+        userScrolledUpRef.current = true;
+      }
     }
     if (e.deltaY < 0 && canRequestOlderHistory && historyOnLoadMore) {
       // 检查是否已经在顶部（没有滚动条时 scrollTop 始终为 0）

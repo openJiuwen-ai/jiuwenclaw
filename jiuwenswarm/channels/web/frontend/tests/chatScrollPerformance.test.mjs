@@ -14,6 +14,13 @@ test('coalesces chat scroll bookkeeping to one animation frame', () => {
   assert.match(indexSource, /window\.cancelAnimationFrame\(scrollFrameRef\.current\)/);
 });
 
+test('upward wheel intent pauses automatic bottom following immediately', () => {
+  assert.match(
+    indexSource,
+    /if \(e\.deltaY < 0\) \{[\s\S]*?stickToBottomUntilStableRef\.current = false;[\s\S]*?userScrolledUpRef\.current = true;/,
+  );
+});
+
 test('skips rendering offscreen timeline blocks when the webview supports it', () => {
   assert.match(styles, /@supports \(content-visibility: auto\)/);
   assert.match(styles, /\.chat-timeline > \*:not\(\.timeline-collapse\)/);
