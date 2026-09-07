@@ -20,7 +20,6 @@ import {
 import { useClickOutside } from './useClickOutside';
 import { usePendingConnectorFlow, PendingConnectorModals } from './usePendingConnectorFlow';
 import SimpleSelect from '../CronPanel/SimpleSelect';
-import { MarketplaceSurface } from '../marketplace/MarketplaceSurface';
 
 export type MarketKind = 'plugin' | 'mcp';
 export type TopTab = MarketKind | 'my';
@@ -488,7 +487,9 @@ export function MarketplacePage({
   }
 
   return (
-    <MarketplaceSurface variant="catalog" scrollRef={scrollRef} testId="connector-market-marketplace">
+    <div className="relative flex min-h-0 flex-1 flex-col overflow-hidden" data-testid="connector-market-marketplace">
+      {/* 固定区（header/toolbar/分类 tab）：page-shell 限宽 1400px 居中，与下方滚动列共用内容线 */}
+      <div className="page-shell flex-none">
       <div className="mb-[33px]">
         <h1 className="text-[24px] font-semibold leading-9 text-text" data-testid="connector-market-marketplace-title">
           {t('connectorMarket.title')}
@@ -668,8 +669,10 @@ export function MarketplacePage({
           ))}
         </div>
       )}
+      </div>
 
-      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3" data-testid="connector-market-card-list">
+      <div ref={scrollRef} className="page-scroll min-h-0 overflow-y-auto">
+        <div className="card-grid-auto" data-testid="connector-market-card-list">
         {topTab === 'my'
           ? myKind === 'mcp'
             ? paginatedConnectors.map((connector) => {
@@ -781,17 +784,20 @@ export function MarketplacePage({
                 : t('connectorMarket.empty.searchNoResult')}
           </div>
         )}
+        </div>
       </div>
 
       {!isEmpty && (
-        <PaginationBar
-          currentPage={currentPage}
-          totalPages={totalPages}
-          pageSize={pageSize}
-          totalCount={activeList.length}
-          onPageChange={goToPage}
-          onPageSizeChange={changePageSize}
-        />
+        <div className="page-shell">
+          <PaginationBar
+            currentPage={currentPage}
+            totalPages={totalPages}
+            pageSize={pageSize}
+            totalCount={activeList.length}
+            onPageChange={goToPage}
+            onPageSizeChange={changePageSize}
+          />
+        </div>
       )}
 
       {tokenTarget && (
@@ -815,7 +821,7 @@ export function MarketplacePage({
       )}
 
       <PendingConnectorModals flow={pluginInstallFlow} />
-    </MarketplaceSurface>
+    </div>
   );
 }
 
