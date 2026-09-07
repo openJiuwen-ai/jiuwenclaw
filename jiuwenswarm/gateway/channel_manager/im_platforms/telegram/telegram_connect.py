@@ -12,7 +12,9 @@ from typing import Any, Callable
 import logging
 
 from jiuwenswarm.gateway.channel_manager.base import BaseChannel, ChannelMetadata, RobotMessageRouter
-from jiuwenswarm.common.schema.message import Message, ReqMethod
+from jiuwenswarm.common.schema.message import EventType, Message, ReqMethod
+from jiuwenswarm.gateway.routing.keys import DeliveryTarget
+from jiuwenswarm.gateway.routing.session_sharing import RoutingTarget
 
 logger = logging.getLogger(__name__)
 
@@ -153,7 +155,7 @@ class TelegramChannel(BaseChannel):
 
         logger.info("Telegram Bot 已停止")
 
-    async def send(self, msg: Message) -> None:
+    async def send(self, msg: Message, *, routing_target: RoutingTarget | None = None) -> None:
         """通过 Telegram 发送消息."""
         if not self._application or not self._running:
             logger.warning("Telegram Bot not initialized or not running")
@@ -218,10 +220,17 @@ class TelegramChannel(BaseChannel):
 
     def _extract_content(self, msg: Message) -> str:
         """从 Message 中提取文本内容."""
+        payload = getattr(msg, "payload", None) or {}
+        if msg.event_type == EventType.HEALTH_CHECK_RELAY and isinstance(
+            payload, dict
+        ):
+            health_check = payload.get("health_check")
+            if health_check:
+                return str(health_check).strip()
         # Gateway/Agent 响应在 payload.content
         content = (
                 (msg.params or {}).get("content")
-                or (getattr(msg, "payload") or {}).get("content")
+                or payload.get("content")
                 or ""
         )
 

@@ -1,25 +1,8 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-"""Low-level terminal output primitives for CLI chat.
+"""Compatibility alias for :mod:`jiuwenswarm.channels.cli._terminal`."""
 
-These are NOT log messages — they implement terminal UI (spinner animation,
-streaming content to stdout, structured JSON/JSONL output).  Using ``os.write``
-rather than ``sys.*.write`` or ``print`` because G.LOG.02 requires that
-application-level log messages go through the ``logging`` module, but terminal
-UI rendering is not logging.
-"""
+from importlib import import_module
+import sys
 
-from __future__ import annotations
-
-import os
-
-STDOUT_FD = 1
-STDERR_FD = 2
-
-
-def write_stdout(text: str) -> None:
-    os.write(STDOUT_FD, text.encode())
-
-
-def write_stderr(text: str) -> None:
-    os.write(STDERR_FD, text.encode())
+sys.modules[__name__] = import_module("jiuwenswarm.channels.cli._terminal")

@@ -1,12 +1,13 @@
 /**
- * Auto-Harness state management
+ * Auto-Harness state management (multi-session version)
  *
  * Manages the frontend state for auto-harness execution,
  * including stage progress and harness messages.
+ *
+ * All harness runtime state is isolated per session in runtimes.
  */
 
 import { create } from 'zustand';
-import { PackageInfo, NativeVersionInfo } from '../types';
 
 /**
  * Stage status types
@@ -85,19 +86,10 @@ export interface ActivateInteractionState {
 }
 
 /**
- * File tree entry for caching
+ * Single session harness runtime state.
+ * All session-level fields are isolated here.
  */
-export interface CachedFileTreeEntry {
-  name: string;
-  path: string;
-  is_dir: boolean;
-  children?: CachedFileTreeEntry[];
-}
-
-/**
- * Harness state interface
- */
-interface HarnessState {
+interface HarnessRuntime {
   // Stage definitions from backend pipeline
   stageDefinitions: HarnessStageDefinition[];
   // Stage progress messages list
@@ -110,7 +102,7 @@ interface HarnessState {
   isHarnessRunning: boolean;
   // Overall progress percentage (0-100)
   progressPercent: number;
-  // Extension ready information for file tree display
+  // Extension-ready information received from the backend
   extensionReady: ExtensionReadyInfo | null;
   sessionRuntimePath: string;
   runtimeExtensions: RuntimeExtensionInfo[];
@@ -118,35 +110,30 @@ interface HarnessState {
   extensionsByName: Record<string, ExtensionProgressInfo>;
   // Activate interaction pending state
   activateInteraction: ActivateInteractionState | null;
+}
 
-  // Package list from backend
-  packages: PackageInfo[];
-  // Native version info
-  nativeVersion: NativeVersionInfo | null;
-  // Currently active package IDs (multiple can be active simultaneously)
-  activePackageIds: string[];
-  // Selected package ID in dropdown (not yet activated)
-  selectedPackageId: string | null;
-  // Loading state for packages
-  loadingPackages: boolean;
-  // Activating state
-  activatingPackage: boolean;
-  // Deactivating state
-  deactivatingPackage: boolean;
+/**
+ * Harness state interface
+ */
+interface HarnessState {
+  runtimes: Record<string, HarnessRuntime>;
 
-  // File tree cache by runtime path (key: runtimePath, value: file tree)
-  extensionFileTreeCache: Record<string, CachedFileTreeEntry[]>;
-  // Loading state for file tree by path
-  fileTreeLoadingPaths: Record<string, boolean>;
+  /** App-wide notification, deliberately separate from session-bound harness state. */
+  proactiveNotificationMessage: string | null;
 
-  // Actions
-  setStageDefinitions: (stages: HarnessStageDefinition[]) => void;
-  addHarnessMessage: (content: string, stage?: string) => void;
-  updateStageResult: (info: HarnessStageInfo) => void;
-  setCurrentStage: (stage: string | null) => void;
-  setHarnessRunning: (running: boolean) => void;
-  setExtensionReady: (info: ExtensionReadyInfo | null) => void;
-  updateExtensionProgress: (info: {
+  // Runtime management
+  ensureRuntime: (sessionId: string) => HarnessRuntime;
+  getRuntime: (sessionId: string | null) => HarnessRuntime | undefined;
+  removeRuntime: (sessionId: string) => void;
+
+  // Session-level actions
+  setStageDefinitions: (sessionId: string, stages: HarnessStageDefinition[]) => void;
+  addHarnessMessage: (sessionId: string, content: string, stage?: string) => void;
+  updateStageResult: (sessionId: string, info: HarnessStageInfo) => void;
+  setCurrentStage: (sessionId: string, stage: string | null) => void;
+  setHarnessRunning: (sessionId: string, running: boolean) => void;
+  setExtensionReady: (sessionId: string, info: ExtensionReadyInfo | null) => void;
+  updateExtensionProgress: (sessionId: string, info: {
     extensionName: string;
     taskId?: string;
     parentStage?: string;
@@ -155,22 +142,9 @@ interface HarnessState {
     error?: string;
     messages?: string[];
   }) => void;
-  setActivateInteraction: (state: ActivateInteractionState | null) => void;
-  reset: () => void;
-
-  setPackages: (packages: PackageInfo[], nativeVersion: NativeVersionInfo, activeIds: string[]) => void;
-  isPackageActive: (packageId: string) => boolean;
-  setSelectedPackageId: (id: string | null) => void;
-  setLoadingPackages: (loading: boolean) => void;
-  setActivatingPackage: (activating: boolean) => void;
-  setDeactivatingPackage: (deactivating: boolean) => void;
-
-  // File tree cache actions
-  setFileTreeCache: (runtimePath: string, files: CachedFileTreeEntry[]) => void;
-  getFileTreeCache: (runtimePath: string) => CachedFileTreeEntry[] | undefined;
-  clearFileTreeCache: (runtimePath?: string) => void;
-  setFileTreeLoading: (runtimePath: string, loading: boolean) => void;
-  isFileTreeLoading: (runtimePath: string) => boolean;
+  setActivateInteraction: (sessionId: string, state: ActivateInteractionState | null) => void;
+  reset: (sessionId: string) => void;
+  setProactiveNotification: (message: string | null) => void;
 }
 
 /**
@@ -229,72 +203,111 @@ function hasLaterActiveStage(stageResults: HarnessStageInfo[], stage: string): b
   );
 }
 
+function createEmptyRuntime(): HarnessRuntime {
+  return {
+    stageDefinitions: [],
+    harnessMessages: [],
+    stageResults: [],
+    currentStage: null,
+    isHarnessRunning: false,
+    progressPercent: 0,
+    extensionReady: null,
+    sessionRuntimePath: '',
+    runtimeExtensions: [],
+    extensionOrder: [],
+    extensionsByName: {},
+    activateInteraction: null,
+  };
+}
+
 export const useHarnessStore = create<HarnessState>((set, get) => ({
-  stageDefinitions: [],
-  harnessMessages: [],
-  stageResults: [],
-  currentStage: null,
-  isHarnessRunning: false,
-  progressPercent: 0,
-  extensionReady: null,
-  sessionRuntimePath: '',
-  runtimeExtensions: [],
-  extensionOrder: [],
-  extensionsByName: {},
-  activateInteraction: null,
+  runtimes: {},
+  proactiveNotificationMessage: null,
 
-  packages: [],
-  nativeVersion: null,
-  activePackageIds: [],
-  selectedPackageId: null,
-  loadingPackages: false,
-  activatingPackage: false,
-  deactivatingPackage: false,
+  ensureRuntime: (sessionId) => {
+    const existing = get().runtimes[sessionId];
+    if (existing) return existing;
+    const runtime = createEmptyRuntime();
+    set((state) => ({
+      runtimes: { ...state.runtimes, [sessionId]: runtime },
+    }));
+    return runtime;
+  },
 
-  extensionFileTreeCache: {},
-  fileTreeLoadingPaths: {},
+  getRuntime: (sessionId) => {
+    if (!sessionId) return undefined;
+    return get().runtimes[sessionId];
+  },
 
-  setStageDefinitions: (stages) => {
-    // Only set stages once - ignore subsequent updates
+  removeRuntime: (sessionId) => {
     set((state) => {
-      if (state.stageDefinitions.length > 0) {
+      const next = { ...state.runtimes };
+      delete next[sessionId];
+      return { runtimes: next };
+    });
+  },
+
+  setStageDefinitions: (sessionId, stages) => {
+    set((state) => {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime) return state;
+      // Only set stages once - ignore subsequent updates
+      if (runtime.stageDefinitions.length > 0) {
         // Already initialized, don't update
         return {};
       }
       return {
-        stageDefinitions: stages,
-        stageResults: createInitialStages(stages),
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: {
+            ...runtime,
+            stageDefinitions: stages,
+            stageResults: createInitialStages(stages),
+          },
+        },
       };
     });
   },
 
-  addHarnessMessage: (content, stage) => {
-    set((state) => ({
-      harnessMessages: [
-        ...state.harnessMessages,
-        {
-          content,
-          timestamp: Date.now(),
-          stage,
+  addHarnessMessage: (sessionId, content, stage) => {
+    set((state) => {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime) return state;
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: {
+            ...runtime,
+            harnessMessages: [
+              ...runtime.harnessMessages,
+              {
+                content,
+                timestamp: Date.now(),
+                stage,
+              },
+            ],
+          },
         },
-      ],
-    }));
+      };
+    });
   },
 
-  updateStageResult: (info) => {
+  updateStageResult: (sessionId, info) => {
     set((state) => {
-      const shouldIgnoreRollback = info.status === 'running' && hasLaterActiveStage(state.stageResults, info.stage);
+      const runtime = state.runtimes[sessionId];
+      if (!runtime) return state;
+      const shouldIgnoreRollback = info.status === 'running' && hasLaterActiveStage(runtime.stageResults, info.stage);
       if (shouldIgnoreRollback) {
         return {};
       }
-      const existingIndex = state.stageResults.findIndex((s) => s.stage === info.stage);
-      const existingLabel = existingIndex >= 0 ? state.stageResults[existingIndex].stageLabel : undefined;
-      const definitionLabel = state.stageDefinitions.find(d => d.slot === info.stage)?.display_name;
+      const existingIndex = runtime.stageResults.findIndex((s) => s.stage === info.stage);
+      const existingLabel = existingIndex >= 0 ? runtime.stageResults[existingIndex].stageLabel : undefined;
+      const definitionLabel = runtime.stageDefinitions.find(d => d.slot === info.stage)?.display_name;
       const stageLabel = info.stageLabel || existingLabel || definitionLabel || info.stage;
 
       let newStageResults: HarnessStageInfo[];
       if (existingIndex >= 0) {
-        newStageResults = [...state.stageResults];
+        newStageResults = [...runtime.stageResults];
         newStageResults[existingIndex] = {
           ...newStageResults[existingIndex],
           stageLabel,
@@ -304,11 +317,11 @@ export const useHarnessStore = create<HarnessState>((set, get) => ({
           metrics: info.metrics,
         };
       } else {
-        newStageResults = [...state.stageResults, { ...info, stageLabel }];
+        newStageResults = [...runtime.stageResults, { ...info, stageLabel }];
       }
 
-      const nextExtensionOrder = [...state.extensionOrder];
-      const nextExtensionsByName = { ...state.extensionsByName };
+      const nextExtensionOrder = [...runtime.extensionOrder];
+      const nextExtensionsByName = { ...runtime.extensionsByName };
       if (info.stage === 'plan' && info.messages?.length) {
         for (const extensionName of extractDesignNames(info.messages)) {
           if (!nextExtensionOrder.includes(extensionName)) {
@@ -338,42 +351,74 @@ export const useHarnessStore = create<HarnessState>((set, get) => ({
         }
       }
 
-      let newCurrentStage = state.currentStage;
+      let newCurrentStage = runtime.currentStage;
       if (info.status === 'running') newCurrentStage = info.stage;
-      else if (state.currentStage === info.stage && (info.status === 'success' || info.status === 'failed' || info.status === 'timeout')) {
+      else if (runtime.currentStage === info.stage && (info.status === 'success' || info.status === 'failed' || info.status === 'timeout')) {
         newCurrentStage = null;
       }
 
       return {
-        stageResults: newStageResults,
-        currentStage: newCurrentStage,
-        progressPercent: calculateProgressPercent(newStageResults),
-        extensionOrder: nextExtensionOrder,
-        extensionsByName: nextExtensionsByName,
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: {
+            ...runtime,
+            stageResults: newStageResults,
+            currentStage: newCurrentStage,
+            progressPercent: calculateProgressPercent(newStageResults),
+            extensionOrder: nextExtensionOrder,
+            extensionsByName: nextExtensionsByName,
+          },
+        },
       };
     });
   },
 
-  setCurrentStage: (stage) => {
-    set({ currentStage: stage });
-  },
-
-  setHarnessRunning: (running) => {
-    set({ isHarnessRunning: running });
-  },
-
-  setExtensionReady: (info) => {
+  setCurrentStage: (sessionId, stage) => {
     set((state) => {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime) return state;
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: { ...runtime, currentStage: stage },
+        },
+      };
+    });
+  },
+
+  setHarnessRunning: (sessionId, running) => {
+    set((state) => {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime) return state;
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: { ...runtime, isHarnessRunning: running },
+        },
+      };
+    });
+  },
+
+  setExtensionReady: (sessionId, info) => {
+    set((state) => {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime) return state;
       if (!info) {
         return {
-          extensionReady: null,
-          sessionRuntimePath: '',
-          runtimeExtensions: [],
+          runtimes: {
+            ...state.runtimes,
+            [sessionId]: {
+              ...runtime,
+              extensionReady: null,
+              sessionRuntimePath: '',
+              runtimeExtensions: [],
+            },
+          },
         };
       }
-      const runtimeExtensions = info.runtimeExtensions || state.runtimeExtensions;
-      const extensionOrder = [...state.extensionOrder];
-      const extensionsByName = { ...state.extensionsByName };
+      const runtimeExtensions = info.runtimeExtensions || runtime.runtimeExtensions;
+      const extensionOrder = [...runtime.extensionOrder];
+      const extensionsByName = { ...runtime.extensionsByName };
       for (const ext of runtimeExtensions) {
         if (!extensionOrder.includes(ext.extensionName)) {
           extensionOrder.push(ext.extensionName);
@@ -388,18 +433,26 @@ export const useHarnessStore = create<HarnessState>((set, get) => ({
         };
       }
       return {
-        extensionReady: info,
-        sessionRuntimePath: info.sessionRuntimePath || info.runtimePath,
-        runtimeExtensions,
-        extensionOrder,
-        extensionsByName,
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: {
+            ...runtime,
+            extensionReady: info,
+            sessionRuntimePath: info.sessionRuntimePath || info.runtimePath,
+            runtimeExtensions,
+            extensionOrder,
+            extensionsByName,
+          },
+        },
       };
     });
   },
 
-  updateExtensionProgress: (info) => {
+  updateExtensionProgress: (sessionId, info) => {
     set((state) => {
-      const existing = state.extensionsByName[info.extensionName] || {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime) return state;
+      const existing = runtime.extensionsByName[info.extensionName] || {
         extensionName: info.extensionName,
         implementStatus: 'pending' as ExtensionProgressStatus,
         verifyStatus: 'pending' as ExtensionProgressStatus,
@@ -420,150 +473,78 @@ export const useHarnessStore = create<HarnessState>((set, get) => ({
         next.verifyStatus = info.status;
       }
       return {
-        extensionOrder: state.extensionOrder.includes(info.extensionName)
-          ? state.extensionOrder
-          : [...state.extensionOrder, info.extensionName],
-        extensionsByName: {
-          ...state.extensionsByName,
-          [info.extensionName]: next,
-        },
-      };
-    });
-  },
-
-  setActivateInteraction: (state) => {
-    set((current) => {
-      if (!state) return { activateInteraction: null };
-      const existing = current.extensionsByName[state.extensionName] || {
-        extensionName: state.extensionName,
-        implementStatus: 'success' as ExtensionProgressStatus,
-        verifyStatus: 'success' as ExtensionProgressStatus,
-        activateStatus: 'pending' as ExtensionProgressStatus,
-        messages: [],
-      };
-      return {
-        activateInteraction: state,
-        extensionOrder: current.extensionOrder.includes(state.extensionName)
-          ? current.extensionOrder
-          : [...current.extensionOrder, state.extensionName],
-        extensionsByName: {
-          ...current.extensionsByName,
-          [state.extensionName]: {
-            ...existing,
-            activateStatus: state.pending ? 'running' : existing.activateStatus,
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: {
+            ...runtime,
+            extensionOrder: runtime.extensionOrder.includes(info.extensionName)
+              ? runtime.extensionOrder
+              : [...runtime.extensionOrder, info.extensionName],
+            extensionsByName: {
+              ...runtime.extensionsByName,
+              [info.extensionName]: next,
+            },
           },
         },
       };
     });
   },
 
-  reset: () => {
-    set({
-      stageDefinitions: [],
-      harnessMessages: [],
-      stageResults: [],
-      currentStage: null,
-      isHarnessRunning: false,
-      progressPercent: 0,
-      extensionReady: null,
-      sessionRuntimePath: '',
-      runtimeExtensions: [],
-      extensionOrder: [],
-      extensionsByName: {},
-      activateInteraction: null,
-      packages: [],
-      nativeVersion: null,
-      activePackageIds: [],
-      selectedPackageId: null,
-      loadingPackages: false,
-      activatingPackage: false,
-      deactivatingPackage: false,
-      extensionFileTreeCache: {},
-      fileTreeLoadingPaths: {},
-    });
-  },
-
-  setPackages: (packages, nativeVersion, activeIds) => {
-    const currentSelection = get().selectedPackageId;
-    const allIds = ['native', ...packages.map(p => p.id)];
-    const newSelection = (currentSelection && allIds.includes(currentSelection)) ? currentSelection : 'native';
-    set({
-      packages,
-      nativeVersion,
-      activePackageIds: activeIds,
-      selectedPackageId: newSelection,
-    });
-  },
-
-  isPackageActive: (packageId) => {
-    const state = get();
-    return state.activePackageIds.includes(packageId);
-  },
-
-  setSelectedPackageId: (id) => {
-    set({ selectedPackageId: id });
-  },
-
-  setLoadingPackages: (loading) => {
-    set({ loadingPackages: loading });
-  },
-
-  setActivatingPackage: (activating) => {
-    set({ activatingPackage: activating });
-  },
-
-  setDeactivatingPackage: (deactivating) => {
-    set({ deactivatingPackage: deactivating });
-  },
-
-  // File tree cache actions
-  setFileTreeCache: (runtimePath, files) => {
-    set((state) => ({
-      extensionFileTreeCache: {
-        ...state.extensionFileTreeCache,
-        [runtimePath]: files,
-      },
-      fileTreeLoadingPaths: {
-        ...state.fileTreeLoadingPaths,
-        [runtimePath]: false,
-      },
-    }));
-  },
-
-  getFileTreeCache: (runtimePath) => {
-    return get().extensionFileTreeCache[runtimePath];
-  },
-
-  clearFileTreeCache: (runtimePath) => {
-    if (runtimePath) {
-      set((state) => {
-        const newCache = { ...state.extensionFileTreeCache };
-        delete newCache[runtimePath];
-        const newLoading = { ...state.fileTreeLoadingPaths };
-        delete newLoading[runtimePath];
+  setActivateInteraction: (sessionId, interaction) => {
+    set((state) => {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime) return state;
+      if (!interaction) {
         return {
-          extensionFileTreeCache: newCache,
-          fileTreeLoadingPaths: newLoading,
+          runtimes: {
+            ...state.runtimes,
+            [sessionId]: { ...runtime, activateInteraction: null },
+          },
         };
-      });
-    } else {
-      set({
-        extensionFileTreeCache: {},
-        fileTreeLoadingPaths: {},
-      });
-    }
+      }
+      const existing = runtime.extensionsByName[interaction.extensionName] || {
+        extensionName: interaction.extensionName,
+        implementStatus: 'success' as ExtensionProgressStatus,
+        verifyStatus: 'success' as ExtensionProgressStatus,
+        activateStatus: 'pending' as ExtensionProgressStatus,
+        messages: [],
+      };
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: {
+            ...runtime,
+            activateInteraction: interaction,
+            extensionOrder: runtime.extensionOrder.includes(interaction.extensionName)
+              ? runtime.extensionOrder
+              : [...runtime.extensionOrder, interaction.extensionName],
+            extensionsByName: {
+              ...runtime.extensionsByName,
+              [interaction.extensionName]: {
+                ...existing,
+                activateStatus: interaction.pending ? 'running' : existing.activateStatus,
+              },
+            },
+          },
+        },
+      };
+    });
   },
 
-  setFileTreeLoading: (runtimePath, loading) => {
-    set((state) => ({
-      fileTreeLoadingPaths: {
-        ...state.fileTreeLoadingPaths,
-        [runtimePath]: loading,
-      },
-    }));
+  reset: (sessionId) => {
+    set((state) => {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime) return state;
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: createEmptyRuntime(),
+        },
+      };
+    });
   },
 
-  isFileTreeLoading: (runtimePath) => {
-    return get().fileTreeLoadingPaths[runtimePath] || false;
+  setProactiveNotification: (message) => {
+    set({ proactiveNotificationMessage: message });
   },
 }));

@@ -11,12 +11,15 @@ from datetime import datetime
 from pydantic import BaseModel, Field
 
 SANDBOX_ID_MIN_LEN = 4
-SANDBOX_ID_MAX_LEN = 16
-CUSTOM_SANDBOX_ID_RE = re.compile(r"^[0-9a-z_-]{4,16}$")
+SANDBOX_ID_MAX_LEN = 40
+CUSTOM_SANDBOX_ID_RE = re.compile(
+    rf"^[0-9a-z_-]{{{SANDBOX_ID_MIN_LEN},{SANDBOX_ID_MAX_LEN}}}$"
+)
 
 SANDBOX_ID_FORMAT_MESSAGE = (
-    "sandbox_id must be 4-16 characters and contain only lowercase letters, "
-    "digits, hyphens, and underscores (e.g. my-sb_01)"
+    f"sandbox_id must be {SANDBOX_ID_MIN_LEN}-{SANDBOX_ID_MAX_LEN} characters "
+    "and contain only lowercase letters, digits, hyphens, and underscores "
+    "(e.g. my-sb_01)"
 )
 
 
@@ -25,12 +28,14 @@ class InvalidSandboxIdError(Exception):
 
 
 JOB_ID_MIN_LEN = 4
-JOB_ID_MAX_LEN = 16
-CUSTOM_JOB_ID_RE = re.compile(r"^[0-9a-z_-]{4,16}$")
+JOB_ID_MAX_LEN = 40
+CUSTOM_JOB_ID_RE = re.compile(
+    rf"^[0-9a-z_-]{{{JOB_ID_MIN_LEN},{JOB_ID_MAX_LEN}}}$"
+)
 
 JOB_ID_FORMAT_MESSAGE = (
-    "job_id must be 4-16 characters and contain only lowercase letters, "
-    "digits, hyphens, and underscores (e.g. http-srv)"
+    f"job_id must be {JOB_ID_MIN_LEN}-{JOB_ID_MAX_LEN} characters and contain "
+    "only lowercase letters, digits, hyphens, and underscores (e.g. http-srv)"
 )
 
 
@@ -92,6 +97,10 @@ class SandboxRef(BaseModel):
     last_active_at: datetime | None = None
     error_message: str | None = None
     env: dict[str, str] = Field(default_factory=dict)
+    # Snapshot of the sandbox IPv4 confirmed after the last successful
+    # create/start. Isolated mode uses the veth address; host mode uses the
+    # shared network-namespace egress address. None when not yet known.
+    ip_address: str | None = None
 
 
 class ExecResult(BaseModel):
@@ -109,7 +118,6 @@ class BackgroundExecRequest(BaseModel):
     env: dict[str, str] | None = None
     stdin: str | None = None
     timeout_seconds: int | None = None
-    capture_output: bool = True
 
 
 class BackgroundExecResult(BaseModel):
@@ -120,7 +128,6 @@ class BackgroundExecResult(BaseModel):
     running: bool | None = None
     exit_code: int | None = None
     error_message: str | None = None
-    capture_output: bool = True
 
 
 class BackgroundJobSummary(BaseModel):
@@ -131,7 +138,6 @@ class BackgroundJobSummary(BaseModel):
     exit_code: int | None
     started_at: datetime
     finished_at: datetime | None
-    capture_output: bool
 
 
 class BackgroundJobStatus(BaseModel):
@@ -143,7 +149,7 @@ class BackgroundJobStatus(BaseModel):
     exit_code: int | None
     started_at: datetime
     finished_at: datetime | None
-    capture_output: bool
+    # Background jobs discard stdout/stderr; fields stay for API stability.
     stdout: str = ""
     stderr: str = ""
     workdir: str | None = None

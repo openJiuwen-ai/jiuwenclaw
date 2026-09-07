@@ -7,15 +7,26 @@ and building permission rails.
 """
 from __future__ import annotations
 
+import copy
 import json
 import re
-from typing import Any
+from pathlib import Path
+from typing import Any, Mapping
 
+from jiuwenswarm.agents.harness.code.prompt.plan_approval import (
+    build_plan_approval_actions,
+)
 from jiuwenswarm.agents.harness.code.rails.code_plan_approval_interrupt_rail import (
     build_plan_approval_options_from_message,
     extract_plan_approval_content,
     is_plan_approval_message,
     strip_inline_plan_approval_choices,
+)
+from jiuwenswarm.agents.harness.common.rails.interrupt.permission_options import (
+    ALLOW_ONCE,
+    ALWAYS_ALLOW,
+    REJECT,
+    SESSION_ALLOW,
 )
 from jiuwenswarm.common.utils import logger
 
@@ -36,6 +47,55 @@ SKILL_EVOLUTION_APPROVAL_TOOL_KINDS = {
     "evolve_skill_experiences": "evolve",
     "simplify_skill_experiences": "simplify",
 }
+
+
+def resolve_permission_workspace_dir(session_id: str | None = None) -> Path:
+    """Default file_guard workspace: session task dir, not the whole agent workspace."""
+    from jiuwenswarm.common.utils import get_default_project_session_workspace_dir
+
+    return get_default_project_session_workspace_dir(session_id)
+
+
+def merge_permission_trusted_dirs(
+    trusted_dirs: list[str] | None = None,
+    project_dir: str | None = None,
+) -> list[str]:
+    """Merge request trusted_dirs with frontend project_dir for file_guard."""
+    merged: list[str] = []
+    seen: set[str] = set()
+
+    def _add(raw: Any) -> None:
+        text = str(raw or "").strip()
+        if not text:
+            return
+        try:
+            key = str(Path(text).expanduser().resolve(strict=False))
+        except (OSError, RuntimeError, ValueError):
+            key = text
+        folded = key.casefold()
+        if folded in seen:
+            return
+        seen.add(folded)
+        merged.append(key)
+
+    if isinstance(trusted_dirs, (list, tuple)):
+        for item in trusted_dirs:
+            _add(item)
+    _add(project_dir)
+    return merged
+
+
+def apply_permission_trusted_dirs(
+    rail: Any,
+    *,
+    trusted_dirs: list[str] | None = None,
+    project_dir: str | None = None,
+) -> None:
+    """Hot-update file_guard trusted prefixes: client dirs plus project_dir."""
+    setter = getattr(rail, "set_trusted_dirs", None)
+    if not callable(setter):
+        return
+    setter(merge_permission_trusted_dirs(trusted_dirs, project_dir))
 
 
 def has_interrupt_resume_payload(params: Any) -> bool:
@@ -66,6 +126,7 @@ def build_permission_rail(
     config: dict[str, Any],
     llm: Any = None,
     model_name: str | None = None,
+    session_id: str | None = None,
 ) -> Any | None:
     """Build openjiuwen PermissionInterruptRail for tool permission checks.
 
@@ -73,34 +134,56 @@ def build_permission_rail(
         config: Agent config dict containing permissions section
         llm: LLM instance for risk assessment
         model_name: Model name for risk assessment
+        session_id: Host identity for User/Session compose and persist
 
     Returns:
         PermissionInterruptRail instance or None if disabled
     """
-    from openjiuwen.harness.rails.security.tool_security_rail import PermissionInterruptRail
-    from openjiuwen.harness.security.host import (
+    from openjiuwen.harness.security import (
         PermissionConfirmationRequest,
+        PermissionConfirmResponse,
         PermissionSceneHookInput,
         ToolPermissionHost,
+        build_permission_interrupt_rail,
     )
-    from openjiuwen.harness.security.models import PermissionConfirmResponse
 
+    from jiuwenswarm.agents.harness.common.rails.permissions.permission_compose import (
+        compose_host_effective_permissions,
+    )
+    from jiuwenswarm.agents.harness.common.rails.permissions.permissions_layers import (
+        load_session_permissions,
+        load_user_permissions,
+        persist_session_overlay_from_effective,
+        persist_user_overlay_from_effective,
+    )
     from jiuwenswarm.agents.harness.common.rails.permissions.tool_permission_context import (
+        SKILLS_REBUILD_SILENT,
         TOOL_PERMISSION_CHANNEL_ID,
     )
     from jiuwenswarm.common.config import get_config
     from jiuwenswarm.common.e2a.acp.acp_tool_updates import build_acp_tool_descriptor
-    from jiuwenswarm.common.utils import get_config_file, get_workspace_dir
+    from jiuwenswarm.common.utils import get_config_file
 
-    permission_config = config.get("permissions", {})
+    inline_permissions = config.get("permissions", {})
+    if not isinstance(inline_permissions, dict):
+        inline_permissions = {}
     logger.info(
-        "[InterruptHelpers] build_permission_rail called: enabled=%s",
-        permission_config.get("enabled", False)
+        "[InterruptHelpers] build_permission_rail called: enabled=%s session_id=%s",
+        inline_permissions.get("enabled", False),
+        session_id,
     )
 
-    if not permission_config.get("enabled", False):
+    if not inline_permissions.get("enabled", False):
         logger.info("[InterruptHelpers] Permission system is disabled, returning None")
         return None
+
+    bound_session_id = str(session_id).strip() if session_id else None
+    permission_config = compose_host_effective_permissions(
+        global_permissions=inline_permissions,
+        user_permissions=load_user_permissions(),
+        session_permissions=load_session_permissions(bound_session_id),
+        session_id=bound_session_id,
+    )
 
     def _collect_optional_tool_tags(cfg: dict[str, Any]) -> list[str]:
         # openjiuwen PermissionInterruptRail 会拦截所有工具；
@@ -139,47 +222,32 @@ def build_permission_rail(
         tool_names, llm is not None, model_name,
     )
     try:
-        def _persist_allow_rule(permissions: dict[str, Any]) -> bool:
-            """Persist merged `permissions` config back to config.yaml.
+        def _effective_session_id(session_id: str | None = None) -> str | None:
+            sid = (session_id or "").strip()
+            return sid or bound_session_id
 
-            openjiuwen PermissionInterruptRail calls this when user selects "always allow".
-
-            Instead of replacing the entire ``permissions`` section with the
-            in-memory snapshot (which may contain stale entries that were
-            already deleted from config.yaml), we first re-read the current
-            on-disk permissions, then merge only the *approval_overrides*
-            and *external_directory* deltas from ``permissions`` into it.
-            This prevents re-creating tool-level entries (e.g. ``bash: ask``)
-            that the user has already removed via the webui.
-            """
+        def _persist_allow_rule(
+            permissions: dict[str, Any], session_id: str | None = None
+        ) -> bool:
             try:
-                from jiuwenswarm.common.config import _dump_yaml_round_trip, _load_yaml_round_trip
-
-                yaml_path = get_config_file()
-                data = _load_yaml_round_trip(yaml_path)
-                if not isinstance(data, dict):
-                    data = {}
-
-                on_disk_perms = data.get("permissions")
-                if not isinstance(on_disk_perms, dict):
-                    on_disk_perms = {}
-
-                # Only overlay approval_overrides & external_directory;
-                # keep on-disk tools/defaults/rules to avoid restoring
-                # entries the user already deleted via webui.
-                merged = dict(on_disk_perms)
-                overrides_new = permissions.get("approval_overrides")
-                if overrides_new is not None:
-                    merged["approval_overrides"] = overrides_new
-                ext_dir_new = permissions.get("external_directory")
-                if ext_dir_new is not None:
-                    merged["external_directory"] = ext_dir_new
-
-                data["permissions"] = merged
-                _dump_yaml_round_trip(yaml_path, data)
-                return True
+                return persist_user_overlay_from_effective(
+                    permissions, session_id=_effective_session_id(session_id)
+                )
             except Exception as exc:
                 logger.warning("[InterruptHelpers] persist_allow_rule failed: %s", exc)
+                return False
+
+        def _persist_session_allow_rule(
+            permissions: dict[str, Any], session_id: str | None = None
+        ) -> bool:
+            sid = _effective_session_id(session_id)
+            if not sid:
+                logger.warning("[InterruptHelpers] persist_session_allow_rule skipped: no session_id")
+                return False
+            try:
+                return persist_session_overlay_from_effective(sid, permissions)
+            except Exception as exc:
+                logger.warning("[InterruptHelpers] persist_session_allow_rule failed: %s", exc)
                 return False
 
         def _resolve_session_id(ctx: Any) -> str | None:
@@ -199,6 +267,20 @@ def build_permission_rail(
         async def _request_permission_confirmation(
             req: PermissionConfirmationRequest,
         ) -> PermissionConfirmResponse | str | None:
+            # skills.rebuild 静默 follow-up 使用临时 session，无法弹 UI 审批；
+            # 若返回 "interrupt"，Agent 会停在 bash/write 上却仍被当成重建成功。
+            if SKILLS_REBUILD_SILENT.get():
+                tool_name = getattr(getattr(req, "tool_call", None), "name", "") or ""
+                logger.info(
+                    "[InterruptHelpers] auto-approve permission for silent skills.rebuild tool=%s",
+                    tool_name,
+                )
+                return PermissionConfirmResponse(
+                    approved=True,
+                    auto_confirm=False,
+                    feedback="",
+                )
+
             channel = TOOL_PERMISSION_CHANNEL_ID.get() or "web"
             if channel != "acp":
                 return "interrupt"
@@ -280,6 +362,9 @@ def build_permission_rail(
                 )
             return None
 
+        def _is_silent_skills_rebuild_session() -> bool:
+            return bool(SKILLS_REBUILD_SILENT.get())
+
         async def _permission_scene_hook(
             inp: PermissionSceneHookInput,
         ) -> tuple[str, ...] | None:
@@ -289,7 +374,26 @@ def build_permission_rail(
                 _resolve_owner_scope_level,
             )
 
+            # skills.rebuild 静默 Agent 无法弹权限卡片；在 tiered 判定前直接放行。
+            if _is_silent_skills_rebuild_session():
+                return ("approve",)
+
             perm_ctx = TOOL_PERMISSION_CONTEXT.get()
+
+            # issue #1976: ask_user has its own dedicated interrupt rail. The
+            # permission rail intercepts *every* tool, so on resume it grabs the
+            # ask_user answer (keyed by tool_call_id) as its own user_input,
+            # fails to parse it as a ConfirmPayload, and re-raises a permission
+            # interrupt that swallows the answer — the option card then re-pops
+            # forever. Bypass the permission rail for ask_user so the ask_user
+            # rail's answer reaches the model. The digital-avatar scene below
+            # intentionally blocks interactive tools, so exclude it here.
+            if inp.normalized_tool_name == "ask_user" and (
+                perm_ctx is None
+                or getattr(perm_ctx, "scene", None) != "group_digital_avatar"
+            ):
+                return ("approve",)
+
             if perm_ctx is None:
                 return None
 
@@ -327,30 +431,50 @@ def build_permission_rail(
                 return ("approve",)
             return ("reject", f"[PERMISSION_DENIED] 该工具未被授权 (owner_scopes: {owner_level})")
 
-        def _get_permissions_snapshot():
-            cfg = get_config()
-            return cfg.get("permissions") if isinstance(cfg, dict) else {}
+        def _get_permissions_snapshot(session_id: str | None = None):
+            # skills.rebuild 静默路径：返回 full_access，避免 ASK 中断。
+            if SKILLS_REBUILD_SILENT.get():
+                return {
+                    "enabled": True,
+                    "defaults": {"*": "allow"},
+                    "file_guard": {"enabled": False},
+                }
+            sid = _effective_session_id(session_id)
+            return compose_host_effective_permissions(
+                    global_permissions=inline_permissions,
+                    user_permissions=load_user_permissions(),
+                    session_permissions=load_session_permissions(sid),
+                    session_id=sid,
+            )
 
         host = ToolPermissionHost(
             get_permissions_snapshot=_get_permissions_snapshot,
             persist_allow_rule=_persist_allow_rule,
-            resolve_workspace_dir=get_workspace_dir,
+            persist_session_allow_rule=_persist_session_allow_rule,
+            resolve_workspace_dir=lambda: resolve_permission_workspace_dir(
+                bound_session_id
+            ),
             permission_yaml_path=get_config_file(),
             request_permission_confirmation=_request_permission_confirmation,
             permission_scene_hook=_permission_scene_hook,
         )
 
-        permission_rail = PermissionInterruptRail(
-            config=permission_config,
-            tool_names=tool_names,
+        permission_rail = build_permission_interrupt_rail(
+            permissions=permission_config,
             llm=llm,
             model_name=model_name,
             host=host,
         )
-        logger.info(
-            "[InterruptHelpers] PermissionInterruptRail created successfully with tool_names=%s",
-            tool_names
-        )
+        if permission_rail is None:
+            logger.info(
+                "[InterruptHelpers] build_permission_interrupt_rail returned None tool_names=%s",
+                tool_names,
+            )
+        else:
+            logger.info(
+                "[InterruptHelpers] PermissionInterruptRail created successfully with tool_names=%s",
+                tool_names,
+            )
     except Exception as exc:
         logger.warning("[InterruptHelpers] PermissionInterruptRail create failed: %s", exc)
         permission_rail = None
@@ -382,8 +506,14 @@ def _normalize_tool_args(raw: Any) -> dict | None:
 
 def _is_ask_user_interrupt_value(value_obj: Any) -> bool:
     tool_name = str(_read_value_field(value_obj, "tool_name", "") or "").strip()
-    if tool_name == "ask_user":
-        return True
+    # Prefer the explicit tool identity whenever it is available.  Many tools
+    # (for example memory_search) have a plain ``query`` argument, so treating
+    # every query-only interrupt as ask_user misroutes permission responses.
+    if tool_name:
+        return tool_name == "ask_user"
+
+    # Legacy ask_user interrupt payloads may not carry tool_name.  Keep the
+    # structural fallbacks below only for those identity-less payloads.
     if hasattr(value_obj, "payload_schema") and hasattr(value_obj, "questions"):
         return True
     if isinstance(value_obj, dict) and "payload_schema" in value_obj and "questions" in value_obj:
@@ -423,6 +553,12 @@ def _build_plain_ask_user_question(value_obj: Any) -> dict | None:
 
 _PERMISSION_INTERRUPT_MARKERS = (
     "需要授权才能执行",
+    "需要授权后才能使用",
+    "检测到受保护的文件路径访问",
+    "检测到需确认的网络访问",
+    "检测到需确认的命令执行",
+    "检测到风险命令结构",
+    "操作需要授权",
     "requires permission",
     "Permission denied",
     "安全风险评估",
@@ -520,7 +656,9 @@ def convert_interactions_to_ask_user_question(state_outputs: list) -> dict | Non
         if questions_raw is None:
             continue
 
-        questions = _build_multi_questions(questions_raw)
+        questions = _build_multi_questions(
+            questions_raw, _extract_ask_user_query(value_obj)
+        )
         return {
             "event_type": "chat.ask_user_question",
             "request_id": request_id,
@@ -566,9 +704,13 @@ def convert_interactions_to_ask_user_question(state_outputs: list) -> dict | Non
             and is_plan_approval_message(message)
         ):
             plan_content, plan_language = extract_plan_approval_content(message)
+            resolved_plan_language = "en" if plan_language == "en" else "cn"
             payload["plan_content"] = plan_content
-            payload["plan_language"] = "en" if plan_language == "en" else "cn"
+            payload["plan_language"] = resolved_plan_language
             payload["plan_approval_kind"] = "plan_approval"
+            # Web 用的动作说明。TUI 忽略该字段，继续使用 questions[].options 的
+            # approve / reject，因此两端行为互不影响。
+            payload["plan_actions"] = build_plan_approval_actions(resolved_plan_language)
         plan_path = str(question_data.get("plan_path") or "").strip()
         plan_slug = str(question_data.get("plan_slug") or "").strip()
         if plan_path:
@@ -643,26 +785,96 @@ def _extract_questions_from_value(value_obj: Any) -> list | None:
     return None
 
 
-def _build_multi_questions(questions_data: list) -> list:
+def _extract_ask_user_query(value_obj: Any) -> str:
+    """The call's top-level ``query``, or ``""`` when there is none.
+
+    Read from the same place ``_extract_questions_from_value`` reads the
+    questions: ``ToolCallInterruptRequest.tool_args`` preserves the original
+    ``ask_user`` arguments. It is the last source of prompt text for a question
+    that arrived without any of its own, and the only one still available once
+    the tool call itself has been consumed.
+    """
+    query = getattr(value_obj, "query", None)
+    if isinstance(query, str) and query.strip():
+        return query
+    if isinstance(value_obj, dict):
+        query = value_obj.get("query")
+        if isinstance(query, str) and query.strip():
+            return query
+
+    tool_args = getattr(value_obj, "tool_args", None)
+    if isinstance(tool_args, str):
+        try:
+            tool_args = json.loads(tool_args)
+        except (ValueError, TypeError):
+            tool_args = None
+    if isinstance(tool_args, dict):
+        query = tool_args.get("query")
+        if isinstance(query, str) and query.strip():
+            return query
+    return ""
+
+
+def _resolve_question_text(question: Mapping[str, Any], fallback_query: str) -> str:
+    """The prompt to show for one question.
+
+    Three sources in order: the question's own ``question``, its ``header``,
+    then the call's top-level ``query``. A call that satisfied the ask_user rail
+    never reaches past the first, because that rail rejects a question carrying
+    no text. The fallbacks are for questions that did not come through it -- the
+    same class of input the non-array ``options`` guard in
+    ``_build_multi_questions`` already accounts for. There a malformed value
+    built a question out of single characters; here a missing one raised
+    ``KeyError``, losing the whole conversion and every question in the call
+    with it.
+    """
+    for candidate in (
+        question.get("question"),
+        question.get("header"),
+        fallback_query,
+    ):
+        if isinstance(candidate, str) and candidate.strip():
+            return candidate
+    return ""
+
+
+def _build_multi_questions(questions_data: list, fallback_query: str = "") -> list:
     """Build frontend PendingQuestionItem list from questions data.
 
     有选项的问题: 保留原始选项 + 追加 __other__ (自定义输入)
     无选项的问题: 不追加 __other__, 前端应直接进入自由输入模式
+
+    问题若声明了 ``inputs``，该键原样带出，本函数不解释其内容。
+
+    A question's ``inputs`` declaration is carried through as opaque data. This
+    is the one normalisation point every channel's question passes through, so
+    it must not learn what any single channel's renderer makes of the
+    declaration: it neither reads nor validates nor reshapes it. A channel with
+    no renderer for it never looks the key up and behaves exactly as before.
     """
     questions = []
     for q in questions_data:
         raw_options = q.get("options", [])
+        # Non-array options (e.g. "a,b") must not be iterated as characters (#2331).
+        if not isinstance(raw_options, list):
+            raw_options = []
         if raw_options:
             options = [_normalize_question_option(opt) for opt in raw_options if isinstance(opt, dict)]
             options.append({"label": "Other", "description": "Custom input"})
         else:
             options = []
         question_payload = {
-            "question": q["question"],
-            "header": q["header"],
+            "question": _resolve_question_text(q, fallback_query),
+            "header": q.get("header") or "Question",
             "options": options,
             "multi_select": q.get("multi_select", False),
         }
+        # A non-empty array only, so a question declaring nothing keeps the
+        # payload it had; copied, not referenced, because one question can reach
+        # several channels and none may edit what the next one receives.
+        declared_inputs = q.get("inputs")
+        if isinstance(declared_inputs, list) and declared_inputs:
+            question_payload["inputs"] = copy.deepcopy(declared_inputs)
         questions.append(question_payload)
     return questions
 
@@ -697,15 +909,21 @@ def _normalize_question_option(option: dict[str, Any]) -> dict[str, Any]:
     value = option.get("value")
     if isinstance(value, str) and value:
         normalized["value"] = value
+    preview = option.get("preview")
+    if isinstance(preview, str) and preview.strip():
+        normalized["preview"] = preview
     return normalized
 
 
+# 权限审批的兜底选项。``value`` 取自 ``permission_options``，与解析回答用的是同一份
+# 词表：web / CLI 回传 ``value``，TUI 回传 ``label``，两条路都要能被 ``build_inputs``
+# 解出同一个动作。label / description 保持原样，渲染出的文案不变。
 def _default_interrupt_options() -> list[dict[str, str]]:
     return [
-        {"label": "本次允许", "description": "仅本次授权执行"},
-        {"label": "会话内记住", "description": "本次会话内自动放行同类操作"},
-        {"label": "永久记住", "description": "写回磁盘，所有会话均自动放行"},
-        {"label": "拒绝", "description": "拒绝执行此工具"},
+        {"value": ALLOW_ONCE, "label": "本次允许", "description": "仅本次授权执行"},
+        {"value": SESSION_ALLOW, "label": "会话内记住", "description": "本次会话内自动放行同类操作"},
+        {"value": ALWAYS_ALLOW, "label": "永久记住", "description": "写回磁盘，所有会话均自动放行"},
+        {"value": REJECT, "label": "拒绝", "description": "拒绝执行此工具"},
     ]
 
 
@@ -811,7 +1029,9 @@ def extract_question_from_interaction(payload: Any) -> dict | None:
         header = f"操作确认: {tool_name}" if tool_name else "操作确认"
         question = message
     else:
-        header = f"权限审批: {tool_name}" if tool_name else "权限审批"
+        metadata = _extract_interrupt_metadata(value_obj)
+        ask_title = str(metadata.get("ask_title") or "").strip()
+        header = ask_title or (f"权限审批: {tool_name}" if tool_name else "权限审批")
         question = message
 
     return {

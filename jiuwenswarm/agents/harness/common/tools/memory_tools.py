@@ -306,6 +306,16 @@ async def write_memory(
     """
     if is_group_chat_mode():
         return {"success": False, "error": "群聊模式下禁止写入记忆文件"}
+    from jiuwenswarm.agents.harness.common.memory.forbidden import (
+        contains_forbidden_memory_content,
+    )
+
+    if contains_forbidden_memory_content(content):
+        return {
+            "success": False,
+            "path": path,
+            "error": "检测到敏感信息，已阻止写入记忆；请删除或脱敏后再保存",
+        }
     try:
         is_valid, result = _validate_memory_path(path)
         if not is_valid:
@@ -367,6 +377,16 @@ async def edit_memory(
     """
     if is_group_chat_mode():
         return {"success": False, "error": "群聊模式下禁止编辑记忆文件"}
+    from jiuwenswarm.agents.harness.common.memory.forbidden import (
+        contains_forbidden_memory_content,
+    )
+
+    if contains_forbidden_memory_content(newText):
+        return {
+            "success": False,
+            "path": path,
+            "error": "检测到敏感信息，已阻止写入记忆；请删除或脱敏后再保存",
+        }
     try:
         is_valid, result = _validate_memory_path(path)
         if not is_valid:

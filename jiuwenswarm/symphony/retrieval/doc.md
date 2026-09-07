@@ -45,11 +45,21 @@ The canonical route uses the progressive tree index:
 Typical usage:
 
 ```python
-from retrieval.service.retriever import Retriever
+from retrieval.service import RequestConfig, Retriever
 
 retriever = Retriever.from_index("/abs/path/to/index")
-payloads = retriever.search("find tools for browser automation", top_k=5)
+payloads = retriever.search(
+    "find tools for browser automation",
+    search_config=RequestConfig(top_k=5, tags=("mobile",)),
+)
 ```
+
+Tag filtering is a deterministic pre-filter: disallowed leaves and their empty
+ancestor branches are removed before the first LLM routing call. With an empty
+`tags` tuple, retrieval uses the complete tree. With a non-empty tuple,
+untagged candidates are excluded and candidates tagged `all` remain eligible by
+default. A candidate must contain every requested tag unless it carries the
+reserved wildcard tag `all`.
 
 ## Dependency Boundary
 

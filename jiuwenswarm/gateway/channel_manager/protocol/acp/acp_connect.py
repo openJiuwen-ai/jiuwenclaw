@@ -41,6 +41,8 @@ from jiuwenswarm.common.e2a.constants import (
 )
 from jiuwenswarm.common.e2a.models import E2AEnvelope, E2AProvenance, E2AResponse, utc_now_iso
 from jiuwenswarm.common.schema.message import EventType, Message, Mode, ReqMethod
+from jiuwenswarm.gateway.routing.keys import DeliveryTarget
+from jiuwenswarm.gateway.routing.session_sharing import RoutingTarget
 
 logger = logging.getLogger(__name__)
 
@@ -286,7 +288,7 @@ class AcpGatewayBridge:
                         timestamp=time.time(),
                         ok=True,
                         req_method=ReqMethod.CHAT_SEND,
-                        mode=Mode.AGENT_PLAN,
+                        mode=Mode.AGENT,
                         metadata={"acp": {"jsonrpc_id": rpc_id, "method": method}},
                     )
                 )
@@ -766,7 +768,7 @@ class AcpChannel(BaseChannel):
         for session_id in affected_sessions:
             await self._maybe_finalize_deferred_prompts(session_id)
 
-    async def send(self, msg: Message) -> None:
+    async def send(self, msg: Message, *, routing_target: RoutingTarget | None = None) -> None:
         ctx = self._request_ctx.get(str(msg.id))
         if ctx is None:
             logger.debug("[ACP] skip outbound without request context: id=%s", msg.id)

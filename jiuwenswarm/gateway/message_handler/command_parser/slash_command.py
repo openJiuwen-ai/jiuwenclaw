@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
+import re
 from typing import Any, Literal
 
 
@@ -30,6 +31,9 @@ class GatewaySlashCommand(str, Enum):
     REWIND = "/rewind"
     REVIEW = "/review"
     SECURITY_REVIEW = "/security-review"
+    JOIN = "/join"
+    EXIT = "/exit"
+    PERSIST = "/persist"
 
 
 class ModeSubcommand(str, Enum):
@@ -43,6 +47,18 @@ class ModeSubcommand(str, Enum):
     CODE_PLAN = "code.plan"
     CODE_NORMAL = "code.normal"
     CODE_TEAM = "code.team"
+    TEAM_PLAN = "team.plan"
+    TEAM_PLAN_NORMAL = "team.plan.normal"
+    TEAM_PLAN_CODE = "team.plan.code"
+    # 新三段命名 canonical（P2 引入；旧成员保留）。
+    AGENT_WORK_NORMAL = "agent.work.normal"
+    AGENT_WORK_PLAN = "agent.work.plan"
+    AGENT_CODE_NORMAL = "agent.code.normal"
+    AGENT_CODE_PLAN = "agent.code.plan"
+    TEAM_WORK_NORMAL = "team.work.normal"
+    TEAM_WORK_PLAN = "team.work.plan"
+    TEAM_CODE_NORMAL = "team.code.normal"
+    TEAM_CODE_PLAN = "team.code.plan"
 
 
 _VALID_MODE_LINES: frozenset[str] = frozenset(
@@ -71,8 +87,14 @@ CONTROL_MESSAGE_TEXTS: frozenset[str] = frozenset(
         GatewaySlashCommand.SKILLS_LIST.value,
         GatewaySlashCommand.BRANCH.value,
         GatewaySlashCommand.REWIND.value,
+        GatewaySlashCommand.JOIN.value,
+        GatewaySlashCommand.EXIT.value,
+        GatewaySlashCommand.PERSIST.value,
     }
 )
+
+# /join、/exit 的 session_ref 格式：team_<name>_session_<id>
+_SESSION_REF_RE: re.Pattern[str] = re.compile(r'^team_[\w-]+_session_[\w-]+$')
 
 
 class ParsedControlAction(str, Enum):
@@ -95,6 +117,12 @@ class ParsedControlAction(str, Enum):
     REVIEW_BAD = "review_bad"
     SECURITY_REVIEW_OK = "security_review_ok"
     SECURITY_REVIEW_BAD = "security_review_bad"
+    JOIN_OK = "join_ok"
+    JOIN_BAD = "join_bad"
+    EXIT_OK = "exit_ok"
+    EXIT_BAD = "exit_bad"
+    PERSIST_OK = "persist_ok"
+    PERSIST_BAD = "persist_bad"
 
 
 @dataclass(frozen=True)
@@ -116,6 +144,12 @@ class ParsedChannelControl:
     """review_ok 时为用户指定的 PR 编号、URL 或自由文本；空字符串表示未指定，将展示 PR 列表。"""
     security_review_arg: str | None = None
     """security_review_ok 时为用户可选附加说明；空字符串表示未指定。"""
+    session_ref: str | None = None
+    """join/exit 时的 session 引用。"""
+    member_name: str | None = None
+    """join 时的席位名。"""
+    persist_task: str | None = None
+    """persist_ok 时为去掉 /persist 前缀后的首条任务。"""
 
 
 _PR_ARG_MAX_LEN = 2048
@@ -151,6 +185,17 @@ def parse_channel_control_text(text: str) -> ParsedChannelControl:
     """
     if not text:
         return ParsedChannelControl(ParsedControlAction.NONE)
+    # /persist 是“创建会话 + 首条任务”的混合命令，任务正文允许换行。
+    # 必须先于其它控制命令的单行限制解析。
+    persist_match = re.match(r"^/persist(?=$|\s)", text.strip(), flags=re.IGNORECASE)
+    if persist_match:
+        task = text.strip()[persist_match.end():].strip()
+        if not task:
+            return ParsedChannelControl(ParsedControlAction.PERSIST_BAD)
+        return ParsedChannelControl(
+            ParsedControlAction.PERSIST_OK,
+            persist_task=task,
+        )
     if "\n" in text:
         return ParsedChannelControl(ParsedControlAction.NONE)
     t = text.strip()
@@ -230,6 +275,46 @@ def parse_channel_control_text(text: str) -> ParsedChannelControl:
         if sanitized is None:
             return ParsedChannelControl(ParsedControlAction.REVIEW_BAD)
         return ParsedChannelControl(ParsedControlAction.REVIEW_OK, pr_arg=sanitized)
+    # /join <session_ref> as <member_name>
+    # 仅接受完整格式：/join team_<name>_session_<id> as <member_name>
+    # 简化格式 /join <session_id> as <member_name> 不再允许：
+    # 缺 team_name 维度无法做 team_name ↔ session_id 一致性校验，
+    # 直接判格式错误，引导用户用完整格式。
+    if t.startswith(GatewaySlashCommand.JOIN.value):
+        parts = t.split()
+        if (
+            len(parts) == 4
+            and parts[0] == GatewaySlashCommand.JOIN.value
+            and parts[2] == "as"
+        ):
+            session_ref = parts[1]
+            member_name = parts[3]
+            if _SESSION_REF_RE.match(session_ref):
+                return ParsedChannelControl(
+                    ParsedControlAction.JOIN_OK,
+                    session_ref=session_ref,
+                    member_name=member_name,
+                )
+        return ParsedChannelControl(ParsedControlAction.JOIN_BAD)
+    # /exit [session_ref]
+    # 支持两种格式：
+    #   不带参数: /exit（使用当前 session，不校验 team_name）
+    #   完整: /exit team_<name>_session_<id>（handler 校验 team_name 与 session 一致）
+    # 简化格式 /exit <session_id> 不再允许：缺 team_name 维度无法做一致性校验，
+    # 直接判格式错误，引导用户用完整格式或无参 /exit。
+    if t.startswith(GatewaySlashCommand.EXIT.value):
+        parts = t.split()
+        if len(parts) == 1 and parts[0] == GatewaySlashCommand.EXIT.value:
+            # /exit 不带 session_id → handler 用当前 session 兜底，不做 team_name 校验
+            return ParsedChannelControl(ParsedControlAction.EXIT_OK)
+        if len(parts) == 2 and parts[0] == GatewaySlashCommand.EXIT.value:
+            session_ref = parts[1]
+            if _SESSION_REF_RE.match(session_ref):
+                return ParsedChannelControl(
+                    ParsedControlAction.EXIT_OK,
+                    session_ref=session_ref,
+                )
+        return ParsedChannelControl(ParsedControlAction.EXIT_BAD)
     return ParsedChannelControl(ParsedControlAction.NONE)
 
 
@@ -240,6 +325,9 @@ def is_control_like_for_im_batching(text: str) -> bool:
     """
     if not text:
         return False
+    # Persist 的任务正文可以换行，但整条消息仍必须绕过 IM 合并窗口。
+    if re.match(r"^/persist(?=$|\s)", text.strip(), flags=re.IGNORECASE):
+        return True
     if "\n" in text:
         return False
     t = text.strip()
@@ -263,6 +351,10 @@ def is_control_like_for_im_batching(text: str) -> bool:
     if t.startswith(GatewaySlashCommand.REVIEW.value):
         return True
     if t.startswith(GatewaySlashCommand.SECURITY_REVIEW.value):
+        return True
+    if t.startswith(GatewaySlashCommand.JOIN.value):
+        return True
+    if t.startswith(GatewaySlashCommand.EXIT.value):
         return True
     return False
 
@@ -294,18 +386,18 @@ FIRST_BATCH_REGISTRY: tuple[SlashCommandEntry, ...] = (
     SlashCommandEntry(
         id="mode",
         canonical_text=f"{GatewaySlashCommand.MODE.value} agent|code|team|agent.plan|agent.fast|code.plan|"
-                       f"code.normal|code.team",
+                       f"code.normal|code.team|team.plan|team.plan.normal|team.plan.code",
         scope="gateway",
         req_method=None,
-        notes="受控通道切换模式：一级模式 agent/code/team（映射到默认子模式）或直达 agent.plan/agent.fast/code.plan/code.normal；"
-              "写入 params.mode。",
+        notes="受控通道切换模式：一级模式 agent/code/team（映射到默认子模式）；"
+              "agent 的 plan/fast 已合并为单一 agent（agent.plan/agent.fast 作为历史别名仍可接受）；写入 params.mode。",
     ),
     SlashCommandEntry(
         id="switch",
         canonical_text=f"{GatewaySlashCommand.SWITCH.value} plan|fast|normal|team",
         scope="gateway",
         req_method=None,
-        notes="受控通道切换二级模式：agent 下 plan/fast，code 下 plan/normal。",
+        notes="受控通道切换二级模式：agent 下 plan/fast 已合并；code 下 plan/normal。",
     ),
     SlashCommandEntry(
         id="skills",
@@ -372,11 +464,144 @@ FIRST_BATCH_REGISTRY: tuple[SlashCommandEntry, ...] = (
         notes="受控通道安全审查：args 透传注入 prompt，"
               "由 Agent 执行 git status/diff/log 并做安全分析；无 git 预检。",
     ),
+    SlashCommandEntry(
+        id="goal",
+        canonical_text="/goal [set <objective>|pause|resume|clear]",
+        scope="client",
+        req_method="command.goal",
+        notes="TUI session-level persistent goal management. "
+              "SET/RESUME triggers a streaming goal round; "
+              "GET/PAUSE/CLEAR returns status immediately.",
+    ),
 )
 
 
+# ---------------------------------------------------------------------------
+# 快捷面板命令清单（Web 前端「输入 / 唤起面板」用，commands.list 下发）
+# ---------------------------------------------------------------------------
+
+BUILTIN_COMMANDS_META: tuple[dict[str, Any], ...] = (
+    {
+        "name": "compact",
+        "description": "压缩对话历史，保留摘要以节省上下文",
+        "usage": "/compact",
+        "example": None,
+        "kind": "built-in",
+        "takesArgs": False,
+        "scope": "agent",
+        "execution": "rpc",
+        "req_method": "command.compact",
+        # 压缩的是会话历史，无会话即无意义
+        "requires_session": True,
+        "available_modes": None,
+    },
+    {
+        # Web 侧复用现有 Plan 开关：面板选中后立即翻转，不向输入框插入命令。
+        "name": "plan",
+        "description": "切换计划模式（只读规划 → 审批 → 执行）",
+        "usage": "/plan",
+        "example": None,
+        "kind": "built-in",
+        "takesArgs": False,
+        "scope": "agent",
+        "execution": "chat.send_with_mode",
+        "mode": "agent.plan",
+        "plan_entry_source": "slash_command",
+        # 纯本地开关翻转，欢迎页（NEW_CONVERSATION_ID）也能用，开关随首次发送迁移
+        "requires_session": False,
+        "available_modes": None,
+    },
+    {
+        "name": "persist",
+        "description": "开启永续会话并开始任务（仅限新会话，创建后不可更改）",
+        "usage": "/persist <任务>",
+        "example": "/persist 帮我持续跟进这次产品发布",
+        "kind": "built-in",
+        "takesArgs": True,
+        "scope": "client",
+        "execution": "session.create",
+        "requires_session": False,
+        "available_modes": None,
+    },
+)
+
+
+def list_builtin_commands(params: dict | None = None) -> dict:
+    """返回快捷面板要展示的命令清单（静态元数据，无 IO）。
+
+    params(可选):
+        work_mode: str — 当前工作模式，用于按 available_modes 过滤可用命令
+    返回:
+        {"commands": [command_meta, ...]}
+    """
+    params = params or {}
+    work_mode = params.get("work_mode")
+    out = []
+    for cmd in BUILTIN_COMMANDS_META:
+        am = cmd.get("available_modes")
+        if am is not None and work_mode and work_mode not in am:
+            continue
+        out.append(dict(cmd))
+    return {"commands": out}
+
+
+def _skill_source_tag(item: dict[str, Any]) -> str:
+    """与 TUI ``listSkills`` 标签逻辑对齐：is_builtin_source→[builtin]，否则按 source 取 [local]/[project]/…。"""
+    if item.get("is_builtin_source") is True or item.get("is_builtin") is True:
+        return "[builtin]"
+    src = str(item.get("source") or "").strip()
+    if not src:
+        return "[project]"
+    if src == "local":
+        return "[local]"
+    return f"[{src}]"
+
+
+def _truncate_desc_by_bytes(desc: str, max_bytes: int = 600) -> str:
+    """按 UTF-8 字节预算截断描述，使中英文视觉长度一致。
+
+    Python ``len()`` 数的是字符数：中文 1 字符 = 3 字节、英文 1 字符 = 1 字节，
+    若按字符数截断会出现"中文描述很长很完整、英文描述一句话没说完就被切在单词
+    中间（如 immediatel…）"的不一致。这里按字节预算截断：600 字节约等于 200 个
+    汉字或 600 个英文字母，两边视觉长度相当，且都能讲清一句话。
+
+    截断点优先落在最近的空格/换行（词界），避免把英文单词劈成两半；找不到词界
+    时才在字节边界硬截。截断后补 ``…``。
+    """
+    if not desc:
+        return ""
+    encoded = desc.encode("utf-8")
+    if len(encoded) <= max_bytes:
+        return desc
+    # 字节预算内能完整容纳的最大字符数：逐字符推进，直到加上下一个字符会超预算。
+    cut_chars = 0
+    used = 0
+    for ch in desc:
+        n = len(ch.encode("utf-8"))
+        if used + n > max_bytes:
+            break
+        used += n
+        cut_chars += 1
+    prefix = desc[:cut_chars]
+    # 词界兜底：把末尾不完整的英文单词去掉（回退到最后一个空格/换行）。
+    if cut_chars < len(desc):
+        last_sep = max(prefix.rfind(" "), prefix.rfind("\n"))
+        if last_sep > 0:
+            prefix = prefix[:last_sep]
+    return prefix.rstrip() + "…"
+
+
 def format_skills_list_for_notice(payload: dict[str, Any] | None, *, max_items: int = 50) -> str:
-    """将 skills.list 响应 payload 格式化为适合 IM 的纯文本。"""
+    """将 skills.list 响应 payload 格式化为适合 IM 的纯文本。
+
+    与 TUI ``skills.ts`` 的 ``listSkills`` 渲染对齐：按 ``installed`` 字段分
+    "已安装"/"可安装"两组，每项标注来源标签（[builtin]/[local]/[project]/…），
+    使 IM 端 /skills list 与 TUI 显示一致。后端 ``handle_skills_list`` 对本地已装
+    技能置 ``installed=True``、内置未装技能置 ``installed=False``，渲染据此分组。
+
+    两组用醒目标题 + 空行分隔，且编号各自从 1 开始（不跨组连续），让用户一眼
+    区分"已安装"与"可安装"。
+    """
     if not payload or not isinstance(payload, dict):
         return "暂无技能数据。"
     err = payload.get("error")
@@ -385,21 +610,64 @@ def format_skills_list_for_notice(payload: dict[str, Any] | None, *, max_items: 
     skills = payload.get("skills")
     if not isinstance(skills, list) or not skills:
         return "当前无可用技能。"
-    lines: list[str] = ["【技能列表】"]
-    for i, item in enumerate(skills[:max_items], 1):
+
+    installed: list[dict[str, Any]] = []
+    available: list[dict[str, Any]] = []
+    others: list[Any] = []  # 非 dict 项兜底，避免整条丢失
+    for item in skills:
         if isinstance(item, dict):
-            name = str(item.get("name") or item.get("title") or "?").strip()
-            desc = str(item.get("description") or "").strip()
-            src = str(item.get("source") or "").strip()
-            suffix = f" ({src})" if src else ""
-            if desc:
-                short = desc if len(desc) <= 200 else desc[:200] + "…"
-                lines.append(f"{i}. {name}{suffix}\n   {short}")
+            if item.get("installed") is True:
+                installed.append(item)
             else:
-                lines.append(f"{i}. {name}{suffix}")
+                available.append(item)
         else:
+            others.append(item)
+
+    def _render_items(group: list[dict[str, Any]], quota: int) -> list[str]:
+        # 编号每组独立从 1 开始，避免跨组连续让两组混作一坨。
+        # quota 控制本组最多渲染多少项，使总输出受 max_items 约束。
+        lines: list[str] = []
+        for i, item in enumerate(group, 1):
+            if i > quota:
+                break
+            name = str(item.get("name") or item.get("title") or "?").strip()
+            tag = _skill_source_tag(item)
+            desc = str(item.get("description") or "").strip()
+            if desc:
+                short = _truncate_desc_by_bytes(desc)
+                lines.append(f"{i}. {name} {tag}\n   {short}")
+            else:
+                lines.append(f"{i}. {name} {tag}")
+        return lines
+
+    lines: list[str] = ["【技能列表】"]
+    remaining = max_items  # 跨组共享的总配额：先满足已安装组，再给可安装组
+    shown = 0
+
+    if installed and remaining > 0:
+        q = min(len(installed), remaining)
+        lines.append("")
+        lines.append(f"■ 已安装（{q}）")
+        lines.extend(_render_items(installed, q))
+        shown += q
+        remaining -= q
+
+    if available and remaining > 0:
+        q = min(len(available), remaining)
+        lines.append("")
+        lines.append(f"■ 可安装（{q}）")
+        lines.extend(_render_items(available, q))
+        shown += q
+        remaining -= q
+
+    if others and remaining > 0:  # 兜底：非 dict 项独立编号，受剩余配额约束
+        q = min(len(others), remaining)
+        for i, item in enumerate(others[:q], 1):
             lines.append(f"{i}. {item}")
-    if len(skills) > max_items:
+        shown += q
+        remaining -= q
+
+    if len(skills) > max_items and shown < len(skills):
         lines.append(f"... 共 {len(skills)} 项，仅显示前 {max_items} 项。")
     return "\n".join(lines)
 

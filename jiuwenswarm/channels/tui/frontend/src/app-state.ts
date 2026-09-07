@@ -1,5 +1,12 @@
 import { addError, addInfo } from "./core/commands/helpers.js";
+import { PrWatchController } from "./core/commands/builtins/autofix-pr.watch.js";
 import type { CommandContext, PreferredLanguage } from "./core/commands/types.js";
+import type {
+  HandoffPort,
+  TaskLifecyclePort,
+  UiLifecyclePort,
+} from "./core/supervision/protocol.js";
+import type { ReauthenticationPort } from "./core/supervision/protocol.js";
 import {
   computeTimeoutAt,
   isIgnorableHistoryRestoreError,
@@ -14,7 +21,6 @@ import {
   mergeHistoryMessagesForRestore,
   parseHistoryFrame,
 } from "./core/history-parser.js";
-import { generateSessionId } from "./core/session-state.js";
 import { getToolGroupIds } from "./core/transcript-timeline.js";
 import {
   handleIncomingFrame,
@@ -25,8 +31,12 @@ import {
   type HarnessExtensionReady,
   type HarnessActivateInteraction,
 } from "./core/event-handlers.js";
-import { isTeamMode, type ClientMode } from "./core/modes.js";
+import { isTeamMode, normalizeToClientMode, type ClientMode } from "./core/modes.js";
 import { isEventFrame, type EventFrame, type FileAttachment } from "./core/protocol.js";
+import {
+  PLAN_ENTRY_SOURCE_SLASH_COMMAND,
+  type PlanEntrySource,
+} from "./core/plan-entry-source.js";
 import {
   StreamingState,
   type ContextCompressionStats,
@@ -62,12 +72,36 @@ import {
   getCurrentCwd,
 } from "./core/tui-trusted-dirs-store.js";
 import { loadTuiConfig } from "./core/tui-config-store.js";
-import { applyWorkflowUpdate, normalizeWorkflowRun, type WorkflowRun } from "./core/workflows.js";
-import { execFile, spawnSync } from "node:child_process";
-import { writeFileSync } from "node:fs";
-import { createConnection } from "node:net";
-import { tmpdir } from "node:os";
-import { join, sep } from "node:path";
+import { runStatusLineCommand } from "./core/statusline-runner.js";
+import { generateCreateToken } from "./core/session-state.js";
+import {
+  applyWorkflowUpdate,
+  collectWaitingForHuman,
+  countWaitingForHuman,
+  findWorkflowAgent,
+  mergeHumanPromptText,
+  mergeWorkflowRun,
+  normalizeWorkflowRun,
+  reassembleAgentFieldParts,
+  isSessionNode,
+  phaseLocalTurnNumber,
+  sessionTurnLabelNumber,
+  shouldShowTurnInDetailOrReply,
+  type WorkflowRun,
+  type WorkflowPhase,
+  type WorkflowAgent,
+} from "./core/workflows.js";
+import type { PendingHumanPrompt } from "./core/event-handlers.js";
+import { spawnSync } from "node:child_process";
+
+// A just-exited TUI can remain bound briefly while its WebSocket close is
+// observed by the gateway. Retry only this startup-specific ownership race.
+const BOOT_SESSION_IN_USE_RETRY_DELAYS_MS = [100, 200, 400, 800, 800, 800, 800];
+
+function isTransientSessionInUseError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return message.toLowerCase().includes("already active in another window");
+}
 
 export interface ModelUsageEntry {
   model: string;
@@ -123,11 +157,20 @@ export interface AppSnapshot {
   teamTaskEvents: TeamTaskEvent[];
   teamMessageEvents: TeamMessageEvent[];
   workflowRuns: WorkflowRun[];
+  pendingHumanPrompts: Map<string, PendingHumanPrompt>;
   evolutionStatus: "idle" | "running";
+  /** 后端 config.get 成功读取到的技能自演进展示开关。 */
+  skillEvolutionEnabled: boolean;
   contextCompression: ContextCompressionStats | null;
   contextWindowLimit: number | null;
   contextUsedPercentage: number | null;
   modelInfo: { provider: string; model: string; version: string };
+  /** 全局选中的 agentos 备份模型名（请求级注入）；null 表示使用启动默认 */
+  selectedAgentosModel: string | null;
+  /** 全局选中的 agentos 备份模型 provider（仅展示用，头部 Provider 行）；空表示未取到 */
+  selectedAgentosProvider: string;
+  /** 注入用 key（model_name#global_idx）；后端 model_key 缺省时回退到 selectedAgentosModel */
+  selectedAgentosModelKey: string | null;
   preferredLanguage: PreferredLanguage;
   sessionTitle: string;
   statusLineText: string | null;
@@ -145,8 +188,14 @@ export interface AppSnapshot {
   currentQueryUsage: CurrentQueryUsage;
   /** /btw 侧问题覆盖层：独立于 transcript 渲染，不受滚动影响 */
   btwOverlay: { question: string; answer: string } | null;
+  /** 当前 btw overlay 在历史中的下标（-1 表示无选中） */
+  btwOverlayIndex: number;
+  /** btw 历史总数（用于提示 i/n） */
+  btwOverlayTotal: number;
   /** BTW 是否处于活动状态（加载中或 overlay 可见），Esc 优先消费 */
   btwActive: boolean;
+  /** /btw 正在回答的问题；非空时显示加载动画。 */
+  btwPendingQuestion: string | null;
 }
 
 function formatElapsed(ms: number): string {
@@ -161,6 +210,13 @@ function formatElapsed(ms: number): string {
 
 function normalizePreferredLanguage(value: unknown): PreferredLanguage {
   return typeof value === "string" && value.trim().toLowerCase() === "en" ? "en" : "zh";
+}
+
+/** config.get 将技能自演进开关展平为 skill_evolution；未知/缺失值必须保持关闭。 */
+function parseSkillEvolutionEnabled(value: unknown): boolean {
+  if (value === true) return true;
+  if (typeof value !== "string") return false;
+  return ["true", "1", "yes", "on", "enabled"].includes(value.trim().toLowerCase());
 }
 
 const LOCAL_FILE_SEARCH_TOOL_NAMES = new Set([
@@ -196,7 +252,7 @@ const DEFERRED_TRANSCRIPT_EVENTS = new Set([
 ]);
 
 function isPlanClientMode(mode: ClientMode): boolean {
-  return mode === "agent.plan" || mode === "code.plan" || mode === "team.plan";
+  return mode.endsWith(".plan");
 }
 
 // ── Auto-recap (自动回顾) 常量 ──
@@ -206,34 +262,6 @@ const AUTO_RECAP_IDLE_THRESHOLD_MS = 5 * 60_000;
 const AUTO_RECAP_CHECK_INTERVAL_MS = 30_000;
 const ACTIVE_TURN_RECONNECT_TIMEOUT_MS = 60_000;
 const ACTIVE_NETWORK_CHECK_INTERVAL_MS = 8_000;
-
-function probeTcp(host: string, port: number, timeoutMs: number): Promise<boolean> {
-  return new Promise((resolve) => {
-    const socket = createConnection({ host, port });
-    let settled = false;
-    const finish = (ok: boolean) => {
-      if (settled) return;
-      settled = true;
-      socket.removeAllListeners();
-      socket.destroy();
-      resolve(ok);
-    };
-    socket.setTimeout(timeoutMs);
-    socket.once("connect", () => finish(true));
-    socket.once("timeout", () => finish(false));
-    socket.once("error", () => finish(false));
-  });
-}
-
-async function hasExternalNetwork(): Promise<boolean> {
-  const probes = [
-    probeTcp("223.5.5.5", 53, 1500),
-    probeTcp("114.114.114.114", 53, 1500),
-    probeTcp("1.1.1.1", 443, 1500),
-  ];
-  const results = await Promise.all(probes);
-  return results.some(Boolean);
-}
 
 function isLocalFileSearchTool(name: string): boolean {
   return LOCAL_FILE_SEARCH_TOOL_NAMES.has(name.trim().toLowerCase());
@@ -295,7 +323,22 @@ export class CliPiAppState {
   private connectionStatus: ConnectionStatus = "idle";
   private sessionId: string;
   private sessionTitle: string = "";
-  private mode: ClientMode = "code.normal";
+  /**
+   * `--session <id>` 启动时传入的目标 session id；为 null 表示用户未显式指定，
+   * 此时由 AgentServer 分配新 ID 并尝试领取预热实例。显式 ID 则通过同一个
+   * `session.create` 原子恢复或登记，并明确绕过预热。
+   */
+  private bootSessionId: string | null = null;
+  private readonly bootPersistSession: boolean = false;
+  /** 幂等守卫：boot session creation 只在首次 connection.ack 触发一次（重连/重发不重试）。 */
+  private bootSessionHandled = false;
+  /** connection.ack 到来时放行启动会话创建；构造期即存在，避免 connected 回调抢跑。 */
+  private bootSessionStart: (() => void) | null = null;
+  /** 启动会话创建完成前，后续命令与 chat 帧统一排队到该 Promise。 */
+  private bootSessionCreation: Promise<void> | null = null;
+  /** 普通启动的幂等创建 token；重连期间保持稳定。 */
+  private readonly bootCreateToken = generateCreateToken();
+  private mode: ClientMode = "agent.code.normal";
   private themeName: ThemeName = getCurrentThemeName();
   private accentColor: AccentColorName = getCurrentAccentColor();
   private transcriptMode: "compact" | "detailed" = "compact";
@@ -315,7 +358,10 @@ export class CliPiAppState {
   private teamTaskEvents: TeamTaskEvent[] = [];
   private teamMessageEvents: TeamMessageEvent[] = [];
   private workflowRuns: WorkflowRun[] = [];
+  private pendingHumanPrompts: Map<string, PendingHumanPrompt> = new Map();
   private evolutionStatus: "idle" | "running" = "idle";
+  /** 配置读取失败时保持 false，避免前端暴露不可用的演进命令。 */
+  private skillEvolutionEnabled = false;
   private contextCompression: ContextCompressionStats | null = null;
   private contextWindowLimit: number | null = null;
   private contextUsedPercentage: number | null = null;
@@ -348,6 +394,18 @@ export class CliPiAppState {
     model: "",
     version: "",
   };
+  /**
+   * 全局选中的 agentos 备份模型名（请求级注入）。
+   * 非空时 sendMessage 在 params 注入 model_name，由 AgentServer
+   * _resolve_model_for_request 命中 agentos 缓存条目。切回 defaults 模型
+   * 时由 setModel 清空（恢复启动默认模型路由）。
+   */
+  private selectedAgentosModel: string | null = null;
+  private selectedAgentosProvider: string = "";
+  // 注入用 key（model_name#global_idx），仅用于 chat.send 的 model_name 参数，
+  // 后端 _resolve_model_by_name 据此精确命中同名 agentos 条目，避免纯名误路由到
+  // defaults。展示一律用 selectedAgentosModel（纯名）。无后端 model_key 时回退到纯名。
+  private selectedAgentosModelKey: string | null = null;
   private preferredLanguage: PreferredLanguage = "zh";
   private memoryWarnings: {
     path: string;
@@ -361,21 +419,35 @@ export class CliPiAppState {
   private activeTurnReconnectNoticeShown = false;
   private lastStreamActivityAt: number | null = null;
   private streamStallNoticeTimer: ReturnType<typeof setTimeout> | null = null;
-  private streamStallNoticeShown = false;
   private streamStalled = false;
-  /** 当 closeUi 中 cancelBeforeExit 调 cancel({showNotice:false}) 时置 true，抑制 chat.interrupt_result 的 UI 通知。 */
+  /** 静默中断当前任务时置 true，抑制 chat.interrupt_result 的 UI 通知。 */
   private suppressInterruptResult = false;
   /** /btw 侧问题覆盖层：独立于 transcript 渲染 */
   private btwOverlay: { question: string; answer: string } | null = null;
+  /** /btw 历史记录（按提问先后顺序），overlay 是其中"当前选中"条目的视图 */
+  private btwHistory: { question: string; answer: string }[] = [];
+  /** 当前 overlay 在 btwHistory 中的下标，-1 表示无选中 */
+  private btwOverlayIndex = -1;
   /** BTW 是否处于活动状态（加载中或 overlay 可见），用于 Esc 优先级判断 */
   private _btwActive = false;
+  /** /btw 正在回答的问题；与回答 overlay 的可见状态分离。 */
+  private btwPendingQuestion: string | null = null;
   /** 本地中断请求标志，cancel() 调用时立即置 true，用于 long-running 命令的中断检测。 */
   private interruptRequested = false;
+  /** 是否有一个 cancel interrupt 在途（已发送但未收到 interrupt_result 确认）。
+   *  用于 esc 去抖：为 true 时重复 esc 不再发送新 interrupt。仅由 cancel() 实际发送 interrupt 时置 true、
+   *  由 clearInterruptRequested（收到 result）清 false——不与 requestLocalInterrupt 的 interruptRequested 混用。 */
+  private cancelInterruptInFlight = false;
+  /** 最近一次向服务端发送 chat.interrupt(cancel) 的时间戳；用于 esc 去抖兜底超时，避免 result 丢失时窗口永久锁死。 */
+  private lastInterruptSentAt = 0;
+  /** esc 去抖兜底超时（毫秒）：发送 interrupt 后若 result 迟迟不回来，超过该时长允许下一次 esc 重新发送，
+   *  防止 interrupt_result 丢失导致窗口永久锁死。设得比 AgentServer 最慢的取消响应（含首次初始化阻塞）略长。 */
+  private static readonly INTERRUPT_DEBOUNCE_FALLBACK_MS = 30000;
   /** 当前正在执行的斜杠命令 WS 请求 ID，用于 Ctrl+C 时立即取消。 */
   private activeCommandRequestId: string | null = null;
   /** 当前正在执行的命令名称，用于追踪不可中断命令。 */
   private runningCommand: string | null = null;
-  private pendingPlanEntrySource: "slash_command" | null = null;
+  private pendingPlanEntrySource: PlanEntrySource | null = null;
   private lastVisibleUserRequest: VisibleUserRequest | null = null;
   /** 保存 askQuestions 之前的 streamingState，用于在对话框关闭后恢复。 */
   private streamingStateBeforeQuestion: StreamingState | null = null;
@@ -388,6 +460,12 @@ export class CliPiAppState {
   private autoRecapState: "idle" | "pending" | "generated" = "idle";
   /** 周期检查空闲状态的定时器。 */
   private autoRecapTimer: ReturnType<typeof setInterval> | null = null;
+  /** Active TUI-side PR watch, if any (see startPrWatch). */
+  private prWatchController: PrWatchController | null = null;
+  /** Run-scoped grant: auto-approve tool-permission prompts during a /autofix-pr
+   *  run. Set when the user grants it at the start; cleared when the run ends
+   *  (single-round turn end, watch stop) or is interrupted (Ctrl+C, session reset). */
+  private autofixAutoApprove = false;
   /** 是否启用自动回顾（从 config.yaml 读取，默认 true）。 */
   private autoRecapEnabled: boolean = true;
   private ripgrepAvailable: boolean | null = null;
@@ -398,6 +476,32 @@ export class CliPiAppState {
   private harnessActivateInteraction: HarnessActivateInteraction | null = null;
   private deferTranscriptFrames = false;
   private deferredTranscriptFrames: EventFrame[] = [];
+
+  // ── /switch 公共契约端口（可选；由 index.ts 注入） ──
+  /** HandoffPort；未注入时 /switch 通过 CommandContext 回退到 NOT_SUPERVISED。 */
+  private handoffPort: HandoffPort | null = null;
+  /** TaskLifecyclePort；未注入时回退到 hasServerTask()/cancel()。 */
+  private taskLifecycle: TaskLifecyclePort | null = null;
+  /** ReauthenticationPort；由 ws-client 在权威认证过期时调用。 */
+  private reauthPort: ReauthenticationPort | null = null;
+  /** UiLifecyclePort；统一顶层关闭路径。 */
+  private uiLifecycle: UiLifecyclePort | null = null;
+  /**
+   * Remote 模式：--url 指向远端服务器时为 true。
+   * 本地 PC 路径不可被远端沙箱访问，故请求时不发送本地 project_dir/cwd/trusted_dirs，
+   * 改用 {@link remoteProjectDir}（服务器侧 /home/<user-id>）作为 workspace。
+   */
+  private isRemote = false;
+  /** Remote 模式下的服务器侧 project_dir：/home/<user-id>；非 remote 时为空串。 */
+  private remoteProjectDir = "";
+  /** interrupt_result 事件订阅器；等待型取消按 requestId 关联。 */
+  private interruptResultListeners = new Set<
+    (requestId: string, sessionId: string, success: boolean, message?: string) => void
+  >();
+  /** WebSocket 断开订阅器；等待型取消按 CONNECTION_LOST reject。 */
+  private connectionLostListeners = new Set<() => void>();
+  /** AppState.stop 订阅器；等待型取消按 STATE_STOPPED reject。 */
+  private stopListeners = new Set<() => void>();
   private readonly eventDelegate: AppEventDelegate = {
     getConnectionStatus: () => this.connectionStatus,
     getSessionId: () => this.sessionId,
@@ -419,6 +523,11 @@ export class CliPiAppState {
       this.emitChange();
     },
     setPendingQuestion: (question) => {
+      // Run-scoped auto-approve: during a /autofix-pr run the user pre-authorized,
+      // silently approve tool-permission prompts instead of surfacing the card.
+      if (question && this.autofixAutoApprove && this.tryAutoApprovePermission(question)) {
+        return;
+      }
       this.pendingQuestion = question;
     },
     setLastError: (error) => {
@@ -439,6 +548,9 @@ export class CliPiAppState {
     },
     applyWorkflowUpdate: (workflow) => {
       this.applyWorkflowUpdate(workflow);
+    },
+    setPendingHumanPrompts: (prompts) => {
+      this.setPendingHumanPrompts(prompts);
     },
     setEvolutionStatus: (status) => {
       this.evolutionStatus = status;
@@ -484,6 +596,9 @@ export class CliPiAppState {
     },
     safeFetchSessionTitle: (sessionId) => {
       this.safeFetchSessionTitle(sessionId);
+    },
+    initializeBootSession: () => {
+      this.initializeBootSession();
     },
     getSuppressInterruptResult: () => this.suppressInterruptResult,
     clearSuppressInterruptResult: () => {
@@ -541,18 +656,54 @@ export class CliPiAppState {
         true,
       );
     },
+    notifyInterruptResult: (requestId, sessionId, success, message) => {
+      this.notifyInterruptResult(requestId, sessionId, success, message);
+    },
   };
 
   constructor(
     private readonly wsClient: WsClient,
     cliSession?: string,
+    cliPersistSession?: boolean,
+    supervision?: {
+      handoffPort?: HandoffPort | null;
+      taskLifecycle?: TaskLifecyclePort | null;
+      reauthPort?: ReauthenticationPort | null;
+      uiLifecycle?: UiLifecyclePort | null;
+      isRemote?: boolean;
+      remoteProjectDir?: string;
+    },
   ) {
-    this.sessionId = cliSession || generateSessionId();
+    this.sessionId = cliSession || generateCreateToken();
+    this.bootPersistSession = Boolean(cliPersistSession);
+    this.bootSessionId = cliSession ? cliSession : null;
+    const startGate = new Promise<void>((resolve) => {
+      this.bootSessionStart = resolve;
+    });
+    const bootCreation = (async () => {
+      await startGate;
+      await this.createBootSession();
+    })();
+    this.bootSessionCreation = bootCreation;
+    void bootCreation
+      .catch(() => undefined)
+      .finally(() => {
+        if (this.bootSessionCreation === bootCreation) {
+          this.bootSessionCreation = null;
+        }
+      });
     const config = loadTuiConfig();
     if (config.theme) {
       setCurrentThemeName(config.theme);
       this.themeName = config.theme;
     }
+    // 注入 /switch 公共契约端口（可选；未注入时回退到非托管实现）。
+    this.handoffPort = supervision?.handoffPort ?? null;
+    this.taskLifecycle = supervision?.taskLifecycle ?? null;
+    this.reauthPort = supervision?.reauthPort ?? null;
+    this.uiLifecycle = supervision?.uiLifecycle ?? null;
+    this.isRemote = supervision?.isRemote ?? false;
+    this.remoteProjectDir = supervision?.remoteProjectDir ?? "";
   }
 
   start(): void {
@@ -579,6 +730,16 @@ export class CliPiAppState {
   }
 
   stop(): void {
+    // 通知所有 stop 订阅器（等待型取消按 STATE_STOPPED reject）。
+    for (const listener of this.stopListeners) {
+      try {
+        listener();
+      } catch {
+        // ignore — 进程即将退出
+      }
+    }
+    this.stopListeners.clear();
+
     if (this.localPendingQuestion) {
       this.localPendingQuestion.reject(new Error("app stopped while awaiting input"));
       this.localPendingQuestion = null;
@@ -601,6 +762,14 @@ export class CliPiAppState {
     this.stopMemoryRefresh();
     this.stopAutoRecapTimer();
     this.wsClient.disconnect();
+  }
+
+  private setSkillEvolutionEnabled(enabled: boolean): void {
+    if (this.skillEvolutionEnabled === enabled) {
+      return;
+    }
+    this.skillEvolutionEnabled = enabled;
+    this.emitChange();
   }
 
   private async fetchModelInfo(): Promise<void> {
@@ -630,6 +799,7 @@ export class CliPiAppState {
         ? models.find((m) => m.model_name === activeModelName)
         : models[0];
       this.preferredLanguage = normalizePreferredLanguage(config.preferred_language);
+      this.setSkillEvolutionEnabled(parseSkillEvolutionEnabled(config.skill_evolution));
       this.autoRecapEnabled = config.auto_recap_enabled !== "false";
       // 同步 auto-recap timer：WS 连接后才拿到配置，需根据实际值启停 timer
       if (this.autoRecapEnabled) {
@@ -732,6 +902,16 @@ export class CliPiAppState {
     const wasActiveResponseStream = this.hasActiveResponseStream();
     this.streamingState = state;
     this.handleStreamingStateChanged(wasActiveResponseStream);
+    // Single-round /autofix-pr: the run ends when the turn goes idle, so drop the
+    // auto-approve grant. A watch owns the grant across its rounds' idle gaps, so
+    // skip while a watch is active (it clears via onStopped instead).
+    if (
+      state === StreamingState.Idle &&
+      this.autofixAutoApprove &&
+      !this.prWatchController?.active
+    ) {
+      this.autofixAutoApprove = false;
+    }
   }
 
   private noteStreamActivity(): void {
@@ -740,7 +920,6 @@ export class CliPiAppState {
     }
     this.lastStreamActivityAt = Date.now();
     this.streamStalled = false;
-    this.streamStallNoticeShown = false;
     this.scheduleStreamStallWatchdog();
   }
 
@@ -766,7 +945,6 @@ export class CliPiAppState {
   private clearStreamStallWatchdog(): void {
     this.clearStreamStallTimers();
     this.lastStreamActivityAt = null;
-    this.streamStallNoticeShown = false;
     this.streamStalled = false;
   }
 
@@ -774,18 +952,14 @@ export class CliPiAppState {
     if (!this.hasActiveResponseStream()) {
       return;
     }
-    if (await hasExternalNetwork()) {
-      this.lastStreamActivityAt = Date.now();
-      this.scheduleStreamStallWatchdog();
-      return;
-    }
-    if (this.streamStallNoticeShown) {
-      return;
-    }
-    this.streamStallNoticeShown = true;
-    this.failActiveTurnAfterConnectionLoss(
-      "Network appears offline while the task is running. Stopped the current TUI response; reconnect and retry.",
-    );
+    // 到达此处时 connectionStatus 必为 "connected"（hasActiveResponseStream 已隐含，
+    // 且本函数 fire 于定时器回调、其间无 await 改写该字段）。ws 仍 connected 即认为
+    // 本地服务（Gateway/AgentServer）还活着、任务在跑只是暂未吐帧，故续期不报错。
+    // air-gapped 内网里 ws 恒 connected，故永远续期，消除公网探针必然失败导致的误报。
+    // 公网用户真断网时 ws 会先变 reconnecting（见 handleConnectionStatusChanged，走 60s
+    // 重连看门狗），本函数在 reconnecting 下不会被调到，故公网保护语义不变。
+    this.lastStreamActivityAt = Date.now();
+    this.scheduleStreamStallWatchdog();
   }
 
   private frameBelongsToActiveSession(frame: EventFrame): boolean {
@@ -833,6 +1007,15 @@ export class CliPiAppState {
           ? "Backend connection failed authentication. Stopped waiting for the current response."
           : "Backend closed the connection because the message was too large. Stopped waiting for the current response.",
       );
+      // 通知连接丢失订阅器（等待型取消按 CONNECTION_LOST reject）。
+      for (const listener of this.connectionLostListeners) {
+        try {
+          listener();
+        } catch {
+          // ignore
+        }
+      }
+      this.connectionLostListeners.clear();
     }
   }
 
@@ -969,11 +1152,16 @@ export class CliPiAppState {
           })),
         })),
       })),
+      pendingHumanPrompts: new Map(this.pendingHumanPrompts),
       evolutionStatus: this.evolutionStatus,
+      skillEvolutionEnabled: this.skillEvolutionEnabled,
       contextCompression: this.contextCompression ? { ...this.contextCompression } : null,
       contextWindowLimit: this.contextWindowLimit,
       contextUsedPercentage: this.contextUsedPercentage,
       modelInfo: this.modelInfo,
+      selectedAgentosModel: this.selectedAgentosModel,
+      selectedAgentosProvider: this.selectedAgentosProvider,
+      selectedAgentosModelKey: this.selectedAgentosModelKey,
       preferredLanguage: this.preferredLanguage,
       sessionTitle: this.sessionTitle,
       statusLineText: this.statusLineText,
@@ -984,7 +1172,10 @@ export class CliPiAppState {
         this.lastStreamActivityAt === null ? null : Date.now() - this.lastStreamActivityAt,
       currentQueryUsage: { ...this.currentQueryUsage },
       btwOverlay: this.btwOverlay,
+      btwOverlayIndex: this.btwOverlayIndex,
+      btwOverlayTotal: this.btwHistory.length,
       btwActive: this._btwActive,
+      btwPendingQuestion: this.btwPendingQuestion,
     };
   }
 
@@ -1013,6 +1204,9 @@ export class CliPiAppState {
   /** Clear local interrupt flag (called after handling interrupt) */
   clearInterruptRequested(): void {
     this.interruptRequested = false;
+    // 收到 interrupt_result（成功或失败）即表示在途的 cancel 已确认，解除去抖拦截，允许下一次 esc 重新发送。
+    // 不清 lastInterruptSentAt：兜底超时用它判断"result 丢失"窗口，若清了则兜底失效。
+    this.cancelInterruptInFlight = false;
   }
 
   /** Set the currently running command name (for tracking uninterruptible commands) */
@@ -1048,6 +1242,7 @@ export class CliPiAppState {
       setBtwOverlay: this.setBtwOverlay,
       clearBtwOverlay: this.clearBtwOverlay,
       setBtwActive: this.setBtwActive,
+      setBtwPendingQuestion: this.setBtwPendingQuestion,
       clearEntries: this.clearEntries,
       restoreHistory: this.restoreHistory,
       exitApp: () => {
@@ -1063,6 +1258,7 @@ export class CliPiAppState {
       setMode: this.setMode,
       markPlanEntryFromSlashCommand: this.markPlanEntryFromSlashCommand,
       setModel: this.setModel,
+      setSelectedAgentosModel: this.setSelectedAgentosModel,
       setPreferredLanguage: this.setPreferredLanguage,
       setThemeName: this.setThemeName,
       setAccentColor: this.setAccentColor,
@@ -1102,7 +1298,107 @@ export class CliPiAppState {
         return snapshot.cancellableWork;
       },
       setRunningCommand: (name: string | null) => this.setRunningCommand(name),
+      // ── /switch 公共契约端口 ──
+      checkHandoff: (target) => this.handoffPort?.checkHandoff(target)
+        ?? {
+          ok: false,
+          code: "NOT_SUPERVISED",
+          message: "Running outside agentos-tui launcher; start via `agentos-tui` to use /switch",
+        },
+      requestHandoff: (target, switchContent) => this.handoffPort
+        ? this.handoffPort.requestHandoff(target, switchContent)
+        : Promise.reject(new Error("Handoff port not available (not supervised)")),
+      hasServerTask: () => this.taskLifecycle?.hasServerTask() ?? this.hasServerTask(),
+      cancelAndWaitForIdle: (opts) => this.taskLifecycle
+        ? this.taskLifecycle.cancelAndWaitForIdle(opts)
+        : Promise.reject(new Error("Task lifecycle port not available")),
+      startPrWatch: this.startPrWatch,
+      stopPrWatch: this.stopPrWatch,
+      isPrWatchActive: this.isPrWatchActive,
+      setAutofixAutoApprove: this.setAutofixAutoApprove,
     };
+  }
+
+  /** Start a TUI-side PR watch (replacing any existing one). */
+  readonly startPrWatch = (config: {
+    repo: string;
+    prNumber: string;
+    platform: string;
+    intervalMs?: number;
+    autoApprove?: boolean;
+    preferredLanguage?: PreferredLanguage;
+  }): void => {
+    const { autoApprove, preferredLanguage, ...watchConfig } = config;
+    this.prWatchController?.stop("被新的 watch 取代", { silent: true });
+    // Apply the run-scoped grant here — after the prior watch's onStopped has
+    // cleared it, but before start() synchronously sends the first round — so
+    // round 1 is auto-approved too. (Setting it in the command before this call
+    // would be wiped by the replaced watch's onStopped.)
+    if (autoApprove) this.autofixAutoApprove = true;
+    this.prWatchController = new PrWatchController(
+      {
+        sendMessage: (prompt) => this.sendMessage(prompt, undefined, this.mode, { logAsUser: false }),
+        isBusy: () => {
+          const s = this.getSnapshot();
+          return s.isProcessing || s.cancellableWork || Boolean(s.pendingQuestion);
+        },
+        isConnected: () => this.connectionStatus === "connected",
+        notify: (message, isError) =>
+          this.addItem((isError ? addError : addInfo)(this.sessionId, message, isError ? undefined : "i")),
+        preferredLanguage: preferredLanguage ?? this.preferredLanguage,
+        onStopped: () => {
+          // Watch ended (green / merged / closed / fuse / replaced) → drop the
+          // run-scoped auto-approve grant so the next run asks again.
+          this.autofixAutoApprove = false;
+        },
+      },
+      watchConfig,
+    );
+    this.prWatchController.start();
+  };
+
+  /** Stop the active PR watch; returns true if one was running. */
+  readonly stopPrWatch = (): boolean => {
+    if (!this.prWatchController?.active) return false;
+    this.prWatchController.stop(this.preferredLanguage === "zh" ? "用户手动停止" : "stopped by user");
+    this.prWatchController = null;
+    return true;
+  };
+
+  readonly isPrWatchActive = (): boolean => Boolean(this.prWatchController?.active);
+
+  /** Grant/revoke run-scoped auto-approval of tool-permission prompts. */
+  readonly setAutofixAutoApprove = (on: boolean): void => {
+    this.autofixAutoApprove = on;
+  };
+
+  /**
+   * If this is a tool-permission prompt and we can confidently identify its
+   * "allow once" option, approve it automatically (the user pre-authorized) and
+   * return true. Scoped to permission_interrupt only — ask_user / confirm / plan
+   * prompts are genuine decisions and must still reach the user. If the option
+   * shape is not what we expect, return false so the card renders normally
+   * (fail toward asking, never toward a blind wrong answer).
+   */
+  private tryAutoApprovePermission(question: PendingQuestion): boolean {
+    if (question.source !== "permission_interrupt") return false;
+    const options = question.questions?.[0]?.options;
+    if (!Array.isArray(options) || options.length === 0) return false;
+    // "Allow once" = an allow option that is NOT "always allow" (which would
+    // persist beyond the run). zh: 本次允许 / 总是允许; en: Allow once / Always allow.
+    const isAllow = (l: string) => l.includes("允许") || /^allow\b/i.test(l.trim());
+    const isAlwaysAllow = (l: string) =>
+      l.includes("总是允许") || /^always allow\b/i.test(l.trim());
+    const allowOnce = options.find((o) => isAllow(o.label) && !isAlwaysAllow(o.label));
+    if (!allowOnce) return false;
+    this.pendingQuestion = question; // submitQuestionAnswers reads this
+    this.addItem(
+      addInfo(this.sessionId, `※ /autofix-pr 自动批准命令：${allowOnce.label}`, "※"),
+    );
+    this.submitQuestionAnswers([
+      { selected_options: [allowOnce.label], custom_input: allowOnce.label },
+    ]);
+    return true;
   }
 
   getUsageSummary(): SessionUsageSummary {
@@ -1172,55 +1468,172 @@ export class CliPiAppState {
     this._getInputValueRef = ref;
   }
 
+  // ── TaskLifecyclePort 订阅接口 ──
+
+  /**
+   * 订阅 interrupt_result 事件；按 requestId + sessionId 关联。
+   * 返回取消订阅函数。迟到事件（waiter 已清除）由 listener 自行过滤。
+   */
+  onInterruptResult(
+    handler: (requestId: string, sessionId: string, success: boolean, message?: string) => void,
+  ): () => void {
+    this.interruptResultListeners.add(handler);
+    return () => {
+      this.interruptResultListeners.delete(handler);
+    };
+  }
+
+  /** 订阅 WebSocket 断开或认证失败。 */
+  onConnectionLost(handler: () => void): () => void {
+    this.connectionLostListeners.add(handler);
+    return () => {
+      this.connectionLostListeners.delete(handler);
+    };
+  }
+
+  /** 订阅 AppState.stop（进程退出前清理）。 */
+  onStop(handler: () => void): () => void {
+    this.stopListeners.add(handler);
+    return () => {
+      this.stopListeners.delete(handler);
+    };
+  }
+
+  /**
+   * 由 event-handlers 在收到 chat.interrupt_result 时调用；
+   * 通知所有订阅器，按 requestId + sessionId 关联。
+   */
+  notifyInterruptResult(
+    requestId: string,
+    sessionId: string,
+    success: boolean,
+    message?: string,
+  ): void {
+    for (const listener of this.interruptResultListeners) {
+      try {
+        listener(requestId, sessionId, success, message);
+      } catch {
+        // ignore — listener 错误不应影响其他订阅器或 UI 处理
+      }
+    }
+  }
+
+  /**
+   * 由 index.ts 在 AppState 构造后回填监督端口。
+   * TaskLifecyclePort、HandoffPort、ReauthenticationPort 依赖 AppState 方法，
+   * 无法在构造函数中直接创建。
+   */
+  setSupervisionPorts(ports: {
+    handoffPort: HandoffPort | null;
+    taskLifecycle: TaskLifecyclePort | null;
+    reauthPort: ReauthenticationPort | null;
+    uiLifecycle: UiLifecyclePort | null;
+  }): void {
+    this.handoffPort = ports.handoffPort;
+    this.taskLifecycle = ports.taskLifecycle;
+    this.reauthPort = ports.reauthPort;
+    this.uiLifecycle = ports.uiLifecycle;
+  }
+
+  /** 测试/外部用：获取 ReauthenticationPort（由 ws-client 在权威认证过期时调用）。 */
+  getReauthPort(): ReauthenticationPort | null {
+    return this.reauthPort;
+  }
+
+  /**
+   * 计算随请求发送的本地上下文路径（project_dir/cwd/trusted_dirs）。
+   * Remote 模式下本地 PC 路径不可被远端沙箱访问，故只发送服务器侧 /home/<user-id>
+   * 作为 project_dir/cwd，不发送 trusted_dirs；非 remote 时沿用本地 trusted_dirs/cwd。
+   */
+  private resolveRequestPaths(): {
+    projectDir: string;
+    cwd: string;
+    trustedDirs: string[];
+  } {
+    if (this.isRemote && this.remoteProjectDir) {
+      return { projectDir: this.remoteProjectDir, cwd: this.remoteProjectDir, trustedDirs: [] };
+    }
+    const trustedDirs = getTrustedDirs();
+    const projectDir = getCurrentProjectDir() || process.cwd();
+    const cwd = getCurrentCwd() || projectDir;
+    return { projectDir, cwd, trustedDirs };
+  }
+
   readonly sendEventOnly = (
     method: string,
     params: Record<string, unknown>,
     isStream = false,
   ): string => {
     const id = `tui_${Date.now().toString(16)}_${Math.random().toString(36).slice(2, 6)}`;
-    const trustedDirs = getTrustedDirs();
-    const projectDir = getCurrentProjectDir() || process.cwd();
-    const cwd = getCurrentCwd() || projectDir;
-    this.wsClient.send({
-      type: "req",
-      id,
-      method,
-      ...(isStream ? { is_stream: true } : {}),
-      params: {
-        ...params,
-        session_id: (params.session_id as string | undefined) ?? this.sessionId,
-        ...(trustedDirs.length > 0 ? { trusted_dirs: trustedDirs } : {}),
-        ...(projectDir ? { project_dir: projectDir } : {}),
-        ...(cwd ? { cwd } : {}),
-      },
-    });
+    const send = () => {
+      const { projectDir, cwd, trustedDirs } = this.resolveRequestPaths();
+      this.wsClient.send({
+        type: "req",
+        id,
+        method,
+        ...(isStream ? { is_stream: true } : {}),
+        params: {
+          ...params,
+          ...(method === "session.create" && params.session_id === undefined
+            ? {}
+            : { session_id: (params.session_id as string | undefined) ?? this.sessionId }),
+          ...(trustedDirs.length > 0 ? { trusted_dirs: trustedDirs } : {}),
+          ...(projectDir ? { project_dir: projectDir } : {}),
+          ...(cwd ? { cwd } : {}),
+        },
+      });
+    };
+    const bootCreation = this.bootSessionCreation;
+    if (bootCreation) {
+      void bootCreation.then(send).catch(() => undefined);
+    } else {
+      send();
+    }
     return id;
   };
 
-  readonly request = async <T = Record<string, unknown>>(
+  private requestAgentServer = async <T = Record<string, unknown>>(
     method: string,
     params: Record<string, unknown>,
-    timeoutMs?: number,
+    timeoutMs: number | undefined,
+    waitForBootSession: boolean,
   ): Promise<T> => {
+    if (waitForBootSession && this.bootSessionCreation) {
+      await this.bootSessionCreation;
+    }
     const id = `tui_${Date.now().toString(16)}_${Math.random().toString(36).slice(2, 6)}`;
     // 记录当前命令请求 ID，以便 Ctrl+C 时能立即取消 WS 请求
     this.activeCommandRequestId = id;
-    const trustedDirs = getTrustedDirs();
-    const projectDir = getCurrentProjectDir() || process.cwd();
-    const cwd = getCurrentCwd() || projectDir;
+    const { projectDir, cwd, trustedDirs } = this.resolveRequestPaths();
     try {
       const response = await this.wsClient.request(
         id,
         method,
         {
           ...params,
-          session_id: params.session_id ?? this.sessionId,
+          ...(method === "session.create" && params.session_id === undefined
+            ? {}
+            : { session_id: params.session_id ?? this.sessionId }),
           ...(trustedDirs.length > 0 ? { trusted_dirs: trustedDirs } : {}),
           ...(projectDir ? { project_dir: projectDir } : {}),
           ...(cwd ? { cwd } : {}),
         },
         timeoutMs ?? 30000,
       );
+      if (method === "config.get") {
+        const payload = response.payload;
+        const enabled =
+          payload && typeof payload === "object" && !Array.isArray(payload)
+            ? parseSkillEvolutionEnabled((payload as Record<string, unknown>).skill_evolution)
+            : false;
+        this.setSkillEvolutionEnabled(enabled);
+      } else if (
+        method === "config.set" &&
+        Object.prototype.hasOwnProperty.call(params, "skill_evolution")
+      ) {
+        // config.set 响应只确认写盘；重新读取权威 payload，保证 hot reload 后 UI 与后端一致。
+        void this.fetchModelInfo();
+      }
       return response.payload as T;
     } finally {
       // 请求完成后清理追踪（无论成功/失败/取消）
@@ -1230,45 +1643,262 @@ export class CliPiAppState {
     }
   };
 
+  readonly request = async <T = Record<string, unknown>>(
+    method: string,
+    params: Record<string, unknown>,
+    timeoutMs?: number,
+  ): Promise<T> => this.requestAgentServer<T>(method, params, timeoutMs, true);
+
+  readonly notifyDisconnectBeforeExit = async (reason = "user_exit"): Promise<void> => {
+    if (this.connectionStatus !== "connected") {
+      return;
+    }
+    const id = `tui_disconnect_${Date.now().toString(16)}_${Math.random().toString(36).slice(2, 6)}`;
+    try {
+      await this.wsClient.request(
+        id,
+        "tui.disconnect",
+        {
+          reason,
+          session_id: this.sessionId,
+          mode: this.mode,
+        },
+        500,
+      );
+    } catch {
+      // Best effort only; the process is exiting.
+    }
+  };
+
   readonly loadWorkflowSnapshot = async (sessionId = this.sessionId): Promise<void> => {
     const payload = await this.request<{
       type?: string;
       workflows?: unknown[];
       session_id?: string;
+      total?: number;
+      has_more?: boolean;
     }>(
       "command.workflows",
       {
         action: "list",
         session_id: sessionId,
       },
-      10000,
+      30000,
     );
     this.applyWorkflowSnapshotPayload(payload);
+  };
+
+  readonly loadWorkflowDetail = async (
+    workflowId: string,
+    sessionId = this.sessionId,
+    phaseOffset = 0,
+  ): Promise<void> => {
+    const payload = await this.request<{
+      type?: string;
+      workflow?: unknown;
+      phase_total?: number;
+      has_more?: boolean;
+    }>(
+      "command.workflows",
+      {
+        action: "get_workflow",
+        workflow_id: workflowId,
+        session_id: sessionId,
+        phase_offset: phaseOffset,
+      },
+      30000,
+    );
+    if (
+      payload.type === "workflow_run_detail" &&
+      payload.workflow &&
+      typeof payload.workflow === "object" &&
+      !Array.isArray(payload.workflow) &&
+      "id" in payload.workflow
+    ) {
+      const workflow = payload.workflow as WorkflowRun;
+      if (payload.has_more === true) {
+        workflow.has_more = true;
+      }
+      if (typeof payload.phase_total === "number") {
+        workflow.phase_total = payload.phase_total;
+      }
+      this.applyWorkflowUpdate(workflow);
+    }
+  };
+
+  readonly loadPhaseAgents = async (
+    workflowId: string,
+    phaseId: string,
+    sessionId = this.sessionId,
+    agentOffset = 0,
+  ): Promise<void> => {
+    const payload = await this.request<{
+      type?: string;
+      phase?: unknown;
+      agent_total?: number;
+      has_more?: boolean;
+      error?: unknown;
+    }>(
+      "command.workflows",
+      {
+        action: "get_phase",
+        workflow_id: workflowId,
+        phase_id: phaseId,
+        session_id: sessionId,
+        agent_offset: agentOffset,
+      },
+      30000,
+    );
+    if (payload.error || !payload.phase || typeof payload.phase !== "object") return;
+    const phase = payload.phase as WorkflowPhase & { workflow_id?: string };
+    const existing = this.workflowRuns.find((item) => item.id === workflowId);
+    if (!existing) return;
+    // Hand the incoming phase (agent summaries) to applyWorkflowUpdate's merge
+    // path — mergeWorkflowAgent preserves already-loaded full bodies (from
+    // get_agent) and stamps detail_pending on summary-only agents.
+    this.applyWorkflowUpdate({
+      ...existing,
+      phases: [...(existing.phases ?? []), phase],
+    });
+  };
+
+  readonly loadAgentDetail = async (
+    workflowId: string,
+    phaseId: string,
+    agentId: string,
+    sessionId = this.sessionId,
+  ): Promise<string> => {
+    const payload = await this.request<{
+      type?: string;
+      agent?: unknown;
+      error?: unknown;
+    }>(
+      "command.workflows",
+      {
+        action: "get_agent",
+        workflow_id: workflowId,
+        phase_id: phaseId,
+        agent_id: agentId,
+        session_id: sessionId,
+      },
+      30000,
+    );
+    if (payload.error || !payload.agent || typeof payload.agent !== "object") return "";
+    const agent = reassembleAgentFieldParts(payload.agent as WorkflowAgent);
+
+    const existing = this.workflowRuns.find((item) => item.id === workflowId);
+    if (!existing) return agent.human_prompt ?? "";
+
+    const updatedPhases = (existing.phases ?? []).map((phase) =>
+      phase.id === phaseId
+        ? {
+            ...phase,
+            agents: (phase.agents ?? []).map((a) =>
+              a.id === agentId ? { ...a, ...agent } : a,
+            ),
+          }
+        : phase,
+    );
+    this.applyWorkflowUpdate({ ...existing, phases: updatedPhases });
+    return agent.human_prompt ?? "";
+  };
+
+  readonly ensureHumanPromptLoaded = async (
+    workflowId: string,
+    agentId: string,
+  ): Promise<void> => {
+    const lookup = findWorkflowAgent(this.workflowRuns, workflowId, agentId);
+    if (!lookup) return;
+    const current = lookup.agent.human_prompt?.trim() ?? "";
+    if (current) return;
+    try {
+      await this.loadAgentDetail(workflowId, lookup.phase.id, agentId);
+    } catch {
+      // Best-effort — pending list still shows whatever partial text we have.
+    }
   };
 
   readonly applyWorkflowSnapshotPayload = (payload: {
     type?: unknown;
     workflows?: unknown;
+    total?: unknown;
+    has_more?: unknown;
     [key: string]: unknown;
   }): void => {
     const workflows = Array.isArray(payload.workflows) ? payload.workflows : [];
     if (payload.type !== "workflow_run_snapshot" && workflows.length === 0) {
       return;
     }
-    this.setWorkflowRuns(
-      workflows.filter((item): item is WorkflowRun =>
-        Boolean(item && typeof item === "object" && !Array.isArray(item) && "id" in item),
-      ),
+    const incoming = workflows.filter((item): item is WorkflowRun =>
+      Boolean(item && typeof item === "object" && !Array.isArray(item) && "id" in item),
     );
+    const merged = incoming.map((workflow) => {
+      const existing = this.workflowRuns.find((item) => item.id === workflow.id);
+      return normalizeWorkflowRun(mergeWorkflowRun(existing, workflow));
+    });
+    const incomingIds = new Set(incoming.map((workflow) => workflow.id));
+    const preserved = this.workflowRuns.filter((workflow) => !incomingIds.has(workflow.id));
+    this.setWorkflowRuns([...merged, ...preserved]);
   };
 
   readonly setWorkflowRuns = (workflows: WorkflowRun[]): void => {
     this.workflowRuns = workflows.map((workflow) => normalizeWorkflowRun(workflow));
+    this.recomputePendingHumanPrompts();
     this.emitChange();
   };
 
   readonly applyWorkflowUpdate = (workflow: WorkflowRun): void => {
     this.workflowRuns = applyWorkflowUpdate(this.workflowRuns, workflow);
+    this.recomputePendingHumanPrompts();
+    this.emitChange();
+  };
+
+  /** Recompute the pending-human-prompt map from the full workflow snapshot. */
+  private recomputePendingHumanPrompts(): void {
+    // Preserve reply summaries from the previous map for entries that are no
+    // longer waiting (replied -> running) so the list can dim them briefly.
+    const next = new Map<string, PendingHumanPrompt>();
+    for (const wf of this.workflowRuns) {
+      const waiting = collectWaitingForHuman(wf);
+      for (const { phase, agent } of waiting) {
+        const key = `${wf.id}:${agent.correlation_id ?? agent.id}`;
+        const turn = phaseLocalTurnNumber(agent, phase.agents ?? []) ?? 0;
+        const prev = this.pendingHumanPrompts.get(key);
+        next.set(key, {
+          workflow_run_id: wf.id,
+          workflow_id: wf.id,
+          workflow_name: wf.name,
+          agent_id: agent.id,
+          correlation_id: agent.correlation_id ?? "",
+          prompt: mergeHumanPromptText(prev?.prompt, agent.human_prompt ?? ""),
+          label: agent.name,
+          is_session: isSessionNode(agent),
+          turn,
+          // Carry forward a prior reply summary if this entry was replied then
+          // somehow re-listed (defensive — normally a replied turn won't wait again).
+          replied: prev?.replied,
+          answer: prev?.answer,
+        });
+      }
+      // Dim entries that were waiting and are now replied (status moved off
+      // waiting_for_human but human_reply was just set).
+      for (const phase of wf.phases ?? []) {
+        for (const agent of phase.agents ?? []) {
+          if (agent.status !== "waiting_for_human" && agent.human_reply) {
+            const key = `${wf.id}:${agent.correlation_id ?? agent.id}`;
+            const prev = this.pendingHumanPrompts.get(key);
+            if (prev && !prev.replied) {
+              next.set(key, { ...prev, replied: true, answer: agent.human_reply });
+            }
+          }
+        }
+      }
+    }
+    this.pendingHumanPrompts = next;
+  }
+
+  readonly setPendingHumanPrompts = (prompts: Map<string, PendingHumanPrompt> | null): void => {
+    this.pendingHumanPrompts = prompts ?? new Map();
     this.emitChange();
   };
 
@@ -1278,8 +1908,12 @@ export class CliPiAppState {
     this.usageByModel.clear();
     this.resetCurrentUsageTokens();
     this.workflowRuns = [];
+    this.pendingHumanPrompts = new Map();
     this.btwOverlay = null;
+    this.btwHistory = [];
+    this.btwOverlayIndex = -1;
     this._btwActive = false;
+    this.btwPendingQuestion = null;
     this.pendingPlanEntrySource = null;
     if (this.accentColor !== "default") {
       this.accentColor = "default";
@@ -1316,10 +1950,17 @@ export class CliPiAppState {
     // 用户发言后重置自动回顾状态，允许下一次空闲时触发新的回顾
     if (item.kind === "user") {
       this.autoRecapState = "idle";
-      // 用户发送新消息时自动清除 /btw overlay
-      if (this.btwOverlay !== null) {
+      // 用户发送新消息时自动清除 /btw overlay（含历史）
+      if (
+        this.btwOverlay !== null ||
+        this.btwHistory.length > 0 ||
+        this.btwPendingQuestion !== null
+      ) {
         this.btwOverlay = null;
+        this.btwHistory = [];
+        this.btwOverlayIndex = -1;
         this._btwActive = false;
+        this.btwPendingQuestion = null;
       }
     }
     this.emitChange();
@@ -1327,25 +1968,74 @@ export class CliPiAppState {
 
   /** 设置 /btw 侧问题覆盖层（独立于 transcript 渲染，不受滚动影响） */
   readonly setBtwOverlay = (question: string, answer: string): void => {
+    this.btwPendingQuestion = null;
     this.btwOverlay = { question, answer };
+    this.btwHistory.push({ question, answer });
+    this.btwOverlayIndex = this.btwHistory.length - 1;
     this.emitChange();
   };
 
   /** 设置 BTW 活动状态（加载中或 overlay 可见），用于 Esc 优先级判断 */
   readonly setBtwActive = (active: boolean): void => {
-    if (this._btwActive !== active) {
+    const pendingChanged = !active && this.btwPendingQuestion !== null;
+    if (this._btwActive !== active || pendingChanged) {
       this._btwActive = active;
+      if (!active) {
+        this.btwPendingQuestion = null;
+      }
       this.emitChange();
     }
   };
 
-  /** 清除 /btw 侧问题覆盖层 */
-  readonly clearBtwOverlay = (): void => {
-    if (this.btwOverlay !== null) {
-      this.btwOverlay = null;
-      this._btwActive = false;
+  readonly setBtwPendingQuestion = (question: string | null): void => {
+    if (this.btwPendingQuestion !== question) {
+      this.btwPendingQuestion = question;
       this.emitChange();
     }
+  };
+
+  /** 清除 /btw 侧问题覆盖层（同时清空历史，Esc 视为放弃这批侧问） */
+  readonly clearBtwOverlay = (): void => {
+    if (
+      this.btwOverlay !== null ||
+      this.btwHistory.length > 0 ||
+      this.btwPendingQuestion !== null
+    ) {
+      this.btwOverlay = null;
+      this.btwHistory = [];
+      this.btwOverlayIndex = -1;
+      this._btwActive = false;
+      this.btwPendingQuestion = null;
+      this.emitChange();
+    }
+  };
+
+  /** 在 btw 历史中前后切换当前 overlay（仅 ≥2 条时生效） */
+  readonly navigateBtw = (direction: -1 | 1): void => {
+    if (this.btwHistory.length < 2 || this.btwOverlayIndex < 0) return;
+    const len = this.btwHistory.length;
+    const next = Math.max(0, Math.min(len - 1, this.btwOverlayIndex + direction));
+    if (next === this.btwOverlayIndex) return;
+    this.btwOverlayIndex = next;
+    this.btwOverlay = this.btwHistory[next];
+    this.emitChange();
+  };
+
+  /** 删除当前 btw 条目；剩余非空则跳到相邻条目，为空则关闭 overlay */
+  readonly deleteCurrentBtwEntry = (): void => {
+    if (this.btwOverlayIndex < 0 || this.btwHistory.length === 0) return;
+    this.btwHistory.splice(this.btwOverlayIndex, 1);
+    const len = this.btwHistory.length;
+    if (len === 0) {
+      this.btwOverlay = null;
+      this.btwOverlayIndex = -1;
+      this._btwActive = false;
+      this.btwPendingQuestion = null;
+    } else {
+      this.btwOverlayIndex = Math.min(this.btwOverlayIndex, len - 1);
+      this.btwOverlay = this.btwHistory[this.btwOverlayIndex];
+    }
+    this.emitChange();
   };
 
   readonly isHelpVisible = (): boolean => {
@@ -1386,11 +2076,18 @@ export class CliPiAppState {
       this.localPendingQuestion.reject(new Error("input flow was interrupted"));
       this.localPendingQuestion = null;
     }
+    // A watch is tied to the current PR/session; a new/cleared session drops it.
+    this.prWatchController?.stop("会话已重置", { silent: true });
+    this.prWatchController = null;
+    this.autofixAutoApprove = false;
     this.entries = [];
     this.pendingQuestion = null;
     this.lastError = null;
     this.btwOverlay = null;
+    this.btwHistory = [];
+    this.btwOverlayIndex = -1;
     this._btwActive = false;
+    this.btwPendingQuestion = null;
     this.setStreamingStateInternal(StreamingState.Idle);
     this.collapsedToolGroupIds.clear();
     this.activeSubtasks.clear();
@@ -1427,13 +2124,48 @@ export class CliPiAppState {
   };
 
   readonly markPlanEntryFromSlashCommand = (): void => {
-    this.pendingPlanEntrySource = "slash_command";
+    this.pendingPlanEntrySource = PLAN_ENTRY_SOURCE_SLASH_COMMAND;
   };
 
   readonly setModel = (name: string): void => {
     const trimmed = name.trim();
     if (trimmed && this.modelInfo.model !== trimmed) {
       this.modelInfo = { ...this.modelInfo, model: trimmed };
+      this.emitChange();
+    }
+    // 切回 defaults 模型 → 放弃 agentos 请求级注入，恢复启动默认模型路由
+    if (this.selectedAgentosModel !== null) {
+      this.selectedAgentosModel = null;
+      this.selectedAgentosProvider = "";
+      this.selectedAgentosModelKey = null;
+      this.emitChange();
+    }
+  };
+
+  /**
+   * 全局选中 agentos 备份模型（请求级注入）。与 setModel 互斥：
+   * 选 agentos 不改 modelInfo（启动默认不变），仅记录注入名；
+   * setModel 会清空本字段。
+   *
+   * name 为展示用纯名；key 为后端 model_key（model_name#global_idx），供
+   * chat.send 精确注入同名 agentos 条目，缺省时回退到 name。
+   */
+  readonly setSelectedAgentosModel = (
+    name: string | null,
+    provider?: string,
+    key?: string | null,
+  ): void => {
+    const trimmed = name ? name.trim() : "";
+    const next = trimmed || null;
+    const nextKey = key ? key.trim() || null : null;
+    if (
+      this.selectedAgentosModel !== next
+      || this.selectedAgentosProvider !== (provider ?? "")
+      || this.selectedAgentosModelKey !== (next ? nextKey : null)
+    ) {
+      this.selectedAgentosModel = next;
+      this.selectedAgentosProvider = next ? (provider ?? "") : "";
+      this.selectedAgentosModelKey = next ? nextKey : null;
       this.emitChange();
     }
   };
@@ -1523,6 +2255,7 @@ export class CliPiAppState {
     attachments?: FileAttachment[],
     modeOverride?: ClientMode,
     options?: { logAsUser?: boolean },
+    skills?: string[],
   ): string | null => {
     if (this.connectionStatus !== "connected") return null;
     const mode = modeOverride ?? this.mode;
@@ -1533,6 +2266,14 @@ export class CliPiAppState {
       mode,
       ...(attachments?.length ? { attachments } : {}),
       ...(planEntrySource ? { plan_entry_source: planEntrySource } : {}),
+      ...(skills?.length ? { skills } : {}),
+      // agentos 备份模型：请求级注入 model_name，AgentServer 据此路由到 agentos 缓存条目。
+      // 为空时省略，沿用启动默认模型。优先用后端 model_key（model_name#global_idx），
+      // 后端 _resolve_model_by_name 据 #global_idx 精确命中同名 agentos 条目；
+      // 无 key 时回退纯名（同名时会被解析到 defaults，仅作兼容兜底）。
+      ...((this.selectedAgentosModelKey || this.selectedAgentosModel)
+        ? { model_name: this.selectedAgentosModelKey || this.selectedAgentosModel }
+        : {}),
     };
     // Pre-check: reject messages whose serialized frame exceeds 7 MB (gateway
     // server max_size is 8 MB; leave 1 MB margin for JSON overhead).
@@ -1618,6 +2359,9 @@ export class CliPiAppState {
 
   /** 向服务端请求中断当前 session 的任务；成功发送前不宣称"已中断"。 */
   cancel(options?: { showNotice?: boolean }): boolean {
+    // User intervention (Ctrl+C / other) revokes the run-scoped auto-approve
+    // grant — subsequent tool prompts must reach the user again.
+    this.autofixAutoApprove = false;
     if (this.connectionStatus !== "connected") {
       if (options?.showNotice !== false) {
         this.addItem(addError(this.sessionId, "Unable to interrupt task while disconnected"));
@@ -1633,6 +2377,11 @@ export class CliPiAppState {
       this.localPendingQuestion = null;
       this.pendingQuestion = null;
       this.setStreamingStateInternal(StreamingState.Idle);
+    } else if (this.pendingQuestion) {
+      // Server-side pendingQuestion (ask_user_interrupt, permission_interrupt, etc.)
+      // chat.interrupt sent below will notify the server to cancel the agent work
+      this.pendingQuestion = null;
+      this.setStreamingStateInternal(StreamingState.Idle);
     }
     // Set local interrupt flag immediately for long-running command detection
     this.interruptRequested = true;
@@ -1642,9 +2391,24 @@ export class CliPiAppState {
       this.activeCommandRequestId = null;
     }
     const hadLocalWork = this.getSnapshot().cancellableWork;
-    this.sendEventOnly("chat.interrupt", { intent: "cancel", mode: this.mode });
-    if (options?.showNotice !== false && hadLocalWork) {
-      this.addItem(addInfo(this.sessionId, "Request Interrupted", "i"));
+    // esc 去抖：混合策略。
+    // 主条件：上一个 cancel interrupt 在途、尚未收到 interrupt_result 确认（cancelInterruptInFlight=true）
+    //   → 不再重复发送。这覆盖"用户每隔 1.5-2s 按一次 esc、每次都超过短去抖窗口"的真实连按节奏——
+    //   只要后端还没确认取消，就绝不再发新 interrupt，避免 N 个 interrupt 积压、最后一次性回 N 个"任务已取消"。
+    // 兜底：若 result 丢失迟迟不回（超 INTERRUPT_DEBOUNCE_FALLBACK_MS），允许重新发送，防止窗口永久锁死。
+    // 收到 interrupt_result（成功或失败）时 clearInterruptRequested 会清 cancelInterruptInFlight 提前解锁。
+    const now = Date.now();
+    const fallbackExpired =
+      this.lastInterruptSentAt > 0 &&
+      now - this.lastInterruptSentAt >= CliPiAppState.INTERRUPT_DEBOUNCE_FALLBACK_MS;
+    const withinDebounce = this.cancelInterruptInFlight && !fallbackExpired;
+    if (!withinDebounce) {
+      this.cancelInterruptInFlight = true;
+      this.lastInterruptSentAt = now;
+      this.sendEventOnly("chat.interrupt", { intent: "cancel", mode: this.mode });
+      if (options?.showNotice !== false && hadLocalWork) {
+        this.addItem(addInfo(this.sessionId, "Request Interrupted", "i"));
+      }
     }
     return true;
   }
@@ -2682,7 +3446,7 @@ export class CliPiAppState {
   private buildStatusLineJsonInput(): Record<string, unknown> {
     const snapshot = this.getSnapshot();
     const usage = this.getUsageSummary();
-    const cwd = getCurrentCwd() || process.cwd();
+    const { cwd, trustedDirs } = this.resolveRequestPaths();
     return {
       session_id: snapshot.sessionId,
       session_name: snapshot.sessionTitle,
@@ -2706,7 +3470,7 @@ export class CliPiAppState {
       evolution_status: snapshot.evolutionStatus,
       active_subtask_count: snapshot.activeSubtasks.length,
       todo_count: snapshot.todos.length,
-      trusted_dirs: getTrustedDirs(),
+      trusted_dirs: trustedDirs,
       usage: {
         total_input_tokens: usage.total_input_tokens,
         total_output_tokens: usage.total_output_tokens,
@@ -2734,57 +3498,22 @@ export class CliPiAppState {
     }
     const jsonInput = JSON.stringify(this.buildStatusLineJsonInput());
     const cmd = sl.command;
-    const isWindows = process.platform === "win32";
-
     try {
-      if (isWindows) {
-        // On Windows: pipe stdin (like POSIX) so `jq -r '.field'` works directly.
-        // Also write a temp file and export JIUWENSWARM_SL_FILE as a fallback for
-        // `$(cat "$JIUWENSWARM_SL_FILE")` style commands (sh -c can't $(cat) stdin).
-        const tmpFile = join(tmpdir(), "jiuwenswarm-sl.json");
-        writeFileSync(tmpFile, jsonInput, "utf8");
-        const msysPath = tmpFile
-          .split(sep)
-          .join("/")
-          .replace(/^([A-Za-z]):/, (_, d) => "/" + d.toLowerCase());
-        const patchedCmd = cmd.replace(/\$\(cat\)/g, `$(cat "${msysPath}")`);
-        const fullCmd = `export JIUWENSWARM_SL_FILE="${msysPath}"; ${patchedCmd}`;
-
-        const child = execFile(
-          "sh",
-          ["-c", fullCmd],
-          { timeout: 3_000, maxBuffer: 10_240, cwd: getCurrentCwd() || process.cwd() },
-          (err, stdout) => {
-            if (err) return;
-            const text = stdout.trim().replace(/\r\n/g, "\n");
-            if (text !== this.statusLineText) {
-              this.statusLineText = text || null;
-              this.emitChange();
-            }
-          },
-        );
-        // Pipe stdin so commands that read stdin directly (jq, python, etc.) work
-        // on Windows the same way they do on POSIX — aligning with Claude Code behavior.
-        child.stdin?.end(jsonInput);
-      } else {
-        // On POSIX, stdin piping works correctly in sh -c.
-        const child = execFile(
-          "sh",
-          ["-c", cmd],
-          { timeout: 3_000, maxBuffer: 10_240 },
-          (err, stdout) => {
-            if (err) return;
-            const text = stdout.trim().replace(/\r\n/g, "\n");
-            if (text !== this.statusLineText) {
-              this.statusLineText = text || null;
-              this.emitChange();
-            }
-          },
-        );
-        child.stdin?.end(jsonInput);
-      }
+      runStatusLineCommand(
+        cmd,
+        jsonInput,
+        getCurrentCwd() || process.cwd(),
+        (err, stdout) => {
+          if (err) return;
+          const text = stdout.trim().replace(/\r\n/g, "\n");
+          if (text !== this.statusLineText) {
+            this.statusLineText = text || null;
+            this.emitChange();
+          }
+        },
+      );
     } catch {
-      // Silently ignore — sh may not be in PATH on Windows
+      // Ignore launch errors; invalid commands should not disrupt the TUI.
     }
   }
 
@@ -2846,5 +3575,96 @@ export class CliPiAppState {
         this.emitChange();
       }
     })();
+  }
+
+  /** connection.ack 放行一次构造期启动屏障；实际创建统一在 createBootSession 中完成。 */
+  private initializeBootSession(): void {
+    if (this.bootSessionHandled) return;
+    if (this.connectionStatus !== "connected") return;
+    this.bootSessionHandled = true;
+    const start = this.bootSessionStart;
+    this.bootSessionStart = null;
+    start?.();
+  }
+
+  /**
+   * 普通启动不传 session_id，由 AgentServer 分配并领取预热实例；`--session <id>`
+   * 传入显式 ID，走 TUI 兼容的非预热恢复/登记路径。两者共享同一个启动 Promise。
+   */
+  private async createBootSession(): Promise<void> {
+    const target = this.bootSessionId;
+    const previousMode = this.mode;
+    try {
+      type BootSessionResult = {
+        session_id?: string;
+        mode?: string;
+        created?: boolean;
+      };
+      let res: BootSessionResult;
+      let retryIndex = 0;
+      while (true) {
+        try {
+          res = await this.requestAgentServer<BootSessionResult>(
+            "session.create",
+            {
+              ...(target ? { session_id: target } : { create_token: this.bootCreateToken }),
+              ...(!target && this.bootPersistSession ? { persist_session: true } : {}),
+              previous_session_id: "",
+              previous_mode: previousMode,
+              mode: previousMode,
+            },
+            undefined,
+            false,
+          );
+          break;
+        } catch (error) {
+          if (
+            target === null
+            || !isTransientSessionInUseError(error)
+            || retryIndex >= BOOT_SESSION_IN_USE_RETRY_DELAYS_MS.length
+          ) {
+            throw error;
+          }
+          const delayMs = BOOT_SESSION_IN_USE_RETRY_DELAYS_MS[retryIndex];
+          retryIndex += 1;
+          await new Promise<void>((resolve) => setTimeout(resolve, delayMs));
+        }
+      }
+      const createdId = res?.session_id;
+      if (typeof createdId !== "string" || !createdId) {
+        throw new Error("session.create did not return a session id");
+      }
+      const placeholderId = this.sessionId;
+      const pendingVisibleRequest = this.lastVisibleUserRequest;
+      this.updateSession(createdId);
+      if (target === null && placeholderId !== createdId) {
+        this.entries = this.entries.map((entry) =>
+          entry.sessionId === placeholderId ? { ...entry, sessionId: createdId } : entry,
+        );
+        if (pendingVisibleRequest?.sessionId === placeholderId) {
+          this.lastVisibleUserRequest = { ...pendingVisibleRequest, sessionId: createdId };
+        }
+        this.emitChange();
+      }
+      const resolvedMode = res?.mode;
+      if (typeof resolvedMode === "string" && resolvedMode) {
+        // 后端可能回旧 canonical 串（历史 session 重连），走 normalizeToClientMode
+        // 归一到新串；未知串丢弃，避免 ``as`` 强转把旧串写入 this.mode 让
+        // isTeamMode / isPlanClientMode / formatModeForDisplay 误判。
+        const normalized = normalizeToClientMode(resolvedMode);
+        if (normalized) {
+          this.setMode(normalized);
+        }
+      }
+      if (target !== null) {
+        this.safeRestoreHistory(createdId);
+        this.safeFetchSessionTitle(createdId);
+      }
+    } catch (createErr) {
+      const message = createErr instanceof Error ? createErr.message : String(createErr);
+      this.lastError = `session.create failed: ${message}`;
+      this.emitChange();
+      throw createErr;
+    }
   }
 }

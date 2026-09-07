@@ -6,7 +6,7 @@
 无论是通过 pip/whl 安装，还是在源码目录里直接运行：
 - 运行本脚本会先询问语言偏好（zh/en），写入 config 的 preferred_language；
 - 同时复制 config.yaml、builtin_rules.yaml、将 ``.env.template`` 复制为 ``<用户数据根>/config/.env``、agent 模板等到 ``<用户数据根>``；
-- 根据语言偏好复制多语言文件（AGENT.md、HEARTBEAT.md、IDENTITY.md、SOUL.md 等），
+- 根据语言偏好复制多语言文件（AGENT.md、IDENTITY.md、SOUL.md 等），
   源文件使用 _ZH/_EN 后缀，目标文件不带后缀。
 
 使用方式:
@@ -32,6 +32,9 @@ from jiuwenswarm.instance_manager import (
     get_instance_workspace_path,
     get_instance_index,
     calculate_instance_ports,
+    find_available_ports,
+    is_port_available,
+    collect_all_ports,
     update_instances_yaml,
     validate_instance_name,
     InstanceConfig,
@@ -99,6 +102,37 @@ def run_init(force: bool = False, name: Optional[str] = None) -> int:
         # Calculate ports (using same index as update_instances_yaml will use)
         index = get_instance_index(name)
         ports = calculate_instance_ports(index)
+
+        # Proactively scan for a conflict-free port group so the instance is
+        # launchable immediately (otherwise the first jiuwenswarm-start --name
+        # would hit a port clash and have to fall back at start time). If the
+        # index's own group is fully available, keep it; otherwise scan upward.
+        conflict_ports = [
+            p for p in ports.values()
+            if not is_port_available("127.0.0.1", p)
+        ]
+        if conflict_ports:
+            # Exclude ports already claimed by other configured instances so
+            # the scan never picks a group that collides with a sibling.
+            exclude_ports = collect_all_ports(exclude_name=name)
+            found = find_available_ports(
+                base_index=index,
+                host="127.0.0.1",
+                scan_range=20,
+                exclude_ports=exclude_ports,
+            )
+            if found is None:
+                logging.info(
+                    f"[jiuwenswarm-init] WARNING: No available port group within "
+                    f"scan_range=20 (from index {index}). Falling back to index "
+                    f"{index} ports; 'jiuwenswarm-start --name {name}' will retry."
+                )
+            else:
+                ports, index = found
+                logging.info(
+                    f"[jiuwenswarm-init] Reserved conflict-free port group "
+                    f"(index {index}) for instance '{name}': {ports}"
+                )
 
         # Update YAML with full configuration (workspace + ports)
         update_instances_yaml(name, workspace_path, ports)

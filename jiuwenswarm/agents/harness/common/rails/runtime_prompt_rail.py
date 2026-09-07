@@ -1,20 +1,23 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
-"""RuntimePromptRail — Inject dynamic time/runtime info per model call.
+"""RuntimePromptRail — Assemble stable and dynamic runtime prompt state.
 
-Time and runtime state (model, mode, language, etc.) are injected fresh on
-every model call by reading runtime_state.yaml in Python, so the LLM always
-sees the current values without needing to call any tool.
+Stable environment rules and the conversation-start git snapshot stay in the
+system prompt. Dynamic runtime state is managed as a prompt attachment.
+Request date/time remains in the real user message's JSON envelope.
 """
 from __future__ import annotations
 
 import os
+import shutil
 import sys
+from contextvars import ContextVar
 from typing import Any
 
 import yaml
 
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
+from openjiuwen.core.sys_operation.cwd import init_cwd
 from openjiuwen.harness.prompts import PromptSection
 from openjiuwen.harness.prompts.prompt_attachment_manager import (
     PromptAttachmentKind,
@@ -22,17 +25,16 @@ from openjiuwen.harness.prompts.prompt_attachment_manager import (
 
 from openjiuwen.harness.rails.base import DeepAgentRail
 from jiuwenswarm.agents.harness.common.prompt.shell_environment import build_shell_environment_prompt
-from jiuwenswarm.common.utils import get_config_dir, logger
-
-from jiuwenswarm.common.utils import get_agent_workspace_dir
-
-_LANGUAGE_NAMES = {"cn": "Chinese", "zh": "Chinese", "en": "English"}
-
-_LANGUAGE_NAMES = {"cn": "Chinese", "zh": "Chinese", "en": "English"}
+from jiuwenswarm.common.utils import (
+    get_agent_workspace_dir,
+    get_runtime_state_path,
+    get_user_workspace_dir,
+    logger,
+)
 
 
 class RuntimePromptRail(DeepAgentRail):
-    """在 before_model_call 中注入时间及运行时状态文件路径。"""
+    """Keep stable system context separate from dynamic prompt attachments."""
 
     priority = 5  # 高优先级，确保早于其他 rail 执行
 
@@ -43,6 +45,7 @@ class RuntimePromptRail(DeepAgentRail):
         timezone_offset: int = 8,
     ) -> None:
         super().__init__()
+        self._agent = None
         self.system_prompt_builder = None
         self.attachment_manager = None
         self._language = language
@@ -50,12 +53,26 @@ class RuntimePromptRail(DeepAgentRail):
         self._trusted_dirs: list[str] | None = None
         self._cwd: str | None = None
         self._project_dir: str | None = None
+        self._workspace_dir: str | None = None
+        self._task_workspace_root: str | None = None
+        self._task_work_dir: str | None = None
+        self._task_outputs_dir: str | None = None
+        self._execution_cwd: str | None = None
+        self._execution_project_root: str | None = None
+        self._execution_workspace: str | None = None
+        self._execution_paths_revision = 0
+        self._bound_execution_paths_revision: ContextVar[int] = ContextVar(
+            "runtime_prompt_bound_execution_paths_revision",
+            default=-1,
+        )
         self._model_name: str = ""
         self._mode: str = ""
+        self._session_id: str | None = None
         self._force_english: bool = False
 
     def init(self, agent) -> None:
         """从 agent 获取 system_prompt_builder 引用。"""
+        self._agent = agent
         self.system_prompt_builder = getattr(agent, "system_prompt_builder", None)
         self.attachment_manager = getattr(agent, "prompt_attachment_manager", None)
 
@@ -66,10 +83,19 @@ class RuntimePromptRail(DeepAgentRail):
             self.system_prompt_builder.remove_section("runtime.model_answer_policy")
             self.system_prompt_builder.remove_section("language_output")
             self.system_prompt_builder.remove_section("env")
-            self.system_prompt_builder.remove_section("browser_tool_policy")
+            self.system_prompt_builder.remove_section("directory_boundaries")
             self.system_prompt_builder.remove_section("tui_current_project_policy")
+            self.system_prompt_builder.remove_section("trusted_dirs_policy")
+            self.system_prompt_builder.remove_section("git_status")
+        self._agent = None
         self.system_prompt_builder = None
         self.attachment_manager = None
+        self._task_workspace_root = None
+        self._task_work_dir = None
+        self._task_outputs_dir = None
+        self._execution_cwd = None
+        self._execution_project_root = None
+        self._execution_workspace = None
 
     def set_language(self, language: str) -> None:
         """per-request 更新语言。"""
@@ -83,12 +109,53 @@ class RuntimePromptRail(DeepAgentRail):
         """per-request 更新可信目录。"""
         self._trusted_dirs = trusted_dirs
 
-    def set_runtime_paths(self, *, cwd: str | None = None, project_dir: str | None = None) -> None:
-        """Per-request stable project identity and dynamic cwd."""
+    def set_runtime_paths(
+        self,
+        *,
+        cwd: str | None = None,
+        project_dir: str | None = None,
+        workspace_dir: str | None = None,
+        task_workspace_root: str | None = None,
+        task_work_dir: str | None = None,
+        task_outputs_dir: str | None = None,
+    ) -> None:
+        """Per-request project identity, task paths, cwd, and own workspace.
+
+        Args:
+            cwd: Working directory shell runs in and relative paths resolve against.
+            project_dir: Project root, when the request is bound to one.
+            workspace_dir: This agent's own workspace (artifacts, memory, skills
+                view). Team members each have their own; falls back to the
+                process-wide agent workspace when unset.
+            task_workspace_root: Root of an automatically allocated projectless
+                task workspace.
+            task_work_dir: Temporary/intermediate files directory.
+            task_outputs_dir: Final deliverables directory.
+        """
         self._cwd = cwd.strip() if isinstance(cwd, str) and cwd.strip() else None
         self._project_dir = (
             project_dir.strip()
             if isinstance(project_dir, str) and project_dir.strip()
+            else None
+        )
+        self._workspace_dir = (
+            workspace_dir.strip()
+            if isinstance(workspace_dir, str) and workspace_dir.strip()
+            else None
+        )
+        self._task_workspace_root = (
+            task_workspace_root.strip()
+            if isinstance(task_workspace_root, str) and task_workspace_root.strip()
+            else None
+        )
+        self._task_work_dir = (
+            task_work_dir.strip()
+            if isinstance(task_work_dir, str) and task_work_dir.strip()
+            else None
+        )
+        self._task_outputs_dir = (
+            task_outputs_dir.strip()
+            if isinstance(task_outputs_dir, str) and task_outputs_dir.strip()
             else None
         )
 
@@ -96,13 +163,70 @@ class RuntimePromptRail(DeepAgentRail):
         """per-request 更新模型名称，作为文件读取失败时的兜底。"""
         self._model_name = model_name or ""
 
+    def set_execution_paths(
+        self,
+        *,
+        cwd: str,
+        project_root: str,
+        workspace: str,
+    ) -> None:
+        """Bind Agent/Code paths inside the task that executes the round."""
+        execution_paths = (cwd, project_root, workspace)
+        if execution_paths == (
+            self._execution_cwd,
+            self._execution_project_root,
+            self._execution_workspace,
+        ):
+            return
+        self._execution_cwd = cwd
+        self._execution_project_root = project_root
+        self._execution_workspace = workspace
+        # A session normally keeps one fixed operational directory. Increment
+        # only when those paths actually change, so repeated requests in the
+        # same session do not overwrite a cwd selected by runtime tools (for
+        # example, a Code worktree).
+        self._execution_paths_revision += 1
+
     def set_mode(self, mode: str) -> None:
         """per-request 更新运行模式，作为文件读取失败时的兜底。"""
         self._mode = mode or ""
 
+    def set_session_id(self, session_id: str | None) -> None:
+        """per-request 更新 session id，用于读取按 session 隔离的 runtime_state 文件。"""
+        self._session_id = (
+            session_id.strip()
+            if isinstance(session_id, str) and session_id.strip()
+            else None
+        )
+
     def set_force_english(self, force: bool) -> None:
-        """Force English-only injected sections regardless of language (code mode)."""
+        """Force English for runtime scaffolding in code mode."""
         self._force_english = force
+
+    def _bind_execution_paths(self) -> None:
+        """Bind request paths in the asyncio task that runs the current round."""
+        if (
+            self._execution_cwd is None
+            or self._execution_project_root is None
+            or self._execution_workspace is None
+        ):
+            return
+        if (
+            self._bound_execution_paths_revision.get()
+            == self._execution_paths_revision
+        ):
+            return
+        init_cwd(
+            self._execution_cwd,
+            project_root=self._execution_project_root,
+            workspace=self._execution_workspace,
+        )
+        self._bound_execution_paths_revision.set(self._execution_paths_revision)
+
+    def _uses_round_execution_paths(self) -> bool:
+        """Return whether Agent/Code rounds need request path rebinding."""
+        mode_root = str(self._mode or "").strip().lower().split(".", 1)[0]
+        return mode_root in {"agent", "code"}
 
     @staticmethod
     def _existing_dirs(paths: list[str] | None) -> list[str]:
@@ -131,7 +255,78 @@ class RuntimePromptRail(DeepAgentRail):
     def _same_path(left: str, right: str) -> bool:
         return os.path.normcase(os.path.abspath(left)) == os.path.normcase(os.path.abspath(right))
 
+    @staticmethod
+    def _configured_model_names() -> list[str]:
+        """Read configured model names from config.yaml as a runtime fallback."""
+        try:
+            from jiuwenswarm.common.config import get_model_names
+
+            return [
+                str(name).strip()
+                for name in get_model_names()
+                if str(name).strip()
+            ]
+        except Exception as exc:
+            logger.debug("Failed to read configured model names: %s", exc)
+            return []
+
+    def _resolve_current_mode(
+        self,
+        ctx: AgentCallbackContext,
+        configured_mode: str,
+    ) -> str:
+        """用 DeepAgent session state 覆盖 code 模式的请求初始快照。"""
+        # 只对单 agent 的 code profile 走 live 覆盖（返回的 legacy 串
+        # "code.plan"/"code.normal" 只携带单 agent code 语义）。保留旧
+        # {"code", "code.normal", "code.plan"} 语义，并补上新三段命名单 agent
+        # code canonical agent.code.*；code.team / team.code.* / team.plan.code
+        # 仍按原样返回，避免把 team 系覆盖成单 agent 串。
+        if configured_mode not in {
+            "code", "code.normal", "code.plan",
+            "agent.code.normal", "agent.code.plan",
+        }:
+            return configured_mode
+
+        agent = self._agent or ctx.agent
+        load_state = getattr(agent, "load_state", None)
+        if not callable(load_state) or ctx.session is None:
+            return configured_mode
+
+        try:
+            state = load_state(ctx.session)
+            plan_state = getattr(state, "plan_mode", None)
+            if isinstance(plan_state, dict):
+                plan_mode = plan_state.get("mode")
+            else:
+                plan_mode = getattr(plan_state, "mode", None)
+        except Exception as exc:
+            logger.debug(
+                "[RuntimePromptRail] Failed to resolve live agent mode: %s",
+                exc,
+            )
+            return configured_mode
+
+        normalized = str(plan_mode or "").strip().lower()
+        if normalized == "plan":
+            return "code.plan"
+        if normalized in {"normal", "auto"}:
+            return "code.normal"
+        return configured_mode
+
+    async def before_invoke(self, ctx: AgentCallbackContext) -> None:
+        """Prepare conversation-start context before the first model call."""
+        self._bind_execution_paths()
+        runtime_state = await self._refresh_dynamic_attachments(ctx)
+        await self._sync_git_system_context(ctx, runtime_state)
+
     async def before_model_call(self, ctx: AgentCallbackContext) -> None:
+        # Long-lived Agent/Code interactions execute rounds in a supervisor task
+        # created before the request arrives. Rebind inside that task so its
+        # subsequently spawned Bash/file tool tasks inherit the request cwd,
+        # rather than the Agent's internal data workspace captured at startup.
+        if self._uses_round_execution_paths():
+            self._bind_execution_paths()
+        runtime_state = await self._refresh_dynamic_attachments(ctx)
         if not self.system_prompt_builder:
             return
 
@@ -140,128 +335,22 @@ class RuntimePromptRail(DeepAgentRail):
             "runtime.model_answer_policy",
             "language_output",
             "env",
-            "browser_tool_policy",
-            "tui_current_project_policy"):
+            "tui_current_project_policy",
+            "trusted_dirs_policy"):
             self.system_prompt_builder.remove_section(name)
 
-        # ── time ──
-        if not self._force_english and self._language == "cn":
-            time_content = (
-                f"# 时间说明\n\n"
-                "- 当用户询问“最新、当前、今年、本年、实时、近期”等信息并需要搜索时，"
-                "搜索 query 必须优先使用当前年份或日期"
-            )
-        else:
-            time_content = (
-                f"# Time Description\n\n"
-                "- When the user asks for latest/current/this-year/recent information and search is needed, "
-                "search queries must prefer the current year or date."
-            )
-
-        self.system_prompt_builder.add_section(PromptSection(
-            name="time",
-            content={"cn": time_content, "en": time_content},
-            priority=92,
-        ))
-
-        # ── runtime ──
-        runtime_state: dict[str, Any] = {}
-        try:
-            with open(get_config_dir() / "runtime_state.yaml", encoding="utf-8") as f:
-                runtime_state = yaml.safe_load(f) or {}
-        except FileNotFoundError:
-            pass
-        except Exception as e:
-            logger.warning("Failed to read runtime_state.yaml: %s", e)
-
-        model = (runtime_state.get("model") or self._model_name or "unknown").strip()
-        mode = (runtime_state.get("mode") or self._mode or "unknown").strip()
-        language_val = (
-            "en"
-            if self._force_english
-            else self._language or runtime_state.get("language") or "unknown"
-        ).strip()
         channel = (runtime_state.get("channel") or self._channel or "unknown").strip()
 
-        if not self._force_english and self._language == "cn":
-            runtime_content = (
-                "# 运行时状态\n\n"
-                f"- 当前模型：{model}\n"
-                f"- 当前模式：{mode}\n"
-                f"- 当前语言：{language_val}\n"
-                f"- 当前渠道：{channel}"
-            )
-            model_answer_policy = (
-                "# 模型名称回答策略\n\n"
-                "- 当用户询问「你是什么模型」「当前用的是哪个模型」等问题时，"
-                "直接使用 `runtime.setting` 中的当前模型值回答，只说模型名称，不要介绍身份或列出能力。"
-            )
-        else:
-            runtime_content = (
-                "# Runtime State\n\n"
-                f"- Current model: {model}\n"
-                f"- Current mode: {mode}\n"
-                f"- Current language: {language_val}\n"
-                f"- Current channel: {channel}"
-            )
-            model_answer_policy = (
-                "# Model Name Answer Policy\n\n"
-                "- When the user asks what model you are using, answer with only the current model "
-                "value from `runtime.setting`. Do not introduce yourself or list capabilities."
-            )
-
-        self.system_prompt_builder.add_section(PromptSection(
-            name="runtime.model_answer_policy",
-            content={"cn": model_answer_policy, "en": model_answer_policy},
-            priority=95,
-        ))
-
-        await self._clear_prompt_attachment(ctx, section="runtime.setting")
-        await self._upsert_prompt_attachment(
-            ctx,
-            section="runtime.setting",
-            content=runtime_content,
-            kind=PromptAttachmentKind.RUNTIME,
-            priority=95,
-        )
-
-        # ── Language output constraint (injected near end) ──
-        language_name = _LANGUAGE_NAMES.get(language_val, language_val)
-        language_output_content = (
-            "# Language\n\n"
-            f"Always respond in {language_name}. "
-            f"Use {language_name} for all explanations, comments, "
-            f"and communications with the user. "
-            f"Technical terms and code identifiers should remain "
-            f"in their original form."
-        )
-        self.system_prompt_builder.add_section(PromptSection(
-            name="language_output",
-            content={"cn": language_output_content, "en": language_output_content},
-            priority=93,
-        ))
-
-        # ── Language output constraint (injected near end) ──
-        self.system_prompt_builder.remove_section("language_output")
-        language_name = _LANGUAGE_NAMES.get(language_val, language_val)
-        language_output_content = (
-            "# Language\n\n"
-            f"Always respond in {language_name}. "
-            f"Use {language_name} for all explanations, comments, "
-            f"and communications with the user. "
-            f"Technical terms and code identifiers should remain "
-            f"in their original form."
-        )
-        self.system_prompt_builder.add_section(PromptSection(
-            name="language_output",
-            content={"cn": language_output_content, "en": language_output_content},
-            priority=93,
-        ))
-
-        # ── Platform / OS environment section ──
+        # ── Platform, shell, encoding, time-query and channel rules ──
         os_type = sys.platform
         shell_path = os.environ.get("SHELL", "")
-        shell_name = os.path.basename(shell_path) if shell_path else "unknown"
+        if os_type.startswith("win"):
+            # Windows normally has no SHELL variable. Prefer the actual
+            # PowerShell executable so the prompt does not report unknown.
+            shell_path = shutil.which("pwsh") or shutil.which("powershell") or ""
+            shell_name = "PowerShell" if shell_path else "unknown"
+        else:
+            shell_name = os.path.basename(shell_path) if shell_path else "unknown"
         import platform as plat
         os_version = f"{plat.system()} {plat.release()}"
         env_language = "cn" if not self._force_english and self._language == "cn" else "en"
@@ -270,57 +359,37 @@ class RuntimePromptRail(DeepAgentRail):
         if not self._force_english and self._language == "cn":
             env_content = (
                 "# 运行环境\n\n"
+                "## 平台与 Shell\n\n"
                 f"- 当前运行平台：`{os_type}`\n"
-                f"- Shell：{shell_name}\n"
-                f"- OS 版本：{os_version}\n\n"
+                f"- OS 版本：{os_version}\n"
+                f"- Shell：{shell_name}\n\n"
                 f"{shell_env_prompt}\n\n"
-                "## 平台命令差异（仅在必须使用 shell 时参考）\n\n"
-                "以下命令差异仅适用于测试、构建、git、包管理、运行脚本等必须调用 shell 的场景。"
-                "文件读取、编辑、搜索仍应优先使用专用工具。\n\n"
-                "| 操作 | Windows (`win32`/`win64`) | Linux/macOS (`linux`/`darwin`) |\n"
-                "|------|---------------------------|-------------------------------|\n"
-                "| 创建目录 | `mkdir folder` 或 PowerShell "
-                "`New-Item -ItemType Directory -Path folder` "
-                "| `mkdir -p folder` |\n"
-                "| 删除文件 | `del file.txt` 或 PowerShell `Remove-Item file.txt` | `rm file.txt` |\n"
-                "| 删除目录 | `rmdir folder` 或 PowerShell `Remove-Item -Recurse folder` | `rm -rf folder` |\n"
-                "| 查找文件 | `dir /s pattern` 或 PowerShell "
-                "`Get-ChildItem -Recurse -Filter pattern` "
-                "| `find . -name pattern` |\n\n"
-                "**特别注意**：Windows 的 cmd/PowerShell `mkdir` 不支持 `-p` 参数；"
-                "只有在 Shell 能力显示 Git Bash/PATH bash 可用且实际使用 bash/Git Bash 时，"
-                "`mkdir -p` 才是合适的。"
-                "如需在 cmd/PowerShell 中创建嵌套目录，请使用 PowerShell "
-                "`New-Item -ItemType Directory -Path \"parent/child\" -Force`，"
-                "或使用 cmd 分步创建 `mkdir parent && mkdir parent\\child`。"
+                "## 编码兼容性\n\n"
+                "- 代码将在 GBK 控制台或仅支持 GBK 的工具中运行时，避免直接使用 GBK 无法编码的 Emoji 和特殊字符。\n"
+                "- 必须使用这些字符时，选择明确支持 UTF-8 的执行工具或显式配置 UTF-8 编码。\n\n"
+                "## 时间相关查询\n\n"
+                "- 用户询问“最新、当前、今年、实时、近期”等信息并需要搜索时，搜索 query 应优先包含当前年份或日期。\n\n"
+                "## 当前渠道\n\n"
+                f"- 当前渠道：`{channel}`"
             )
         else:
             env_content = (
-                "# Environment\n\n"
+                "# Runtime Environment\n\n"
+                "## Platform and Shell\n\n"
                 f"- Current platform: `{os_type}`\n"
-                f"- Shell: {shell_name}\n"
-                f"- OS Version: {os_version}\n\n"
+                f"- OS version: {os_version}\n"
+                f"- Shell: {shell_name}\n\n"
                 f"{shell_env_prompt}\n\n"
-                "## Platform Command Differences (only when shell is required)\n\n"
-                "The following command differences apply only to scenarios where shell execution is required "
-                "(testing, builds, git, package management, running scripts). "
-                "File reading, editing, and searching should still prefer dedicated tools.\n\n"
-                "| Operation | Windows (`win32`/`win64`) | Linux/macOS (`linux`/`darwin`) |\n"
-                "|-----------|---------------------------|-------------------------------|\n"
-                "| Create directory | `mkdir folder` or PowerShell "
-                "`New-Item -ItemType Directory -Path folder` "
-                "| `mkdir -p folder` |\n"
-                "| Delete file | `del file.txt` or PowerShell `Remove-Item file.txt` | `rm file.txt` |\n"
-                "| Delete directory | `rmdir folder` or PowerShell `Remove-Item -Recurse folder` | `rm -rf folder` |\n"
-                "| Find file | `dir /s pattern` or PowerShell "
-                "`Get-ChildItem -Recurse -Filter pattern` "
-                "| `find . -name pattern` |\n\n"
-                "**WARNING**: Windows cmd/PowerShell `mkdir` does NOT support the `-p` flag; "
-                "`mkdir -p` is appropriate only when Shell capabilities show Git Bash/PATH bash "
-                "is available and you are actually using bash/Git Bash. "
-                "To create nested directories in cmd/PowerShell, use either PowerShell "
-                "`New-Item -ItemType Directory -Path \"parent/child\" -Force` "
-                "or cmd with step-by-step creation `mkdir parent && mkdir parent\\\\child`."
+                "## Encoding Compatibility\n\n"
+                "- When code will run in a GBK console or a tool that supports only GBK, avoid Emoji and "
+                "special characters that GBK cannot encode.\n"
+                "- If those characters are required, use a tool that explicitly supports UTF-8 or "
+                "configure UTF-8 encoding.\n\n"
+                "## Time-sensitive Queries\n\n"
+                "- When the user asks for the latest, current, this year's, real-time, or recent information "
+                "and search is needed, prefer including the current year or date in the query.\n\n"
+                "## Current Channel\n\n"
+                f"- Current channel: `{channel}`"
             )
 
         self.system_prompt_builder.add_section(PromptSection(
@@ -329,17 +398,300 @@ class RuntimePromptRail(DeepAgentRail):
             priority=89,
         ))
 
-        # ── Git status section ──
+        # ── Channel: directory and file-operation boundaries ──
+        # Remove both the consolidated section and legacy sections first so
+        # switching away from TUI/Web cannot leave stale directory guidance.
+        self.system_prompt_builder.remove_section("directory_boundaries")
+        self.system_prompt_builder.remove_section("tui_current_project_policy")
+        self.system_prompt_builder.remove_section("trusted_dirs_policy")
+        if self._channel in ("tui", "web", "ws_client"):
+            # This agent's own workspace. Team members each own one; without
+            # it (single-agent runs) the process-wide agent workspace is the
+            # same directory anyway.
+            agent_workspace_dir = self._existing_dir(self._workspace_dir) or str(get_agent_workspace_dir())
+            config_dir = str(get_user_workspace_dir() / "config")
+            project_dir = self._existing_dir(self._project_dir)
+            task_workspace_root = self._existing_dir(self._task_workspace_root)
+            task_work_dir = self._existing_dir(self._task_work_dir)
+            task_outputs_dir = self._existing_dir(self._task_outputs_dir)
+            runtime_cwd = (
+                self._existing_dir(self._cwd)
+                or task_work_dir
+                or project_dir
+                or agent_workspace_dir
+            )
+            has_projectless_task = (
+                project_dir is None
+                and task_workspace_root is not None
+                and task_work_dir is not None
+                and task_outputs_dir is not None
+            )
+            has_project = project_dir is not None
+            prompt_project_dir = project_dir or runtime_cwd
+            has_distinct_cwd = bool(
+                has_project
+                and not self._same_path(project_dir or "", runtime_cwd)
+            )
+
+            if not self._force_english and self._language == "cn":
+                if has_projectless_task:
+                    active_directory_content = (
+                        "## 当前任务目录\n\n"
+                        f"- 当前任务根目录：`{task_workspace_root}`\n"
+                        f"- 临时工作目录：`{task_work_dir}`\n"
+                        f"- 最终产物目录：`{task_outputs_dir}`\n\n"
+                        "- 相对路径以临时工作目录为基准。\n"
+                        "- Bash 未显式传入 `workdir` 时，默认在临时工作目录执行。\n"
+                        "- 中间文件、缓存和临时脚本放在临时工作目录。\n"
+                        "- 报告、导出文件、图片、数据等最终产物放在最终产物目录。\n\n"
+                    )
+                    directory_content = (
+                        "# 目录与文件操作边界\n\n"
+                        f"{active_directory_content}"
+                        "## 通用目录规则\n\n"
+                    )
+                elif not has_project:
+                    active_directory_content = (
+                        "## 当前项目目录\n\n"
+                        f"- 项目目录是当前运行时工作空间：`{prompt_project_dir}`\n\n"
+                        "- 相对路径以项目目录为基准。\n"
+                        "- Bash 未显式传入 `workdir` 时，默认在项目目录执行。\n"
+                        "- 未指定保存位置时，任务产物放在项目目录内的合理位置。\n\n"
+                    )
+                    directory_content = (
+                        "# 目录与文件操作边界\n\n"
+                        f"{active_directory_content}"
+                        "## 通用目录规则\n\n"
+                    )
+                else:
+                    project_description = (
+                        "- 项目目录是当前项目的根目录与项目上下文边界，"
+                        if has_distinct_cwd
+                        else "- 项目目录是你当前的工作空间，"
+                    )
+                    cwd_description = (
+                        f"- 当前工作目录（cwd、相对路径基准及 Bash 默认目录）是：`{runtime_cwd}`\n\n"
+                        if has_distinct_cwd
+                        else "\n"
+                    )
+                    separation_rule = (
+                        "- 项目目录与当前工作目录是两个独立概念，不得互相替换。\n"
+                        if has_distinct_cwd
+                        else ""
+                    )
+                    operation_directory = "当前工作目录" if has_distinct_cwd else "当前项目目录"
+                    directory_content = (
+                        "# 目录与文件操作边界\n\n"
+                        "## 项目目录\n\n"
+                        "### 项目目录说明\n\n"
+                        f"{project_description}"
+                        f"当前项目目录是：`{prompt_project_dir}`\n"
+                        f"{cwd_description}"
+                        "### 项目目录规则\n\n"
+                        f"{separation_rule}"
+                        f"- 用户任务中的相对路径必须相对于{operation_directory}路径去解析。\n"
+                        f"- Bash 未显式传入 `workdir` 时，默认在{operation_directory}执行。\n"
+                    )
+            else:
+                if has_projectless_task:
+                    active_directory_content = (
+                        "## Current Task Directories\n\n"
+                        f"- Current task root: `{task_workspace_root}`\n"
+                        f"- Temporary working directory: `{task_work_dir}`\n"
+                        f"- Final deliverables directory: `{task_outputs_dir}`\n\n"
+                        "- Resolve relative paths against the temporary working directory.\n"
+                        "- When Bash is called without an explicit `workdir`, "
+                        "run it in the temporary working directory.\n"
+                        "- Put intermediate files, caches, and temporary scripts in the temporary working directory.\n"
+                        "- Put reports, exports, images, data, and other final "
+                        "deliverables in the final deliverables directory.\n\n"
+                    )
+                    directory_content = (
+                        "# Directory and File-Operation Boundaries\n\n"
+                        f"{active_directory_content}"
+                        "## General Directory Rules\n\n"
+                    )
+                elif not has_project:
+                    active_directory_content = (
+                        "## Current Project Directory\n\n"
+                        f"- The project directory is the current runtime workspace: `{prompt_project_dir}`\n\n"
+                        "- Resolve relative paths against the project directory.\n"
+                        "- When Bash is called without an explicit `workdir`, run it in the project directory.\n"
+                        "- When no save location is specified, put task artifacts in "
+                        "an appropriate location under the project directory.\n\n"
+                    )
+                    directory_content = (
+                        "# Directory and File-Operation Boundaries\n\n"
+                        f"{active_directory_content}"
+                        "## General Directory Rules\n\n"
+                    )
+                else:
+                    project_description = (
+                        "- The project directory is the project root and project-context boundary; "
+                        if has_distinct_cwd
+                        else "- The project directory is your current workspace; "
+                    )
+                    cwd_description = (
+                        f"- The current working directory (cwd, relative-path base, and Bash default) is: "
+                        f"`{runtime_cwd}`\n\n"
+                        if has_distinct_cwd
+                        else "\n"
+                    )
+                    separation_rule = (
+                        "- The project directory and current working directory are independent concepts; do not "
+                        "substitute one for the other.\n"
+                        if has_distinct_cwd
+                        else ""
+                    )
+                    operation_directory = (
+                        "current working directory" if has_distinct_cwd else "current project directory"
+                    )
+                    directory_content = (
+                        "# Directory and File-Operation Boundaries\n\n"
+                        "## Project Directory\n\n"
+                        "### Project Directory Description\n\n"
+                        f"{project_description}"
+                        f"the current project directory is: `{prompt_project_dir}`\n"
+                        f"{cwd_description}"
+                        "### Project Directory Rules\n\n"
+                        f"{separation_rule}"
+                        f"- Resolve relative paths in user tasks against the {operation_directory}.\n"
+                        f"- When Bash is called without an explicit `workdir`, run it in the {operation_directory}.\n"
+                    )
+            if not self._force_english and self._language == "cn":
+                directory_content += (
+                    "- 用户已经提供明确路径时直接使用，不要重复询问。\n"
+                    "- 只有任务确实需要操作某个项目、且现有上下文无法确定项目位置时，才询问项目路径。\n\n"
+                    "## JiuwenSwarm 内部目录\n\n"
+                    f"- 智能体内部数据目录：`{agent_workspace_dir}`\n"
+                    f"- JiuwenSwarm 启动配置目录：`{config_dir}`\n"
+                    "- `IDENTITY.md`、`memory/`、`skills/`、`todo/` 和运行状态属于智能体内部数据。\n"
+                    f"- 技能执行产生的内部技能资产放在 `{agent_workspace_dir}/skills/{{skill_name}}/`。\n"
+                    "- 不要把普通任务产物写入智能体内部目录或启动配置目录。\n"
+                    "- 用户任务中的 `config/`、`memory/`、`skills/`、`todo/` 或 `workspace/` 不自动映射到 JiuwenSwarm 内部目录。"
+                )
+            else:
+                directory_content += (
+                    "- When the user has provided an explicit path, use it directly without asking again.\n"
+                    "- Ask for a project path only when the task truly requires a "
+                    "project and its location cannot be determined from the existing "
+                    "context.\n\n"
+                    "## JiuwenSwarm Internal Directories\n\n"
+                    f"- Agent internal data directory: `{agent_workspace_dir}`\n"
+                    f"- JiuwenSwarm startup configuration directory: `{config_dir}`\n"
+                    "- `IDENTITY.md`, `memory/`, `skills/`, `todo/`, and runtime state are Agent internal data.\n"
+                    f"- Internal skill assets produced by skill execution belong in "
+                    f"`{agent_workspace_dir}/skills/{{skill_name}}/`.\n"
+                    "- Do not write ordinary task artifacts to the Agent internal data "
+                    "directory or startup configuration directory.\n"
+                    "- `config/`, `memory/`, `skills/`, `todo/`, or `workspace/` in a "
+                    "user task do not automatically refer to JiuwenSwarm internal "
+                    "directories."
+                )
+            self.system_prompt_builder.add_section(PromptSection(
+                name="directory_boundaries",
+                content={"cn": directory_content, "en": directory_content},
+                priority=89,
+            ))
+
+    async def _refresh_dynamic_attachments(
+        self,
+        ctx: AgentCallbackContext,
+    ) -> dict[str, Any]:
+        """Refresh runtime and git sections without touching the system prefix."""
+        runtime_state: dict[str, Any] = {}
+        state_path = get_runtime_state_path(self._session_id)
+        try:
+            with open(state_path, encoding="utf-8") as f:
+                loaded_state = yaml.safe_load(f) or {}
+                if isinstance(loaded_state, dict):
+                    runtime_state = loaded_state
+        except FileNotFoundError:
+            pass
+        except Exception as exc:
+            logger.warning("Failed to read runtime state file %s: %s", state_path, exc)
+
+        configured_models: list[str] = []
+        raw_available_models = runtime_state.get("available_models") or []
+        available_models: list[str] = [
+            str(item).strip()
+            for item in raw_available_models
+            if str(item).strip()
+        ] if isinstance(raw_available_models, list) else []
+        if not available_models or not runtime_state.get("model"):
+            configured_models = self._configured_model_names()
+        if not available_models:
+            available_models = configured_models
+        fallback_model = configured_models[0] if configured_models else ""
+        model = str(
+            runtime_state.get("model")
+            or self._model_name
+            or fallback_model
+            or "unknown"
+        ).strip()
+        available_models_str = ", ".join(available_models) if available_models else model
+        configured_mode = str(
+            self._mode or runtime_state.get("mode") or "unknown"
+        ).strip()
+        mode = self._resolve_current_mode(ctx, configured_mode)
+        language_val = (
+            self._language
+            or runtime_state.get("language")
+            or "unknown"
+        ).strip()
+        channel = (runtime_state.get("channel") or self._channel or "unknown").strip()
+
+        if not self._force_english and self._language == "cn":
+            runtime_content = (
+                "# 运行时状态\n\n"
+                f"- 当前模型：{model}\n"
+                f"- 可用模型：{available_models_str}\n"
+                f"- 当前模式：{mode}\n"
+                f"- 当前语言：{language_val}\n"
+                f"- 当前渠道：{channel}"
+            )
+        else:
+            runtime_content = (
+                "# Runtime State\n\n"
+                f"- Current model: {model}\n"
+                f"- Available models: {available_models_str}\n"
+                f"- Current mode: {mode}\n"
+                f"- Current language: {language_val}\n"
+                f"- Current channel: {channel}"
+            )
+        await self._upsert_prompt_attachment(
+            ctx,
+            section="runtime.setting",
+            content=runtime_content,
+            kind=PromptAttachmentKind.RUNTIME,
+            priority=95,
+        )
+
+        return runtime_state
+
+    async def _sync_git_system_context(
+        self,
+        ctx: AgentCallbackContext,
+        runtime_state: dict[str, Any],
+    ) -> None:
+        """Install the conversation git snapshot in the cacheable system prefix."""
+        # Clear the legacy per-model-call attachment when upgrading a live agent.
+        await self._clear_prompt_attachment(ctx, section="git_status")
+        if self.system_prompt_builder is None:
+            return
+
+        self.system_prompt_builder.remove_section("git_status")
         git_branch = str(runtime_state.get("git_branch") or "").strip()
         if git_branch and git_branch != "N/A":
             git_main_branch = str(runtime_state.get("git_main_branch") or "").strip()
             git_status_text = str(runtime_state.get("git_status") or "").strip()
             git_recent_commits = str(runtime_state.get("git_recent_commits") or "").strip()
             git_user = str(runtime_state.get("git_user") or "").strip()
-
             git_lines = [
                 "This is the git status at the start of the conversation. "
-                "Note that this status is a snapshot in time, and will not update during the conversation.",
+                "Note that this status is a snapshot in time, and will not update during the conversation. "
+                "Run git yourself when you need the current state — for example before staging or "
+                "committing, or after anything may have changed the working tree.",
                 f"Current branch: {git_branch}",
             ]
             if git_main_branch:
@@ -350,176 +702,12 @@ class RuntimePromptRail(DeepAgentRail):
                 git_lines.append(f"Git user: {git_user}")
             git_lines.append(f"Status:\n{git_status_text or '(clean)'}")
             git_lines.append(f"Recent commits:\n{git_recent_commits or '(none)'}")
-
             git_content = "\n\n".join(git_lines)
-
-            await self._upsert_prompt_attachment(
-                ctx,
-                section="git_status",
-                content=git_content,
-                kind=PromptAttachmentKind.WORKSPACE_DELTA,
-                priority=87,
-            )
-        else:
-            await self._clear_prompt_attachment(
-                ctx,
-                section="git_status",
-            )
-
-        # ── Channel: browser_tool_policy or trusted_dirs_policy──
-        if self._channel == "web":
-            browser_tool_policy = (
-                "# Browser Tool Policy\n\n"
-                "- For browser tasks such as opening pages, navigation, clicking, typing, login, screenshots, "
-                "page inspection, or extracting data from a live website, use `task_tool` with "
-                '`subagent_type` set to `"browser_agent"` and put the full browser objective in '
-                "`task_description`.\n"
-                "- Before spawning `browser_agent` for booking, ticketing, purchasing, reservation, or "
-                "form-filling tasks, check whether the user has supplied enough confirmed details. "
-                "If required details are missing and A2UI is available, render a preflight A2UI form "
-                "with action name `browser_preflight_submit` instead of starting browser automation. "
-                "Do not use plain natural-language questions or `ask_user` for those missing "
-                "browser-task details when A2UI is available on the Web channel.\n"
-                "- Mandatory Web A2UI account-action gate: Gmail, email, mailbox cleanup, social "
-                "media posting, comments, and other externally visible account actions MUST use A2UI "
-                "when A2UI is available. Do not use `todo_create`, `todo_modify`, `memory_search`, "
-                "`task_tool`, plain text, Markdown, or `ask_user` as a substitute for A2UI preflight, "
-                "candidate selection, draft review, or final confirmation. For requests such as "
-                "finding emails and replying to the ones that need a reply, first use A2UI preflight "
-                "if filters or reply preferences are incomplete; after Gmail search, show the "
-                "emails/threads as A2UI candidates before opening, summarizing multiple messages, "
-                "drafting replies, or modifying mail; and show final A2UI confirmation before any "
-                "send, archive, delete, unsubscribe, label, mark-read, post, publish, comment, like, "
-                "follow, or delete action.\n"
-                "- For hotel booking flows, after `browser_agent` returns candidate hotels, render the "
-                "candidate list with A2UI selection actions named `hotel_option_select`. Include "
-                "`next_action=\"continue_hotel_booking\"`, the selected hotel identity, and the "
-                "confirmed city/date/guest context in each action context. When the user selects a "
-                "hotel, call `browser_agent` to continue from the current browser state and selected "
-                "candidate; do not restart the broad hotel search unless browser-state recovery is "
-                "needed. At the payment/order summary page, render a final A2UI confirmation using "
-                "`hotel_payment_confirm` and `hotel_payment_cancel` actions.\n"
-                "- For Gmail search, summarization, reply drafting, and cleanup flows, render search "
-                "results with `gmail_email_select` actions and cleanup candidates with "
-                "`gmail_cleanup_select` actions. When the user selects an email, continue from the "
-                "current Gmail browser state; do not repeat the broad Gmail search unless recovery is "
-                "needed. Filling a reply draft must use `gmail_reply_draft_select` and must stop "
-                "before sending. After `gmail_send_confirm`, send the email only if the visible "
-                "Gmail compose state matches the confirmed context. Final cleanup requires "
-                "`gmail_cleanup_confirm`. Respect `gmail_send_cancel` and `gmail_cleanup_cancel` "
-                "by stopping without side effects.\n"
-                "- For social media posting flows, render draft variants with "
-                "`social_post_draft_select`. After draft selection, use `browser_agent` to fill the "
-                "current platform compose UI but stop before any externally visible action. Final "
-                "publishing requires `social_post_confirm`; after confirmation, publish only if "
-                "the visible compose state matches the confirmed context. `social_post_cancel` "
-                "stops without publishing.\n"
-                "- Do not use bash, execute_code, subprocess, shell commands, or direct Chrome/Edge launches "
-                "for browser automation.\n"
-                "- If `task_tool` or `browser_agent` is unavailable, say that the browser "
-                "subagent is unavailable before trying to start a browser through commands."
-            )
             self.system_prompt_builder.add_section(PromptSection(
-                name="browser_tool_policy",
-                content={"cn": browser_tool_policy, "en": browser_tool_policy},
-                priority=98,
+                name="git_status",
+                content={"cn": git_content, "en": git_content},
+                priority=90,
             ))
-
-        if self._channel == "tui":
-            # Trusted directories policy for TUI mode
-            trusted_dirs = self._existing_dirs(self._trusted_dirs)
-            current_dir = (
-                self._existing_dir(self._cwd)
-                or self._existing_dir(self._project_dir)
-                or (trusted_dirs[0] if trusted_dirs else None)
-            )
-            if current_dir:
-                workspace_dir = str(get_agent_workspace_dir())
-                project_dir = current_dir
-                other_dirs = [
-                    path for path in trusted_dirs
-                    if not self._same_path(path, project_dir)
-                ]
-                cn_dirs_display = ", ".join(other_dirs) if other_dirs else "无"
-                en_dirs_display = ", ".join(other_dirs) if other_dirs else "none"
-                if not self._force_english and self._language == "cn":
-                    current_project_policy = (
-                        "# 当前项目工作空间\n\n"
-                        f"- 当前项目目录：{project_dir}\n"
-                        f"- 系统目录：{workspace_dir}\n\n"
-                        "- 当用户询问“当前工作空间”“当前工作目录”“当前项目目录”“项目空间”或 workspace，"
-                        "且没有明确限定 team workspace、系统目录或其他目录时，直接回答当前项目目录。\n"
-                        "- 不要为了回答这类问题调用 `pwd`、`ls` 或读取内部 Team Leader workspace；"
-                        "也不要把系统目录、team-workspace 或 Team Leader workspace 称为当前工作空间。\n"
-                    )
-                    trusted_dirs_content = (
-                        "# 工作目录策略\n\n"
-                        f"- 系统目录（不要在其中查找或运行项目文件）：{workspace_dir}\n"
-                        f"- 当前项目目录（你正在工作的项目，查询文件、运行测试、执行命令等均应在此目录下进行）：{project_dir}\n"
-                        f"- 其他可访问目录（可读写其中的资源，但不是当前项目目录）：{cn_dirs_display}\n\n"
-                        "重要规则：\n"
-                        "- 命令执行工具（mcp_exec_command）默认的工作目录是系统目录，"
-                        "如果你要在项目目录下执行命令，必须将工具的 workdir 参数设置为当前项目目录，"
-                        f"即 workdir=\"{project_dir}\"，不要使用默认值或 cd 方式切换，"
-                        "因为 cd 只在子shell中生效，不会改变工具本身的工作目录\n"
-                        "- 查找项目文件、读取项目代码时，应在当前项目目录下搜索，不要在系统目录下查找\n"
-                        "- 不要在系统目录下运行项目测试或构建，系统目录仅用于存放配置和状态文件\n"
-                        "- 若用户请求的操作涉及超出上述目录范围的路径，必须先向用户确认是否允许此次操作\n"
-                        "- 确认时需明确告知：操作的完整路径、操作类型（读取/编辑/执行）、潜在风险\n"
-                    )
-                else:
-                    current_project_policy = (
-                        "# Current Project Workspace\n\n"
-                        f"- Current project directory: {project_dir}\n"
-                        f"- System directory: {workspace_dir}\n\n"
-                        "- When the user asks for the current workspace, current working directory, "
-                        "current project directory, project space, or workspace without explicitly "
-                        "saying team workspace, "
-                        "system directory, or another directory, answer directly with the current "
-                        "project directory.\n"
-                        "- Do not call `pwd`, `ls`, or inspect the internal Team Leader workspace "
-                        "to answer this question, and do not call the system directory, "
-                        "team-workspace, or Team Leader workspace the current workspace.\n"
-                    )
-                    trusted_dirs_content = (
-                        "# Working Directory Policy\n\n"
-                        f"- System directory (never search or run project files here): {workspace_dir}\n"
-                        f"- Current project directory (the project you are working on; "
-                        f"all file queries, test runs, command execution should happen here): {project_dir}\n"
-                        f"- Other accessible directories (read/write allowed, but not the current project): "
-                        f"{en_dirs_display}\n\n"
-                        "Important rules:\n"
-                        "- The command execution tool (mcp_exec_command) defaults its working directory "
-                        "to the system directory. When you need to execute commands in the project directory, "
-                        "you MUST set the tool's workdir parameter to the current project directory, "
-                        f"i.e. workdir=\"{project_dir}\". Do NOT rely on cd to switch directories, "
-                        "because cd only takes effect inside a subshell and does not change the tool's "
-                        "actual working directory\n"
-                        "- When searching for project files or reading project code, search within the "
-                        "current project directory, not the system directory\n"
-                        "- Never run project tests or builds in the system directory; "
-                        "the system directory is only for config and state files\n"
-                        "- If the user requests an operation involving paths outside the above directories, "
-                        "you must first ask the user to confirm whether to allow this operation\n"
-                        "- When confirming, clearly state: the full path, operation type (read/edit/execute), "
-                        "potential risks\n"
-                    )
-                self.system_prompt_builder.add_section(PromptSection(
-                    name="tui_current_project_policy",
-                    content={"cn": current_project_policy, "en": current_project_policy},
-                    priority=99,
-                ))
-                await self._upsert_prompt_attachment(
-                    ctx,
-                    section="trusted_dirs_policy",
-                    content=trusted_dirs_content,
-                    kind=PromptAttachmentKind.WORKSPACE_DELTA,
-                    priority=90,
-                )
-            else:
-                await self._clear_prompt_attachment(ctx, section="trusted_dirs_policy")
-        else:
-            await self._clear_prompt_attachment(ctx, section="trusted_dirs_policy")
 
     async def _upsert_prompt_attachment(
         self,

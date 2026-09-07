@@ -2,6 +2,7 @@ import { addError, addInfo } from "../helpers.js";
 import { CommandKind, type SlashCommand } from "../types.js";
 
 export interface ModelMeta {
+  index?: number | string;
   name: string;
   alias?: string;
   model_name?: string;
@@ -9,6 +10,8 @@ export interface ModelMeta {
   api_base?: string;
   api_key_suffix?: string;
   is_current?: boolean;
+  // agentos 备份模型标记：与 defaults 并列可选可切换，但不抢启动默认
+  is_agentos?: boolean;
   reasoning_level?: string;
 }
 
@@ -90,14 +93,14 @@ export function createModelCommand(): SlashCommand {
         // If no arg or "list", show selectable model list
         if (value === "" || value === "list") {
           const payload = await ctx.request<ModelListPayload>("command.model", {});
-          const models = payload.available_models ?? [];
+          const modelsMeta = payload.models ?? [];
           const current = payload.current ?? "unknown";
-          if (models.length === 0) {
+          if (modelsMeta.length === 0) {
             ctx.addItem(addInfo(ctx.sessionId, "No models configured", "m"));
             return;
           }
-          const skipped = models.filter((m) => isReservedMultimodalModelKey(m));
-          const selectable = models.filter((m) => !isReservedMultimodalModelKey(m));
+          const skipped = modelsMeta.filter((m) => isReservedMultimodalModelKey(m.name));
+          const selectableMeta = modelsMeta.filter((m) => m.name && !isReservedMultimodalModelKey(m.name));
           if (skipped.length > 0) {
             ctx.addItem(
               addInfo(
@@ -107,21 +110,20 @@ export function createModelCommand(): SlashCommand {
               ),
             );
           }
-          if (selectable.length === 0) {
+          if (selectableMeta.length === 0) {
             ctx.addItem(addInfo(ctx.sessionId, "No switchable models in list", "m"));
             return;
           }
-          const modelsMeta = payload.models ?? [];
+          const selectable = selectableMeta.map((m) => m.name);
           // 优先用后端 is_current 标记判断当前模型（同名模型仅靠名字无法区分），
           // 回退到 name-matching（兼容不带 is_current 的旧后端）
-          const currentIdx = selectable.findIndex((m, i) => {
-            const meta = modelsMeta[i];
+          const currentIdx = selectableMeta.findIndex((meta) => {
             return meta?.is_current === true;
           });
           const fallbackCurrentIdx = currentIdx < 0 ? selectable.findIndex((m) => m === current) : currentIdx;
           const nameOccurrence: Record<string, number> = {};
-          const items = selectable.map((m, i) => {
-            const meta = modelsMeta[i];
+          const items = selectableMeta.map((meta, i) => {
+            const m = meta.name;
             const isCurrent = i === fallbackCurrentIdx;
             // 统计同名出现次序
             const seq = (nameOccurrence[m] ?? 0) + 1;
@@ -144,8 +146,7 @@ export function createModelCommand(): SlashCommand {
               const _mk = (mm: ModelMeta | undefined) =>
                 `${mm?.model_provider ?? ""}|${mm?.api_base ?? ""}`;
               const myFingerprint = _mk(meta);
-              const conflictCount = selectable.reduce((acc, _x, xi) => {
-                const xm = modelsMeta[xi];
+              const conflictCount = selectableMeta.reduce((acc, xm) => {
                 return xm && _mk(xm) === myFingerprint ? acc + 1 : acc;
               }, 0);
               if (conflictCount > 1) {
@@ -154,7 +155,7 @@ export function createModelCommand(): SlashCommand {
             }
             return {
               label: String(i + 1),
-              value: `${displayName}${keySuffix}${isCurrent ? " (current)" : ""}`,
+              value: `${displayName}${meta?.is_agentos === true ? " [agentos]" : ""}${keySuffix}${isCurrent ? " (current)" : ""}`,
             };
           });
           ctx.addItem(
@@ -183,10 +184,17 @@ export function createModelCommand(): SlashCommand {
           requested?: string;
           applied?: boolean;
           type?: string;
+          is_agentos?: boolean;
+          provider?: string;
         }>("command.model", { model: value });
 
         const isSwitch = !!payload.requested;
-        if (isSwitch) {
+        // agentos 备份模型：请求级注入路径，回包 type=switched_agentos。
+        // 不调 setModel（不改启动默认），改调 setSelectedAgentosModel 全局记录，
+        // 后续 sendMessage 注入 model_name 路由到 agentos 缓存条目。
+        if (isSwitch && (payload.type === "switched_agentos" || payload.is_agentos === true)) {
+          ctx.setSelectedAgentosModel?.(payload.current ?? payload.requested ?? value, payload.provider);
+        } else if (isSwitch) {
           ctx.setModel(payload.current ?? payload.requested ?? "");
         }
         const title = isSwitch

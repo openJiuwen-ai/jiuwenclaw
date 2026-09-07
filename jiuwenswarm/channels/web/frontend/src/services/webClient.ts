@@ -9,7 +9,10 @@ import {
   WsResponse,
 } from '../types';
 import { getWsBase } from '../utils/env';
+import { resolveUserId } from '../utils/userId';
 import i18n from '../i18n';
+import { GoalRecord } from '../types/goal';
+import { createSessionEventGate } from './sessionEventGate';
 
 type EventHandler = (event: WsEvent) => void;
 type TypedEventHandler<TPayload> = (event: WsEvent & { payload: TPayload }) => void;
@@ -31,6 +34,7 @@ const LEGACY_EVENT_MAP: Record<string, string> = {
   media_content: 'chat.media',
   file_content: 'chat.file',
   tool_call: 'chat.tool_call',
+  tool_update: 'chat.tool_update',
   tool_result: 'chat.tool_result',
   error: 'chat.error',
   interrupt_result: 'chat.interrupt_result',
@@ -84,13 +88,12 @@ class WebClient {
   private connectPromise: Promise<void> | null = null;
   private lastConnectOptions: WebConnectOptions = {};
   private requestSeq = 0;
+  private readonly sessionEventGate = createSessionEventGate((event) => {
+    this.dispatchEventNow(event);
+  });
 
   getState(): WebConnectionState {
     return this.state;
-  }
-
-  getInflightCount(): number {
-    return this.pending.size;
   }
 
   onStateChange(handler: StateHandler): () => void {
@@ -119,6 +122,10 @@ class WebClient {
         this.handlers.delete(eventName);
       }
     };
+  }
+
+  suspendSessionEvents(sessionId: string): () => void {
+    return this.sessionEventGate.suspend(sessionId);
   }
 
   async connect(options: WebConnectOptions = {}): Promise<void> {
@@ -195,6 +202,15 @@ class WebClient {
           this.updateState('closed');
           return;
         }
+        // 1008 Policy Violation: gateway 鉴权失败 (token 失效/缺失)。
+        // 重载页面, AppWithAuth 会探测 cookie 失效 -> 回到登录页。
+        if (closeEvent.code === 1008) {
+          this.updateState('closed');
+          if (typeof window !== 'undefined') {
+            window.location.reload();
+          }
+          return;
+        }
         this.scheduleReconnect();
       };
     });
@@ -258,6 +274,7 @@ class WebClient {
       id,
       method,
       params: params ?? {},
+      ...(options.isStream ? { is_stream: true } : {}),
     };
 
     return new Promise<T>((resolve, reject) => {
@@ -296,6 +313,41 @@ class WebClient {
       });
       this.ws?.send(JSON.stringify(message));
     });
+  }
+
+  /**
+   * 发出去就不等了——给那些正常路径上压根不会有 res 的 is_stream 请求用（目前是 command.goal
+   * 的 set/resume，见 backend-requests.md #4：process_stream/_chunk_to_message 对每个 chunk
+   * 无条件 type="event"，没有能产出 res 的分支，连"需要用户确认"这类失败也是走
+   * goal.confirm_required 事件）。跟 request() 共用同一套就绪检查（没连上照样立刻抛错，这个
+   * 检查本身不依赖等 res），区别只是不注册 pending/不设超时——没有 res 要等，也就没有"超时"
+   * 这回事，真实状态全靠调用方自己订阅事件拿。
+   */
+  async sendFireAndForget(
+    method: string,
+    params?: Record<string, unknown>,
+    options: { isStream?: boolean } = {}
+  ): Promise<void> {
+    await this.ensureReady();
+
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+      throw this.createWebError(i18n.t('network.connectionUnavailable'), 'WS_NOT_READY', undefined, true);
+    }
+
+    const message: WsRequest = {
+      type: 'req',
+      id: this.generateRequestId(),
+      method,
+      params: params ?? {},
+      ...(options.isStream ? { is_stream: true } : {}),
+    };
+
+    logDevWsTraffic({
+      direction: 'outgoing',
+      messageType: 'req',
+      data: message,
+    });
+    this.ws.send(JSON.stringify(message));
   }
 
   private async ensureReady(): Promise<void> {
@@ -414,12 +466,17 @@ class WebClient {
         message.error ?? i18n.t('network.requestFailed'),
         message.code,
         message.id,
-        this.isRetriableCode(message.code)
+        this.isRetriableCode(message.code),
+        message.payload
       )
     );
   }
 
   private dispatchEvent(event: WsEvent): void {
+    this.sessionEventGate.dispatch(event);
+  }
+
+  private dispatchEventNow(event: WsEvent): void {
     const handlers = this.handlers.get(event.event);
     if (!handlers || handlers.size === 0) {
       return;
@@ -478,7 +535,12 @@ class WebClient {
     if (options.apiKey) params.set('api_key', options.apiKey);
     if (options.apiBase) params.set('api_base', options.apiBase);
     if (options.model) params.set('model', options.model);
-    if (options.projectPath) params.set('project_path', options.projectPath);
+    if (options.projectDir) params.set('project_dir', options.projectDir);
+    // user_id 来自 URL ?user_id= 或 localStorage（见 utils/userId.ts），
+    // 供 gateway 为 faas 注入 X-Session-Context（CreateSandbox 绑定用户标识）。
+    // 浏览器 new WebSocket 无法设置自定义 header，只能走 query string。
+    const userId = resolveUserId();
+    if (userId) params.set('user_id', userId);
     const query = params.toString();
     const target = `${base}${path}`;
     return query ? `${target}?${query}` : target;
@@ -494,12 +556,14 @@ class WebClient {
     message: string,
     code?: string,
     requestId?: string,
-    retriable = false
+    retriable = false,
+    payload?: unknown
   ): WebError {
     const error = new Error(message) as WebError;
     error.code = code;
     error.requestId = requestId;
     error.retriable = retriable;
+    error.payload = payload;
     return error;
   }
 
@@ -520,6 +584,169 @@ export async function webRequest<T = unknown>(
   options?: WebRequestOptions
 ): Promise<T> {
   return webClient.request<T>(method, params, options);
+}
+
+// ── SwarmFlow workflow 分页 RPC 封装（command.workflows） ─────────
+
+export interface WorkflowListResponse {
+  type?: string;
+  workflows?: unknown[];
+  session_id?: string;
+  total?: number;
+  has_more?: boolean;
+}
+
+export interface WorkflowDetailResponse {
+  type?: string;
+  workflow?: unknown;
+  session_id?: string;
+  phase_total?: number;
+  has_more?: boolean;
+}
+
+export interface WorkflowPhaseResponse {
+  type?: string;
+  phase?: unknown;
+  session_id?: string;
+  agent_total?: number;
+  has_more?: boolean;
+  error?: unknown;
+}
+
+export interface WorkflowAgentResponse {
+  type?: string;
+  agent?: unknown;
+  session_id?: string;
+  error?: unknown;
+}
+
+export async function requestWorkflowList(
+  sessionId: string,
+  offset = 0,
+  limit?: number,
+): Promise<WorkflowListResponse> {
+  return webRequest<WorkflowListResponse>('command.workflows', {
+    session_id: sessionId,
+    action: 'list',
+    offset,
+    ...(limit == null ? {} : { limit }),
+  });
+}
+
+export async function requestWorkflowDetail(
+  sessionId: string,
+  workflowId: string,
+  phaseOffset = 0,
+  phaseLimit?: number,
+): Promise<WorkflowDetailResponse> {
+  return webRequest<WorkflowDetailResponse>('command.workflows', {
+    session_id: sessionId,
+    action: 'get_workflow',
+    workflow_id: workflowId,
+    phase_offset: phaseOffset,
+    ...(phaseLimit == null ? {} : { phase_limit: phaseLimit }),
+  });
+}
+
+export async function requestPhaseAgents(
+  sessionId: string,
+  workflowId: string,
+  phaseId: string,
+  agentOffset = 0,
+  agentLimit?: number,
+): Promise<WorkflowPhaseResponse> {
+  return webRequest<WorkflowPhaseResponse>('command.workflows', {
+    session_id: sessionId,
+    action: 'get_phase',
+    workflow_id: workflowId,
+    phase_id: phaseId,
+    agent_offset: agentOffset,
+    ...(agentLimit == null ? {} : { agent_limit: agentLimit }),
+  });
+}
+
+export async function requestAgentDetail(
+  sessionId: string,
+  workflowId: string,
+  phaseId: string,
+  agentId: string,
+): Promise<WorkflowAgentResponse> {
+  return webRequest<WorkflowAgentResponse>('command.workflows', {
+    session_id: sessionId,
+    action: 'get_agent',
+    workflow_id: workflowId,
+    phase_id: phaseId,
+    agent_id: agentId,
+  });
+}
+
+interface GoalCommandResponsePayload {
+  action?: string;
+  message?: string;
+  goal?: GoalRecord | null;
+  record?: GoalRecord | null;
+  cleared_goal?: GoalRecord | null;
+  existing_goal?: GoalRecord | null;
+  requested_objective?: string | null;
+  code?: string | null;
+}
+
+/**
+ * Goal（持续目标）控制里"有真正 res"的三个一次性动作：get/pause/clear。这三个走的是非流式
+ * 一次性响应（interface.py 的 process_message()），正常应该秒回，用默认超时兜底——这里超时
+ * 是真的有问题，不是误判。见 cjh/goal/Goal持续目标Web前端对接.md §4。
+ * clear 成功后 goal 应视为已清空，不用 cleared_goal 兜底出一个"已清除的目标"。
+ */
+export async function requestGoalAction(params: {
+  sessionId: string;
+  action: 'get' | 'pause' | 'clear';
+  /** 当前会话模式（如 'agent'），协议文档 v2 §2.1 要求带上，不要写死 'code.normal' */
+  mode?: string;
+}): Promise<GoalRecord | null> {
+  const { sessionId, action, mode } = params;
+  const payload = await webRequest<GoalCommandResponsePayload>('command.goal', {
+    session_id: sessionId,
+    action,
+    mode: mode ?? 'agent',
+  });
+  if (action === 'clear') {
+    return null;
+  }
+  return payload?.goal ?? payload?.record ?? null;
+}
+
+/**
+ * set/resume：is_stream:true，抢到监听席位后正常路径上永远不会有 res——`process_stream`/
+ * `_chunk_to_message`（gateway/message_handler/message_handler.py）对每个 chunk 无条件
+ * `type="event"`，没有能产出 res 的分支；连"目标已存在，需要 overwrite_confirmed 确认"这类
+ * 失败，协议里对应的也是 `goal.confirm_required` 事件，不是 res（见 backend-requests.md #4）。
+ * 所以这两个动作干脆不等 res：发出去就返回，真实状态全靠 goal.snapshot/goal.updated 事件驱动
+ * （`useWebSocket.ts` 的 `applyGoalSnapshot`），不再需要一个"等不到就超时"的 Promise。
+ */
+export async function sendGoalStreamCommand(params: {
+  sessionId: string;
+  action: 'set' | 'resume';
+  objective?: string;
+  mode?: string;
+  modelName?: string | null;
+}): Promise<void> {
+  const { sessionId, action, objective, mode, modelName } = params;
+  await webClient.sendFireAndForget(
+    'command.goal',
+    {
+      session_id: sessionId,
+      action,
+      mode: mode ?? 'agent',
+      ...(action === 'set' ? { objective, overwrite_confirmed: true } : {}),
+      ...(modelName ? { model_name: modelName } : {}),
+    },
+    { isStream: true }
+  );
+}
+
+// Expose webClient to window for debugging in development
+if (import.meta.env.DEV) {
+  (window as any).webClient = webClient;
 }
 
 export type { WsEvent, WebMessage };

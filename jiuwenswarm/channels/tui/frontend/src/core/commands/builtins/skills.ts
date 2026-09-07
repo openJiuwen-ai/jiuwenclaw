@@ -1,5 +1,7 @@
-import { flattenArrayPayload, formatValue, makeItem } from "../helpers.js";
+import { flattenArrayPayload, makeItem } from "../helpers.js";
 import { CommandKind, type SlashCommand } from "../types.js";
+
+const ONLINE_SKILL_SOURCES = new Set(["clawhub"]);
 
 type SkillNetItem = {
   skill_name: string;
@@ -46,7 +48,7 @@ async function pollSkillNetInstall(
   installId: string,
   maxWaitMs: number = 15 * 60 * 1000,
   pollMs: number = 800,
-): Promise<{ success?: boolean; status?: string; detail?: string; skill?: { name?: string; source?: string } }> {
+): Promise<{ success?: boolean; status?: string; detail?: string; detail_key?: string; skill?: { name?: string; source?: string } }> {
   const deadline = Date.now() + maxWaitMs;
   while (Date.now() < deadline) {
     await new Promise((r) => setTimeout(r, pollMs));
@@ -61,6 +63,61 @@ async function pollSkillNetInstall(
     // still pending — keep polling
   }
   return { success: false, detail: `SkillNet install timed out after ${Math.round(maxWaitMs / 1000)}s` };
+}
+
+/** Detect "skill already installed" from a SkillNet install result (sync response or polled final status).
+ *  Backend signals this via detail_key "skills.skillNet.errors.skillAlreadyInstalled"
+ *  or a Chinese detail containing 已安装/已存在. */
+function isSkillNetAlreadyInstalled(result: { detail?: string; detail_key?: string } | undefined): boolean {
+  if (!result) return false;
+  if (result.detail_key === "skills.skillNet.errors.skillAlreadyInstalled") return true;
+  return !!(result.detail?.includes("已存在") || result.detail?.includes("已安装"));
+}
+
+/** After a SkillNet install reports "already installed" (the async backend detects this
+ *  during polling, not in the initial sync response), prompt the user to overwrite or cancel.
+ *  Returns true if handled (overwrite attempted or cancelled), false if not an "already installed" case. */
+async function promptSkillNetOverwrite(
+  ctx: import("../types.js").CommandContext,
+  url: string,
+  result: { detail?: string; detail_key?: string } | undefined,
+): Promise<boolean> {
+  if (!isSkillNetAlreadyInstalled(result)) return false;
+  const answers = await ctx.askQuestions([
+    {
+      header: "SkillNet",
+      question: `Skill already exists. Do you want to force overwrite it from SkillNet?`,
+      options: [
+        { label: "Yes, overwrite", description: `Re-install from SkillNet, replacing the existing version` },
+        { label: "No, cancel", description: "Keep the existing skill unchanged" },
+      ],
+    },
+  ]);
+  const selected = answers[0]?.selected_options?.[0];
+  if (selected !== "Yes, overwrite") {
+    ctx.addItem(makeItem(ctx.sessionId, "info", `Installation cancelled. Skill remains unchanged.`));
+    return true;
+  }
+  ctx.addItem(makeItem(ctx.sessionId, "info", `Force re-installing from SkillNet: ${url}`));
+  const forcePayload = await ctx.request<{ success?: boolean; detail?: string; pending?: boolean; install_id?: string }>(
+    "skills.skillnet.install",
+    { url, force: true },
+    120_000,
+  );
+  if (forcePayload.success && forcePayload.pending && forcePayload.install_id) {
+    ctx.addItem(makeItem(ctx.sessionId, "info", `Downloading... (install_id: ${forcePayload.install_id.slice(0, 8)})`));
+    const finalSt = await pollSkillNetInstall(ctx, forcePayload.install_id);
+    if (finalSt.success && finalSt.status === "done") {
+      ctx.addItem(makeItem(ctx.sessionId, "info", `Skill re-installed from SkillNet: ${finalSt.skill?.name || url}`));
+    } else {
+      ctx.addItem(makeItem(ctx.sessionId, "error", finalSt.detail || `SkillNet force install failed: ${url}`));
+    }
+  } else if (forcePayload.success && !forcePayload.pending) {
+    ctx.addItem(makeItem(ctx.sessionId, "info", `Skill re-installed from SkillNet: ${url}`));
+  } else {
+    ctx.addItem(makeItem(ctx.sessionId, "error", forcePayload.detail || `SkillNet force install failed: ${url}`));
+  }
+  return true;
 }
 
 async function listSkills(ctx: import("../types.js").CommandContext): Promise<void> {
@@ -117,14 +174,14 @@ async function listSkills(ctx: import("../types.js").CommandContext): Promise<vo
 export function createSkillsCommand(): SlashCommand {
   return {
     name: "skills",
-    description: "Manage skills (list, install, uninstall, marketplace, skillnet, use)",
-    usage: "/skills [list|install|uninstall|marketplace|skillnet|use]",
-    example: "/skills install my-skill  |  /skills install code-review@clawhub  |  /skills skillnet search code",
+    description: "Manage skills (list, install, uninstall, marketplace, use)",
+    usage: "/skills [list|install|uninstall|marketplace|use]",
+    example: "/skills install my-skill  |  /skills install code-review@clawhub",
     kind: CommandKind.BUILT_IN,
     action: async (ctx) => {
       await listSkills(ctx);
     },
-    subCommands: [
+    subCommands: ([
       {
         name: "list",
         description: "List skills",
@@ -138,15 +195,15 @@ export function createSkillsCommand(): SlashCommand {
       },
       {
         name: "install",
-        description: "Install a skill (builtin name, slug@clawhub, name@skillnet, plugin@marketplace, or local path/URL)",
-        usage: "/skills install <skill> | <slug@clawhub> | <name@skillnet> | <skill@marketplace> | <path_or_url>",
-        example: "/skills install my-skill  |  /skills install code-review@clawhub  |  /skills install code-review@skillnet",
+        description: "Install a skill (builtin name, slug@clawhub, plugin@marketplace, or local path/URL)",
+        usage: "/skills install <skill> | <slug@clawhub> | <skill@marketplace> | <path_or_url>",
+        example: "/skills install my-skill  |  /skills install code-review@clawhub",
         kind: CommandKind.BUILT_IN,
         takesArgs: true,
         action: async (ctx, args) => {
           const spec = args.trim();
           if (!spec) {
-            ctx.addItem(makeItem(ctx.sessionId, "error", "Usage: /skills install <skill> | <slug@clawhub> | <name@skillnet> | <skill@marketplace> | <path_or_url>"));
+            ctx.addItem(makeItem(ctx.sessionId, "error", "Usage: /skills install <skill> | <slug@clawhub> | <skill@marketplace> | <path_or_url>"));
             return;
           }
 
@@ -163,6 +220,36 @@ export function createSkillsCommand(): SlashCommand {
             if (payload.success) {
               const skillName = payload.skill?.name || spec;
               ctx.addItem(makeItem(ctx.sessionId, "info", `Skill imported: ${skillName}`));
+            } else if (payload.detail?.includes("已存在") || payload.detail?.includes("已安装")) {
+              // Skill already installed — ask user if they want to force overwrite
+              const existingName = payload.detail.replace(/^skill\s+/, "").replace(/[\s已存在安装]+.*$/, "") || spec;
+              const answers = await ctx.askQuestions([
+                {
+                  header: "Import",
+                  question: `Skill "${existingName}" is already installed. Do you want to force overwrite it?`,
+                  options: [
+                    { label: "Yes, overwrite", description: `Re-import from "${spec}", replacing the existing version` },
+                    { label: "No, cancel", description: "Keep the existing skill unchanged" },
+                  ],
+                },
+              ]);
+              const selected = answers[0]?.selected_options?.[0];
+              if (selected === "Yes, overwrite") {
+                ctx.addItem(makeItem(ctx.sessionId, "info", `Force re-importing from: ${spec}`));
+                const forcePayload = await ctx.request<{ success?: boolean; detail?: string; skill?: { name?: string } }>(
+                  "skills.import_local",
+                  { path: spec, force: true },
+                  120_000,
+                );
+                if (forcePayload.success) {
+                  const skillName = forcePayload.skill?.name || spec;
+                  ctx.addItem(makeItem(ctx.sessionId, "info", `Skill re-imported: ${skillName}`));
+                } else {
+                  ctx.addItem(makeItem(ctx.sessionId, "error", forcePayload.detail || `Import failed: ${spec}`));
+                }
+              } else {
+                ctx.addItem(makeItem(ctx.sessionId, "info", `Import cancelled. Skill remains unchanged.`));
+              }
             } else {
               ctx.addItem(
                 makeItem(ctx.sessionId, "error", payload.detail || `Import failed: ${spec}`),
@@ -171,14 +258,21 @@ export function createSkillsCommand(): SlashCommand {
             return;
           }
 
-          // ClawHub install flow: "slug@clawhub" or bare slug that looks like a ClawHub identifier
+          // ClawHub install flow: "ownerHandle/slug@clawhub" or "slug@clawhub"
           // ClawHub identifiers are alphanumeric slugs like "code-review", "daily-report" etc.
           if (spec.includes("@clawhub") || (spec.includes("@") && spec.endsWith("@clawhub"))) {
-            const slug = spec.replace(/@clawhub$/i, "");
+            const clawhubPart = spec.replace(/@clawhub$/i, "");
+            let slug = clawhubPart;
+            let ownerHandle: string | undefined;
+            if (clawhubPart.includes("/")) {
+              const slashIdx = clawhubPart.indexOf("/");
+              ownerHandle = clawhubPart.substring(0, slashIdx);
+              slug = clawhubPart.substring(slashIdx + 1);
+            }
             ctx.addItem(makeItem(ctx.sessionId, "info", `Installing from ClawHub: ${slug}`));
             const downloadPayload = await ctx.request<{ success?: boolean; detail?: string; detail_key?: string; skill?: { name?: string; source?: string } }>(
               "skills.clawhub.download",
-              { slug, force: false },
+              { slug, owner_handle: ownerHandle || "", force: false },
               120_000,
             );
             if (downloadPayload.success) {
@@ -211,7 +305,7 @@ export function createSkillsCommand(): SlashCommand {
                   ctx.addItem(makeItem(ctx.sessionId, "info", `Force re-installing from ClawHub: ${slug}`));
                   const forcePayload = await ctx.request<{ success?: boolean; detail?: string; detail_key?: string; skill?: { name?: string; source?: string } }>(
                     "skills.clawhub.download",
-                    { slug, force: true },
+                    { slug, owner_handle: ownerHandle || "", force: true },
                     120_000,
                   );
                   if (forcePayload.success) {
@@ -239,7 +333,7 @@ export function createSkillsCommand(): SlashCommand {
                     value: s.slug,
                     description: `${s.summary || "(no description)"} | slug: ${s.slug} | v${s.version || "?"}`,
                   }));
-                  ctx.addItem(makeItem(ctx.sessionId, "info", `Found ${searchPayload.skills.length} matching skills on ClawHub. Use the slug shown below:`, "*", { view: "list", title: "ClawHub Search Results (use slug@clawhub to install)", items }));
+                  ctx.addItem(makeItem(ctx.sessionId, "info", `Found ${searchPayload.skills.length} matching skills on ClawHub. Use the slug shown below:`, "*", { view: "list", title: "ClawHub Search Results", items }));
                 } else {
                   // Search also requires token — if token error, give guidance
                   if (searchPayload.detail_key === "skills.clawhub.errors.tokenNotConfigured") {
@@ -262,7 +356,7 @@ export function createSkillsCommand(): SlashCommand {
           // SkillNet skills are identified by URL, not slug. The @skillnet format triggers
           // a search first. Only auto-installs if an exact match by skill_name is found;
           // otherwise shows search results and lets the user pick the right one.
-          if (spec.endsWith("@skillnet")) {
+          if (spec.endsWith("@skillnet") && ONLINE_SKILL_SOURCES.has("skillnet")) {
             const skillName = spec.replace(/@skillnet$/i, "");
             ctx.addItem(makeItem(ctx.sessionId, "info", `Searching SkillNet for: ${skillName}`));
             const searchPayload = await ctx.request<{ success?: boolean; detail?: string; detail_key?: string; count?: number; skills?: SkillNetItem[] }>(
@@ -300,51 +394,21 @@ export function createSkillsCommand(): SlashCommand {
               120_000,
             );
             if (!installPayload.success) {
-              if (installPayload.detail?.includes("已存在") || installPayload.detail?.includes("已安装")) {
-                const answers = await ctx.askQuestions([
-                  {
-                    header: "SkillNet",
-                    question: `Skill "${exactMatch.skill_name}" is already installed. Do you want to force overwrite it?`,
-                    options: [
-                      { label: "Yes, overwrite", description: `Re-install from SkillNet, replacing the existing version` },
-                      { label: "No, cancel", description: "Keep the existing skill unchanged" },
-                    ],
-                  },
-                ]);
-                const selected = answers[0]?.selected_options?.[0];
-                if (selected === "Yes, overwrite") {
-                  const forcePayload = await ctx.request<{ success?: boolean; detail?: string; pending?: boolean; install_id?: string }>(
-                    "skills.skillnet.install",
-                    { url: skillUrl, force: true },
-                    120_000,
-                  );
-                  if (forcePayload.success && forcePayload.pending && forcePayload.install_id) {
-                    ctx.addItem(makeItem(ctx.sessionId, "info", `Downloading... (install_id: ${forcePayload.install_id.slice(0, 8)})`));
-                    const finalSt = await pollSkillNetInstall(ctx, forcePayload.install_id);
-                    if (finalSt.success && finalSt.status === "done") {
-                      ctx.addItem(makeItem(ctx.sessionId, "info", `Skill re-installed from SkillNet: ${finalSt.skill?.name || exactMatch.skill_name}`));
-                    } else {
-                      ctx.addItem(makeItem(ctx.sessionId, "error", finalSt.detail || `SkillNet force install failed`));
-                    }
-                  } else if (forcePayload.success && !forcePayload.pending) {
-                    ctx.addItem(makeItem(ctx.sessionId, "info", `Skill re-installed from SkillNet: ${exactMatch.skill_name}`));
-                  } else {
-                    ctx.addItem(makeItem(ctx.sessionId, "error", forcePayload.detail || `SkillNet force install failed`));
-                  }
-                } else {
-                  ctx.addItem(makeItem(ctx.sessionId, "info", `Installation cancelled. Skill remains unchanged.`));
-                }
-              } else {
-                ctx.addItem(makeItem(ctx.sessionId, "error", installPayload.detail || `SkillNet install failed: ${skillUrl}`));
-              }
+              // SkillNet install is async: "already installed" is normally detected during polling,
+              // but handle the sync response defensively before falling back to a plain error.
+              if (await promptSkillNetOverwrite(ctx, skillUrl, installPayload)) return;
+              ctx.addItem(makeItem(ctx.sessionId, "error", installPayload.detail || `SkillNet install failed: ${skillUrl}`));
               return;
             }
-            // Async install — poll for completion
+            // Async install — poll for completion. "Already installed" is detected here by the
+            // backend during the background job, surfaced as status=failed with a specific detail.
             if (installPayload.pending && installPayload.install_id) {
               ctx.addItem(makeItem(ctx.sessionId, "info", `Downloading... (install_id: ${installPayload.install_id.slice(0, 8)})`));
               const finalSt = await pollSkillNetInstall(ctx, installPayload.install_id);
               if (finalSt.success && finalSt.status === "done") {
                 ctx.addItem(makeItem(ctx.sessionId, "info", `Skill installed from SkillNet: ${finalSt.skill?.name || exactMatch.skill_name}`));
+              } else if (await promptSkillNetOverwrite(ctx, skillUrl, finalSt)) {
+                return;
               } else {
                 ctx.addItem(makeItem(ctx.sessionId, "error", finalSt.detail || `SkillNet install failed: ${skillUrl}`));
               }
@@ -383,6 +447,43 @@ export function createSkillsCommand(): SlashCommand {
           );
           if (payload.success) {
             ctx.addItem(makeItem(ctx.sessionId, "info", `Skill installed: ${finalSpec}`));
+          } else if (payload.detail?.includes("已存在") || payload.detail?.includes("已安装")) {
+            // Builtin skills cannot be force-overwritten (backend rejects force) — just warn.
+            // A bare name (no @) or "<name>@builtin" both resolve to a builtin on the backend.
+            const isBuiltin = !finalSpec.includes("@") || finalSpec.endsWith("@builtin");
+            if (isBuiltin) {
+              const builtinName = finalSpec.replace(/@builtin$/i, "");
+              ctx.addItem(makeItem(ctx.sessionId, "info",
+                `Skill "${builtinName}" is already installed (built-in). Reinstallation is not supported — the existing version is kept.`));
+              return;
+            }
+            // Marketplace skill already installed — ask user if they want to force overwrite
+            const answers = await ctx.askQuestions([
+              {
+                header: "Install",
+                question: `Skill "${finalSpec}" is already installed. Do you want to force overwrite it?`,
+                options: [
+                  { label: "Yes, overwrite", description: `Re-install "${finalSpec}", replacing the existing version` },
+                  { label: "No, cancel", description: "Keep the existing skill unchanged" },
+                ],
+              },
+            ]);
+            const selected = answers[0]?.selected_options?.[0];
+            if (selected === "Yes, overwrite") {
+              ctx.addItem(makeItem(ctx.sessionId, "info", `Force re-installing: ${finalSpec}`));
+              const forcePayload = await ctx.request<{ success?: boolean; detail?: string }>(
+                "skills.install",
+                { spec: finalSpec, force: true },
+                120_000,
+              );
+              if (forcePayload.success) {
+                ctx.addItem(makeItem(ctx.sessionId, "info", `Skill re-installed: ${finalSpec}`));
+              } else {
+                ctx.addItem(makeItem(ctx.sessionId, "error", forcePayload.detail || `Install failed: ${finalSpec}`));
+              }
+            } else {
+              ctx.addItem(makeItem(ctx.sessionId, "info", `Installation cancelled. Skill "${finalSpec}" remains unchanged.`));
+            }
           } else {
             ctx.addItem(
               makeItem(ctx.sessionId, "error", payload.detail || `Install failed: ${finalSpec}`),
@@ -667,6 +768,9 @@ export function createSkillsCommand(): SlashCommand {
                   description: `${s.skill_description || "(no description)"} | by ${s.author || "?"} | ⭐${s.stars || 0} | ${s.category || "-"}`,
                 }));
                 ctx.addItem(makeItem(ctx.sessionId, "info", `SkillNet results (${payload.skills.length})`, "*", { view: "list", title: "SkillNet Search Results (use /skills skillnet install <url> to install)", items }));
+              } else if (payload.success) {
+                // Search succeeded but matched nothing — not a failure
+                ctx.addItem(makeItem(ctx.sessionId, "info", `No skills found on SkillNet for: ${q}`));
               } else {
                 ctx.addItem(makeItem(ctx.sessionId, "error", payload.detail || `SkillNet search failed: ${q}`));
               }
@@ -692,53 +796,21 @@ export function createSkillsCommand(): SlashCommand {
                 120_000,
               );
               if (!installPayload.success) {
-                // Skill already installed — ask user if they want to force overwrite
-                if (installPayload.detail?.includes("已存在") || installPayload.detail?.includes("已安装")) {
-                  const answers = await ctx.askQuestions([
-                    {
-                      header: "SkillNet",
-                      question: `Skill already exists. Do you want to force overwrite it from SkillNet?`,
-                      options: [
-                        { label: "Yes, overwrite", description: `Re-install from SkillNet, replacing the existing version` },
-                        { label: "No, cancel", description: "Keep the existing skill unchanged" },
-                      ],
-                    },
-                  ]);
-                  const selected = answers[0]?.selected_options?.[0];
-                  if (selected === "Yes, overwrite") {
-                    ctx.addItem(makeItem(ctx.sessionId, "info", `Force re-installing from SkillNet: ${url}`));
-                    const forcePayload = await ctx.request<{ success?: boolean; detail?: string; pending?: boolean; install_id?: string }>(
-                      "skills.skillnet.install",
-                      { url, force: true },
-                      120_000,
-                    );
-                    if (forcePayload.success && forcePayload.pending && forcePayload.install_id) {
-                      ctx.addItem(makeItem(ctx.sessionId, "info", `Downloading... (install_id: ${forcePayload.install_id.slice(0, 8)})`));
-                      const finalSt = await pollSkillNetInstall(ctx, forcePayload.install_id);
-                      if (finalSt.success && finalSt.status === "done") {
-                        ctx.addItem(makeItem(ctx.sessionId, "info", `Skill re-installed from SkillNet: ${finalSt.skill?.name || url}`));
-                      } else {
-                        ctx.addItem(makeItem(ctx.sessionId, "error", finalSt.detail || `SkillNet force install failed: ${url}`));
-                      }
-                    } else if (forcePayload.success && !forcePayload.pending) {
-                      ctx.addItem(makeItem(ctx.sessionId, "info", `Skill re-installed from SkillNet: ${url}`));
-                    } else {
-                      ctx.addItem(makeItem(ctx.sessionId, "error", forcePayload.detail || `SkillNet force install failed: ${url}`));
-                    }
-                  } else {
-                    ctx.addItem(makeItem(ctx.sessionId, "info", `Installation cancelled. Skill remains unchanged.`));
-                  }
-                } else {
-                  ctx.addItem(makeItem(ctx.sessionId, "error", installPayload.detail || `SkillNet install failed: ${url}`));
-                }
+                // SkillNet install is async: the sync response rarely carries "already installed"
+                // directly, but handle it defensively before falling back to a plain error.
+                if (await promptSkillNetOverwrite(ctx, url, installPayload)) return;
+                ctx.addItem(makeItem(ctx.sessionId, "error", installPayload.detail || `SkillNet install failed: ${url}`));
                 return;
               }
-              // Async install — poll for completion
+              // Async install — poll for completion. "Already installed" is detected here by the
+              // backend during the background job, surfaced as status=failed with a specific detail.
               if (installPayload.pending && installPayload.install_id) {
                 ctx.addItem(makeItem(ctx.sessionId, "info", `Downloading... (install_id: ${installPayload.install_id.slice(0, 8)})`));
                 const finalSt = await pollSkillNetInstall(ctx, installPayload.install_id);
                 if (finalSt.success && finalSt.status === "done") {
                   ctx.addItem(makeItem(ctx.sessionId, "info", `Skill installed from SkillNet: ${finalSt.skill?.name || url}`));
+                } else if (await promptSkillNetOverwrite(ctx, url, finalSt)) {
+                  return;
                 } else {
                   ctx.addItem(makeItem(ctx.sessionId, "error", finalSt.detail || `SkillNet install failed: ${url}`));
                 }
@@ -781,15 +853,15 @@ export function createSkillsCommand(): SlashCommand {
         },
         action: async (ctx, args) => {
           const parts = args.trim().split(/\s*,\s*(.*)/);
-          const skill_name = parts[0];
-          const query = parts[1];
+          const skill_name = parts[0]?.trim();
+          const query = parts[1]?.trim();
           if (!skill_name || !query) {
             ctx.addItem(makeItem(ctx.sessionId, "error", "Usage: /skills use <skill_name>, <query>"));
             return;
           }
-          const text = `/skills use ${skill_name}, ${query}`
-
-          const requestId = ctx.sendMessage(text)
+          // 兼容路径：不再拼 `/skills use` 文本，
+          // 直接把干净的 query 作为 content 发送，skill 名走独立的 skills 参数。
+          const requestId = ctx.sendMessage(query, undefined, undefined, undefined, [skill_name]);
           if (!requestId) {
             ctx.addItem(
               makeItem(ctx.sessionId, "error", "offline: waiting for reconnect before sending /skills use request"),
@@ -798,6 +870,8 @@ export function createSkillsCommand(): SlashCommand {
           }
         },
       },
-    ],
+    ] satisfies SlashCommand[]).filter(
+      (command) => command.name !== "skillnet" || ONLINE_SKILL_SOURCES.has("skillnet"),
+    ),
   };
 }

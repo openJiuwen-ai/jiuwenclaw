@@ -25,7 +25,6 @@ interface UpdateStatusPayload {
 }
 
 interface UpdaterConfigPayload {
-  enabled?: unknown;
   release_api_type?: unknown;
   release_api_url?: unknown;
 }
@@ -68,13 +67,15 @@ function formatPublishedAt(value: string, locale: string): string {
   }).format(date);
 }
 
+const UPDATER_STATUS_EVENT = 'jiuwenswarm:updater-status';
+
 export function UpdatePanel({ isConnected, request }: UpdatePanelProps) {
   const { t, i18n } = useTranslation();
   const [status, setStatus] = useState<UpdateStatusPayload | null>(null);
   const [config, setConfig] = useState<UpdaterConfigPayload | null>(null);
   const [loading, setLoading] = useState(false);
   const [checking, setChecking] = useState(false);
-  const [savingConfig, setSavingConfig] = useState(false);
+  const [resettingSource, setResettingSource] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const refreshStatus = useCallback(async () => {
@@ -106,7 +107,27 @@ export function UpdatePanel({ isConnected, request }: UpdatePanelProps) {
   }, [refreshConfig, refreshStatus]);
 
   useEffect(() => {
-    if (normalizeString(status?.state) !== 'downloading' && normalizeString(status?.state) !== 'upgrading') {
+    const handleUpdaterStatus = (event: Event) => {
+      const payload = (event as CustomEvent<UpdateStatusPayload>).detail;
+      if (!payload || typeof payload !== 'object') {
+        return;
+      }
+      setStatus(payload);
+      setError(normalizeString(payload.error) || null);
+    };
+    window.addEventListener(UPDATER_STATUS_EVENT, handleUpdaterStatus);
+    return () => {
+      window.removeEventListener(UPDATER_STATUS_EVENT, handleUpdaterStatus);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (
+      normalizeString(status?.state) !== 'checking' &&
+      normalizeString(status?.state) !== 'downloading' &&
+      normalizeString(status?.state) !== 'upgrading' &&
+      normalizeString(status?.state) !== 'installing'
+    ) {
       return;
     }
     const timer = window.setInterval(() => {
@@ -118,7 +139,7 @@ export function UpdatePanel({ isConnected, request }: UpdatePanelProps) {
   }, [refreshStatus, status?.state]);
 
   const handleCheck = useCallback(async () => {
-    if (!isConnected || checking) return;
+    if (!isConnected || checking || normalizeString(status?.state) === 'downloading') return;
     setChecking(true);
     setError(null);
     try {
@@ -130,7 +151,7 @@ export function UpdatePanel({ isConnected, request }: UpdatePanelProps) {
     } finally {
       setChecking(false);
     }
-  }, [checking, isConnected, request, t]);
+  }, [checking, isConnected, status, request, t]);
 
   const handleDownload = useCallback(async () => {
     if (!isConnected) return;
@@ -144,28 +165,19 @@ export function UpdatePanel({ isConnected, request }: UpdatePanelProps) {
     }
   }, [isConnected, request, t]);
 
-  const handleConfigChange = useCallback((key: keyof UpdaterConfigPayload, value: string | boolean) => {
-    setConfig((prev) => ({ ...(prev ?? {}), [key]: value }));
-  }, []);
-
-  const handleSaveConfig = useCallback(async () => {
-    if (!config || savingConfig) {
-      return;
-    }
-    setSavingConfig(true);
+  const handleResetSource = useCallback(async () => {
+    if (resettingSource) return;
+    setResettingSource(true);
     setError(null);
     try {
-      const payload = await request<UpdaterConfigPayload>('updater.set_conf', {
-        enabled: normalizeBoolean(config.enabled),
-        release_api_url: normalizeString(config.release_api_url),
-      });
+      const payload = await request<UpdaterConfigPayload>('updater.reset_source');
       setConfig(payload);
-    } catch (saveError) {
-      setError(saveError instanceof Error ? saveError.message : t('updatePanel.errors.saveConfigFailed'));
+    } catch (resetError) {
+      setError(resetError instanceof Error ? resetError.message : t('updatePanel.errors.resetSourceFailed'));
     } finally {
-      setSavingConfig(false);
+      setResettingSource(false);
     }
-  }, [config, request, savingConfig, t]);
+  }, [request, resettingSource, t]);
 
   const handleInstall = useCallback(async () => {
     const installerPath = normalizeString(status?.downloaded_path);
@@ -174,13 +186,18 @@ export function UpdatePanel({ isConnected, request }: UpdatePanelProps) {
       setError(t('updatePanel.errors.installUnavailable'));
       return;
     }
+    // Optimistically switch to "installing" so the UI reflects the in-progress
+    // state before the desktop app closes the window.
+    setStatus((prev) => ({ ...(prev ?? {}), state: 'installing', installing: true }));
     try {
       const ok = await api.install_update(installerPath);
       if (!ok) {
         setError(t('updatePanel.errors.installFailed'));
+        setStatus((prev) => ({ ...(prev ?? {}), state: 'downloaded', installing: false }));
       }
     } catch (installError) {
       setError(installError instanceof Error ? installError.message : t('updatePanel.errors.installFailed'));
+      setStatus((prev) => ({ ...(prev ?? {}), state: 'downloaded', installing: false }));
     }
   }, [status?.downloaded_path, t]);
 
@@ -217,35 +234,34 @@ export function UpdatePanel({ isConnected, request }: UpdatePanelProps) {
   const canUpgradePip = isPipMode && hasUpdate && state !== 'upgrading' && state !== 'restart_pending' && state !== 'restarting';
   const canRestartPip = isPipMode && state === 'restart_pending';
   const platformSupported = status == null ? true : normalizeBoolean(status.platform_supported);
-  const configEnabled = normalizeBoolean(config?.enabled);
 
   return (
-    <div className="flex-1 min-h-0">
-      <div className="card w-full h-full flex flex-col gap-5">
+    <div className="flex-1 min-h-0" data-testid="update-panel">
+      <div className="card main-panel-card w-full h-full flex flex-col gap-5">
         <div className="flex items-center justify-between gap-4">
           <div>
-            <h2 className="text-lg font-semibold">{t('updatePanel.title')}</h2>
-            <p className="text-sm text-text-muted mt-1">{t('updatePanel.subtitle')}</p>
+            <h2 className="text-lg font-semibold" data-testid="update-panel-title">{t('updatePanel.title')}</h2>
+            <p className="text-sm text-text-muted mt-1" data-testid="update-panel-subtitle">{t('updatePanel.subtitle')}</p>
           </div>
           <div className="flex items-center gap-2">
-            <button onClick={() => void handleCheck()} className="btn secondary" disabled={!isConnected || checking}>
+            <button onClick={() => void handleCheck()} className="btn secondary" disabled={!isConnected || checking || state === 'downloading'} data-testid="update-panel-check-btn">
               {checking ? t('updatePanel.checking') : t('updatePanel.checkNow')}
             </button>
             {isPipMode ? (
               <>
-                <button onClick={() => void handleDownload()} className="btn primary" disabled={!canUpgradePip}>
+                <button onClick={() => void handleDownload()} className="btn primary" disabled={!canUpgradePip} data-testid="update-panel-download-btn" data-variant="pip">
                   {state === 'upgrading' ? t('updatePanel.downloading') : t('updatePanel.pipUpgrade')}
                 </button>
-                <button onClick={() => void handleUpgrade()} className="btn secondary" disabled={!canRestartPip}>
+                <button onClick={() => void handleUpgrade()} className="btn secondary" disabled={!canRestartPip} data-testid="update-panel-pip-restart-btn" data-variant="pip">
                   {t('updatePanel.pipRestart')}
                 </button>
               </>
             ) : (
               <>
-                <button onClick={() => void handleDownload()} className="btn primary" disabled={!canDownload}>
+                <button onClick={() => void handleDownload()} className="btn primary" disabled={!canDownload} data-testid="update-panel-download-btn" data-variant="desktop">
                   {state === 'downloading' ? t('updatePanel.downloading') : t('updatePanel.downloadAndInstall')}
                 </button>
-                <button onClick={() => void handleInstall()} className="btn secondary" disabled={!canInstall}>
+                <button onClick={() => void handleInstall()} className="btn secondary" disabled={!canInstall} data-testid="update-panel-install-btn" data-variant="desktop">
                   {t('updatePanel.installNow')}
                 </button>
               </>
@@ -254,59 +270,59 @@ export function UpdatePanel({ isConnected, request }: UpdatePanelProps) {
         </div>
 
         {!platformSupported && (
-          <div className="rounded-xl border border-warn/30 bg-warn/10 px-4 py-3 text-sm text-text">
+          <div className="rounded-xl border border-warn/30 bg-warn/10 px-4 py-3 text-sm text-text" data-testid="update-panel-unsupported">
             {t('updatePanel.unsupported')}
           </div>
         )}
 
         {error && (
-          <div className="rounded-xl border border-danger/30 bg-danger/10 px-4 py-3 text-sm text-text">
+          <div className="rounded-xl border border-danger/30 bg-danger/10 px-4 py-3 text-sm text-text" data-testid="update-panel-error">
             {error}
           </div>
         )}
 
-        <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-          <div className="rounded-xl border border-border bg-panel-strong/70 px-4 py-3">
-            <div className="text-xs uppercase tracking-wide text-text-muted">{t('updatePanel.currentVersion')}</div>
-            <div className="mt-2 font-semibold text-text">{currentVersion}</div>
+        <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4" data-testid="update-panel-info-grid">
+          <div className="rounded-xl border border-border bg-panel-strong/70 px-4 py-3" data-testid="update-panel-info-card" data-variant="current_version">
+            <div className="text-xs uppercase tracking-wide text-text-muted" data-testid="update-panel-info-card-label" data-variant="current_version">{t('updatePanel.currentVersion')}</div>
+            <div className="mt-2 font-semibold text-text" data-testid="update-panel-info-card-value" data-variant="current_version">{currentVersion}</div>
           </div>
-          <div className="rounded-xl border border-border bg-panel-strong/70 px-4 py-3">
-            <div className="text-xs uppercase tracking-wide text-text-muted">{t('updatePanel.latestVersion')}</div>
-            <div className="mt-2 font-semibold text-text">{hasUpdate ? latestVersion : '-'}</div>
+          <div className="rounded-xl border border-border bg-panel-strong/70 px-4 py-3" data-testid="update-panel-info-card" data-variant="latest_version">
+            <div className="text-xs uppercase tracking-wide text-text-muted" data-testid="update-panel-info-card-label" data-variant="latest_version">{t('updatePanel.latestVersion')}</div>
+            <div className="mt-2 font-semibold text-text" data-testid="update-panel-info-card-value" data-variant="latest_version">{hasUpdate ? latestVersion : '-'}</div>
             {hasUpdate && normalizeString(status?.matched_asset) && (
-              <div className="mt-1 text-xs font-mono text-text-muted">{normalizeString(status?.matched_asset)}</div>
+              <div className="mt-1 text-xs font-mono text-text-muted" data-testid="update-panel-info-card-asset" data-variant="latest_version">{normalizeString(status?.matched_asset)}</div>
             )}
           </div>
-          <div className="rounded-xl border border-border bg-panel-strong/70 px-4 py-3">
-            <div className="text-xs uppercase tracking-wide text-text-muted">{t('updatePanel.state')}</div>
-            <div className="mt-2 font-semibold text-text">{t(`updatePanel.states.${state}`, { defaultValue: state })}</div>
+          <div className="rounded-xl border border-border bg-panel-strong/70 px-4 py-3" data-testid="update-panel-info-card" data-variant="state">
+            <div className="text-xs uppercase tracking-wide text-text-muted" data-testid="update-panel-info-card-label" data-variant="state">{t('updatePanel.state')}</div>
+            <div className="mt-2 font-semibold text-text" data-testid="update-panel-info-card-value" data-variant="state">{t(`updatePanel.states.${state}`, { defaultValue: state })}</div>
           </div>
-          <div className="rounded-xl border border-border bg-panel-strong/70 px-4 py-3">
-            <div className="text-xs uppercase tracking-wide text-text-muted">{t('updatePanel.publishedAt')}</div>
-            <div className="mt-2 font-semibold text-text">{hasUpdate ? publishedAt : '-'}</div>
+          <div className="rounded-xl border border-border bg-panel-strong/70 px-4 py-3" data-testid="update-panel-info-card" data-variant="published_at">
+            <div className="text-xs uppercase tracking-wide text-text-muted" data-testid="update-panel-info-card-label" data-variant="published_at">{t('updatePanel.publishedAt')}</div>
+            <div className="mt-2 font-semibold text-text" data-testid="update-panel-info-card-value" data-variant="published_at">{hasUpdate ? publishedAt : '-'}</div>
           </div>
         </div>
 
         {(state === 'downloading' || state === 'upgrading' || (isPipMode && state === 'restart_pending')) && (
-          <div className="rounded-xl border border-accent/30 bg-accent/10 px-4 py-4">
+          <div className="rounded-xl border border-accent/30 bg-accent/10 px-4 py-4" data-testid="update-panel-progress">
             <div className="flex items-center justify-between gap-3 text-sm text-text">
-              <span>{t('updatePanel.downloadProgress')}</span>
-              <span className="mono">{progress}%{isPipMode ? '' : ` · ${formatBytes(downloadedBytes)} / ${formatBytes(totalBytes)}`}</span>
+              <span data-testid="update-panel-progress-label">{t('updatePanel.downloadProgress')}</span>
+              <span className="mono" data-testid="update-panel-progress-value">{progress}%{isPipMode ? '' : ` · ${formatBytes(downloadedBytes)} / ${formatBytes(totalBytes)}`}</span>
             </div>
-            <div className="mt-3 h-2 overflow-hidden rounded-full bg-secondary/80">
-              <div className="h-full rounded-full bg-accent transition-all duration-200" style={{ width: `${progress}%` }} />
+            <div className="mt-3 h-2 overflow-hidden rounded-full bg-secondary/80" data-testid="update-panel-progress-bar">
+              <div className="h-full rounded-full bg-accent  " style={{ width: `${progress}%` }} data-testid="update-panel-progress-bar-fill" />
             </div>
             {currentActivity && (
-              <div className="mt-2 text-xs font-mono text-text-muted truncate" title={currentActivity}>
+              <div className="mt-2 text-xs font-mono text-text-muted truncate" title={currentActivity} data-testid="update-panel-current-activity">
                 {currentActivity}
               </div>
             )}
             {isPipMode && state === 'restart_pending' && (
-              <div className="mt-3 text-sm text-text">
+              <div className="mt-3 text-sm text-text" data-testid="update-panel-restart-pending-hint">
                 {t('updatePanel.restartPendingHint')}
                 {restartCommand && (
                   <div className="mt-2">
-                    <code className="block rounded bg-secondary/60 px-2 py-1.5 text-xs font-mono break-all select-all">{restartCommand}</code>
+                    <code className="block rounded bg-secondary/60 px-2 py-1.5 text-xs font-mono break-all select-all" data-testid="update-panel-restart-command">{restartCommand}</code>
                   </div>
                 )}
               </div>
@@ -315,54 +331,44 @@ export function UpdatePanel({ isConnected, request }: UpdatePanelProps) {
         )}
 
         {canInstall && (
-          <div className="rounded-xl border border-ok/30 bg-ok/10 px-4 py-3 text-sm text-text">
+          <div className="rounded-xl border border-ok/30 bg-ok/10 px-4 py-3 text-sm text-text" data-testid="update-panel-ready-to-install">
             {t('updatePanel.readyToInstall')}
           </div>
         )}
 
-        <div className="flex-1 flex flex-col min-h-0 rounded-xl border border-border bg-panel-strong/60 p-4">
-          <div className="text-xs uppercase tracking-wide text-text-muted">{t('updatePanel.releaseNotes')}</div>
-          <pre className="mt-3 flex-1 min-h-0 overflow-auto whitespace-pre-wrap break-words font-sans text-sm text-text">
+        <div className="flex-1 flex flex-col min-h-0 rounded-xl border border-border bg-panel-strong/60 p-4" data-testid="update-panel-release-notes">
+          <div className="text-xs uppercase tracking-wide text-text-muted" data-testid="update-panel-release-notes-label">{t('updatePanel.releaseNotes')}</div>
+          <pre className="mt-3 flex-1 min-h-0 overflow-auto whitespace-pre-wrap break-words font-sans text-sm text-text" data-testid="update-panel-release-notes-content">
             {loading ? t('common.loading') : hasUpdate ? (releaseNotes || t('updatePanel.noReleaseNotes')) : '-'}
           </pre>
         </div>
 
-        <div className="rounded-xl border border-border bg-panel-strong/60 p-4">
+        <div className="rounded-xl border border-border bg-panel-strong/60 p-4" data-testid="update-panel-config">
           <div className="flex items-center justify-between gap-4">
             <div>
-              <div className="text-sm font-semibold text-text">{t('updatePanel.configTitle')}</div>
+              <div className="text-sm font-semibold text-text" data-testid="update-panel-config-title">{t('updatePanel.configTitle')}</div>
             </div>
-            <button onClick={() => void handleSaveConfig()} className="btn secondary" disabled={savingConfig || !config}>
-              {savingConfig ? t('common.saving') : t('common.save')}
+            <button onClick={() => void handleResetSource()} className="btn secondary" disabled={resettingSource} data-testid="update-panel-restore-defaults-btn">
+              {resettingSource ? t('common.loading') : t('updatePanel.restoreDefaults')}
             </button>
           </div>
 
           <div className="mt-4 grid gap-4 md:grid-cols-2">
-            <label className="card !p-4">
-              <div className="text-xs uppercase tracking-wide text-text-muted">{t('updatePanel.fields.enabled')}</div>
-              <div className="mt-3 flex items-center gap-3">
-                <input
-                  type="checkbox"
-                  checked={configEnabled}
-                  onChange={(event) => handleConfigChange('enabled', event.target.checked)}
-                />
-                <span className="text-sm text-text">{configEnabled ? t('common.ok') : t('common.cancel')}</span>
-              </div>
-            </label>
-
-            <label className="card !p-4">
-              <div className="text-xs uppercase tracking-wide text-text-muted">{t('updatePanel.fields.releaseApiType')}</div>
-              <div className="mt-3 text-sm font-mono text-text">
+            <label className="card !p-4" data-testid="update-panel-config-card" data-variant="release_api_type">
+              <div className="text-xs uppercase tracking-wide text-text-muted" data-testid="update-panel-config-card-label" data-variant="release_api_type">{t('updatePanel.fields.releaseApiType')}</div>
+              <div className="mt-3 text-sm font-mono text-text" data-testid="update-panel-config-card-value" data-variant="release_api_type">
                 {normalizeString(config?.release_api_type) || 'gitcode'}
               </div>
             </label>
 
-            <label className="card !p-4 md:col-span-2">
-              <div className="text-xs uppercase tracking-wide text-text-muted">{t('updatePanel.fields.releaseApiUrl')}</div>
+            <label className="card !p-4 md:col-span-2" data-testid="update-panel-config-card" data-variant="release_api_url">
+              <div className="text-xs uppercase tracking-wide text-text-muted" data-testid="update-panel-config-card-label" data-variant="release_api_url">{t('updatePanel.fields.releaseApiUrl')}</div>
               <input
                 className="input mt-3 w-full"
                 value={normalizeString(config?.release_api_url)}
                 disabled
+                data-testid="update-panel-config-card-input"
+                data-variant="release_api_url"
               />
             </label>
           </div>

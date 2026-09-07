@@ -19,6 +19,7 @@ from jiuwenswarm.server.runtime.agent_config_service import (
 )
 from jiuwenswarm.common.config import (
     remove_subagent_from_config,
+    update_swarmflow_enabled_in_config,
     upsert_subagent_in_config,
 )
 
@@ -193,6 +194,38 @@ class TestAgentConfigService:
         assert agent.description == "new description"
         assert agent.prompt == "new prompt"
 
+    # ---- create_agent name normalization ----
+
+    @staticmethod
+    def test_create_agent_strips_whitespace_from_name(service, tmp_workspace):
+        params = CreateAgentParams(
+            name=" test-agent ",
+            description="test desc",
+            prompt="test prompt",
+            location="project",
+        )
+        agent = service.create_agent(params)
+        assert agent.name == "test-agent"
+
+        md_file = tmp_workspace / ".jiuwenswarm" / "agents" / "test-agent.md"
+        assert md_file.exists()
+        content = md_file.read_text(encoding="utf-8")
+        assert "name: test-agent" in content
+
+    @staticmethod
+    def test_create_agent_with_whitespace_name_can_be_found(service):
+        params = CreateAgentParams(
+            name=" test-agent ",
+            description="test desc",
+            prompt="test prompt",
+            location="project",
+        )
+        service.create_agent(params)
+
+        found = service.get_agent("test-agent")
+        assert found is not None
+        assert found.name == "test-agent"
+
     # ---- update_agent ----
 
     @staticmethod
@@ -221,6 +254,19 @@ class TestAgentConfigService:
         params = UpdateAgentParams(description="x")
         with pytest.raises(ValueError, match="Agent 不存在"):
             service.update_agent("nonexistent", params)
+
+    @staticmethod
+    def test_update_agent_strips_whitespace_from_name(service, tmp_workspace):
+        agents_dir = tmp_workspace / ".jiuwenswarm" / "agents"
+        agents_dir.mkdir(parents=True)
+        (agents_dir / "my-agent.md").write_text(
+            "---\nname: my-agent\ndescription: original\n---\n\noriginal prompt\n",
+            encoding="utf-8",
+        )
+
+        params = UpdateAgentParams(description="updated")
+        agent = service.update_agent(" my-agent ", params)
+        assert agent.description == "updated"
 
     # ---- delete_agent ----
 
@@ -376,6 +422,53 @@ class TestSubagentConfigMutation:
     def test_remove_empty_name_raises():
         with pytest.raises(ValueError, match="subagent name is required"):
             remove_subagent_from_config("")
+
+
+class TestSwarmflowConfigMutation:
+    """update_swarmflow_enabled_in_config 测试."""
+
+    @pytest.fixture
+    def tmp_config(self, tmp_path, monkeypatch):
+        import jiuwenswarm.common.config as config_mod
+
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text(
+            """
+modes:
+  team:
+    jiuwen_team:
+      team_name: jiuwen_team
+      enable_swarmflow: true
+    secondary_team:
+      team_name: secondary_team
+      enable_swarmflow: true
+""",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(config_mod, "CONFIG_YAML_PATH", config_file)
+        return config_file
+
+    @staticmethod
+    def test_updates_modes_team_jiuwen_team_entry(tmp_config):
+        update_swarmflow_enabled_in_config(False)
+
+        data = yaml.safe_load(tmp_config.read_text(encoding="utf-8"))
+        teams = data["modes"]["team"]
+        assert teams["jiuwen_team"]["enable_swarmflow"] is False
+        assert teams["secondary_team"]["enable_swarmflow"] is True
+
+    @staticmethod
+    def test_creates_modes_team_jiuwen_team_entry(tmp_path, monkeypatch):
+        import jiuwenswarm.common.config as config_mod
+
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text("{}\n", encoding="utf-8")
+        monkeypatch.setattr(config_mod, "CONFIG_YAML_PATH", config_file)
+
+        update_swarmflow_enabled_in_config(True)
+
+        data = yaml.safe_load(config_file.read_text(encoding="utf-8"))
+        assert data["modes"]["team"]["jiuwen_team"]["enable_swarmflow"] is True
 
 
 class TestAgentLLMGeneration:

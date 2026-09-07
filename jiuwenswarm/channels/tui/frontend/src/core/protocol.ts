@@ -11,6 +11,7 @@ export interface ReqFrame {
   readonly id: string;
   readonly method: string;
   readonly is_stream?: boolean;
+  readonly timeout_ms?: number;
   readonly params: Record<string, unknown> & {
     content?: string;
     mode?: string;

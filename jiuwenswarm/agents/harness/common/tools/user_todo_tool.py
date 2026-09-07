@@ -199,6 +199,11 @@ def _write_todos_file(file_path: str, todos: List[TodoItem]):
         "NOTE: This is the user's personal todo tool — do NOT use it for internal agent "
         "task planning (use todo_create/todo_insert for internal task tracking)."
     ),
+    # Module-level singleton driven by process-wide state (see
+    # ``set_global_workspace_dir`` / ``set_global_channel_id``), so every agent
+    # must share this one registration under its bare id rather than get an
+    # agent-qualified copy.
+    stateless=True,
 )
 async def user_todos(params: UserTodosParams) -> Dict[str, Any]:
     """Manage the user's per-channel todo list. Each channel has an isolated todo list.

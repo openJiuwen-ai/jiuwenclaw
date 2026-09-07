@@ -17,6 +17,7 @@ from pydantic import ValidationError
 
 from jiuwenbox.logging_config import configure_logging
 from jiuwenbox import __version__
+from jiuwenbox.server.auth import BearerTokenAuthMiddleware, get_configured_token
 from jiuwenbox.server.audit_logger import AuditLogger
 from jiuwenbox.models.sandbox import InvalidJobIdError, InvalidSandboxIdError
 from jiuwenbox.server.runtime.process import BackgroundJobNotFoundError
@@ -298,6 +299,8 @@ async def lifespan(_application: FastAPI):
             )
     _proxy_manager = ProxyManager(policy_reader=policy_reader)
     logger.info("box-server started (version %s)", __version__)
+    if get_configured_token() is not None:
+        logger.info("API authentication enabled")
     await _proxy_manager.start()
     # 在 proxy 起来之后、yield (接受请求) 之前给 UDS 打权限: 此刻 uvicorn 已
     # 经 bind 并 listen 完成, socket inode 必然存在; 改 mode 不会和首个请求
@@ -397,6 +400,7 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+    application.add_middleware(BearerTokenAuthMiddleware)
 
     @application.exception_handler(SandboxNotFoundError)
     async def not_found_handler(request: Request, exc: SandboxNotFoundError):

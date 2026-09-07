@@ -6,4 +6,7 @@ export * from './formatters';
 export * from './env';
 export * from './tts';
 export * from './finalContent';
-export * from './harnessErrors';
+export * from './chatFinalProtocol';
+export * from './timestamp';
+export * from './fileDownloadDedup';
+export * from './heartbeatAutomation';

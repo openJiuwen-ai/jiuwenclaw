@@ -20,10 +20,17 @@ from pydantic import BaseModel, Field
 
 from jiuwenswarm.gateway.channel_manager.base import BaseChannel, ChannelMetadata, RobotMessageRouter
 from jiuwenswarm.gateway.channel_manager.im_platforms.platform_adapter.message import MessageStore
+from jiuwenswarm.gateway.channel_manager.im_platforms.errors import (
+    AttachmentPersistError,
+)
 from jiuwenswarm.common.schema.message import Message, ReqMethod, EventType
 from jiuwenswarm.common.utils import get_agent_workspace_dir
+from jiuwenswarm.gateway.routing.keys import DeliveryTarget
+from jiuwenswarm.gateway.routing.session_sharing import RoutingTarget
 
 logger = logging.getLogger(__name__)
+
+_SYSTEM_SESSION_PREFIXES = ("__", "health_check_", "healthcheck_", "cron")
 
 try:
     from wecom_aibot_sdk import WSClient
@@ -94,6 +101,8 @@ class WecomChannel(BaseChannel):
         self._im_platform_adapter: Any = im_platform_adapter
         # 文件服务
         self._file_service: Any = None
+        # IM 附件落盘钩子（Phase 3）
+        self._file_persist_hook: Any = None
         # 按 request_id 记录已发送文件路径，避免重复发送
         self._sent_file_paths_by_req: dict[str, set[str]] = {}
 
@@ -104,6 +113,12 @@ class WecomChannel(BaseChannel):
     def on_message(self, callback: Callable[[Message], None]) -> None:
         """注册消息回调，供 ChannelManager 使用。"""
         self._message_callback = callback
+
+    def set_file_persist_hook(self, hook: Any) -> None:
+        """注入 IM 附件落盘钩子（Phase 3）；文件服务未创建时缓存，创建后生效。"""
+        self._file_persist_hook = hook
+        if self._file_service is not None:
+            self._file_service.set_persist_hook(hook)
 
     def set_platform_adapter(self, adapter: Any) -> None:
         """设置平台适配器。"""
@@ -1002,8 +1017,10 @@ class WecomChannel(BaseChannel):
         msg_id = str(msg.id or "").strip()
         is_system_msg = (
             msg_id.startswith("cron-push")
-            or msg_id.startswith("heartbeat-relay")
-            or str(getattr(msg, "session_id", "") or "").startswith(("__", "heartbeat_", "cron"))
+            or msg_id.startswith("healthcheck-relay")
+            or str(getattr(msg, "session_id", "") or "").startswith(
+                _SYSTEM_SESSION_PREFIXES
+            )
         )
         if is_system_msg:
             wecom_user_id = str(meta.get("wecom_user_id") or "").strip()
@@ -1018,9 +1035,8 @@ class WecomChannel(BaseChannel):
 
         sid = getattr(msg, "session_id", None) or msg.id
         sid_str = str(sid) if sid else ""
-        # 系统会话（心跳、cron 等）无有效 chatid，使用 config 中的 last_chat_id
-        system_session_prefixes = ("__", "heartbeat_", "cron")
-        if sid_str and not any(sid_str.startswith(p) for p in system_session_prefixes):
+        # 系统会话（探活、cron 等）无有效 chatid，使用 config 中的 last_chat_id
+        if sid_str and not sid_str.startswith(_SYSTEM_SESSION_PREFIXES):
             if not self._looks_like_msgid(sid_str):
                 logger.info("[WecomChannel] _extract_chatid: 返回session_id=%s", sid_str)
                 return sid_str
@@ -1115,8 +1131,17 @@ class WecomChannel(BaseChannel):
         meta = getattr(msg, "metadata", None) or {}
         return (meta.get("wecom_req_id") or "").strip() or None
 
-    async def send(self, msg: Message) -> None:
-        """通过企业微信发送消息。支持流式（reply_stream）与非流式（send_message）。"""
+    async def send(
+        self,
+        msg: Message,
+        *,
+        routing_target: RoutingTarget | None = None,
+    ) -> None:
+        """通过企业微信发送消息。支持流式（reply_stream）与非流式（send_message）。
+
+        V2: resolved/delivery 为 team 模式分发元数据，企微通道当前通过
+        msg.metadata 获取投递信息，暂不直接消费。
+        """
         if not self._ws_client or not getattr(self._ws_client, "is_connected", False):
             logger.warning("WecomChannel 未连接，跳过发送")
             return
@@ -1139,14 +1164,19 @@ class WecomChannel(BaseChannel):
             return
 
         # 心跳/系统事件
-        if msg.event_type == EventType.HEARTBEAT_RELAY:
+        if msg.event_type == EventType.HEALTH_CHECK_RELAY:
             chatid = self._extract_chatid(msg)
             logger.info("[WecomChannel] 心跳/系统事件处理: chatid=%s, msg.id=%s", chatid, msg.id)
             if chatid:
                 payload = getattr(msg, "payload", None) or {}
-                if isinstance(payload, dict) and payload.get("heartbeat"):
+                health_check = (
+                    payload.get("health_check")
+                    if isinstance(payload, dict)
+                    else None
+                )
+                if health_check:
                     try:
-                        body = {"msgtype": "markdown", "markdown": {"content": str(payload.get("heartbeat"))}}
+                        body = {"msgtype": "markdown", "markdown": {"content": str(health_check)}}
                         await self._ws_client.send_message(chatid, body)
                         logger.info("[WecomChannel] 心跳已发送至 chatid=%s", chatid)
                     except Exception as e:
@@ -1172,13 +1202,19 @@ class WecomChannel(BaseChannel):
                     return
                 content = self._extract_content_from_payload(msg)
                 if content is not None:
-                    entry["accumulated"] = (entry.get("accumulated") or "") + content
+                    is_final = msg.event_type == EventType.CHAT_FINAL
+                    if is_final and content.strip():
+                        entry["accumulated"] = content
+                    else:
+                        entry["accumulated"] = (entry.get("accumulated") or "") + content
                     # 移除 <think>...</think> 块，不将 Agent 思考过程展示给用户
                     to_send = self._strip_think_tags(entry["accumulated"]).strip()
                     if not to_send or self._is_thinking_only_content(to_send):
                         if msg.event_type == EventType.CHAT_FINAL:
                             self._pending_streams.pop(req_id, None)
                             self._stream_completed_requests.add(req_id)
+                        return
+                    if not is_final and to_send == entry.get("last_sent"):
                         return
                     
                     # 群聊场景：出站管线已在 publish_robot_messages 时设置 reply_scope
@@ -1208,13 +1244,13 @@ class WecomChannel(BaseChannel):
                     
                     # 非群聊场景或无目标用户，正常流式发送
                     try:
-                        is_final = msg.event_type == EventType.CHAT_FINAL
                         await self._ws_client.reply_stream(
                             entry["frame"],
                             entry["stream_id"],
                             to_send,
                             finish=is_final,
                         )
+                        entry["last_sent"] = to_send
                         logger.debug(
                             "WecomChannel 流式发送: req_id=%s finish=%s len=%d",
                             req_id,
@@ -1380,6 +1416,8 @@ class WecomChannel(BaseChannel):
                 download_timeout=self.config.download_timeout,
                 workspace_dir=workspace_dir,
             )
+            if self._file_persist_hook is not None:
+                self._file_service.set_persist_hook(self._file_persist_hook)
             logger.info("WecomChannel 文件服务已初始化")
         except Exception as e:
             logger.warning(f"WecomChannel 文件服务初始化失败: {e}")
@@ -1486,12 +1524,19 @@ class WecomChannel(BaseChannel):
         message_id = req_id or f"img_{int(time.time() * 1000)}"
 
         # 下载图片
-        file_info = await self._file_service.download_file(
-            url=url,
-            aes_key=aes_key,
-            message_id=message_id,
-            file_category="images",
-        )
+        try:
+            file_info = await self._file_service.download_file(
+                url=url,
+                aes_key=aes_key,
+                message_id=message_id,
+                file_category="images",
+            )
+        except AttachmentPersistError:
+            logger.warning(
+                "[WecomChannel] 附件落盘失败（AgentServer 不可达），整条消息按可重试错误失败"
+            )
+            await self._send_attachment_error_reply(frame)
+            return
 
         if not file_info:
             content = "[图片: 下载失败]"
@@ -1527,13 +1572,20 @@ class WecomChannel(BaseChannel):
         message_id = req_id or f"file_{int(time.time() * 1000)}"
 
         # 下载文件
-        file_info = await self._file_service.download_file(
-            url=url,
-            aes_key=aes_key,
-            message_id=message_id,
-            file_category="files",
-            filename=filename,
-        )
+        try:
+            file_info = await self._file_service.download_file(
+                url=url,
+                aes_key=aes_key,
+                message_id=message_id,
+                file_category="files",
+                filename=filename,
+            )
+        except AttachmentPersistError:
+            logger.warning(
+                "[WecomChannel] 附件落盘失败（AgentServer 不可达），整条消息按可重试错误失败"
+            )
+            await self._send_attachment_error_reply(frame)
+            return
 
         if not file_info:
             content = f"[文件: {filename} 下载失败]"
@@ -1568,12 +1620,19 @@ class WecomChannel(BaseChannel):
         message_id = req_id or f"voice_{int(time.time() * 1000)}"
 
         # 下载语音
-        file_info = await self._file_service.download_file(
-            url=url,
-            aes_key=aes_key,
-            message_id=message_id,
-            file_category="voice",
-        )
+        try:
+            file_info = await self._file_service.download_file(
+                url=url,
+                aes_key=aes_key,
+                message_id=message_id,
+                file_category="voice",
+            )
+        except AttachmentPersistError:
+            logger.warning(
+                "[WecomChannel] 附件落盘失败（AgentServer 不可达），整条消息按可重试错误失败"
+            )
+            await self._send_attachment_error_reply(frame)
+            return
 
         if not file_info:
             content = "[语音: 下载失败]"
@@ -1608,12 +1667,19 @@ class WecomChannel(BaseChannel):
         message_id = req_id or f"video_{int(time.time() * 1000)}"
 
         # 下载视频
-        file_info = await self._file_service.download_file(
-            url=url,
-            aes_key=aes_key,
-            message_id=message_id,
-            file_category="video",
-        )
+        try:
+            file_info = await self._file_service.download_file(
+                url=url,
+                aes_key=aes_key,
+                message_id=message_id,
+                file_category="video",
+            )
+        except AttachmentPersistError:
+            logger.warning(
+                "[WecomChannel] 附件落盘失败（AgentServer 不可达），整条消息按可重试错误失败"
+            )
+            await self._send_attachment_error_reply(frame)
+            return
 
         if not file_info:
             content = "[视频: 下载失败]"
@@ -1666,12 +1732,19 @@ class WecomChannel(BaseChannel):
                 aes_key = image_data.get("aeskey", "")
                 
                 if url and aes_key:
-                    file_info = await self._file_service.download_file(
-                        url=url,
-                        aes_key=aes_key,
-                        message_id=f"{message_id}_{idx}",
-                        file_category="images",
-                    )
+                    try:
+                        file_info = await self._file_service.download_file(
+                            url=url,
+                            aes_key=aes_key,
+                            message_id=f"{message_id}_{idx}",
+                            file_category="images",
+                        )
+                    except AttachmentPersistError:
+                        logger.warning(
+                            "[WecomChannel] 附件落盘失败（AgentServer 不可达），整条消息按可重试错误失败"
+                        )
+                        await self._send_attachment_error_reply(frame)
+                        return
                     if file_info:
                         file_infos.append(file_info)
 
@@ -1680,6 +1753,22 @@ class WecomChannel(BaseChannel):
         
         # 构建消息并发送
         await self._send_file_message_to_handler(frame, content, file_infos if file_infos else None)
+
+    async def _send_attachment_error_reply(self, frame: dict) -> None:
+        """决策 D6：附件落盘失败时回发可重试错误提示，整条消息按失败处理。"""
+        try:
+            chatid, _, _ = self._extract_frame_info(frame)
+            if not chatid:
+                return
+            if not self._ws_client or not getattr(self._ws_client, "is_connected", False):
+                return
+            body = {
+                "msgtype": "markdown",
+                "markdown": {"content": "⚠️ 附件处理失败（服务暂不可用），请稍后重试。"},
+            }
+            await self._ws_client.send_message(chatid, body)
+        except Exception as e:
+            logger.warning("[WecomChannel] 发送附件错误提示失败: %s", e)
 
     async def _send_file_message_to_handler(
         self, frame: dict, content: str, files: list[dict] | None

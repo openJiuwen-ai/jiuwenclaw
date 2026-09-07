@@ -571,6 +571,30 @@ class MemoryIndexManager:
 
         return file_date in (today, yesterday)
 
+    def _filter_recent_memory_results(self, results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Filter out results from today's/yesterday's daily memory files.
+
+        These files are loaded into the system prompt directly, so including
+        them in search results would be redundant.
+
+        Note: The actual loading into the system prompt is implemented in
+        agent-core's MemoryRail.before_model_call(). If jiuwenswarm is deployed
+        without the corresponding agent-core changes, daily memory files will
+        be filtered from search results but not loaded into the system prompt,
+        making today's/yesterday's memory inaccessible to the Agent.
+        """
+        filtered = []
+        for r in results:
+            path = r.get("path") or ""
+            filename = os.path.basename(path)
+            if self._is_recent_session_file(filename):
+                continue
+            filtered.append(r)
+        removed = len(results) - len(filtered)
+        if removed:
+            logger.debug("Filtered %d recent daily memory results from search", removed)
+        return filtered
+
     async def _sync_memory_files(self) -> None:
         """Sync memory files.
 
@@ -786,7 +810,9 @@ class MemoryIndexManager:
         """Search memory for relevant content.
 
         Note: Excludes MEMORY.md and recent (today/yesterday) memory files
-        as they are already loaded in the system prompt.
+        as they are already loaded in the system prompt. Loading is
+        implemented in agent-core's MemoryRail.before_model_call(); ensure
+        agent-core is deployed in sync (see _filter_recent_memory_results).
         """
         opts = opts or {}
 
@@ -825,10 +851,12 @@ class MemoryIndexManager:
                 logger.debug("Vector search failed: %s", e)
 
         if not hybrid.get("enabled", True):
-            return [
+            results = [
                 r for r in vector_results
                 if r["score"] >= min_score
-            ][:max_results]
+            ]
+            results = self._filter_recent_memory_results(results)
+            return results[:max_results]
 
         merged = self._merge_hybrid_results(
             vector_results,
@@ -837,7 +865,9 @@ class MemoryIndexManager:
             hybrid.get("textWeight", 0.3)
         )
 
-        return [r for r in merged if r["score"] >= min_score][:max_results]
+        results = [r for r in merged if r["score"] >= min_score]
+        results = self._filter_recent_memory_results(results)
+        return results[:max_results]
 
     async def _search_vector(
             self,
@@ -1175,7 +1205,8 @@ class MemoryIndexManager:
         try:
             cursor = self.db.execute(f"SELECT COUNT(*) as count FROM {EMBEDDING_CACHE_TABLE}")
             return cursor.fetchone()["count"]
-        except:
+        except Exception as e:
+            logger.warning(f"Failed to get cache entry count: {e}")
             return 0
 
     async def close(self) -> None:

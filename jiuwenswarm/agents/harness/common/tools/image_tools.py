@@ -22,6 +22,7 @@ from jiuwenswarm.common.utils import get_agent_workspace_dir
 from jiuwenswarm.agents.harness.common.tools.multimodal_config import (
     apply_image_gen_model_config_from_yaml,
     apply_vision_model_config_from_yaml,
+    _get_model_config,
 )
 from jiuwenswarm.agents.harness.common.tools.ssl_config import get_requests_verify
 
@@ -335,18 +336,44 @@ async def _invoke_model_image_generation(prompt: str, size: str = "1024x1024", q
     """
     from openjiuwen.core.foundation.llm import ModelClientConfig, Model, UserMessage, ModelRequestConfig
 
-    api_key, api_base, model, provider = _get_image_gen_api_credentials()
+    # 与主链路（apply_image_gen_model_config_from_yaml）同源：直接读 config.yaml
+    # 的 models.image_gen.model_client_config，避免与主链路配置脱节。
+    from jiuwenswarm.common.config import get_config
+    mc = _get_model_config(get_config() or {}, "image_gen")
+    api_key = str(mc.get("api_key") or os.getenv("IMAGE_GEN_API_KEY") or os.getenv("API_KEY") or "").strip()
+    api_base = str(
+        mc.get("api_base")
+        or os.getenv("IMAGE_GEN_API_BASE")
+        or os.getenv("API_BASE")
+        or "https://dashscope.aliyuncs.com/api/v1"
+    ).strip()
     if not api_key:
         return {"error": "[ERROR]: IMAGE_GEN_API_KEY or API_KEY is not configured for image generation."}
 
+    model = str(mc.get("model_name") or mc.get("model") or os.getenv("IMAGE_GEN_MODEL_NAME") or "wanx-v1").strip()
+    provider = str(mc.get("client_provider") or mc.get("model_provider")
+                   or os.getenv("IMAGE_GEN_PROVIDER") or "DashScope").strip()
+    # 新声明下 DashScope 不再是独立 client_provider，而是 OpenAI + endpoint_profile=dashscope。
+    # 兼容旧 IMAGE_GEN_PROVIDER=DashScope：归一为 OpenAI 并补 dashscope profile。
+    # 缺少 endpoint_profile=dashscope 时 OpenAIModelClient 会拒绝生图(方案 8.6)。
+    endpoint_profile = str(mc.get("endpoint_profile") or "").strip().lower()
+    if provider in ("DashScope", "dashscope"):
+        provider = "OpenAI"
+        endpoint_profile = endpoint_profile or "dashscope"
+
     try:
-        model_client_config = ModelClientConfig(
+        _mcc_kwargs: dict[str, Any] = dict(
             client_id="image_gen_client",
             client_provider=provider,
             api_key=api_key,
             api_base=api_base,
-            verify_ssl=False
+            verify_ssl=mc.get("verify_ssl", True),
+            ssl_cert=mc.get("ssl_cert"),
+            timeout=mc.get("timeout", 1800),
         )
+        if endpoint_profile:
+            _mcc_kwargs["endpoint_profile"] = endpoint_profile
+        model_client_config = ModelClientConfig(**_mcc_kwargs)
 
         model_config = ModelRequestConfig(
             model=model,

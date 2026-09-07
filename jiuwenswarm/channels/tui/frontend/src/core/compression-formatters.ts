@@ -22,6 +22,12 @@ export function formatCompressionUsage(usage: Record<string, unknown>): string {
   return parts.length ? parts.join(" | ") : "-";
 }
 
+const COMPRESSION_STARTED_LABELS: Record<string, string> = {
+  DialogueCompressor: "Compressing past-round messages",
+  CurrentRoundCompressor: "Compressing current round",
+  RoundLevelCompressor: "Full compression",
+};
+
 export function formatCompressionStartedLine(
   processor: string,
   phase: string,
@@ -37,5 +43,6 @@ export function formatCompressionStartedLine(
     messages !== "-" ? `${messages} messages` : "",
     context !== "-" ? context : "",
   ].filter(Boolean);
-  return `Context compression started${details.length ? ` (${details.join(" | ")})` : ""}`;
+  const label = COMPRESSION_STARTED_LABELS[processor] ?? "Context compression started";
+  return `${label}${details.length ? ` (${details.join(" | ")})` : ""}`;
 }

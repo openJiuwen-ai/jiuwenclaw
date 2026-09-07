@@ -1,43 +1,45 @@
 import { useCallback, useEffect, useState } from 'react';
 import type { TabType, TeamDetailTab } from '../components/teamArea/shared';
+import {
+  DEFAULT_TEAM_PANEL_STATE,
+  parseTeamPanelStateRaw,
+  type TeamPanelState,
+} from './teamPanelStateNormalize';
+
+export type { TeamPanelState } from './teamPanelStateNormalize';
+export { DEFAULT_TEAM_PANEL_STATE, normalizeTeamPanelState, parseTeamPanelStateRaw } from './teamPanelStateNormalize';
 
 const TEAM_PANEL_STATE_KEY = 'jiuwenclaw_team_panel_state';
 const TEAM_PANEL_STATE_EVENT = 'jiuwenclaw-team-panel-state-change';
-
-export interface TeamPanelState {
-  expanded: boolean;
-  activeTab: TabType;
-  activeDetailTab: TeamDetailTab;
-  selectedMemberId?: string;
-}
-
-const DEFAULT_TEAM_PANEL_STATE: TeamPanelState = {
-  expanded: false,
-  activeTab: 'team',
-  activeDetailTab: 'members',
-};
 
 interface UseTeamPanelStateResult {
   teamAreaExpanded: boolean;
   teamAreaActiveTab: TabType;
   teamAreaActiveDetailTab: TeamDetailTab;
   teamAreaSelectedMemberId?: string;
+  teamAreaSelectedArtifactId?: string;
   setTeamAreaExpanded: (expanded: boolean) => void;
   setTeamAreaActiveTab: (tab: TabType) => void;
   setTeamAreaActiveDetailTab: (tab: TeamDetailTab) => void;
   setTeamAreaSelectedMemberId: (memberId: string) => void;
+  setTeamAreaSelectedArtifactId: (artifactId: string) => void;
 }
 
 function loadTeamPanelState(): TeamPanelState {
-  const raw = window.localStorage.getItem(TEAM_PANEL_STATE_KEY);
-  if (!raw) {
-    return DEFAULT_TEAM_PANEL_STATE;
+  try {
+    return parseTeamPanelStateRaw(window.localStorage.getItem(TEAM_PANEL_STATE_KEY));
+  } catch {
+    // localStorage may be unavailable (private mode / blocked storage).
+    return { ...DEFAULT_TEAM_PANEL_STATE };
   }
-  return JSON.parse(raw) as TeamPanelState;
 }
 
 function saveTeamPanelState(nextState: TeamPanelState): void {
-  window.localStorage.setItem(TEAM_PANEL_STATE_KEY, JSON.stringify(nextState));
+  try {
+    window.localStorage.setItem(TEAM_PANEL_STATE_KEY, JSON.stringify(nextState));
+  } catch {
+    // Ignore quota / unavailable storage errors; in-memory state still works.
+  }
 }
 
 function notifyTeamPanelState(nextState: TeamPanelState): void {
@@ -51,11 +53,22 @@ export function openTeamPanel(
   activeDetailTab: TeamDetailTab = 'members',
   selectedMemberId?: string
 ): void {
-  const nextState = {
+  const nextState: TeamPanelState = {
     expanded: true,
     activeTab,
     activeDetailTab,
     selectedMemberId,
+  };
+  saveTeamPanelState(nextState);
+  notifyTeamPanelState(nextState);
+}
+
+export function openArtifactPanel(selectedArtifactId: string): void {
+  const nextState: TeamPanelState = {
+    ...loadTeamPanelState(),
+    expanded: true,
+    activeTab: 'artifacts',
+    selectedArtifactId,
   };
   saveTeamPanelState(nextState);
   notifyTeamPanelState(nextState);
@@ -89,6 +102,10 @@ export function useTeamPanelState(): UseTeamPanelStateResult {
     updateState({ selectedMemberId });
   }, [updateState]);
 
+  const setTeamAreaSelectedArtifactId = useCallback((selectedArtifactId: string) => {
+    updateState({ selectedArtifactId });
+  }, [updateState]);
+
   useEffect(() => {
     function handleTeamPanelStateChange(event: Event) {
       setState((event as CustomEvent<TeamPanelState>).detail);
@@ -105,9 +122,11 @@ export function useTeamPanelState(): UseTeamPanelStateResult {
     teamAreaActiveTab: state.activeTab,
     teamAreaActiveDetailTab: state.activeDetailTab,
     teamAreaSelectedMemberId: state.selectedMemberId,
+    teamAreaSelectedArtifactId: state.selectedArtifactId,
     setTeamAreaExpanded,
     setTeamAreaActiveTab,
     setTeamAreaActiveDetailTab,
     setTeamAreaSelectedMemberId,
+    setTeamAreaSelectedArtifactId,
   };
 }

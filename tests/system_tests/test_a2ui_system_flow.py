@@ -50,7 +50,10 @@ async def test_a2ui_system_flow_accepts_event_and_valid_response(monkeypatch):
     monkeypatch.setenv("JIUWENSWARM_A2UI_ENABLED", "true")
 
     config = get_a2ui_config({"a2ui": {"enabled": True}})
-    prompt_section = build_a2ui_prompt_section("en")
+    prompt_section = build_a2ui_prompt_section(
+        "en",
+        include_browser_workflows=True,
+    )
     client_event = {
         "type": "a2ui.client_event",
         "event": {
@@ -131,7 +134,8 @@ def test_a2ui_browser_preflight_event_prompts_browser_subagent(monkeypatch):
 
     assert client_prompt is not None
     assert "browser task preflight submission" in client_prompt
-    assert "spawn_sub_agent" in client_prompt
+    assert "synchronous task_tool" in client_prompt
+    assert "spawn_sub_agent" not in client_prompt
     assert "browser_agent" in client_prompt
     assert "Book a hotel in Shanghai" in client_prompt
     assert "must_confirm_before_payment" in client_prompt
@@ -174,7 +178,8 @@ def test_a2ui_hotel_option_select_continues_current_browser_state(monkeypatch):
 
     assert client_prompt is not None
     assert "hotel candidate selection" in client_prompt
-    assert "spawn_sub_agent" in client_prompt
+    assert "synchronous task_tool" in client_prompt
+    assert "spawn_sub_agent" not in client_prompt
     assert "browser_agent" in client_prompt
     assert "current browser state/session" in client_prompt
     assert "Do not repeat the broad hotel search" in client_prompt
@@ -253,7 +258,8 @@ def test_a2ui_gmail_email_select_continues_current_search_results(monkeypatch):
 
     assert client_prompt is not None
     assert "Gmail email/thread selection" in client_prompt
-    assert "spawn_sub_agent" in client_prompt
+    assert "synchronous task_tool" in client_prompt
+    assert "spawn_sub_agent" not in client_prompt
     assert "browser_agent" in client_prompt
     assert "current Gmail browser state/session" in client_prompt
     assert "Do not repeat the broad Gmail search" in client_prompt
@@ -293,7 +299,8 @@ def test_a2ui_gmail_cleanup_confirmation_is_guarded(monkeypatch):
 
     assert client_prompt is not None
     assert "final Gmail cleanup confirmation" in client_prompt
-    assert "spawn_sub_agent" in client_prompt
+    assert "synchronous task_tool" in client_prompt
+    assert "spawn_sub_agent" not in client_prompt
     assert "current Gmail browser state/session" in client_prompt
     assert "verify the selected messages/count" in client_prompt
     assert "Never delete, archive, unsubscribe" in client_prompt
@@ -372,7 +379,8 @@ def test_a2ui_social_post_draft_select_stops_before_publish(monkeypatch):
 
     assert client_prompt is not None
     assert "social media post draft selection" in client_prompt
-    assert "spawn_sub_agent" in client_prompt
+    assert "synchronous task_tool" in client_prompt
+    assert "spawn_sub_agent" not in client_prompt
     assert "browser_agent" in client_prompt
     assert "fill the selected draft" in client_prompt
     assert "Do not publish" in client_prompt

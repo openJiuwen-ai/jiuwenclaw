@@ -2,20 +2,13 @@ import { useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { ListChecks, MessageSquareText, Wrench } from 'lucide-react';
 import { Message, type TodoItem } from '../../types';
-import {
-  type ParsedTeamEvent,
-  parseTeamEventMessage,
-} from './teamEventUtils';
+import { type ParsedTeamEvent, parseTeamEventMessage } from './teamEventUtils';
 import { isTeamLeaderMember } from '../../utils/teamMemberAvatar';
 import { openTeamPanel } from '../../features/teamPanelState';
-import teamProcessIcon from '../../assets/team-process.svg';
+import TeamProcessIcon from '../../assets/team-process.svg?react';
 import { TeamMemberAvatar } from '../TeamMemberAvatar';
-import { useSessionStore } from '../../stores';
-import type {
-  TeamMemberExecutionEvent,
-  TeamTask,
-  TeamTaskEvent,
-} from '../../stores/sessionStore';
+import { useChatStore, useSessionStore } from '../../stores';
+import type { TeamMemberExecutionEvent, TeamTask, TeamTaskEvent } from '../../stores/sessionStore';
 
 type ActivityStatus = TeamTask['status'] | TodoItem['status'];
 type Translate = (key: string, options?: Record<string, unknown>) => string;
@@ -104,7 +97,7 @@ function getTaskStatusLabel(status: ActivityStatus, t: Translate): string {
 }
 
 function isRunningTaskStatus(status: ActivityStatus): boolean {
-  return status === 'claimed' || status === 'in_progress' || status === 'plan_approved';
+  return status === 'in_progress' || status === 'planning' || status === 'in_review';
 }
 
 function getMemberName(memberId: string, members: TeamMemberLike[]): string {
@@ -124,7 +117,7 @@ function pickTaskActivity(
   memberId: string,
   tasks: TeamTask[],
   todos: TodoItem[],
-  t: Translate
+  t: Translate,
 ): ActivityCandidate | null {
   const taskCandidates: TaskCandidate[] = [
     ...tasks
@@ -169,14 +162,10 @@ function buildTaskActivity(task: TaskCandidate, t: Translate): ActivityCandidate
   };
 }
 
-function pickMessageActivity(
-  memberId: string,
-  eventItems: TeamEventItem[],
-  t: Translate
-): ActivityCandidate | null {
+function pickMessageActivity(memberId: string, eventItems: TeamEventItem[], t: Translate): ActivityCandidate | null {
   const latest = getLatestByTimestamp(
     eventItems.filter(({ event }) => event.fromMember === memberId || event.toMember === memberId),
-    ({ event, message }) => toEventTime(event, message)
+    ({ event, message }) => toEventTime(event, message),
   );
   if (!latest) {
     return null;
@@ -185,9 +174,7 @@ function pickMessageActivity(
   const isReceived = latest.event.toMember === memberId;
   return {
     summary: compactText(latest.event.content || latest.event.type),
-    statusLabel: isReceived
-      ? t('chatUi.teamActivity.status.receivedMessage')
-      : t('chatUi.teamActivity.status.message'),
+    statusLabel: isReceived ? t('chatUi.teamActivity.status.receivedMessage') : t('chatUi.teamActivity.status.message'),
     timestamp: toEventTime(latest.event, latest.message),
   };
 }
@@ -195,11 +182,11 @@ function pickMessageActivity(
 function pickToolActivity(
   memberId: string,
   executionEvents: TeamMemberExecutionEvent[],
-  t: Translate
+  t: Translate,
 ): ActivityCandidate | null {
   const latest = getLatestByTimestamp(
     executionEvents.filter((event) => event.member_id === memberId && event.kind !== 'final'),
-    (event) => event.timestamp
+    (event) => event.timestamp,
   );
   if (!latest) {
     return null;
@@ -213,7 +200,10 @@ function pickToolActivity(
   };
 }
 
-function getExecutionActivityLabel(event: TeamMemberExecutionEvent, t: Translate): Pick<ActivityCandidate, 'summary' | 'statusLabel'> {
+function getExecutionActivityLabel(
+  event: TeamMemberExecutionEvent,
+  t: Translate,
+): Pick<ActivityCandidate, 'summary' | 'statusLabel'> {
   const content = event.content || event.tool_name || event.title;
   if (event.kind === 'file') {
     return {
@@ -223,16 +213,14 @@ function getExecutionActivityLabel(event: TeamMemberExecutionEvent, t: Translate
   }
   return {
     summary: compactText(content),
-    statusLabel: event.kind === 'tool_call'
-      ? t('chatUi.teamActivity.status.executingTool')
-      : t('chatUi.teamActivity.status.toolCall'),
+    statusLabel:
+      event.kind === 'tool_call'
+        ? t('chatUi.teamActivity.status.executingTool')
+        : t('chatUi.teamActivity.status.toolCall'),
   };
 }
 
-function getLatestByTimestamp<T>(
-  items: T[],
-  getTimestamp: (item: T) => number
-): T | undefined {
+function getLatestByTimestamp<T>(items: T[], getTimestamp: (item: T) => number): T | undefined {
   return items.reduce<T | undefined>((latest, item) => {
     if (!latest || getTimestamp(item) > getTimestamp(latest)) {
       return item;
@@ -248,8 +236,7 @@ function parseTeamEventItems(messages: Message[]): TeamEventItem[] {
 }
 
 function compareRecentActivity(a: MemberActivity, b: MemberActivity): number {
-  return b.timestamp - a.timestamp
-    || a.displayName.localeCompare(b.displayName, undefined, { numeric: true });
+  return b.timestamp - a.timestamp || a.displayName.localeCompare(b.displayName, undefined, { numeric: true });
 }
 
 function buildMemberActivities(
@@ -258,12 +245,10 @@ function buildMemberActivities(
   tasks: TeamTask[],
   todos: TodoItem[],
   executionEvents: TeamMemberExecutionEvent[],
-  t: Translate
+  t: Translate,
 ): MemberActivity[] {
   const eventItems = parseTeamEventItems(messages);
-  const memberIds = members
-    .filter(isActiveTeamMember)
-    .map((member) => member.member_id);
+  const memberIds = members.filter(isActiveTeamMember).map((member) => member.member_id);
 
   return memberIds
     .map((memberId) => {
@@ -301,12 +286,10 @@ function buildMemberCompletionSummaries(
   tasks: TeamTask[],
   todos: TodoItem[],
   taskEvents: TeamTaskEvent[],
-  executionEvents: TeamMemberExecutionEvent[]
+  executionEvents: TeamMemberExecutionEvent[],
 ): MemberActivityWithCounts[] {
   const eventItems = parseTeamEventItems(messages);
-  const memberIds = members
-    .filter(isActiveTeamMember)
-    .map((member) => member.member_id);
+  const memberIds = members.filter(isActiveTeamMember).map((member) => member.member_id);
 
   return memberIds
     .map((memberId) => {
@@ -331,7 +314,7 @@ function countMemberActivity(
   tasks: TeamTask[],
   todos: TodoItem[],
   taskEvents: TeamTaskEvent[],
-  executionEvents: TeamMemberExecutionEvent[]
+  executionEvents: TeamMemberExecutionEvent[],
 ): MemberCounts {
   return {
     taskCount: countMemberTasks(memberId, tasks, todos, taskEvents),
@@ -340,12 +323,7 @@ function countMemberActivity(
   };
 }
 
-function countMemberTasks(
-  memberId: string,
-  tasks: TeamTask[],
-  todos: TodoItem[],
-  taskEvents: TeamTaskEvent[]
-): number {
+function countMemberTasks(memberId: string, tasks: TeamTask[], todos: TodoItem[], taskEvents: TeamTaskEvent[]): number {
   const taskIds = new Set<string>();
   tasks.forEach((task) => {
     if (task.assignee === memberId) {
@@ -371,24 +349,18 @@ function getLatestMemberTimestamp(
   tasks: TeamTask[],
   todos: TodoItem[],
   taskEvents: TeamTaskEvent[],
-  executionEvents: TeamMemberExecutionEvent[]
+  executionEvents: TeamMemberExecutionEvent[],
 ): number {
   const timestamps = [
     ...eventItems
       .filter(({ event }) => event.fromMember === memberId)
       .map(({ event, message }) => toEventTime(event, message)),
-    ...tasks
-      .filter((task) => task.assignee === memberId)
-      .map(toTaskTime),
-    ...todos
-      .filter((todo) => todo.claimedBy === memberId)
-      .map((todo) => toTodoTime(todo.updatedAt)),
+    ...tasks.filter((task) => task.assignee === memberId).map(toTaskTime),
+    ...todos.filter((todo) => todo.claimedBy === memberId).map((todo) => toTodoTime(todo.updatedAt)),
     ...taskEvents
       .filter((event) => event.assignee === memberId || event.member_id === memberId)
       .map((event) => event.timestamp || 0),
-    ...executionEvents
-      .filter((event) => event.member_id === memberId)
-      .map((event) => event.timestamp || 0),
+    ...executionEvents.filter((event) => event.member_id === memberId).map((event) => event.timestamp || 0),
   ];
 
   return Math.max(0, ...timestamps);
@@ -397,25 +369,22 @@ function getLatestMemberTimestamp(
 function pickLatestActivity(activities: Array<ActivityCandidate | null>): ActivityCandidate | null {
   const latest = getLatestByTimestamp(
     activities.filter((activity): activity is ActivityCandidate => activity !== null),
-    (activity) => activity.timestamp
+    (activity) => activity.timestamp,
   );
   return latest || null;
 }
 
-function sortActivitiesByMember<T extends MemberActivity>(
-  activities: T[],
-  members: TeamMemberLike[]
-): T[] {
-  const orderedIds = members
-    .map((member) => member.member_id)
-    .filter(isVisibleTeamMember);
+function sortActivitiesByMember<T extends MemberActivity>(activities: T[], members: TeamMemberLike[]): T[] {
+  const orderedIds = members.map((member) => member.member_id).filter(isVisibleTeamMember);
   const order = new Map(orderedIds.map((memberId, index) => [memberId, index]));
   return [...activities].sort((a, b) => {
     const aOrder = order.get(a.memberId) ?? Number.MAX_SAFE_INTEGER;
     const bOrder = order.get(b.memberId) ?? Number.MAX_SAFE_INTEGER;
-    return aOrder - bOrder
-      || a.displayName.localeCompare(b.displayName, undefined, { numeric: true })
-      || a.timestamp - b.timestamp;
+    return (
+      aOrder - bOrder ||
+      a.displayName.localeCompare(b.displayName, undefined, { numeric: true }) ||
+      a.timestamp - b.timestamp
+    );
   });
 }
 
@@ -440,16 +409,31 @@ function MemberCountSummary({ counts }: { counts: MemberCounts }) {
   const { t } = useTranslation();
 
   return (
-    <span className="team-event-member-counts">
-      <span className="team-event-member-count" title={t('chatUi.teamActivity.counts.tasks')}>
+    <span className="team-event-member-counts" data-testid="chat-panel-team-event-member-counts">
+      <span
+        className="team-event-member-count"
+        data-testid="chat-panel-team-event-member-count"
+        data-variant="tasks"
+        title={t('chatUi.teamActivity.counts.tasks')}
+      >
         <ListChecks aria-hidden="true" />
         {counts.taskCount}
       </span>
-      <span className="team-event-member-count" title={t('chatUi.teamActivity.counts.messages')}>
+      <span
+        className="team-event-member-count"
+        data-testid="chat-panel-team-event-member-count"
+        data-variant="messages"
+        title={t('chatUi.teamActivity.counts.messages')}
+      >
         <MessageSquareText aria-hidden="true" />
         {counts.messageCount}
       </span>
-      <span className="team-event-member-count" title={t('chatUi.teamActivity.counts.tools')}>
+      <span
+        className="team-event-member-count"
+        data-testid="chat-panel-team-event-member-count"
+        data-variant="tools"
+        title={t('chatUi.teamActivity.counts.tools')}
+      >
         <Wrench aria-hidden="true" />
         {counts.toolCount}
       </span>
@@ -475,25 +459,31 @@ function AgentTeamHeader({
     <button
       type="button"
       className="team-event-group-summary"
+      data-testid="chat-panel-team-event-group-summary"
       onClick={onToggle}
       aria-expanded={expanded}
     >
-      <span className="team-event-group-summary__main">
-        <span className="team-event-group-summary__icon" aria-hidden="true">
-          <img src={teamProcessIcon} alt="" />
+      <span className="team-event-group-summary__main" data-testid="chat-panel-team-event-group-summary-main">
+        <span
+          className="team-event-group-summary__icon"
+          aria-hidden="true"
+          data-testid="chat-panel-team-event-group-summary-icon"
+        >
+          <TeamProcessIcon aria-hidden />
         </span>
-        <span className="team-event-group-summary__title">
+        <span className="team-event-group-summary__title" data-testid="chat-panel-team-event-group-summary-title">
           {buildProgressLabel(memberCount, isProcessing, t)}
         </span>
       </span>
       {isProcessing && (
-        <span className="team-event-group-summary__activity">
+        <span className="team-event-group-summary__activity" data-testid="chat-panel-team-event-group-summary-activity">
           ｜ {buildActivityText(currentActivity, t)}
         </span>
       )}
       <span
         className="team-event-group-summary__chevron"
         aria-hidden="true"
+        data-testid="chat-panel-team-event-group-summary-open-chat"
         title={t('chatUi.teamActivity.openGroupChatTitle')}
         onClick={(event) => {
           event.stopPropagation();
@@ -516,31 +506,28 @@ export function AgentTeamActivityCard({
 }: AgentTeamActivityCardProps) {
   const [expanded, setExpanded] = useState(false);
   const { t } = useTranslation();
-  const { teamMembers } = useSessionStore();
+  const activeSessionId = useChatStore((s) => s.activeSessionId);
+  const teamMembers = useSessionStore((s) => s.runtimes[activeSessionId ?? '']?.teamMembers ?? []);
   const members = teamMembers as TeamMemberLike[];
   const { activities, activeCount } = useMemo(() => {
     const count = members.filter(isActiveTeamMember).length;
     if (!isProcessing) {
-      const acts = buildMemberCompletionSummaries(
-        messages, members, tasks, todos, taskEvents, executionEvents
-      );
+      const acts = buildMemberCompletionSummaries(messages, members, tasks, todos, taskEvents, executionEvents);
       return { activities: acts, activeCount: count };
     }
-    const acts = buildMemberActivities(
-      messages, members, tasks, todos, executionEvents, t
-    );
+    const acts = buildMemberActivities(messages, members, tasks, todos, executionEvents, t);
     return { activities: acts, activeCount: count };
-  }, [messages, members, tasks, todos, taskEvents, executionEvents, isProcessing, t]);
+    }, [messages, members, tasks, todos, taskEvents, executionEvents, isProcessing, t]);
 
-  if (activities.length === 0) {
+    if (activities.length === 0) {
     return null;
   }
 
   const currentActivity = activities.find((a) => a.timestamp > 0);
 
   return (
-    <div className="chat-active-team-group animate-rise">
-      <div className="team-event-group team-event-group--activity">
+    <div className="chat-active-team-group animate-rise" data-testid="chat-panel-team-activity-card">
+      <div className="team-event-group team-event-group--activity" data-testid="chat-panel-team-event-group">
         <AgentTeamHeader
           memberCount={activeCount}
           expanded={expanded}
@@ -550,30 +537,44 @@ export function AgentTeamActivityCard({
           onOpenGroupChat={() => openTeamPanel('team', 'group')}
         />
         {expanded && (
-          <div className="team-event-group-list team-event-group-list--activity">
+          <div
+            className="team-event-group-list team-event-group-list--activity"
+            data-testid="chat-panel-team-event-group-list"
+          >
             {sortActivitiesByMember(activities, members).map((activity) => (
               <button
                 key={activity.memberId}
                 type="button"
                 className="team-event-group-row team-event-group-row--activity"
+                data-testid="chat-panel-team-event-group-row"
+                data-variant={activity.memberId}
                 onClick={() => openMemberDetail(activity.memberId)}
               >
-                <div className="team-event-group-row__avatar">
+                <div className="team-event-group-row__avatar" data-testid="chat-panel-team-event-group-row-avatar">
                   <TeamMemberAvatar member={activity.memberId} className="h-7 w-7" />
                 </div>
-                <div className="team-event-group-row__main">
-                  <div className="team-event-group-row__meta">
-                    <span className="team-event-group-row__member">{activity.displayName}</span>
+                <div className="team-event-group-row__main" data-testid="chat-panel-team-event-group-row-main">
+                  <div className="team-event-group-row__meta" data-testid="chat-panel-team-event-group-row-meta">
+                    <span className="team-event-group-row__member" data-testid="chat-panel-team-event-group-row-member">
+                      {activity.displayName}
+                    </span>
                     {activity.counts ? (
                       <MemberCountSummary counts={activity.counts} />
                     ) : (
-                      <span className="team-event-group-chip team-event-group-chip--status">
+                      <span
+                        className="team-event-group-chip team-event-group-chip--status"
+                        data-testid="chat-panel-team-event-group-chip"
+                        data-variant="status"
+                      >
                         {activity.statusLabel}
                       </span>
                     )}
                   </div>
                   {!activity.counts && (
-                    <div className="team-event-group-row__content">
+                    <div
+                      className="team-event-group-row__content"
+                      data-testid="chat-panel-team-event-group-row-content"
+                    >
                       {activity.summary}
                     </div>
                   )}

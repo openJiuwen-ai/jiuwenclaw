@@ -25,7 +25,7 @@ import {
 } from "./types.js";
 import type { ConnectionStatus } from "./ws-client.js";
 import { createId, findLastIndex, isIgnorableHistoryRestoreError } from "./app-state-helpers.js";
-import { isClientMode, type ClientMode } from "./modes.js";
+import { isClientMode, normalizeToClientMode, type ClientMode } from "./modes.js";
 import type { WorkflowRun } from "./workflows.js";
 
 type PreferredLanguage = "zh" | "en";
@@ -58,11 +58,38 @@ export interface PendingQuestionOption {
   description?: string;
   value?: string;
   details?: string[];
+  preview?: string;
 }
 
 export interface UserAnswer {
   selected_options: string[];
   custom_input?: string;
+}
+
+/**
+ * A pending swarmflow human-session turn awaiting the person's reply.
+ * Not the leader HITL channel (PendingQuestion) — this is a workflow human
+ * node (human_session / human) paused on a real person's input.
+ *
+ * Composite map key is `${workflow_run_id}:${correlation_id}` so concurrent
+ * runs with the same correlation id don't clobber each other's pending entry.
+ */
+export interface PendingHumanPrompt {
+  workflow_run_id: string;
+  workflow_id: string;
+  workflow_name: string;
+  agent_id: string;
+  correlation_id: string;
+  prompt: string;
+  label: string;
+  /** True when reply/detail chrome should show a turn label (session nodes only). */
+  is_session: boolean;
+  /** Turn index parsed from correlation_id ({phase}:{label}:{turn}); 0 for one-shot. */
+  turn: number;
+  /** Set when the reply has been submitted (entry stays dimmed in the list). */
+  replied?: boolean;
+  /** Short reply summary shown after the entry is replied. */
+  answer?: string;
 }
 
 // Harness extension ready info
@@ -110,6 +137,7 @@ export interface AppEventDelegate {
   appendTeamTaskEvent(event: TeamTaskEvent): void;
   appendTeamMessageEvent(event: TeamMessageEvent): void;
   applyWorkflowUpdate(workflow: WorkflowRun): void;
+  setPendingHumanPrompts(prompts: Map<string, PendingHumanPrompt> | null): void;
   setEvolutionStatus(status: "idle" | "running"): void;
   setContextCompression(stats: ContextCompressionStats | null): void;
   setContextWindowLimit(n: number | null): void;
@@ -146,6 +174,8 @@ export interface AppEventDelegate {
   pushHistoryEntry(entry: HistoryItem): void;
   scheduleHistoryFlush(): void;
   safeRestoreHistory(sessionId: string): void;
+  /** 放行统一启动屏障；普通启动分配 ID，`--session` 恢复或登记显式 ID。 */
+  initializeBootSession(): void;
   /** 报告 history.get 流返回的分页元数据（本页 page_idx / total_pages）。 */
   reportHistoryPageMeta(meta: { pageIdx?: number; totalPages?: number }): void;
   /** 某一页 history.get 流已结束（收到 `status: done` 帧），由 app-state 决定是否继续拉下一页。 */
@@ -166,6 +196,16 @@ export interface AppEventDelegate {
   getHarnessActivateInteraction(): HarnessActivateInteraction | null;
   /** Auto-activate extension (send activate_response with action="accept") */
   autoActivateExtension(interactionId: string): void;
+  /**
+   * 由 event-handlers 在收到 chat.interrupt_result 时调用；
+   * 通知所有订阅器（等待型取消按 requestId + sessionId 关联）。
+   */
+  notifyInterruptResult(
+    requestId: string,
+    sessionId: string,
+    success: boolean,
+    message?: string,
+  ): void;
 }
 
 function _handleAgentModeToolResult(
@@ -213,10 +253,21 @@ function _handleAgentModeToolResult(
 
   const existingMode = delegate.getMode();
   let newMode: ClientMode | null = null;
-  if (existingMode.startsWith("code.")) {
-    newMode = subMode === "team" ? "code.team" : "code.normal";
-  } else if (existingMode.startsWith("agent.")) {
-    newMode = subMode === "plan" ? "agent.plan" : "agent.fast";
+  if (existingMode.startsWith("agent.code.")) {
+    newMode = subMode === "team" ? "team.code.normal" : "agent.code.normal";
+  } else if (existingMode.startsWith("team.code.")) {
+    newMode = subMode === "plan" ? "team.code.plan" : "team.code.normal";
+  } else if (existingMode.startsWith("agent.work.")) {
+    newMode = subMode === "plan" ? "agent.work.plan" : "agent.work.normal";
+  } else if (existingMode.startsWith("team.work.")) {
+    newMode = subMode === "plan" ? "team.work.plan" : "team.work.normal";
+  } else {
+    // 四个前缀分支全部失配：existingMode 可能是旧 canonical 串
+    // （agent / agent.plan / team / code.team / team.plan.normal 等），
+    // 理论上有 setMode 归一兜底，但竞态/直写场景可能落到旧串，导致
+    // newMode 保持 null、switch_mode 回显不驱动 UI 切换，与后端 mode 静默错位。
+    // 用 normalizeToClientMode 归一成新 canonical 后兜底；归一无效则保持 null。
+    newMode = normalizeToClientMode(existingMode) ?? null;
   }
 
   if (newMode && newMode !== existingMode) {
@@ -410,12 +461,8 @@ function handleConnectionAck(delegate: AppEventDelegate, frame: EventFrame): boo
   if (frame.event !== "connection.ack") {
     return false;
   }
-  // session_id is determined at construction time; connection.ack is only
-  // used as a signal to restore history once connected.
-  const sessionId = delegate.getSessionId();
-  if (sessionId && delegate.getConnectionStatus() === "connected") {
-    delegate.safeRestoreHistory(sessionId);
-    delegate.safeFetchSessionTitle(sessionId);
+  if (delegate.getConnectionStatus() === "connected") {
+    delegate.initializeBootSession();
   }
   return true;
 }
@@ -438,6 +485,10 @@ function normalizePendingQuestion(payload: Record<string, unknown>): PendingQues
               label: typeof option.label === "string" ? option.label : "",
               description: typeof option.description === "string" ? option.description : undefined,
               value: typeof option.value === "string" ? option.value : undefined,
+              preview:
+                typeof option.preview === "string" && option.preview.trim()
+                  ? option.preview
+                  : undefined,
             }))
             .filter((option) => option.label.length > 0)
         : [],
@@ -838,6 +889,7 @@ function handleContextCompressionState(
           sessionId: activeSessionId,
           content: formatCompressionStartedLine(processor, phase, before),
           icon: "i",
+          transcriptOnly: true,
           meta: { view: "dim" },
           at: new Date().toISOString(),
         });
@@ -884,17 +936,19 @@ function handleSubtaskUpdate(
 ): boolean {
   const taskId = typeof payload.task_id === "string" ? payload.task_id : "";
   if (!taskId) return false;
+  const legacyStatus =
+    typeof payload.legacy_status === "string" ? payload.legacy_status : undefined;
+  const rawStatus = typeof payload.status === "string" ? payload.status : "starting";
+  const progressStatus = legacyStatus ?? rawStatus;
   const subtasks = delegate.getActiveSubtasks();
-  if (payload.status === "completed" || payload.status === "error") {
+  if (progressStatus === "completed" || progressStatus === "error") {
     subtasks.delete(taskId);
     return true;
   }
   subtasks.set(taskId, {
     task_id: taskId,
     description: typeof payload.description === "string" ? payload.description : "",
-    status: (typeof payload.status === "string"
-      ? payload.status
-      : "starting") as SubtaskState["status"],
+    status: progressStatus as SubtaskState["status"],
     index: typeof payload.index === "number" ? payload.index : 0,
     total: typeof payload.total === "number" ? payload.total : 0,
     tool_name: typeof payload.tool_name === "string" ? payload.tool_name : undefined,
@@ -906,8 +960,11 @@ function handleSubtaskUpdate(
 }
 
 function normalizeTodoStatus(status: unknown): TodoItem["status"] | null {
-  if (status === "deleted" || status === "cancelled" || status === "canceled") {
+  if (status === "deleted") {
     return null;
+  }
+  if (status === "cancelled" || status === "canceled") {
+    return "cancelled";
   }
   if (status === "in_progress" || status === "completed" || status === "error") {
     return status;
@@ -1148,14 +1205,24 @@ export function handleIncomingFrame(delegate: AppEventDelegate, frame: EventFram
 
     case "chat.interrupt_result": {
       const intent = typeof payload.intent === "string" ? payload.intent : "cancel";
+      const requestId = typeof payload.request_id === "string" ? payload.request_id : "";
+      const eventSessionId =
+        typeof payload.session_id === "string" ? payload.session_id : activeSessionId;
       if (intent === "cancel") {
+        // 先通知等待型 waiter，让其 resolve/reject。
+        // 服务端可能不回显 TUI 的 requestId（使用自己的 interrupt_xxx 格式），
+        // 因此即使 requestId 为空也要通知，由 waiter 按 sessionId 关联。
+        // 迟到事件（waiter 已清除）由 listener 自行过滤。
+        const success = payload.success !== false;
+        const message =
+          typeof payload.message === "string" ? payload.message : undefined;
+        delegate.notifyInterruptResult(requestId, eventSessionId, success, message);
         const suppressed = delegate.getSuppressInterruptResult();
         if (suppressed) {
           delegate.clearSuppressInterruptResult();
           return true;
         }
-        const success = payload.success !== false;
-        const message = formatInterruptResultMessage(delegate.getPreferredLanguage(), intent, success, payload.message);
+        const uiMessage = formatInterruptResultMessage(delegate.getPreferredLanguage(), intent, success, payload.message);
         if (success) {
           delegate.setStreamingState(StreamingState.Interrupted);
           delegate.getActiveSubtasks().clear();
@@ -1166,7 +1233,7 @@ export function handleIncomingFrame(delegate: AppEventDelegate, frame: EventFram
             kind: "info",
             id: createId("info"),
             sessionId: activeSessionId,
-            content: message,
+            content: uiMessage,
             icon: "i",
             at: new Date().toISOString(),
           });
@@ -1179,10 +1246,13 @@ export function handleIncomingFrame(delegate: AppEventDelegate, frame: EventFram
             kind: "error",
             id: createId("error"),
             sessionId: activeSessionId,
-            content: message,
+            content: uiMessage,
             at: new Date().toISOString(),
           });
-          delegate.setLastError(message);
+          delegate.setLastError(uiMessage);
+          // 失败也视为本次 interrupt 请求已结束，清本地标志 + 解除 esc 去抖窗口，
+          // 否则去抖窗口内后续 esc 会被一直抑制，无法重新发起取消。
+          delegate.clearInterruptRequested();
         }
       } else if (intent === "pause") {
         delegate.setStreamingState(StreamingState.Paused);
@@ -1197,9 +1267,17 @@ export function handleIncomingFrame(delegate: AppEventDelegate, frame: EventFram
       return connectionChanged;
 
     case "plan.mode_exited": {
-      const mode = typeof payload.mode === "string" ? payload.mode : "code.normal";
-      if (mode === "code.normal" && delegate.getMode().startsWith("code.")) {
-        delegate.setMode("code.normal");
+      const rawMode = typeof payload.mode === "string" ? payload.mode : "";
+      const current = delegate.getMode();
+      // 旧判据 startsWith("code.") 在新 canonical（agent.code.*）下永不成立，故用 endsWith(".plan") 复位。
+      if (!current.endsWith(".plan")) return true;
+      const normalTarget = (current.slice(0, -".plan".length) + ".normal") as ClientMode;
+      // 后端推的 exit_mode 可能是旧 canonical 串（如 "agent" / "code.normal"），
+      // 走 normalizeToClientMode 两端都归一到新串再比，避免旧串精确匹配失败导致
+      // UI 卡在 plan 态不复位。
+      const expectedNormal = normalizeToClientMode(rawMode);
+      if (expectedNormal === normalTarget) {
+        delegate.setMode(normalTarget);
       }
       return true;
     }
@@ -1299,8 +1377,12 @@ export function handleIncomingFrame(delegate: AppEventDelegate, frame: EventFram
 
     case "session.updated": {
       const mode = typeof payload.mode === "string" ? payload.mode : "";
-      if (isClientMode(mode)) {
-        delegate.setMode(mode);
+      // 后端推送可能仍带旧 canonical 串（历史 session / cron 拓扑），
+      // 走 normalizeToClientMode 归一到新 canonical 再 setMode，避免
+      // isClientMode 拒收导致 UI mode 与后端真实状态错位。
+      const normalized = normalizeToClientMode(mode);
+      if (normalized) {
+        delegate.setMode(normalized);
       }
       if (typeof payload.title === "string") {
         delegate.setSessionTitle(payload.title);

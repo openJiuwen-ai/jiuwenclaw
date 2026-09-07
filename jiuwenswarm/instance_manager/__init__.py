@@ -49,7 +49,10 @@ from jiuwenswarm.instance_manager.config import (
     check_port_conflicts,
     collect_all_ports,
     compute_auto_port,
+    find_available_ports,
     is_port_available,
+    PORT_ENV_NAMES,
+    PORT_ENV_OVERRIDES,
 )
 
 # YAML management from yaml
@@ -117,6 +120,9 @@ __all__ = [
     "is_port_available",
     "check_port_conflicts",
     "collect_all_ports",
+    "find_available_ports",
+    "PORT_ENV_NAMES",
+    "PORT_ENV_OVERRIDES",
     # YAML management
     "get_instances_yaml_path",
     "get_instances_dir",

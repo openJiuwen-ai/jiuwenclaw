@@ -1,5 +1,7 @@
 import chalk from "chalk";
 import { matchesKey } from "@mariozechner/pi-tui/dist/keys.js";
+import { visibleWidth, wrapTextWithAnsi } from "@mariozechner/pi-tui";
+import { padToWidth } from "../rendering/text.js";
 
 /**
  * CheckboxList — pi-tui Component for grouped multi-select with checkbox items.
@@ -124,7 +126,10 @@ export class CheckboxList {
       const item = this.flatItems[i];
 
       if (item.type === "header") {
-        lines.push(this.theme.header(item.label));
+        const headerWidth = Math.max(1, width - 6);
+        for (const headerLine of wrapTextWithAnsi(item.label, headerWidth)) {
+          lines.push(padToWidth(this.theme.header(headerLine), width));
+        }
         continue;
       }
 
@@ -134,32 +139,60 @@ export class CheckboxList {
         ? this.theme.checkedMark
         : this.theme.uncheckedMark;
 
-      let line: string;
-      if (item.description) {
-        const labelWidth = 14;
-        const paddedLabel = item.label.padEnd(labelWidth);
-        line = `  ${marker}[${checkMark}] ${paddedLabel}${item.description}`;
+      const prefix = `  ${marker}[${checkMark}] `;
+      const continuationPrefix = " ".repeat(visibleWidth(prefix));
+      const bodyWidth = Math.max(1, width - visibleWidth(prefix));
+      const description = item.description?.replace(/[\r\n]+/g, " ").trim() ?? "";
+      const itemLines: string[] = [];
+
+      if (
+        description &&
+        visibleWidth(item.label) + 2 + visibleWidth(description) <= bodyWidth
+      ) {
+        itemLines.push(`${prefix}${item.label}  ${description}`);
       } else {
-        line = `  ${marker}[${checkMark}] ${item.label}`;
+        const labelLines = wrapTextWithAnsi(item.label, bodyWidth);
+        for (let lineIndex = 0; lineIndex < labelLines.length; lineIndex++) {
+          const linePrefix = lineIndex === 0 ? prefix : continuationPrefix;
+          itemLines.push(`${linePrefix}${labelLines[lineIndex]}`);
+        }
+        if (description) {
+          const descriptionPrefix = `${continuationPrefix}  `;
+          const descriptionWidth = Math.max(1, width - visibleWidth(descriptionPrefix));
+          for (const descriptionLine of wrapTextWithAnsi(description, descriptionWidth)) {
+            itemLines.push(`${descriptionPrefix}${descriptionLine}`);
+          }
+        }
       }
 
-      if (isFocused) {
-        line = this.theme.focus(line);
-      } else if (!item.checked) {
-        line = this.theme.dim(line);
+      for (const itemLine of itemLines) {
+        const styledLine = isFocused
+          ? this.theme.focus(itemLine)
+          : !item.checked
+            ? this.theme.dim(itemLine)
+            : itemLine;
+        lines.push(padToWidth(styledLine, width));
       }
-
-      lines.push(line);
     }
 
     // Scroll indicator
     if (totalSelectable > this.maxVisible) {
       const currentSelectableIdx = selectableIndices.indexOf(this.selectedIndex);
-      lines.push(this.theme.hint(`  (${currentSelectableIdx + 1}/${totalSelectable})`));
+      lines.push(
+        padToWidth(
+          this.theme.hint(`  (${currentSelectableIdx + 1}/${totalSelectable})`),
+          width,
+        ),
+      );
     }
 
     // Hint line
-    lines.push(this.theme.hint("↑/↓ 导航 · 空格切换 · Enter 确认 · Esc 取消"));
+    lines.push(
+      padToWidth(
+        this.theme.hint("↑/↓ 导航 · 空格切换 · Enter 确认 · Esc 取消"),
+        width,
+      ),
+    );
 
     return lines;
   }

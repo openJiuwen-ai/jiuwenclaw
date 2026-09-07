@@ -104,6 +104,7 @@ def test_roundtrip_chunk_chat_delta() -> None:
             "event_type": "chat.delta",
             "content": "hi",
             "source_chunk_type": "llm_reasoning",
+            "rid": 7,
         },
         is_complete=False,
     )
@@ -113,6 +114,7 @@ def test_roundtrip_chunk_chat_delta() -> None:
     assert back.payload.get("event_type") == "chat.delta"
     assert back.payload.get("content") == "hi"
     assert back.payload.get("source_chunk_type") == "llm_reasoning"
+    assert back.payload.get("rid") == 7
 
 
 def test_roundtrip_chunk_custom_event() -> None:
@@ -206,3 +208,49 @@ def test_inverse_raises_for_chunk_shape_on_unary_parser() -> None:
     )
     with pytest.raises(ValueError):
         parse_agent_server_wire_unary(chunk_wire)
+
+
+# ---------------------------------------------------------------------------
+# SDD-0010 — wire truncation keeps budget / token_count / child meta
+# ---------------------------------------------------------------------------
+
+def test_snapshot_keep_keys_include_budget() -> None:
+    from jiuwenswarm.server.wire_truncate import (
+        _WORKFLOW_LIST_SUMMARY_KEEP_KEYS,
+    )
+
+    assert "budget" in _WORKFLOW_LIST_SUMMARY_KEEP_KEYS
+
+
+def test_collapse_agent_keeps_token_count() -> None:
+    from jiuwenswarm.server.wire_truncate import _split_oversized_agent_fields
+
+    agent = {"id": "k1", "name": "analyst", "status": "completed", "kind": "agent",
+             "token_count": 12700, "outcome": "ok"}
+    out = _split_oversized_agent_fields(agent)
+    assert out.get("token_count") == 12700
+
+
+def test_collapse_phase_keeps_child_meta() -> None:
+    from jiuwenswarm.server.wire_truncate import _build_workflow_detail_paginated
+
+    item = {
+        "id": "wf_1", "name": "onboarding", "status": "running",
+        "agent_count": 1, "completed_agent_count": 0,
+        "started_at": "2026-08-01T10:00:00+08:00", "token_count": 12700,
+        "budget": {"total": 5, "spent": 5, "remaining": 0, "scope": "leader", "exhausted": True},
+        "phases": [{
+            "id": "p1", "name": "▸ intro #0", "status": "running",
+            "agent_count": 1, "completed_agent_count": 0,
+            "phase_type": "child", "nested_phase": "▸ intro #0",
+            "parent_phase": "review", "agents": [],
+        }],
+    }
+    out = _build_workflow_detail_paginated(item, session_id="s1")
+    wf = out["workflow"]
+    assert wf["budget"]["exhausted"] is True
+    assert wf.get("token_count") == 12700
+    ph = wf["phases"][0]
+    assert ph.get("phase_type") == "child"
+    assert ph.get("nested_phase") == "▸ intro #0"
+    assert ph.get("parent_phase") == "review"

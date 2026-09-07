@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from jiuwenswarm.server.runtime.skill.skilldev.state_utils import (
     get_registered_skill_names,
     get_skill_enabled,
@@ -171,6 +173,35 @@ def test_manual_skill_auto_registered_as_local(monkeypatch, tmp_path):
     assert "manual-skill" in manager.list_execution_disabled_skills()
 
 
+@pytest.mark.asyncio
+async def test_local_skill_get_accepts_directory_id_and_frontmatter_name(
+    monkeypatch, tmp_path
+):
+    skills_dir = tmp_path / "skills"
+    builtin_dir = tmp_path / "builtin"
+    builtin_dir.mkdir(parents=True, exist_ok=True)
+    _make_skill_dir(
+        skills_dir,
+        "software-engineer",
+        "---\nname: 工程师\ndescription: test\n---\n",
+    )
+
+    manager = _init_manager_with_skills_dir(monkeypatch, skills_dir, builtin_dir)
+    manager.set_skill_enabled("software-engineer", False)
+
+    listed = manager._scan_local_skills()
+    skill = next(s for s in listed if s.get("name") == "software-engineer")
+    assert (skill["source"], skill["display_name"]) == ("local", "工程师")
+
+    by_id = await manager.handle_skills_get({"name": "software-engineer"})
+    by_display_name = await manager.handle_skills_get({"name": "工程师"})
+    for detail in (by_id, by_display_name):
+        assert detail["name"] == "software-engineer"
+        assert detail["source"] == "local"
+        assert detail["display_name"] == "工程师"
+        assert detail["enabled"] is False
+
+
 def test_builtin_skill_not_auto_registered_as_local(monkeypatch, tmp_path):
     """A skill that also exists under the builtin dir must NOT be auto-registered."""
     skills_dir = tmp_path / "skills"
@@ -181,6 +212,32 @@ def test_builtin_skill_not_auto_registered_as_local(monkeypatch, tmp_path):
     manager = _init_manager_with_skills_dir(monkeypatch, skills_dir, builtin_dir)
 
     assert all(s.get("name") != "builtin-twin" for s in manager.get_local_skills())
+
+
+def test_installed_builtin_skill_keeps_builtin_source_flag(monkeypatch, tmp_path):
+    """Installed built-in skills are local files but still need a built-in source marker."""
+    skills_dir = tmp_path / "skills"
+    builtin_dir = tmp_path / "builtin"
+    _make_skill_dir(skills_dir, "builtin-installed")
+    _make_skill_dir(builtin_dir, "builtin-installed")
+
+    manager = _init_manager_with_skills_dir(monkeypatch, skills_dir, builtin_dir)
+
+    listed = manager._scan_local_skills()
+    skill = next(s for s in listed if s.get("name") == "builtin-installed")
+    assert skill["is_builtin_source"] is True
+
+
+def test_builtin_scan_uses_directory_name_without_frontmatter(monkeypatch, tmp_path):
+    """Built-in marketplace entries should not appear as the generic SKILL name."""
+    skills_dir = tmp_path / "skills"
+    builtin_dir = tmp_path / "builtin"
+    _make_skill_dir(builtin_dir, "builtin-no-frontmatter")
+
+    manager = _init_manager_with_skills_dir(monkeypatch, skills_dir, builtin_dir)
+
+    listed = manager._scan_builtin_skills()
+    assert [s.get("name") for s in listed] == ["builtin-no-frontmatter"]
 
 
 def test_already_registered_skill_not_duplicated(monkeypatch, tmp_path):

@@ -136,7 +136,6 @@ async def exec_background_in_sandbox(
             workdir=request.workdir,
             env=request.env,
             stdin_data=stdin_data,
-            capture_output=request.capture_output,
         ),
     )
 

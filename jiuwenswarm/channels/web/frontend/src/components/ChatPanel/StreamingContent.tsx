@@ -1,19 +1,11 @@
-/**
- * StreamingContent 组件
- *
- * 流式内容显示
- */
-
 interface StreamingContentProps {
   content: string;
-  isStreaming: boolean;
 }
 
-export function StreamingContent({ content, isStreaming }: StreamingContentProps) {
+export function StreamingContent({ content }: StreamingContentProps) {
   return (
-    <div className="chat-text">
+    <div className="chat-text" data-testid="chat-panel-streaming-content">
       <span className="whitespace-pre-wrap">{content}</span>
-      {isStreaming && <span className="streaming-cursor" />}
     </div>
   );
 }

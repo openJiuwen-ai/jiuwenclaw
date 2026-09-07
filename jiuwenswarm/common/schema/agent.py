@@ -79,6 +79,11 @@ class AgentRequest:
     metadata: dict[str, Any] | None = None
     enable_memory: bool | None = None
     permission_context: PermissionContext | None = None
+    # V2: AgentRef(mode, id)，全链路透传供响应侧回带（设计 §6.3/§5.2）。
+    agent_ref: Any = None
+    # 创建者/调用者标识（envelope.user_id 透传）。AgentServer 据此回写会话
+    # metadata.user_id，供 gateway 列表接口按用户隔离会话历史。默认空串向后兼容。
+    user_id: str = ""
 
 
 @dataclass
@@ -90,6 +95,8 @@ class AgentResponse:
     ok: bool = True
     payload: dict | None = None
     metadata: dict[str, Any] | None = None
+    # V2: 回带请求侧 agent_ref，供 gateway 非流式响应 3 元组路由（设计 §6.3）。
+    agent_ref: Any = None
 
 
 @dataclass
@@ -100,3 +107,5 @@ class AgentResponseChunk:
     channel_id: str
     payload: dict | None = None
     is_complete: bool = False
+    agent_ref: Any = None       # AgentRef(mode, id), V2 新增
+    metadata: dict = field(default_factory=dict)  # fan_out_targets (V1 wire key, list[LogicalTarget])

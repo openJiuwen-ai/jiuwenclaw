@@ -9,11 +9,15 @@ from enum import Enum
 from typing import TYPE_CHECKING, Any, Callable, Awaitable
 
 from jiuwenswarm.common.schema.message import Message
+from jiuwenswarm.gateway.routing.session_sharing import RoutingTarget
 
 
 logger = logging.getLogger(__name__)
 if TYPE_CHECKING:
     pass
+
+# 连接钩子签名: (ws) -> None | Awaitable[None]
+ConnectHook = Callable[..., Any]
 
 
 class ChannelType(str, Enum):
@@ -25,9 +29,11 @@ class ChannelType(str, Enum):
     DINGTALK = "dingtalk"
     TELEGRAM = "telegram"
     DISCORD = "discord"
+    SLACK = "slack"
     WHATSAPP = "whatsapp"
     WECOM = "wecom"
     WECHAT = "wechat"
+    SSH = "ssh"
     CLI = "tui"
 
 
@@ -124,6 +130,7 @@ class BaseChannel(ABC):
         self.config = config
         self.bus = router
         self._running = False
+        self.start_task: Any = None
 
     @abstractmethod
     async def start(self) -> None:
@@ -142,12 +149,23 @@ class BaseChannel(ABC):
         """停止Channel并清理资源"""
         pass
 
-    @abstractmethod
-    async def send(self, msg: Message) -> None:
+    async def send(
+        self,
+        msg: Message,
+        *,
+        routing_target: RoutingTarget | None = None,
+    ) -> None:
+        """通过 Channel 发送消息。
+
+        V2 签名（2 参数）：
+          msg            — 消息内容
+          routing_target — RoutingTarget（自包含：intent + routing_keys + at_user_ids + delivery）
         """
-        通过Channel发送消息
-        """
-        pass
+        logger.warning(
+            "[%s] send() not implemented, message dropped: id=%s",
+            getattr(self, "channel_id", "unknown"),
+            getattr(msg, "id", ""),
+        )
 
     def is_allowed(self, sender_id: str) -> bool:
         """
@@ -193,3 +211,19 @@ class BaseChannel(ABC):
         """Check if the channel_id is running."""
         return self._running
 
+
+class BaseWebChannel(BaseChannel):
+
+    def __init__(self, config: Any, router: RobotMessageRouter):
+        """
+        初始化Channel
+        """
+        super().__init__(config, router)
+        self._connect_hooks: list[ConnectHook] = []
+        self._disconnect_hooks: list[ConnectHook] = []
+
+    def on_connect(self, callback: ConnectHook) -> None:
+        self._connect_hooks.append(callback)
+
+    def on_disconnect(self, callback: ConnectHook) -> None:
+        self._disconnect_hooks.append(callback)

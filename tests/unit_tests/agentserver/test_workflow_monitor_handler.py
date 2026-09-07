@@ -420,3 +420,140 @@ class TestWorkflowMonitorHandlerRunIdRegistry:
         assert len(runs) == 1
         assert run_id in runs
         assert runs[run_id].id == run_id
+
+
+# ---------------------------------------------------------------------------
+# Checkpoint persistence
+# ---------------------------------------------------------------------------
+
+class TestWorkflowMonitorHandlerPersist:
+    """_persist() must land runs + session_budget in ONE read-modify-write.
+
+    Regression: two separate persists each cache_bust-read the disk before
+    the other's async-queued write is flushed; the second full-file replace
+    reverts the first's workflow_runs (lost update freezing the checkpoint
+    at a stale pre-terminal state).
+    """
+
+    def test_persist_writes_runs_and_budget_in_single_write(self) -> None:
+        from jiuwenswarm.agents.harness.team.handlers.workflow_state import WorkflowRunState
+        import jiuwenswarm.server.runtime.session.session_metadata as sm
+
+        monitor = _FakeTeamMonitor()
+        handler = WorkflowMonitorHandler(monitor=monitor, session_id="sess-persist")
+        handler._runs = {
+            "wf_run1": WorkflowRunState(
+                id="wf_run1", name="flow", status="stopped",
+                agent_count=5, completed_agent_count=5,
+            )
+        }
+        budget = {"total": 500000, "spent": 400000, "remaining": 100000, "scope": "session", "exhausted": False}
+        handler._session_budget = budget
+
+        store: dict[str, Any] = {"session_id": "sess-persist", "title": "t"}
+        written: list[tuple[str, dict]] = []
+        original_read = sm._read_metadata
+        original_enqueue = sm._enqueue_write
+        sm._read_metadata = lambda session_id, cache_bust=True: dict(store)
+        sm._enqueue_write = lambda session_id, metadata: written.append((session_id, dict(metadata)))
+        try:
+            handler._persist()
+        finally:
+            sm._read_metadata = original_read
+            sm._enqueue_write = original_enqueue
+
+        assert len(written) == 1, "runs + budget must share one enqueue (single RMW)"
+        session_id, payload = written[0]
+        assert session_id == "sess-persist"
+        assert payload["session_budget"] == budget
+        persisted_runs = payload.get("workflow_runs") or {}
+        assert persisted_runs["wf_run1"]["status"] == "stopped"
+        assert persisted_runs["wf_run1"]["completed_agent_count"] == 5
+
+    def test_persist_without_budget_only_writes_runs(self) -> None:
+        from jiuwenswarm.agents.harness.team.handlers.workflow_state import WorkflowRunState
+        import jiuwenswarm.server.runtime.session.session_metadata as sm
+
+        monitor = _FakeTeamMonitor()
+        handler = WorkflowMonitorHandler(monitor=monitor, session_id="sess-persist2")
+        handler._runs = {"wf_run2": WorkflowRunState(id="wf_run2", name="flow", status="running")}
+
+        written: list[tuple[str, dict]] = []
+        original_read = sm._read_metadata
+        original_enqueue = sm._enqueue_write
+        sm._read_metadata = lambda session_id, cache_bust=True: {"session_id": "sess-persist2"}
+        sm._enqueue_write = lambda session_id, metadata: written.append((session_id, dict(metadata)))
+        try:
+            handler._persist()
+        finally:
+            sm._read_metadata = original_read
+            sm._enqueue_write = original_enqueue
+
+        assert len(written) == 1
+        assert "session_budget" not in written[0][1]
+        assert "wf_run2" in (written[0][1].get("workflow_runs") or {})
+
+
+# ---------------------------------------------------------------------------
+# New-field passthrough (agent_id / node_type / correlation_id / answer)
+# ---------------------------------------------------------------------------
+
+class TestExtractProgressPassthrough:
+    """_extract_progress passes the new fields through the dict payload path.
+
+    Agent-core EventMessage / WorkflowProgressTeamEvent shapes vary by package
+    version; those paths are not pinned here.
+    """
+
+    @staticmethod
+    def test_dict_payload_passes_new_fields() -> None:
+        """dict path: WorkflowProgress(**payload) covers the new fields."""
+        handler = WorkflowMonitorHandler(monitor=_FakeTeamMonitor(), session_id="s")
+        payload = {
+            "kind": "agent_started",
+            "phase": "review",
+            "label": "host",
+            "agent_id": "main/call:1",
+            "node_type": "human_session",
+            "correlation_id": "review:host:0",
+            "answer": "yes, approved",
+        }
+        progress = handler._extract_progress(SimpleNamespace(payload=payload))
+        assert progress is not None
+        assert progress.agent_id == "main/call:1"
+        assert progress.node_type == "human_session"
+        assert progress.correlation_id == "review:host:0"
+        assert progress.answer == "yes, approved"
+
+    @staticmethod
+    def test_object_fallback_copies_new_fields() -> None:
+        """object fallback path copies tokens/budget/nested_* onto WorkflowProgress.
+
+        A raw payload that is neither a dict nor a pydantic model (no
+        ``model_dump``) must still surface the SDD-0010 fields via
+        ``getattr`` so the fallback branch does not silently drop them.
+        """
+        h = WorkflowMonitorHandler.__new__(WorkflowMonitorHandler)
+        h._session_id = "s"
+
+        class _Payload:
+            kind = "agent_completed"
+            run_id = "wf_1"; workflow_name = "w"; description = None; phase = "review"
+            label = "analyst"; prompt = None; model = None; outcome = "ok"; text = None
+            phases = None; correlation_id = None; node_type = "agent"; agent_id = "k1"; answer = None
+            tokens = 12700
+            budget = {"total": 5, "spent": 5, "remaining": 0, "scope": "leader", "exhausted": True}
+            phase_type = "child"
+            nested_phase = "▸ intro #0"
+            parent_phase = "review"
+
+        class _Ev:
+            def get_payload(self):  # noqa: ANN202
+                return _Payload()
+
+        p = h._extract_progress(_Ev())
+        assert p.tokens == 12700
+        assert p.budget["exhausted"] is True
+        assert p.phase_type == "child"
+        assert p.nested_phase == "▸ intro #0"
+        assert p.parent_phase == "review"

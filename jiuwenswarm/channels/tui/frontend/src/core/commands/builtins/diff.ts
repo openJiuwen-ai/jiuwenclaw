@@ -17,7 +17,7 @@ export function createDiffCommand(): SlashCommand {
     kind: CommandKind.BUILT_IN,
     action: async (ctx, args) => {
       try {
-        const payload = await ctx.request<DiffPayload>("command.diff", {});
+        const payload = await ctx.request<DiffPayload>("command.diff", {}, 60_000);
         const turns = payload.turns || [];
         const gitDiff = payload.gitDiff || null;
 

@@ -27,6 +27,13 @@ from openjiuwen.core.sys_operation.shell_process_registry import (
 )
 
 from jiuwenswarm.common.utils import get_agent_workspace_dir
+from jiuwenswarm.agents.harness.common.tools.command_execution_context import (
+    current_command_execution,
+)
+from jiuwenswarm.agents.harness.common.tools.command_runtime import (
+    CommandRuntimePaths,
+    resolve_command_workdir,
+)
 
 
 class CommandCancelled(Exception):
@@ -209,6 +216,65 @@ _QUOTED_WINDOWS_PATH_PATTERN = re.compile(r"(?P<quote>['\"])(?P<path>[A-Za-z]:\\
 _UNQUOTED_WINDOWS_PATH_PATTERN = re.compile(r"(?<![\w/])(?P<path>[A-Za-z]:\\[^\s|&;]+)")
 
 
+def _translate_mkdir_p_to_powershell(segment: str) -> str | None:
+    try:
+        tokens = shlex.split(segment, posix=False)
+    except ValueError:
+        return None
+    if not tokens:
+        return None
+    base = _strip_matching_quotes(tokens[0]).rsplit("/", maxsplit=1)[-1].rsplit("\\", maxsplit=1)[-1].lower()
+    if base.endswith(".exe"):
+        base = base[:-4]
+    if base != "mkdir":
+        return None
+    has_p = False
+    paths: list[str] = []
+    other_flags: list[str] = []
+    for tok in tokens[1:]:
+        stripped = _strip_matching_quotes(tok)
+        if stripped == "-p" or stripped == "--parents":
+            has_p = True
+        elif stripped.startswith("-"):
+            other_flags.append(stripped)
+        else:
+            paths.append(tok)
+    if not has_p:
+        return None
+    if other_flags:
+        return None
+    if not paths:
+        return None
+    items = []
+    for p in paths:
+        bare = _strip_matching_quotes(p)
+        escaped = bare.replace("'", "''")
+        items.append(f"New-Item -ItemType Directory -Path '{escaped}' -Force")
+    return "; ".join(items)
+
+
+def _translate_posix_segment_for_powershell(segment: str) -> str | None:
+    try:
+        tokens = shlex.split(segment, posix=False)
+    except ValueError:
+        return None
+    if not tokens:
+        return None
+    base = _strip_matching_quotes(tokens[0]).rsplit("/", maxsplit=1)[-1].rsplit("\\", maxsplit=1)[-1].lower()
+    if base.endswith(".exe"):
+        base = base[:-4]
+    if base == "mkdir":
+        return _translate_mkdir_p_to_powershell(segment)
+    return None
+
+
+def _translate_posix_for_powershell(command: str) -> str | None:
+    segments = _split_shell_segments(command)
+    if len(segments) != 1:
+        return None
+    return _translate_posix_segment_for_powershell(segments[0])
+
+
 def _clip_text(value: str, max_chars: int) -> str:
     if max_chars <= 0 or len(value) <= max_chars:
         return value
@@ -350,22 +416,15 @@ def _is_relative_to(path: Path, root: Path) -> bool:
 
 
 def _resolve_command_workdir(workdir: str) -> Path:
-    current_cwd = _context_cwd()
-    project_root = _context_project_root()
-    candidate = Path(workdir) if workdir else current_cwd
-    if not candidate.is_absolute():
-        candidate = current_cwd / candidate
-    candidate = candidate.resolve()
-
-    allowed_roots = [project_root]
-    workspace_root = _context_workspace_root()
-    if workspace_root is not None:
-        allowed_roots.append(workspace_root)
-    allowed_roots.append(get_agent_workspace_dir().resolve())
-
-    if not any(_is_relative_to(candidate, root) for root in allowed_roots):
-        raise ValueError("workdir is outside project workspace")
-    return candidate
+    return resolve_command_workdir(
+        workdir,
+        runtime_paths=CommandRuntimePaths(
+            current_cwd=_context_cwd(),
+            project_root=_context_project_root(),
+            workspace_root=_context_workspace_root(),
+            agent_workspace_root=get_agent_workspace_dir().resolve(),
+        ),
+    )
 
 
 def _normalize_shell_type(shell_type: str) -> str:
@@ -560,6 +619,12 @@ def _resolve_execution_plan(command: str, shell_type: str) -> tuple[list[str] | 
                 exe = _available_bash(allow_wsl=False)
                 if exe:
                     return [exe, "-lc", _normalize_windows_paths_for_bash(command)], False, "bash"
+                translated = _translate_posix_for_powershell(command)
+                ps_exe = _available_powershell()
+                if translated is not None and ps_exe:
+                    return [ps_exe, "-NoProfile", "-NonInteractive", "-Command", translated], False, "powershell"
+                if ps_exe:
+                    return [ps_exe, "-NoProfile", "-NonInteractive", "-Command", command], False, "powershell"
             normalized = "cmd"
         if normalized == "powershell":
             exe = _available_powershell()
@@ -719,6 +784,108 @@ def _run_command_background(
     return proc.pid, resolved_shell, None
 
 
+def _value_field(value: Any, name: str, default: Any = None) -> Any:
+    if isinstance(value, dict):
+        return value.get(name, default)
+    return getattr(value, name, default)
+
+
+def _sandbox_host_fallback_reason(sys_operation: Any) -> str | None:
+    run_config = _value_field(sys_operation, "_run_config")
+    gateway_config = _value_field(run_config, "config")
+    launcher_config = _value_field(gateway_config, "launcher_config")
+    extra_params = _value_field(launcher_config, "extra_params", {})
+    if not isinstance(extra_params, dict):
+        return None
+    if extra_params.get("fallback_on_failure") is True:
+        return "sandbox host fallback is enabled"
+    if extra_params.get("excluded_commands"):
+        return "sandbox excluded commands may route to the host"
+    return None
+
+
+def _sandbox_resolved_shell(shell_type: str) -> str:
+    return "bash" if shell_type == "auto" else shell_type
+
+
+async def _run_command_in_bound_sandbox(
+    *,
+    sys_operation: Any,
+    command: str,
+    timeout_seconds: int,
+    workdir: Path,
+    max_output_chars: int,
+    shell_type: str,
+    background: bool,
+) -> str:
+    fallback_reason = _sandbox_host_fallback_reason(sys_operation)
+    if fallback_reason:
+        return f"[ERROR]: command execution failed closed: {fallback_reason}."
+    shell_factory = getattr(sys_operation, "shell", None)
+    if not callable(shell_factory):
+        return "[ERROR]: sandbox shell operation is unavailable."
+    try:
+        shell = shell_factory()
+        if background:
+            execute = getattr(shell, "execute_cmd_background", None)
+            if not callable(execute):
+                return "[ERROR]: sandbox background shell operation is unavailable."
+            result = await execute(
+                command,
+                cwd=str(workdir),
+                grace=5.0,
+                shell_type=shell_type,
+            )
+        else:
+            execute = getattr(shell, "execute_cmd", None)
+            if not callable(execute):
+                return "[ERROR]: sandbox shell operation is unavailable."
+            result = await execute(
+                command,
+                cwd=str(workdir),
+                timeout=timeout_seconds,
+                shell_type=shell_type,
+            )
+    except Exception as exc:
+        return f"[ERROR]: sandbox command execution failed: {exc}"
+
+    if _value_field(result, "code", 1) != 0:
+        message = str(_value_field(result, "message", "sandbox execution failed"))
+        if "timeout" in message.lower():
+            return f"[ERROR]: command timed out after {timeout_seconds}s."
+        return f"[ERROR]: sandbox command execution failed: {message}"
+    data = _value_field(result, "data")
+    if data is None:
+        return "[ERROR]: sandbox command execution returned no result."
+
+    if background:
+        payload = {
+            "command": command,
+            "cwd": str(workdir),
+            "shell_type": shell_type,
+            "resolved_shell": _sandbox_resolved_shell(shell_type),
+            "background": True,
+            "pid": _value_field(data, "pid"),
+            "status": "started",
+        }
+        return json.dumps(payload, ensure_ascii=False, indent=2)
+
+    payload = {
+        "command": command,
+        "cwd": str(workdir),
+        "shell_type": shell_type,
+        "resolved_shell": _sandbox_resolved_shell(shell_type),
+        "exit_code": _value_field(data, "exit_code", -1),
+        "stdout": _clip_text(
+            str(_value_field(data, "stdout", "") or ""), max_output_chars
+        ),
+        "stderr": _clip_text(
+            str(_value_field(data, "stderr", "") or ""), max_output_chars
+        ),
+    }
+    return json.dumps(payload, ensure_ascii=False, indent=2)
+
+
 @tool(
     name="mcp_exec_command",
     description=(
@@ -780,6 +947,18 @@ async def mcp_exec_command(
     if max_output_chars < 0:
         max_output_chars = 0
     normalized_shell_type = _normalize_shell_type(shell_type)
+    execution_binding = current_command_execution()
+
+    if execution_binding is not None and execution_binding.sandboxed:
+        return await _run_command_in_bound_sandbox(
+            sys_operation=execution_binding.sys_operation,
+            command=command,
+            timeout_seconds=timeout_seconds,
+            workdir=resolved_workdir,
+            max_output_chars=max_output_chars,
+            shell_type=normalized_shell_type,
+            background=background,
+        )
 
     if background:
         try:

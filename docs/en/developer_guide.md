@@ -116,6 +116,58 @@ uv add --dev pytest-cov pytest-asyncio
 
 After modifying code, you need to build and verify according to the type of changes made:
 
+#### One-Command Debug Mode (Recommended)
+
+`debug` mode chains "rebuild + reinstall dependencies + start in background" into a
+single command, which is handy for a full verification pass after a change:
+
+```bash
+uv run jiuwenswarm-start debug
+```
+
+It runs, in order:
+
+1. `npm install` in `jiuwenswarm/channels/web/frontend`
+2. `npm run build` in the same directory, regenerating `frontend/dist`
+3. `uv sync` at the repository root
+4. Starts all services in the background, redirecting terminal output to
+   `logs/swarm-<timestamp>.log`
+
+When only Python code changed, the frontend build (steps 1-2) is wasted time -
+pass `--skip-build` to reuse the existing `frontend/dist`:
+
+```bash
+uv run jiuwenswarm-start debug --skip-build
+```
+
+If `frontend/dist` is missing or empty the flag errors out and tells you to run a
+full build first, rather than starting a service whose UI would 404.
+
+The terminal then echoes the ports the services actually bound, and they keep
+running in the background. Follow the log with:
+
+```bash
+tail -f logs/swarm-<timestamp>.log
+```
+
+Stop the background service (this also terminates the AgentServer / Gateway / Web
+subprocesses it spawned):
+
+```bash
+uv run jiuwenswarm-stop
+```
+
+Notes:
+
+- `debug` must run from a source checkout (it builds the frontend and runs `uv sync`);
+  for a package installation use `jiuwenswarm-start all` instead
+- `debug` cannot be combined with `--name` - it only serves the default instance; use
+  `jiuwenswarm-start --name <name>` for multi-instance debugging
+- Starting a second debug service is refused while one is running; run
+  `uv run jiuwenswarm-stop` first
+- Log files are never rotated or removed automatically; delete `logs/swarm-*.log`
+  manually when they pile up
+
 #### Backend Code Changes
 
 After modifying backend Python code, run the following commands to reinitialize and start the service:
@@ -250,6 +302,25 @@ The script will execute the following steps in order:
 Artifacts are output to two directories:
 - `./dist/jiuwenswarm-<version>-py3-none-any.whl` (main package)
 - `./packages/jiuwenswarm-tui/dist/jiuwenswarm_tui-<version>-<platform>.whl` (TUI sidecar package)
+
+#### 6.1.2 Build the jiuwenbox Package Alone
+
+`jiuwenbox` is a standalone sandbox system package (config file: `jiuwenbox/pyproject.toml`). You can skip the main package and TUI sidecar via `scripts/build_python_packages.py` to build only the jiuwenbox wheel:
+
+```bash
+python scripts/build_python_packages.py --skip-root --skip-sidecar --clean
+```
+
+This command will:
+
+1. Clean `dist/`, `build/`, and `jiuwenbox.egg-info` under `jiuwenbox/` (triggered by `--clean`)
+2. Run `uv build --wheel` in the `jiuwenbox/` directory, outputting artifacts to `jiuwenbox/dist/`
+
+Artifact: `./jiuwenbox/dist/jiuwenbox-<version>-py3-none-any.whl`
+
+> Note: `build_python_packages.py` builds the main package, TUI sidecar, and jiuwenbox by default. Use `--skip-root --skip-sidecar` only when you need to produce the jiuwenbox package alone. If all three are skipped (passing `--skip-root --skip-sidecar --skip-jiuwenbox` together), the script exits with an error.
+
+> Note: `jiuwenbox` requires Python `>=3.11`. If the build machine's system Python is below this version, explicitly invoke the script with a 3.11 interpreter (e.g. `python3.11 scripts/build_python_packages.py --skip-root --skip-sidecar --clean`); otherwise the build fails due to dependency resolution errors.
 
 ### 6.2 Desktop EXE / DMG Packaging
 

@@ -17,7 +17,6 @@ from openjiuwen.harness.rails.base import DeepAgentRail
 from jiuwenswarm.agents.harness.common.rails.permissions.owner_scopes import (
     TOOL_PERMISSION_CONTEXT,
 )
-from jiuwenswarm.common.utils import logger
 
 _MEMORY_WRITE_TOOLS = frozenset({"write_memory", "edit_memory"})
 
@@ -52,20 +51,6 @@ class AvatarPromptRail(DeepAgentRail):
         self._injected_sections.clear()
 
         language = getattr(builder, "language", "cn") or "cn"
-
-        try:
-            from jiuwenswarm.agents.harness.common.memory.forbidden import get_forbidden_memory_prompt
-            forbidden = get_forbidden_memory_prompt(language)
-            if forbidden:
-                section = PromptSection(
-                    name="forbidden_memory",
-                    content={language: forbidden},
-                    priority=_AVATAR_PROMPT_PRIORITY + 3,
-                )
-                builder.add_section(section)
-                self._injected_sections.add("forbidden_memory")
-        except Exception as e:
-            logger.debug("[AvatarRail] 加载 forbidden_memory 失败: %s", e)
 
         perm_ctx = TOOL_PERMISSION_CONTEXT.get()
         if perm_ctx is None:

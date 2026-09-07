@@ -53,11 +53,12 @@ export function DateTimeInputWithDefaults({
   );
 
   return (
-    <div className="a2ui-datetime-input" style={hostWeightStyle(node.weight)}>
+    <div className="a2ui-datetime-input" data-testid="a2ui-datetime-input" style={hostWeightStyle(node.weight)}>
       <section className={classMapToString(theme.components.DateTimeInput.container)}>
         <label
           htmlFor={id}
           className={classMapToString(theme.components.DateTimeInput.label)}
+          data-testid="a2ui-datetime-input-label"
         >
           {dateInputLabel(enableDate, enableTime)}
         </label>
@@ -68,6 +69,7 @@ export function DateTimeInputWithDefaults({
           onChange={updateFromInput}
           className={classMapToString(theme.components.DateTimeInput.element)}
           style={stylesToObject(theme.additionalStyles?.DateTimeInput)}
+          data-testid="a2ui-datetime-input-field"
         />
       </section>
     </div>

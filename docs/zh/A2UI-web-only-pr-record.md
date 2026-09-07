@@ -38,3 +38,9 @@ uv run pytest tests/unit_tests/a2ui/test_integration_bridge.py tests/unit_tests/
 
 - 如果未来需要飞书卡片或微信结构化文本，应按平台 adapter 独立设计，不复用 Web A2UI renderer，也不把它定义为完整 A2UI。
 - 如果 IM 需要完整 A2UI 体验，应通过 Web companion 页面承载交互，IM 只作为通知和入口。
+---
+
+## 返回导航
+
+- [返回文档首页](../README.md)
+- [返回项目首页](../../README_CN.md)

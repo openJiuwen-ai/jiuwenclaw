@@ -2,6 +2,7 @@
 
 """Unit tests for team runtime inheritance helpers."""
 
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -13,6 +14,7 @@ from jiuwenswarm.agents.harness.team.team_runtime_inheritance import (
     MemberInfo,
     RuntimeInfo,
     TeamWorkspaceInfo,
+    _build_context_processor_rail,
     build_evolution_llm,
     build_member_rails,
     build_skill_evolution_rail,
@@ -21,6 +23,9 @@ from jiuwenswarm.agents.harness.team.team_runtime_inheritance import (
 )
 from jiuwenswarm.agents.harness.common.prompt.prompt_builder import LocalSectionName
 from jiuwenswarm.server.runtime.a2ui.config import A2UIConfig
+from jiuwenswarm.agents.harness.common.rails.symphony.retrieval_context_processor import (
+    SymphonyRetrievalCompactProcessorConfig,
+)
 
 
 class _FakeAbilityManager:
@@ -49,6 +54,17 @@ def _make_tool_card(name: str) -> ToolCard:
         name=name,
         description=f"{name} description",
         input_params={"type": "object"},
+    )
+
+
+def test_team_context_processor_rail_includes_symphony_retrieval_compactor() -> None:
+    rail = _build_context_processor_rail({})
+
+    assert rail is not None
+    assert rail._user_processors[-1][0] == "SymphonyRetrievalCompactProcessor"
+    assert isinstance(
+        rail._user_processors[-1][1],
+        SymphonyRetrievalCompactProcessorConfig,
     )
 
 
@@ -84,6 +100,36 @@ def test_filter_inheritable_ability_cards_includes_extended_swarm_tools():
 
 
 @pytest.mark.asyncio
+async def test_build_member_rails_separates_project_and_team_file_destinations(
+    tmp_path: Path,
+) -> None:
+    """Legacy/hot-reload rail construction preserves the user project root."""
+    project_dir = str(tmp_path / "project")
+    team_ws_root = str(tmp_path / "team-workspace")
+    rails = build_member_rails(
+        member_info=MemberInfo(role="leader"),
+        team_workspace=TeamWorkspaceInfo(
+            root_dir=team_ws_root,
+            project_dir=project_dir,
+            team_id="unit-team",
+        ),
+    )
+    rail = next(
+        item for item in rails if item.__class__.__name__ == "TeamWorkspaceReportPathRail"
+    )
+    builder = _FakePromptBuilder()
+    rail.init(SimpleNamespace(system_prompt_builder=builder))
+    await rail.before_model_call(SimpleNamespace())
+
+    section = builder.sections["team_workspace_report_paths"]
+    content = section.render("cn")
+    assert f"User project root: `{project_dir}`" in content
+    assert f"Team shared workspace (config / internal data): `{team_ws_root}`" in content
+    assert "Do not place final project files in the team shared workspace root" in content
+    assert "When worktree isolation is active" in content
+
+
+@pytest.mark.asyncio
 async def test_build_member_rails_syncs_response_prompt_channel_for_a2ui(monkeypatch):
     """Team Web model calls should inherit the runtime channel for A2UI prompts."""
     monkeypatch.setattr(
@@ -103,6 +149,36 @@ async def test_build_member_rails_syncs_response_prompt_channel_for_a2ui(monkeyp
     await response_rails[0].before_model_call(SimpleNamespace(inputs=SimpleNamespace()))
 
     assert LocalSectionName.A2UI in prompt_builder.sections
+
+
+def test_build_member_rails_adds_structured_ask_user_rail_for_leader_only():
+    leader_rails = build_member_rails(
+        member_info=MemberInfo(role="leader"),
+        runtime=RuntimeInfo(language="cn"),
+    )
+    teammate_rails = build_member_rails(
+        member_info=MemberInfo(role="teammate"),
+        runtime=RuntimeInfo(language="cn"),
+    )
+
+    assert any(type(rail).__name__ == "StructuredAskUserRail" for rail in leader_rails)
+    assert all(type(rail).__name__ != "StructuredAskUserRail" for rail in teammate_rails)
+
+
+def test_build_member_rails_omits_task_planning_for_leader_only():
+    leader_rails = build_member_rails(
+        member_info=MemberInfo(role="leader"),
+        runtime=RuntimeInfo(language="cn"),
+    )
+    teammate_rails = build_member_rails(
+        member_info=MemberInfo(role="teammate"),
+        runtime=RuntimeInfo(language="cn"),
+    )
+
+    assert all(type(rail).__name__ != "TaskPlanningRail" for rail in leader_rails)
+    assert any(type(rail).__name__ == "TaskPlanningRail" for rail in teammate_rails)
+    assert all(type(rail).__name__ != "HeartbeatRail" for rail in leader_rails)
+    assert all(type(rail).__name__ != "HeartbeatRail" for rail in teammate_rails)
 
 
 # -- resolve_model_config tests --
@@ -209,7 +285,7 @@ def test_build_skill_evolution_rail_returns_none_on_invalid_config(tmp_path):
     assert result is None
 
 
-def test_build_member_rails_wires_team_trajectory_registry_to_evolution_rails(
+def test_build_member_rails_wires_team_trajectory_processor_to_evolution_rails(
     tmp_path,
     monkeypatch,
 ):
@@ -222,21 +298,13 @@ def test_build_member_rails_wires_team_trajectory_registry_to_evolution_rails(
 
     class _FakeSkillEvolutionRail:
         def __init__(self, **kwargs):
-            self.bound_sink = None
-            self.bound_team_id = None
-            self.bound_member_role = None
+            self.kwargs = kwargs
             self._review_runtime = kwargs.get("review_runtime")
             self.experience_manager = SimpleNamespace(
                 experience_submission_service=object()
             )
 
-        def set_trajectory_sink(self, sink, *, team_id, member_role):
-            self.bound_sink = sink
-            self.bound_team_id = team_id
-            self.bound_member_role = member_role
-
-    registry = object()
-    monkeypatch.delenv("EVOLUTION_AUTO_SCAN", raising=False)
+    processor = object()
     monkeypatch.setattr(
         "jiuwenswarm.agents.harness.team.team_runtime_inheritance.TeamSkillEvolutionRail",
         _FakeTeamSkillEvolutionRail,
@@ -249,6 +317,11 @@ def test_build_member_rails_wires_team_trajectory_registry_to_evolution_rails(
         "jiuwenswarm.agents.harness.team.team_runtime_inheritance.SkillEvolutionRail",
         _FakeSkillEvolutionRail,
     )
+    global_skills_dir = tmp_path / "global-skills"
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.harness.team.team_runtime_inheritance.get_agent_skills_dir",
+        lambda: global_skills_dir,
+    )
 
     leader_rails = build_member_rails(
         member_info=MemberInfo(role="leader"),
@@ -256,8 +329,8 @@ def test_build_member_rails_wires_team_trajectory_registry_to_evolution_rails(
             root_dir=str(tmp_path / "team-workspace"),
             skills_dir=str(tmp_path / "skills"),
             team_id="demo-team",
-            trajectory_registry=registry,
-            config={"evolution": {"auto_scan": True}},
+            trajectory_span_processor=processor,
+            config={"react": {"evolution": {"skill_evolution": True}}},
         ),
     )
     member_rails = build_member_rails(
@@ -266,8 +339,8 @@ def test_build_member_rails_wires_team_trajectory_registry_to_evolution_rails(
             root_dir=str(tmp_path / "team-workspace"),
             skills_dir=str(tmp_path / "skills"),
             team_id="demo-team",
-            trajectory_registry=registry,
-            config={"evolution": {"auto_scan": True}},
+            trajectory_span_processor=processor,
+            config={"react": {"evolution": {"skill_evolution": True}}},
         ),
     )
 
@@ -278,31 +351,20 @@ def test_build_member_rails_wires_team_trajectory_registry_to_evolution_rails(
         rail for rail in member_rails if isinstance(rail, _FakeSkillEvolutionRail)
     )
 
-    assert leader_rail.kwargs["trajectory_source"] is registry
-    assert leader_rail.kwargs["trajectory_sink"] is registry
+    assert leader_rail.kwargs["trajectory_span_processor"] is processor
     assert leader_rail.kwargs["member_role"] == "leader"
-    assert leader_rail.kwargs["auto_scan"] is False
-    assert leader_rail.kwargs["completion_followup_enabled"] is True
-    assert member_rail.bound_sink is registry
-    assert member_rail.bound_team_id == "demo-team"
-    assert member_rail.bound_member_role == "teammate"
+    assert leader_rail.kwargs["signal_trigger"] is False
+    assert leader_rail.kwargs["review_trigger"] is True
+    # Skills live in exactly one physical library; the team workspace no longer
+    # contributes a second root.
+    assert leader_rail.kwargs["skills_dir"] == str(global_skills_dir)
+    assert member_rail.kwargs["trajectory_span_processor"] is processor
+    assert member_rail.kwargs["signal_trigger"] is True
+    assert member_rail.kwargs["skills_dir"] == str(global_skills_dir)
 
 
-@pytest.mark.parametrize(
-    ("env_auto_scan", "config", "expected_auto_scan"),
-    [
-        (None, {"evolution": {"enabled": True, "auto_scan": False}}, False),
-        (None, {"evolution": {"enabled": False, "auto_scan": False}}, False),
-        (None, {"react": {"evolution": {"enabled": True, "auto_scan": True}}}, True),
-        ("false", {"evolution": {"enabled": True, "auto_scan": True}}, False),
-    ],
-)
-def test_build_member_rails_creates_leader_team_skill_evolution_rail_with_completion_followup(
-    tmp_path,
-    monkeypatch,
-    env_auto_scan,
-    config,
-    expected_auto_scan,
+def test_build_member_rails_creates_leader_team_skill_evolution_rail_with_canonical_switch(
+    tmp_path, monkeypatch,
 ):
     class _FakeTeamSkillEvolutionRail:
         def __init__(self, **kwargs):
@@ -311,10 +373,6 @@ def test_build_member_rails_creates_leader_team_skill_evolution_rail_with_comple
                 experience_submission_service=object()
             )
 
-    if env_auto_scan is None:
-        monkeypatch.delenv("EVOLUTION_AUTO_SCAN", raising=False)
-    else:
-        monkeypatch.setenv("EVOLUTION_AUTO_SCAN", env_auto_scan)
     monkeypatch.setattr(
         "jiuwenswarm.agents.harness.team.team_runtime_inheritance.TeamSkillEvolutionRail",
         _FakeTeamSkillEvolutionRail,
@@ -328,14 +386,32 @@ def test_build_member_rails_creates_leader_team_skill_evolution_rail_with_comple
         member_info=MemberInfo(role="leader"),
         team_workspace=TeamWorkspaceInfo(
             skills_dir=str(tmp_path / "skills"),
-            config=config,
+            config={"react": {"evolution": {"skill_evolution": True}}},
         ),
     )
 
     team_skill_rails = [rail for rail in rails if isinstance(rail, _FakeTeamSkillEvolutionRail)]
     assert len(team_skill_rails) == 1
-    assert team_skill_rails[0].kwargs["auto_scan"] is False
-    assert team_skill_rails[0].kwargs["completion_followup_enabled"] is expected_auto_scan
+    assert team_skill_rails[0].kwargs["signal_trigger"] is False
+    assert team_skill_rails[0].kwargs["review_trigger"] is True
+
+
+def test_build_member_rails_ignores_legacy_evolution_fields(tmp_path, monkeypatch):
+    class _FakeTeamSkillEvolutionRail:
+        pass
+
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.harness.team.team_runtime_inheritance.TeamSkillEvolutionRail",
+        _FakeTeamSkillEvolutionRail,
+    )
+    rails = build_member_rails(
+        member_info=MemberInfo(role="leader"),
+        team_workspace=TeamWorkspaceInfo(
+            skills_dir=str(tmp_path / "skills"),
+            config={"react": {"evolution": {"auto_scan": True, "enabled": True}}},
+        ),
+    )
+    assert not any(isinstance(rail, _FakeTeamSkillEvolutionRail) for rail in rails)
 
 
 @pytest.mark.parametrize("auto_save", [False, True])
@@ -355,7 +431,6 @@ def test_build_member_rails_wires_leader_team_skill_evolution_active_review_rail
                 experience_submission_service=object()
             )
 
-    monkeypatch.delenv("EVOLUTION_AUTO_SCAN", raising=False)
     monkeypatch.setattr(
         "jiuwenswarm.agents.harness.team.team_runtime_inheritance.EvolutionInterruptRail",
         _FakeEvolutionInterruptRail,
@@ -374,7 +449,7 @@ def test_build_member_rails_wires_leader_team_skill_evolution_active_review_rail
         runtime=RuntimeInfo(channel="web"),
         team_workspace=TeamWorkspaceInfo(
             skills_dir=str(tmp_path / "skills"),
-            config={"evolution": {"auto_scan": False, "auto_save": auto_save}},
+            config={"react": {"evolution": {"skill_evolution": True, "auto_save": auto_save}}},
         ),
     )
 
@@ -399,7 +474,7 @@ def test_build_member_rails_wires_leader_team_skill_evolution_active_review_rail
     assert team_rail.kwargs["auto_save"] is auto_save
 
 
-def test_build_member_rails_keeps_member_skill_evolution_when_auto_scan_disabled(
+def test_build_member_rails_builds_teammate_skill_evolution_with_fixed_triggers(
     tmp_path, monkeypatch
 ):
     class _FakeEvolutionInterruptRail:
@@ -408,14 +483,13 @@ def test_build_member_rails_keeps_member_skill_evolution_when_auto_scan_disabled
 
     class _FakeSkillEvolutionRail:
         def __init__(self, **kwargs):
-            self.auto_scan = kwargs["auto_scan"]
+            self.signal_trigger = kwargs["signal_trigger"]
             self.auto_save = kwargs["auto_save"]
             self._review_runtime = kwargs.get("review_runtime")
             self.experience_manager = SimpleNamespace(
                 experience_submission_service=object()
             )
 
-    monkeypatch.delenv("EVOLUTION_AUTO_SCAN", raising=False)
     monkeypatch.setattr(
         "jiuwenswarm.agents.harness.team.team_runtime_inheritance.EvolutionInterruptRail",
         _FakeEvolutionInterruptRail,
@@ -434,30 +508,25 @@ def test_build_member_rails_keeps_member_skill_evolution_when_auto_scan_disabled
         runtime=RuntimeInfo(channel="web"),
         team_workspace=TeamWorkspaceInfo(
             skills_dir=str(tmp_path / "skills"),
-            config={"react": {"evolution": {"auto_scan": False, "auto_save": False}}},
+            config={"react": {"evolution": {"skill_evolution": True, "auto_save": False}}},
         ),
     )
 
     evo_rails = [rail for rail in rails if isinstance(rail, _FakeSkillEvolutionRail)]
     assert len(evo_rails) == 1
-    assert evo_rails[0].auto_scan is False
+    assert evo_rails[0].signal_trigger is True
     assert evo_rails[0].auto_save is True
-    interrupt_index = next(
-        index for index, rail in enumerate(rails) if isinstance(rail, _FakeEvolutionInterruptRail)
-    )
-    skill_index = next(index for index, rail in enumerate(rails) if isinstance(rail, _FakeSkillEvolutionRail))
-    assert interrupt_index < skill_index
-    assert rails[interrupt_index].kwargs["auto_save"] is True
+    assert evo_rails[0]._review_runtime is not None
+    assert not any(isinstance(rail, _FakeEvolutionInterruptRail) for rail in rails)
 
 
-def test_build_member_rails_keeps_team_skill_create_when_auto_scan_disabled(
+def test_build_member_rails_builds_team_skill_create_with_canonical_switch(
     tmp_path, monkeypatch
 ):
     class _FakeTeamSkillCreateRail:
         def __init__(self, **kwargs):
             self.kwargs = kwargs
 
-    monkeypatch.delenv("SKILL_CREATE", raising=False)
     monkeypatch.setattr(
         "jiuwenswarm.agents.harness.team.team_runtime_inheritance.TeamSkillCreateRail",
         _FakeTeamSkillCreateRail,
@@ -467,21 +536,18 @@ def test_build_member_rails_keeps_team_skill_create_when_auto_scan_disabled(
         member_info=MemberInfo(role="leader"),
         team_workspace=TeamWorkspaceInfo(
             skills_dir=str(tmp_path / "skills"),
-            config={"evolution": {"auto_scan": False, "skill_create": True}},
+            config={"react": {"evolution": {"skill_evolution": True}}},
         ),
     )
 
     assert any(isinstance(rail, _FakeTeamSkillCreateRail) for rail in rails)
 
 
-def test_build_member_rails_reads_react_evolution_skill_create(
-    tmp_path, monkeypatch
-):
+def test_build_member_rails_does_not_mount_create_from_legacy_field(tmp_path, monkeypatch):
     class _FakeTeamSkillCreateRail:
         def __init__(self, **kwargs):
             self.kwargs = kwargs
 
-    monkeypatch.delenv("SKILL_CREATE", raising=False)
     monkeypatch.setattr(
         "jiuwenswarm.agents.harness.team.team_runtime_inheritance.TeamSkillCreateRail",
         _FakeTeamSkillCreateRail,
@@ -495,25 +561,30 @@ def test_build_member_rails_reads_react_evolution_skill_create(
         ),
     )
 
-    assert any(isinstance(rail, _FakeTeamSkillCreateRail) for rail in rails)
+    assert not any(isinstance(rail, _FakeTeamSkillCreateRail) for rail in rails)
 
 
-def test_build_member_rails_env_skill_create_overrides_config(tmp_path, monkeypatch):
+def test_build_member_rails_env_skill_create_does_not_override_canonical_config(tmp_path, monkeypatch):
     class _FakeTeamSkillCreateRail:
-        pass
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
 
     monkeypatch.setenv("SKILL_CREATE", "false")
     monkeypatch.setattr(
         "jiuwenswarm.agents.harness.team.team_runtime_inheritance.TeamSkillCreateRail",
         _FakeTeamSkillCreateRail,
     )
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.harness.team.team_runtime_inheritance.build_evolution_llm",
+        lambda config=None: (object(), "model"),
+    )
 
     rails = build_member_rails(
         member_info=MemberInfo(role="leader"),
         team_workspace=TeamWorkspaceInfo(
             skills_dir=str(tmp_path / "skills"),
-            config={"evolution": {"skill_create": True}},
+            config={"react": {"evolution": {"skill_evolution": True}}},
         ),
     )
 
-    assert not any(isinstance(rail, _FakeTeamSkillCreateRail) for rail in rails)
+    assert any(isinstance(rail, _FakeTeamSkillCreateRail) for rail in rails)

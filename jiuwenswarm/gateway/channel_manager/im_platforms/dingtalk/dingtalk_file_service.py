@@ -10,10 +10,18 @@ from __future__ import annotations
 import asyncio
 import os
 import re
+from pathlib import Path
 from typing import Any, Callable
 
 import httpx
 from loguru import logger
+
+from jiuwenswarm.gateway.channel_manager.im_platforms.errors import (
+    AttachmentPersistError,
+)
+from jiuwenswarm.server.runtime.attachments.upload_storage import (
+    atomic_write_unique,
+)
 
 
 # 文件魔数映射（用于格式检测）
@@ -102,6 +110,8 @@ class DingTalkFileService:
         client_id: str,
         get_token_func: Callable[[], asyncio.coroutines.Coroutine[Any, Any, str | None]],
         http_client: httpx.AsyncClient,
+        api_base: str,
+        oapi_base: str,
         max_download_size: int = 100 * 1024 * 1024,
         download_timeout: int = 60,
         workspace_dir: str = "",
@@ -115,6 +125,8 @@ class DingTalkFileService:
             max_download_size: 最大下载文件大小（字节）
             download_timeout: 下载超时时间（秒）
             workspace_dir: 工作空间目录
+            api_base: 新版 v1.0 接口域名前缀
+            oapi_base: 旧版 media 接口域名前缀
         """
         self._client_id = client_id
         self._get_token = get_token_func
@@ -122,7 +134,35 @@ class DingTalkFileService:
         self._max_download_size = max_download_size
         self._download_timeout = download_timeout
         self._workspace_dir = workspace_dir
+        self._api_base = api_base
+        self._oapi_base = oapi_base
         self._download_semaphore = asyncio.Semaphore(3)
+        # 附件落盘钩子（Phase 3）：Gateway 下载字节后经 E2A 交给目标 AgentServer 落盘。
+        self._persist_hook: Any = None
+
+    def set_persist_hook(self, hook: Any) -> None:
+        """注入附件落盘钩子 ``async (content, category, filename) -> dict``。"""
+        self._persist_hook = hook
+
+    async def _persist_downloaded_file(
+        self, content: bytes, category: str, filename: str,
+    ) -> dict[str, Any]:
+        """把下载字节落盘（经钩子到 AgentServer，或本地回落），返回 file_info 字段。"""
+        if self._persist_hook is not None:
+            try:
+                return await self._persist_hook(content, category, filename)
+            except AttachmentPersistError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                raise AttachmentPersistError(str(exc)) from exc
+        download_dir = self._get_download_dir(category)
+        # 本地回落（仅单用户 / 无 AgentServer 上下文）：用原子独占创建落盘，
+        # 同名文件自动取 stem-N 后缀，并发下载与既有文件均不会被覆盖
+        # （修复秒级时间戳重命名在同秒并发下仍会相互覆盖的 P1）。
+        # 经钩子落盘（AgentServer 注入目录）时由 AgentServer 侧去重
+        # （unique_upload_path），此处不重复处理。
+        path = atomic_write_unique(Path(download_dir) / filename, content)
+        return {"path": str(path), "name": path.name, "size": len(content)}
 
     def _get_download_dir(self, file_category: str) -> str:
         """获取下载目录路径。"""
@@ -158,7 +198,7 @@ class DingTalkFileService:
             logger.error("[DingTalkFileService] 无法获取 access_token")
             return None
 
-        url = "https://api.dingtalk.com/v1.0/robot/messageFiles/download"
+        url = f"{self._api_base}/v1.0/robot/messageFiles/download"
         # 钉钉下载 API 使用 POST 方法，参数放在请求体中
         body = {
             "downloadCode": download_code,
@@ -267,21 +307,20 @@ class DingTalkFileService:
         filename = f"{message_id}_{safe_code}{ext}"
 
         # 保存文件
-        download_dir = self._get_download_dir("images")
-        file_path = os.path.join(download_dir, filename)
-
         try:
-            with open(file_path, 'wb') as f:
-                f.write(content)
+            persisted = await self._persist_downloaded_file(content, "images", filename)
+            file_path = persisted["path"]
 
             return {
                 "path": file_path,
-                "name": filename,
+                "name": persisted.get("name", filename),
                 "size": len(content),
                 "mime_type": get_mime_type(ext),
                 "download_code": download_code,
                 "file_category": "image",
             }
+        except AttachmentPersistError:
+            raise
         except Exception as e:
             logger.error(f"[DingTalkFileService] 保存图片失败: {e}")
             return None
@@ -315,21 +354,20 @@ class DingTalkFileService:
             filename = f"{message_id}_{safe_code}{ext}"
 
         # 保存文件
-        download_dir = self._get_download_dir("files")
-        file_path = os.path.join(download_dir, filename)
-
         try:
-            with open(file_path, 'wb') as f:
-                f.write(content)
+            persisted = await self._persist_downloaded_file(content, "files", filename)
+            file_path = persisted["path"]
 
             return {
                 "path": file_path,
-                "name": filename,
+                "name": persisted.get("name", filename),
                 "size": len(content),
                 "mime_type": get_mime_type(ext),
                 "download_code": download_code,
                 "file_category": "file",
             }
+        except AttachmentPersistError:
+            raise
         except Exception as e:
             logger.error(f"[DingTalkFileService] 保存文件失败: {e}")
             return None
@@ -358,21 +396,20 @@ class DingTalkFileService:
         filename = f"{message_id}_{safe_code}{ext}"
 
         # 保存文件
-        download_dir = self._get_download_dir("audio")
-        file_path = os.path.join(download_dir, filename)
-
         try:
-            with open(file_path, 'wb') as f:
-                f.write(content)
+            persisted = await self._persist_downloaded_file(content, "audio", filename)
+            file_path = persisted["path"]
 
             return {
                 "path": file_path,
-                "name": filename,
+                "name": persisted.get("name", filename),
                 "size": len(content),
                 "mime_type": get_mime_type(ext),
                 "download_code": download_code,
                 "file_category": "audio",
             }
+        except AttachmentPersistError:
+            raise
         except Exception as e:
             logger.error(f"[DingTalkFileService] 保存音频失败: {e}")
             return None
@@ -401,21 +438,20 @@ class DingTalkFileService:
         filename = f"{message_id}_{safe_code}{ext}"
 
         # 保存文件
-        download_dir = self._get_download_dir("video")
-        file_path = os.path.join(download_dir, filename)
-
         try:
-            with open(file_path, 'wb') as f:
-                f.write(content)
+            persisted = await self._persist_downloaded_file(content, "video", filename)
+            file_path = persisted["path"]
 
             return {
                 "path": file_path,
-                "name": filename,
+                "name": persisted.get("name", filename),
                 "size": len(content),
                 "mime_type": get_mime_type(ext),
                 "download_code": download_code,
                 "file_category": "video",
             }
+        except AttachmentPersistError:
+            raise
         except Exception as e:
             logger.error(f"[DingTalkFileService] 保存视频失败: {e}")
             return None
@@ -441,7 +477,7 @@ class DingTalkFileService:
 
         # 使用钉钉旧版 API（与 dingtalk-stream SDK 一致）
         from urllib.parse import quote_plus
-        url = f"https://oapi.dingtalk.com/media/upload?access_token={quote_plus(token)}"
+        url = f"{self._oapi_base}/media/upload?access_token={quote_plus(token)}"
 
         try:
             filename = os.path.basename(file_path)

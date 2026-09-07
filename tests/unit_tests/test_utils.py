@@ -50,6 +50,32 @@ class TestPathResolution:
         assert "agent" in str(agent_workspace)
 
     @staticmethod
+    def test_get_default_project_workspace_dir():
+        """Test no-project task workspace lives under agent workspace/projects."""
+        project_workspace = utils.get_default_project_workspace_dir()
+        assert isinstance(project_workspace, Path)
+        assert project_workspace == utils.get_agent_workspace_dir() / "projects"
+
+    @staticmethod
+    def test_get_default_project_session_workspace_dir():
+        """Test no-project task workspace is scoped by session."""
+        session_workspace = utils.get_default_project_session_workspace_dir("abc-123")
+        assert isinstance(session_workspace, Path)
+        assert session_workspace == (
+            utils.get_default_project_workspace_dir()
+            / "abc-123"
+        )
+        assert session_workspace.exists()
+
+    @staticmethod
+    def test_get_default_project_session_workspace_dir_without_session():
+        """Test early initialization does not create a throwaway session folder."""
+        session_workspace = utils.get_default_project_session_workspace_dir()
+        assert isinstance(session_workspace, Path)
+        assert session_workspace == utils.get_default_project_workspace_dir()
+        assert session_workspace.exists()
+
+    @staticmethod
     def test_path_caching():
         """Test that path results are cached."""
         # First call
@@ -101,6 +127,153 @@ class TestLoggerSetup:
         assert handler_types.count("SafeRotatingFileHandler") == 5
 
 
+class TestSourceRecordMasking:
+    """Test install_source_record_masking (source-level LogRecord factory masking).
+
+    Covers the security-critical paths called out in review:
+    - third-party (non-jiuwenswarm) logger message masking,
+    - traceback-embedded secret masking,
+    - double-masking safety (_is_already_masked keeps fingerprint stable),
+    - idempotency.
+    """
+
+    PLAINTEXT_KEY = "sk-epignnbeppwjigp932ngefebnof"
+
+    @staticmethod
+    def _capture_logger(name):
+        """Build a logger with its own handler (no SensitiveDataFilter), so any
+        masking observed must come from the source record factory, not handler filter.
+        """
+        import io
+        import logging
+
+        lg = logging.getLogger(name)
+        for h in lg.handlers[:]:
+            lg.removeHandler(h)
+        buf = io.StringIO()
+        handler = logging.StreamHandler(buf)
+        # Formatter 默认在 message 后自动追加 traceback（若 record 有 exc_info/exc_text），
+        # 无需显式 %(exc_text)s，否则会与生产行为不一致导致 traceback 重复。
+        handler.setFormatter(logging.Formatter("%(name)s: %(message)s"))
+        lg.addHandler(handler)
+        lg.setLevel(logging.DEBUG)
+        lg.propagate = False
+        return lg, buf
+
+    @staticmethod
+    def _save_state():
+        """Snapshot the global LogRecord factory + install flag for later restore."""
+        import logging
+
+        return logging.getLogRecordFactory(), utils._source_record_masking_installed
+
+    @staticmethod
+    def _restore_state(state):
+        """Restore the global factory + install flag (avoid cross-test pollution)."""
+        import logging
+
+        factory, flag = state
+        logging.setLogRecordFactory(factory)
+        utils._source_record_masking_installed = flag
+
+    def test_third_party_logger_message_masked(self):
+        """Source factory masks messages from non-jiuwenswarm loggers (openjiuwen/
+        openai/httpx style) that bypass the jiuwenswarm handler-level filter."""
+        import logging
+
+        state = self._save_state()
+        try:
+            # Reset to plain factory, then install — proves masking comes from install.
+            logging.setLogRecordFactory(logging.LogRecord)
+            utils._source_record_masking_installed = False
+            utils.install_source_record_masking()
+
+            lg, buf = self._capture_logger("openjiuwen.harness.security")
+            key = self.PLAINTEXT_KEY
+            lg.info("config: api_key=%s, base=https://x.com", key)
+            out = buf.getvalue()
+            assert key not in out, "plaintext api_key leaked from third-party logger"
+            assert "******" in out, "api_key not masked"
+            assert "https://x.com" in out, "non-sensitive api_base should be preserved"
+        finally:
+            self._restore_state(state)
+
+    def test_traceback_embedded_secret_masked(self):
+        """logger.exception masks api_key embedded in the rendered traceback."""
+        import logging
+
+        state = self._save_state()
+        try:
+            logging.setLogRecordFactory(logging.LogRecord)
+            utils._source_record_masking_installed = False
+            utils.install_source_record_masking()
+
+            lg, buf = self._capture_logger("openai._base_client")
+            key = self.PLAINTEXT_KEY
+            try:
+                raise ValueError("build failed: api_key=" + key)
+            except ValueError:
+                lg.exception("init error")
+            out = buf.getvalue()
+            assert key not in out, "plaintext api_key leaked via traceback"
+            assert "Traceback" in out, "traceback should still be rendered"
+            assert "******" in out, "api_key in traceback not masked"
+        finally:
+            self._restore_state(state)
+
+    def test_double_masking_preserves_fingerprint(self):
+        """A record masked at source, then re-processed by _sanitize_log_text (handler
+        layer), keeps the same fingerprint — _is_already_masked prevents 'fingerprint
+        of fingerprint' corruption."""
+        import logging
+        import re
+
+        state = self._save_state()
+        try:
+            logging.setLogRecordFactory(logging.LogRecord)
+            utils._source_record_masking_installed = False
+            utils.install_source_record_masking()
+
+            lg, buf = self._capture_logger("httpx")
+            key = self.PLAINTEXT_KEY
+            lg.info("api_key=%s", key)
+            source_out = buf.getvalue()
+
+            # Re-run the handler-layer sanitizer on the already-masked text.
+            double_masked = utils._sanitize_log_text(source_out)
+
+            fp_source = re.search(r"fp:([0-9a-f]+)", source_out)
+            fp_double = re.search(r"fp:([0-9a-f]+)", double_masked)
+            assert fp_source, "source masking should produce a fingerprint"
+            assert fp_double, "double-masked text should still carry a fingerprint"
+            assert fp_source.group(1) == fp_double.group(1), (
+                "fingerprint changed after double masking — _is_already_masked not effective"
+            )
+            # True fingerprint of the plaintext key (cross-check).
+            assert fp_source.group(1) == utils._fingerprint(key)
+        finally:
+            self._restore_state(state)
+
+    def test_install_is_idempotent(self):
+        """Repeated install_source_record_masking calls are safe (no-op after first)."""
+        import logging
+
+        state = self._save_state()
+        try:
+            logging.setLogRecordFactory(logging.LogRecord)
+            utils._source_record_masking_installed = False
+            utils.install_source_record_masking()
+            factory_after_first = logging.getLogRecordFactory()
+            utils.install_source_record_masking()
+            factory_after_second = logging.getLogRecordFactory()
+            assert factory_after_first is factory_after_second, (
+                "second install should not replace the factory (idempotent)"
+            )
+            assert utils._source_record_masking_installed is True
+        finally:
+            self._restore_state(state)
+
+
 class TestUserWorkspace:
     """Test user workspace functions."""
 
@@ -115,6 +288,20 @@ class TestUserWorkspace:
         # This test requires more complex mocking due to file operations
         # Simplified version
         pass
+
+
+def test_prepare_workspace_does_not_copy_legacy_heartbeat_template(
+    tmp_path: Path,
+) -> None:
+    workspace_dir = tmp_path / ".jiuwenswarm"
+
+    utils.prepare_workspace(
+        overwrite=False,
+        preferred_language="en",
+        workspace_dir=workspace_dir,
+    )
+
+    assert not (workspace_dir / "agent" / "workspace" / "HEARTBEAT.md").exists()
 
 
 class TestConstants:
@@ -224,6 +411,96 @@ class TestMultiInstanceEnvVars:
                 os.environ["JIUWENSWARM_HOME"] = original_home_env
             if original_workspace_env:
                 os.environ["JIUWENSWARM_DATA_DIR"] = original_workspace_env
+
+
+class TestFreeSearchRuntimeDefaults:
+    """Test apply_free_search_runtime_defaults (free-search opt-in survives process start).
+
+    Every entrypoint calls this immediately after loading `.env`. Its predecessor
+    assigned both flags unconditionally, so a value read from `.env` — including one
+    the config UI had just persisted — was discarded one line later, and enabling free
+    search was silently lost on the next restart.
+    """
+
+    DDG_FLAG = "FREE_SEARCH_DDG_ENABLED"
+    BING_FLAG = "FREE_SEARCH_BING_ENABLED"
+
+    @staticmethod
+    def _unset(monkeypatch, *names):
+        """Unset flags so monkeypatch still restores them after the test.
+
+        `delenv` alone records nothing when the variable is already absent, so the
+        `setdefault` under test would leak its value into later tests.
+        """
+        for name in names:
+            monkeypatch.setenv(name, "")
+            monkeypatch.delenv(name)
+
+    def test_explicit_opt_in_survives(self, monkeypatch):
+        """An explicit opt-in from .env, the config UI, or the shell is preserved."""
+        monkeypatch.setenv(self.DDG_FLAG, "true")
+        monkeypatch.setenv(self.BING_FLAG, "true")
+
+        utils.apply_free_search_runtime_defaults()
+
+        assert os.environ[self.DDG_FLAG] == "true", "explicit DDG opt-in was discarded"
+        assert os.environ[self.BING_FLAG] == "true", "explicit Bing opt-in was discarded"
+
+    def test_explicit_opt_out_is_left_alone(self, monkeypatch):
+        """An explicit "false" stays disabled — the default never re-enables anything."""
+        monkeypatch.setenv(self.DDG_FLAG, "false")
+        monkeypatch.setenv(self.BING_FLAG, "false")
+
+        utils.apply_free_search_runtime_defaults()
+
+        assert os.environ[self.DDG_FLAG] == "false"
+        assert os.environ[self.BING_FLAG] == "false"
+
+    def test_unset_flags_get_the_disabled_default(self, monkeypatch):
+        """A fresh install that configures nothing still starts with both engines off."""
+        self._unset(monkeypatch, self.DDG_FLAG, self.BING_FLAG)
+
+        utils.apply_free_search_runtime_defaults()
+
+        assert os.environ[self.DDG_FLAG] == "false"
+        assert os.environ[self.BING_FLAG] == "false"
+
+    def test_empty_value_is_kept_and_still_reads_as_disabled(self, monkeypatch):
+        """An empty value counts as set, and both consumers still treat it as off."""
+        from jiuwenswarm.agents.harness.common.tools.mcp_toolkits import _is_free_search_enabled
+        from jiuwenswarm.agents.harness.common.tools.search_tools import _env_flag
+
+        monkeypatch.setenv(self.DDG_FLAG, "")
+        monkeypatch.setenv(self.BING_FLAG, "")
+
+        utils.apply_free_search_runtime_defaults()
+
+        assert (
+            os.environ[self.DDG_FLAG] == ""
+        ), "an empty value is set, so it is not a default to fill"
+        assert os.environ[self.BING_FLAG] == ""
+        # Blank reads as disabled on both sides, so keeping it changes no behaviour.
+        assert _env_flag(self.DDG_FLAG, default=False) is False
+        assert _env_flag(self.BING_FLAG, default=False) is False
+        assert _is_free_search_enabled() is False
+
+    def test_flags_are_handled_independently(self, monkeypatch):
+        """Opting one engine in leaves the other at the disabled default."""
+        self._unset(monkeypatch, self.BING_FLAG)
+        monkeypatch.setenv(self.DDG_FLAG, "true")
+
+        utils.apply_free_search_runtime_defaults()
+
+        assert os.environ[self.DDG_FLAG] == "true", "DDG opt-in was discarded"
+        assert os.environ[self.BING_FLAG] == "false", "unset Bing flag should take the default"
+
+        self._unset(monkeypatch, self.DDG_FLAG)
+        monkeypatch.setenv(self.BING_FLAG, "true")
+
+        utils.apply_free_search_runtime_defaults()
+
+        assert os.environ[self.BING_FLAG] == "true", "Bing opt-in was discarded"
+        assert os.environ[self.DDG_FLAG] == "false", "unset DDG flag should take the default"
 
 
 class TestHardcodedPathsPhase2:
@@ -339,3 +616,118 @@ class TestAdditionalHardcodedPaths:
 
         assert str(actual_path.resolve()) == str(expected_path.resolve()), \
             f"Expected: {expected_path.resolve()}, Got: {actual_path.resolve()}"
+
+
+class TestCleanupStaleOpenjiuwenDescs:
+    @staticmethod
+    def _fake_package(tmp_path):
+        import types
+
+        package_dir = tmp_path / "openjiuwen"
+        package_dir.mkdir()
+        fake = types.ModuleType("openjiuwen")
+        fake.__file__ = str(package_dir / "__init__.py")
+        return fake, package_dir / "agent_teams" / "tools" / "locales" / "descs"
+
+    @staticmethod
+    def test_removes_only_flat_files_with_nested_replacements(tmp_path):
+        fake, descs = TestCleanupStaleOpenjiuwenDescs._fake_package(tmp_path)
+
+        for lang in ("cn", "en"):
+            domain_dir = descs / lang / "async_task"
+            domain_dir.mkdir(parents=True)
+            (domain_dir / "async_task_cancel.md").write_text("new", encoding="utf-8")
+            (descs / lang / "async_task_cancel.md").write_text("old", encoding="utf-8")
+            (descs / lang / "flat_only.md").write_text("canonical", encoding="utf-8")
+
+            fragments = descs / lang / "fragments"
+            fragments.mkdir()
+            (fragments / "fragment_name.md").write_text("fragment", encoding="utf-8")
+            (descs / lang / "fragment_name.md").write_text("canonical", encoding="utf-8")
+
+        with patch.dict(sys.modules, {"openjiuwen": fake}):
+            utils.cleanup_stale_openjiuwen_descs()
+
+        for lang in ("cn", "en"):
+            assert not (descs / lang / "async_task_cancel.md").exists()
+            assert (descs / lang / "async_task" / "async_task_cancel.md").exists()
+            assert (descs / lang / "flat_only.md").exists()
+            assert (descs / lang / "fragment_name.md").exists()
+
+    @staticmethod
+    def test_raises_actionable_error_when_stale_file_is_not_writable(tmp_path):
+        fake, descs = TestCleanupStaleOpenjiuwenDescs._fake_package(tmp_path)
+        domain_dir = descs / "cn" / "async_task"
+        domain_dir.mkdir(parents=True)
+        (domain_dir / "async_task_cancel.md").write_text("new", encoding="utf-8")
+        flat = descs / "cn" / "async_task_cancel.md"
+        flat.write_text("old", encoding="utf-8")
+
+        with (
+            patch.dict(sys.modules, {"openjiuwen": fake}),
+            patch.object(Path, "unlink", side_effect=PermissionError("read-only")),
+            pytest.raises(RuntimeError, match="reinstall OpenJiuwen"),
+        ):
+            utils.cleanup_stale_openjiuwen_descs()
+
+        assert flat.exists()
+
+    @staticmethod
+    def test_tolerates_concurrent_removal(tmp_path):
+        fake, descs = TestCleanupStaleOpenjiuwenDescs._fake_package(tmp_path)
+        domain_dir = descs / "cn" / "async_task"
+        domain_dir.mkdir(parents=True)
+        (domain_dir / "async_task_cancel.md").write_text("new", encoding="utf-8")
+        (descs / "cn" / "async_task_cancel.md").write_text("old", encoding="utf-8")
+
+        with (
+            patch.dict(sys.modules, {"openjiuwen": fake}),
+            patch.object(Path, "unlink", side_effect=FileNotFoundError),
+        ):
+            utils.cleanup_stale_openjiuwen_descs()
+
+    @staticmethod
+    def test_skips_cleanup_for_frozen_windows_bundle(tmp_path, monkeypatch):
+        fake, descs = TestCleanupStaleOpenjiuwenDescs._fake_package(tmp_path)
+        domain_dir = descs / "cn" / "async_task"
+        domain_dir.mkdir(parents=True)
+        (domain_dir / "async_task_cancel.md").write_text("new", encoding="utf-8")
+        flat = descs / "cn" / "async_task_cancel.md"
+        flat.write_text("old", encoding="utf-8")
+
+        monkeypatch.setattr(utils.sys, "platform", "win32")
+        monkeypatch.setattr(utils.sys, "frozen", True, raising=False)
+        with (
+            patch.dict(sys.modules, {"openjiuwen": fake}),
+            patch.object(Path, "unlink", side_effect=PermissionError("read-only")),
+        ):
+            utils.cleanup_stale_openjiuwen_descs()
+
+        assert flat.exists()
+
+    @staticmethod
+    def test_noop_when_openjiuwen_missing():
+        with patch.dict(sys.modules, {"openjiuwen": None}):
+            utils.cleanup_stale_openjiuwen_descs()
+
+    @staticmethod
+    @pytest.mark.parametrize(
+        "relative_path",
+        (
+            "jiuwenswarm/app.py",
+            "jiuwenswarm/gateway/app_gateway.py",
+            "jiuwenswarm/server/app_agentserver.py",
+        ),
+    )
+    def test_startup_entrypoints_clean_before_openjiuwen_import(relative_path):
+        root = Path(__file__).resolve().parents[2]
+        source = (root / relative_path).read_text(encoding="utf-8")
+        cleanup_call = source.index("cleanup_stale_openjiuwen_descs()")
+
+        openjiuwen_imports = [
+            source.find(marker)
+            for marker in ("from openjiuwen", "import openjiuwen")
+            if source.find(marker) >= 0
+        ]
+        if openjiuwen_imports:
+            assert cleanup_call < min(openjiuwen_imports)

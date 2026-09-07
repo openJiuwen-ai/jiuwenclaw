@@ -23,12 +23,13 @@ export interface AppScreenKeymapDelegate {
    * to-exit" timer should be reset.
    */
   requestLocalInterrupt(): boolean;
-  /** Show a brief hint that pressing Ctrl+C again will exit */
-  showCtrlCExitHint(): void;
+  /** Show a brief hint that pressing the given key again will exit */
+  showExitHint(key: string): void;
   exitApp(): void;
   toggleTodos(): void;
   toggleTeamPanel(): void;
   toggleTranscript(): void;
+  viewHumanInputs(): void;
   redraw(): void;
   clearInput(): void;
   isIdle(): boolean;
@@ -74,7 +75,7 @@ function runCtrlC(delegate: AppScreenKeymapDelegate): void {
     delegate.clearInput();
   }
 
-  delegate.showCtrlCExitHint();
+  delegate.showExitHint("ctrl+c");
   lastInterruptTime = now;
 }
 
@@ -86,7 +87,7 @@ function runCtrlD(delegate: AppScreenKeymapDelegate): void {
   }
   lastInterruptTime = now;
   delegate.interruptTask();
-  delegate.showCtrlCExitHint();
+  delegate.showExitHint("ctrl+d");
 }
 
 /**
@@ -107,6 +108,7 @@ const GLOBAL_ACTION_HANDLERS: Partial<Record<KeybindingAction, (d: AppScreenKeym
   "app:toggleTodos": (d) => d.toggleTodos(),
   "app:toggleTeamPanel": (d) => d.toggleTeamPanel(),
   "app:toggleTranscript": (d) => d.toggleTranscript(),
+  "app:viewHumanInputs": (d) => d.viewHumanInputs(),
 };
 
 /**
@@ -116,10 +118,12 @@ const GLOBAL_ACTION_HANDLERS: Partial<Record<KeybindingAction, (d: AppScreenKeym
 export const APP_SCREEN_KEY_BINDINGS: readonly KeyBindingDisplay[] = [
   { key: "ctrl+c", label: "ctrl+c", description: "中断任务；连按两次退出" },
   { key: "ctrl+d", label: "ctrl+d", description: "中断任务；连按两次退出" },
+  { key: "escape", label: "esc", description: "取消任务；空闲时连按两次清空输入框", action: "app:cancelWork" },
   { key: "ctrl+l", label: "ctrl+l", description: "重绘屏幕", action: "app:redraw" },
   { key: "ctrl+t", label: "ctrl+t", description: "显示/隐藏 Todos 面板", action: "app:toggleTodos" },
   { key: "ctrl+g", label: "ctrl+g", description: "显示/隐藏 Team 面板", action: "app:toggleTeamPanel" },
   { key: "ctrl+o", label: "ctrl+o", description: "切换 transcript 紧凑/详细视图", action: "app:toggleTranscript" },
+  { key: "alt+h", label: "alt+h", description: "查看等待回复的 Human 输入", action: "app:viewHumanInputs" },
 ] as const;
 
 export function handleAppScreenKeyInput(data: string, delegate: AppScreenKeymapDelegate): boolean {

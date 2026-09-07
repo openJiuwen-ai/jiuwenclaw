@@ -33,7 +33,6 @@ class RuntimeBackgroundExecRequest:
     workdir: str | None = None
     env: dict[str, str] | None = None
     stdin_data: bytes | None = None
-    capture_output: bool = True
 
 
 @dataclass(frozen=True)
@@ -126,6 +125,14 @@ class RuntimeAdapter(abc.ABC):
     async def cleanup(self, sandbox_id: str) -> None:
         """Release all resources for a sandbox."""
         ...
+
+    async def get_sandbox_ip_address(self, sandbox_id: str) -> str | None:
+        """Return the sandbox IPv4 address if the runtime can resolve it.
+
+        Optional backend capability. Default returns ``None`` so future
+        adapters are not forced to implement IP discovery.
+        """
+        return None
 
     async def write_file(
         self,

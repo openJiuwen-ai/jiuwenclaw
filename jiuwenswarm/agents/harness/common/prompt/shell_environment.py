@@ -130,7 +130,8 @@ def build_shell_environment_prompt(language: str, os_type: str) -> str:
 Shell 选择规则：
 - Windows 且 Git Bash 可用，或 PATH bash 明确不是 WSL stub 时，可以使用 bash/Git Bash 执行 POSIX 命令，例如 `ls`、`grep`、`cat`、`mkdir -p`、bash 脚本。
 - Windows 且 Git Bash 不可用、PATH bash 也不可用或只是 WSL stub 时，不要使用 POSIX 命令；优先使用 PowerShell 或 cmd。
-- PowerShell cmdlet 不要包在 bash 里执行，应直接使用 PowerShell。"""
+- PowerShell cmdlet 不要包在 bash 里执行，应直接使用 PowerShell。
+- 使用与当前平台匹配的命令和路径语法。"""
         return f"""Shell capabilities:
 - PowerShell: {_status(language, powershell)}
 - Git Bash: {_status(language, git_bash)}
@@ -139,7 +140,8 @@ Shell 选择规则：
 Shell selection rules:
 - On Windows, when Git Bash is available, or PATH bash is clearly not a WSL stub, use bash/Git Bash for POSIX commands such as `ls`, `grep`, `cat`, `mkdir -p`, and bash scripts.
 - On Windows, when Git Bash is unavailable and PATH bash is unavailable or only a WSL stub, do not use POSIX commands; prefer PowerShell or cmd.
-- Do not wrap PowerShell cmdlets in bash; invoke PowerShell directly."""
+- Do not wrap PowerShell cmdlets in bash; invoke PowerShell directly.
+- Use command and path syntax that matches the current platform."""
 
     shell_path = shutil.which("bash") or shutil.which("sh")
     if language == "cn":
@@ -147,11 +149,11 @@ Shell selection rules:
 - Bash/sh：{_status(language, shell_path)}
 
 Shell 选择规则：
-- Linux/macOS 通常使用 bash/sh 风格命令。
-- 如果 bash/sh 不可用，使用当前平台可用的 shell 或专用工具。"""
+- Linux/macOS 使用 bash/sh 风格命令；bash/sh 不可用时，使用当前平台实际可用的 Shell 或专用工具。
+- 使用与当前平台匹配的命令和路径语法。"""
     return f"""Shell capabilities:
 - Bash/sh: {_status(language, shell_path)}
 
 Shell selection rules:
-- Linux/macOS usually use bash/sh-style commands.
-- If bash/sh is unavailable, use the current platform's available shell or dedicated tools."""
+- On Linux/macOS, use bash/sh-style commands; if bash/sh is unavailable, use the Shell actually available on the platform or a dedicated tool.
+- Use command and path syntax that matches the current platform."""

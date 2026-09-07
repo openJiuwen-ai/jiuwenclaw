@@ -61,6 +61,9 @@ REQUEST_TYPE_SHUTDOWN = "shutdown"
 REQUEST_TYPE_WRITE_FILE = "write_file"
 REQUEST_TYPE_READ_FILE = "read_file"
 REQUEST_TYPE_LIST_DIR = "list_dir"
+REQUEST_TYPE_EXEC_BACKGROUND = "exec_background"
+REQUEST_TYPE_BG_STATUS = "bg_status"
+REQUEST_TYPE_BG_KILL = "bg_kill"
 
 PROTOCOL_VERSION = 1
 MAX_HEADER_BYTES = 1 * 1024 * 1024          # 1 MiB JSON header upper bound

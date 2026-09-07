@@ -1,11 +1,11 @@
 ---
 name: skill-omni-creation
-description: "当用户说「从这个链接/URL生成skill」「把这个网页/教程做成skill」「从这个视频提取步骤」时触发。先用 read_file 读取此 SKILL.md，再按步骤用 bash 调用 scripts/ 下的 Python 脚本完成：爬取网页或下载视频 → 下载图片/抽帧 → 生成标准 Skill Markdown 文件。"
+description: "当用户说「从这个链接/URL生成skill」「把这个网页/教程做成skill」「从这个视频提取步骤」时触发。先读取此 SKILL.md，再按步骤调用 scripts/ 下的 Python 脚本完成：爬取网页或下载视频 → 下载图片/抽帧 → 生成标准 Skill Markdown 文件；若内容需要编程实现，自动编写并验证配套脚本（scripts/）。"
 ---
 
 ## 这个 Skill 做什么
 
-给定一个 URL（网页或视频），读取页面内容、下载相关图片或视频帧，整理成标准 Skill `.md` 文件，保存到 `skills/<slug>/SKILL.md`，图片保存到 `skills/<slug>/references/`。
+给定一个 URL（网页或视频），读取页面内容、下载相关图片或视频帧，整理成标准 Skill `.md` 文件，保存到 `skills/<slug>/SKILL.md`，图片保存到 `skills/<slug>/references/`；若任务需要编程实现，还会生成经过验证的脚本，保存到 `skills/<slug>/scripts/`。
 
 适用请求：
 - "从这个链接生成一个 Skill"
@@ -14,17 +14,42 @@ description: "当用户说「从这个链接/URL生成skill」「把这个网页
 
 ---
 
-## 前置依赖
+## 执行总览（先看这里，再动手）
 
-**执行任何脚本前，请先确认以下工具已安装：**
+无论网页还是视频、无论是否走降级路径，完整流程都是固定的五段，缺一不可：
 
-### Playwright（网页爬取）
+1. **获取内容** — `scrape_page.py`（视频走 `analyze_video.py` 抽帧；被反爬则按「Playwright 失败时的处理」构造 stage01.json）
+2. **图片环节** — 有图时 `prepare_images.py` → `image_review.py` 两层筛选 → `save_images.py`；无图时直接执行 `save_images.py <slug> --keep`
+3. **代码粗筛（必经）** — 图片环节完成后按「代码生成（agents/）」一节判断是否需要生成脚本；命中粗筛必须读 `agents/code-detector.md` 细判。**这一步没做完，不允许写 SKILL.md**
+4. **【判定需要时】编写、验证并收口脚本** — `agents/code-writer.md` → `agents/code-verifier.md` → `finalize_scripts.py`；验证失败只淘汰未通过脚本，不阻塞主 Skill
+5. **写生成的 SKILL.md** — 永远是最后一步；有验证通过的脚本则引用它们，否则写一次纯文本+图片版
+
+向用户展示执行计划时，计划里必须列出第 3 步（代码粗筛），不得省略。
+
+---
+
+## 网页与图片环境门禁
+
+网页和图片依赖由 `scripts/environment_gate.py` 在代码层统一处理，不再要求 Agent 手工判断 `.venv` 路径或依次执行两个依赖检查。
+
+门禁在任何 stage、缓存或图片目录被创建/清理之前完成，并按以下顺序执行：
+
+1. 选择已激活虚拟环境、当前虚拟环境或项目最近的 `.venv`；都不存在时，尝试在项目目录创建 `.venv`。
+2. 若选中的解释器不是当前解释器，自动使用该解释器重新执行当前脚本。
+3. 自动安装当前 profile 缺失的 Python 包：`beautifulsoup4`、`requests`、`Pillow`、`playwright`。
+4. 网页 profile 自动安装并真实启动一次 Playwright Chromium。
+5. Debian/Ubuntu 类 Linux 在具备 root 或免密 sudo 时自动补齐 Chromium 系统库；其他 Linux 或无提权权限时返回非零并输出所需修复命令。
+6. 自动修复仍失败时输出 `ENVIRONMENT_BLOCKED`、写入 `scripts/work/environment_status.json` 并立即停止；不得转入网页降级、图片审核、`save_images.py --keep` 或最终化。
+
+`scrape_page.py`、`prepare_images.py`、`download_images.py`、`print_blocks.py`、`image_review.py` 和 `save_images.py` 都会自动调用同一门禁，因此正常流程无需手工运行 `--check-deps`。
+
+可选诊断命令：
 
 ```bash
-playwright install chromium
+{bootstrap_python} "{skill_directory}/scripts/environment_gate.py" --profile web-images --check
 ```
 
-若未安装，网页爬取会静默降级或跳过，导致 skill 内容为空。
+其中 `{bootstrap_python}` 只需是当前 shell 中任何能启动 Python 3 的命令；门禁会自行寻找或创建项目虚拟环境。去掉 `--check` 时，门禁会尝试自动修复环境。
 
 ### ffmpeg（视频抽帧）
 
@@ -33,48 +58,38 @@ playwright install chromium
 brew install ffmpeg
 
 # Ubuntu/Debian
-apt-get install ffmpeg
+sudo apt-get update
+sudo apt-get install -y ffmpeg
+
+# Windows
+# 使用 winget/chocolatey/scoop 或 ffmpeg 官方发行包安装，并确保 ffmpeg.exe 在 PATH
 ```
 
-若未安装，`analyze_video.py` 会报错退出。安装后请确认可用：
-
-```bash
-which ffmpeg && ffmpeg -version
-```
+若未安装，`analyze_video.py` 会报错退出。安装后分别使用 `where ffmpeg`（Windows）或 `command -v ffmpeg`（macOS/Linux）确认路径，再执行 `ffmpeg -version`。
 
 ### yt-dlp（视频下载）
 
-```bash
-pip install yt-dlp
-```
-
-若 `pip` 不可用：
+优先安装到同一个 Python 环境：
 
 ```bash
-brew install yt-dlp        # macOS
-apt-get install yt-dlp     # Ubuntu/Debian
+{python} -m pip install --upgrade yt-dlp
+{python} -m yt_dlp --version
 ```
 
-`analyze_video.py` 和 `scrape_page.py` 均依赖 yt-dlp 下载视频。安装后确认可用：
-
-```bash
-python3 -m yt_dlp --version
-```
+也可以使用 macOS Homebrew、Linux 系统包管理器或 Windows winget/chocolatey/scoop，但脚本通过 `{python} -m yt_dlp` 调用时，仍以当前 Python 环境中的包为准。
 
 ---
 
 ## 可用脚本
 
-所有脚本通过 `bash` 工具调用，不含任何 LLM 调用。
+所有脚本通过当前系统可用的 shell/code 工具调用，脚本本身不含任何 LLM 调用。
 
-**重要：首先调用 `skill_tool(skill_name="skill-omni-creation")` 获取 `skill_directory`。**
-后续所有命令用 `cd {skill_directory}/scripts && python3 ...` 执行，`read_file` 也使用绝对路径 `{skill_directory}/scripts/work/<slug>/...`。
-BashTool 没有 `cwd` 参数，必须在命令里用 `cd` 切换目录。
+**重要：** `skill_tool` 返回的 `skill_dir` 即 `{skill_directory}`。网页/图片链路脚本允许用当前 shell 中可用的 Python 3 作为启动命令；代码门禁会自动切换到同一个项目解释器并重新执行。所有脚本仍用绝对路径调用，不要 `cd`、不要拼接 `&&`。脚本内部已将 `work/` 锚定到自身目录，因此不依赖 shell 当前目录、盘符或路径中的空格。
 
 ### scrape_page.py — 爬取网页
 
 ```bash
-cd {skill_directory}/scripts && python3 scrape_page.py "<URL>" <slug>
+{python} "{skill_directory}/scripts/scrape_page.py" "<URL>" <slug>
 # 输出: work/<slug>/stage01.json
 ```
 
@@ -93,47 +108,56 @@ stage01.json 结构：
 
 - 若 URL 是视频平台（B 站/YouTube/Vimeo/小红书），自动跳过爬取，返回 `blocks=[]` + `video_urls=[url]`
 - 小红书链接（`xhslink.com` 短链或 `xiaohongshu.com` 直链）**必须通过 `scrape_page.py` 处理**，不要直接用 `fetch_webpage`，脚本会自动判断是否为视频帖子
-- 若 Playwright 被反爬拦截，返回空 blocks；见「Playwright 失败时的处理」
+- 正文抽取覆盖标题、段落、列表、`pre/code/table/dl`、常见代码编辑器、JS 文本容器及可恢复的 Canvas 文字
+- stage01 在脚本内部施加整页 block、正文字符和序列化大小硬上限；超限时从整页范围保留结构与代表内容，不创建分页文件
+- 只有代码门禁输出 `ENVIRONMENT_READY` 后，页面仍被反爬并返回空 blocks，才进入「Playwright 失败时的处理」；`ENVIRONMENT_BLOCKED` 必须停止，不能降级
 
 ### print_blocks.py — 读取网页内容（替代 read_file 读 JSON）
 
 ```bash
-cd {skill_directory}/scripts && python3 print_blocks.py <slug>
+{python} "{skill_directory}/scripts/print_blocks.py" <slug> --stage stage01
 # 读取: work/<slug>/stage01.json
-# 输出: TITLE、VIDEO_URLS、所有 blocks 的可读摘要（标题/正文/图片 alt）
+# 输出: TITLE、VIDEO_URLS、一次性有界的全页代表视图（标题/正文/图片 alt）
 ```
 
-**stage01.json 和 stage02.json 过大，read_file 会返回空。必须用这个脚本提取内容。**
+**stage01.json、stage02.json 和 stage03.json 都不要直接读取。必须用这个脚本提取内容。**
 
-### download_images.py — 下载图片
+stage01/stage02/stage03 都输出一次相同全局预算的受限代表视图，不提供 `offset`、下一批游标或继续翻页入口；不要直接读取这些 JSON，也不要尝试补读被预算省略的内容。
+
+### prepare_images.py / image_review.py — 串行下载与单层图片审核
 
 ```bash
-cd {skill_directory}/scripts && python3 download_images.py <slug>
-# 读取: work/<slug>/stage01.json
-# 输出: work/<slug>/raw_images/dom_NNN.{ext}
-#       work/<slug>/stage02.json
+{python} "{skill_directory}/scripts/prepare_images.py" <slug>
+# 严格串行执行 download_images.py，成功后才执行 print_blocks.py --stage stage02
 ```
 
-**不要用 read_file 读 stage02.json（文件过大会返回空）。**
-下载完成后运行 `python3 print_blocks.py <slug>`，根据每张图片的 alt 文字和前后文字上下文按「图片筛选标准」决定 KEEP/SKIP，将 KEEP 的路径列表传给 `save_images.py`。
-若某张图片的 alt 文字为空或过于泛化（如 "image"、"photo"、"screenshot"、文件名等），则用 `read_file` 实际查看该图片再决定。
+只根据输出中的图片 alt 与周围文字完成一次审核，并把每张图片最终标为 `KEEP` 或 `SKIP`。无法确定图片是否有用时，一律标为 `SKIP`，不要调用 `read_file` 查看图片：
+
+```bash
+{python} "{skill_directory}/scripts/image_review.py" <slug> --first-pass KEEP SKIP SKIP
+```
+
+`image_review.py` 会把最终状态直接写入当前 `stage02.json`，并立即输出 `KEEP_PATHS_ARGS`；把其后的 `--keep ...` 参数原样传给 `save_images.py`。不要直接读取 `stage02.json`，不要扫描或列举整个 `raw_images/`，也不要使用 `read_file`、`read_file_stream`、shell、base64 或字节模式查看待审核图片。
 
 ### analyze_video.py — 视频抽帧
 
 ```bash
-cd {skill_directory}/scripts && python3 analyze_video.py "<video_url_or_slug>" --title "视频标题"
-# 传视频 URL  → 自动下载，以 1fps 抽帧保存到 work/<slug>/frames/
-# 传 slug    → 读取已下载的 work/<slug>/video.mp4 直接抽帧
-# 输出: 打印帧总数、帧目录路径、建议批次大小
+{python} "{skill_directory}/scripts/analyze_video.py" "<video_url_or_slug>" --title "视频标题"
+# 可选显式指定同一工作目录：追加 --slug <slug>；省略时脚本会从 stage01.json 自动解析
+# 传视频 URL  → 自动复用 stage01 中的同一 slug；原始帧保存到 frames/，模型只读取 review_frames/ 的 JPEG
+# Bilibili 下载使用持久化 .part 文件与 HTTP Range 断点续传；重跑会继续未完成下载
+# 传 slug    → 读取 work/<slug>/video.mp4 或 work/<slug>/downloads/video.* 直接粗扫抽帧
+# 短视频按 0.5fps；长视频均匀覆盖全片且总帧数最多 90；固定每批最多 5 帧
+# 输出: 首次只打印第 1 批的 5 个精确审核帧路径；完成后用 --next-review-batch 获取下一批
 ```
 
-脚本**不调用任何 LLM**，只抽取帧图片。分析步骤由 agent 自己完成：用 `read_file` 分批读取帧图片，用自身视觉能力提取操作步骤。
+脚本**不调用任何 LLM**，只进行一次粗扫抽帧，不执行细扫。分析时只读取脚本当前打印的 5 个 `review_frames/*.jpg`；完成后运行同一命令并追加 `--next-review-batch` 获取下一批。选定关键帧后用相同编号的 `frames/frame_NNNN.png` 保存。
 
 ### save_images.py — 保存选定图片
 
 ```bash
-cd {skill_directory}/scripts && python3 save_images.py <slug> '["raw_images/dom_000.jpg", "raw_images/dom_003.png"]'
-# 第二个参数: 相对于 work/<slug>/ 的路径列表（JSON 数组），由你决定保留哪些
+{python} "{skill_directory}/scripts/save_images.py" <slug> --keep raw_images/dom_000.jpg raw_images/dom_003.png
+# --keep 后是相对于 work/<slug>/ 的路径；无图时只传 --keep
 # 输出: <skills_dir>/<slug>/references/img_NN.ext
 #       <skills_dir>/<slug>/references/video_frame_NNN.png
 ```
@@ -145,31 +169,31 @@ cd {skill_directory}/scripts && python3 save_images.py <slug> '["raw_images/dom_
 [save_images] SKILL_MD_PATH: /Users/xxx/.jiuwenswarm/agent/workspace/skills/exposure_fusion_opencv/SKILL.md
 ```
 **生成 SKILL.md 时，用 write_file 写入 `SKILL_MD_PATH` 打印出的绝对路径。图片路径为 `references/<文件名>`，例如 `references/img_00.jpg`。**
+页面无图时也必须执行 `save_images.py <slug> --keep`；脚本会从 stage02（不存在则 stage01）生成 stage03，并打印同一个 `SKILL_MD_PATH`。
+
+### finalize_scripts.py — 验证后收口脚本
+
+```bash
+{python} "{skill_directory}/scripts/finalize_scripts.py" <slug> --keep scripts/verified_a.py scripts/verified_b.py
+# 没有脚本通过时：... <slug> --keep
+```
+
+脚本只保留 `--keep` 中列出的验证通过脚本，删除其余生成脚本，并输出 `SKILL_SCRIPT_MODE`。无论结果是 `with_scripts` 还是 `text_images_only`，都输出 `SKILL_MD_ALLOWED: true`，主流程随后必须写一次最终 SKILL.md。
 
 ---
 
 ## 图片筛选标准
 
-你正在审核从教程或指南页面提取的图片。
-该指南可能涵盖任意主题：软件操作、摄影、烹饪、硬件等。
+你正在审核从教程或指南页面提取的图片。该指南可能涵盖任意主题：软件操作、摄影、烹饪、硬件等。
 
-保留（KEEP）图片的条件：图片直接说明或演示了周围文字所描述的某个步骤、概念或技巧，
-能帮助读者理解或复现文字内容。
+只依据图片 alt 与周围文字判断，每张图必须给出以下两种最终状态之一：
+- `KEEP`：上下文已能明确证明图片直接说明步骤、概念或技巧，能帮助读者理解或复现。
+- `SKIP`：图片是小图标、Logo、广告、纯装饰图、其他页面缩略图、与指南主题无关，或者仅凭 alt 与周围文字无法可靠判断其价值。
 
-跳过（SKIP）图片的情况（满足任意一条即跳过）：
-- 图片前后既没有章节标题也没有文字上下文 —— 几乎可以确定是文章顶部的装饰性封面/横幅图，
-  而非教学内容。
-- 图片是小图标、独立 Logo、广告或纯装饰性图形。
-- 图片是指向其他文章或页面的缩略图或预览图。
-- 图片内容明显属于与本指南标题无关的其他主题。
+**有任何疑问时一律 `SKIP`。不得查看图片后再决定，也不得输出其他状态。**
 
-如果图片标记为"来源：子页面"，则适用更严格标准：只有当图片直接、明确地演示了
-标题所描述的主任务中的某个步骤时，才保留。子页面图片有疑问时，一律跳过。
-
-同时参考图片内容和上下文（章节标题、前后文字）做出判断。有疑问时，一律跳过。
-
-只输出一个 JSON 字符串数组，每张图片对应一个元素，值只能是 "KEEP" 或 "SKIP"。
-示例（3 张图片）：["KEEP", "SKIP", "KEEP"]
+决策数量必须与 stage02 中图片数量完全一致，例如：
+`KEEP SKIP SKIP`
 
 
 ---
@@ -183,11 +207,10 @@ cd {skill_directory}/scripts && python3 save_images.py <slug> '["raw_images/dom_
 输入内容：
 1. TITLE —— 软件任务名称
 2. BLOCKS —— 按 DOM 顺序排列的内容块列表，每个块的类型为以下之一：
-   - {"type": "heading", "level": 1-4, "text": "...", "source": "main"|"subpage"}
-   - {"type": "text",    "text": "...", "source": "main"|"subpage"}
-   - {"type": "image",   "path": "references/img_NN.ext", "alt": "...", "source": "main"|"subpage"}
+   - {"type": "heading", "level": 1-4, "text": "...", "source": "main"}
+   - {"type": "text",    "text": "...", "source": "main"}
+   - {"type": "image",   "path": "references/img_NN.ext", "alt": "...", "source": "main"}
    图片块在文字块之间按原始页面位置穿插排列。
-   source 为 "subpage" 的块适用更严格的相关性过滤。
 
 输出格式（严格遵守）：
 
@@ -287,7 +310,6 @@ description: <1-3句中文：描述这个 Skill 的用途和适用场景>
   示例："软件支持配置多种渠道（网页、飞书、Telegram 等），接下来配置**飞书**渠道。"
   然后直接继续该选项的配置步骤。
 - 纯文字步骤：若文字块描述了明确的操作步骤，但其后没有紧跟图片块，按纯文字步骤输出（不加图片标签）。
-- 子页面块：同样适用主题聚焦规则 —— 只有与 TITLE 直接相关时才纳入输出。
 - 不附来源链接：不在输出末尾追加来源 URL、参考链接或脚注。
 - 包含所有帮助用户完成任务的内容：主要步骤、条件分支（"若 X 则 Y"）、说明、提示、
   警告和故障排查。由主题聚焦规则决定相关性，不要整体排除某类内容。
@@ -395,12 +417,48 @@ description: "<1-3句中文：描述这个 Skill 的用途和适用场景>"
 
 ## Playwright 失败时的处理
 
-若 `scrape_page.py` 返回空 blocks，使用 `web_fetch_webpage` 获取页面原始文本，自行提取：
+本节只处理**代码门禁已经输出 `ENVIRONMENT_READY`，但目标网页仍返回空内容、403 或验证页**的情形。若任一脚本输出 `ENVIRONMENT_BLOCKED` 或返回非零，必须停止当前网页/图片流程；不得使用本节绕过环境失败。
+
+在上述前提下，若 `scrape_page.py` 返回空 blocks，使用 `web_fetch_webpage` 获取页面原始文本，自行提取：
 - 主标题
 - 按顺序排列的 h2/h3 标题和步骤文字
 - 图片 URL（若有）
 
-直接用提取内容生成 SKILL.md，跳过 download_images/save_images 步骤。
+**提取后不要直接写 SKILL.md**，而是把提取结果手工构造成 `work/<slug>/stage01.json`（结构与「scrape_page.py」一节展示的完全一致：顶层含 `url`/`slug`/`title`/`blocks`/`video_urls`，image block 必须带 `url` 字段），然后回到正常链路继续：
+
+```bash
+# 用 write_file 写好 work/<slug>/stage01.json 后
+{python} "{skill_directory}/scripts/prepare_images.py" <slug>
+# 之后 image_review.py → save_images.py → 代码粗筛 → 写 SKILL.md，与网页路径完全一致
+```
+
+- 若页面确实没有图片，可跳过 prepare_images，但必须执行 `save_images.py <slug> --keep` 以生成 stage03 并确定最终输出路径
+- 「代码生成（agents/）」的粗筛与后续流程在此路径上同样必须执行——降级只改变内容获取方式，不改变流程本身
+
+---
+
+## 代码生成（agents/）
+
+有些内容描述的任务本质上要靠代码完成，纯文字步骤不足以复现。图片环节完成后（包括无图时执行 `save_images.py <slug> --keep`），做一次粗筛，满足任意一条 → 读 `agents/code-detector.md` 细判：
+
+- 正文含成段代码块（约 5 行以上）
+- 任务本质需编程完成（批量处理、API 调用、数据转换、算法实现）
+- 内容是 CLI 命令组合的教程
+
+粗筛与细判的纪律：
+
+- 粗筛是必经步骤：无论内容来自 scrape_page、fetch_webpage 降级还是视频帧分析，读完内容后都要先做粗筛，才能进入写 SKILL.md 的环节
+- 粗筛命中后**必须读 `agents/code-detector.md`**，按文档标准细判——不得凭自身感觉替代文档判断
+- 判定由你独立完成且是终局的：不询问用户要不要脚本，不提议添加内容中不存在的脚本；判定不需要就直接按原流程写 SKILL.md
+
+detector 判定需要脚本后，严格按此顺序执行：
+
+1. 读 `agents/code-writer.md`，把脚本写入 `{skill_directory}/../<slug>/scripts/`（若本次运行过 `save_images.py`，以其打印的 `SKILL_DIR` 为准）
+2. 读 `agents/code-verifier.md`，逐个验证并记录通过名单；验证失败或依赖无法就绪时，不得中止主流程
+3. 调用 `finalize_scripts.py <slug> --keep <验证通过的相对脚本路径...>`；未列入通过名单的脚本由代码删除。没有脚本通过时只传 `--keep`
+4. 写一次生成的 SKILL.md：有幸存脚本则只引用这些脚本；没有幸存脚本则写纯文本+图片版，不写脚本依赖或调用
+
+纯 GUI 点击教程不满足粗筛 → 跳过本节，按原流程写 SKILL.md。
 
 ---
 
@@ -409,37 +467,42 @@ description: "<1-3句中文：描述这个 Skill 的用途和适用场景>"
 **网页路径：**
 ```
 scrape_page.py
-→ download_images.py
-→ print_blocks.py <slug>          # 读 stage02.json，根据图片 alt + 上下文决定 KEEP/SKIP
-→ save_images.py（传 KEEP 路径列表）  # 同时生成 stage03.json（blocks 含 references/ 路径）
-→ print_blocks.py <slug>          # 现在读 stage03.json，输出含 path 的最终 blocks
-→ write_file 写入 save_images.py 输出的 SKILL_MD_PATH（按「输出格式规范（网页）」，图片路径直接从 blocks 取）
+→ prepare_images.py <slug>        # 内部强制 download_images.py 完成后再运行 print_blocks.py --stage stage02
+→ image_review.py 根据 alt 与周围文字一次性标记 KEEP/SKIP（不确定一律 SKIP）
+→ save_images.py（传 KEEP_PATHS_ARGS；无图只传 --keep）  # 统一生成 stage03.json 并打印 SKILL_MD_PATH
+→ print_blocks.py <slug> --stage stage03  # 输出含 path 的最终 blocks
+→ 代码粗筛                         # 见「代码生成（agents/）」；命中则读 agents/code-detector.md 细判
+→ 【判定需要脚本时】agents/code-writer.md 编写 → agents/code-verifier.md 验证
+→ finalize_scripts.py <slug> --keep <验证通过脚本...>  # 失败脚本自动删除；零通过则进入纯文本+图片模式
+→ write_file 写入 save_images.py 输出的 SKILL_MD_PATH（按「输出格式规范（网页）」，图片路径直接从 blocks 取；
+   仅在有验证幸存脚本时写「前置依赖」和脚本调用）
 ```
 
-**注意：stage01.json / stage02.json 体积较大，直接 read_file 会返回空（被 offload）。**
-请用以下方式读取内容：
-
-```bash
-# 提取文字 blocks（标题 + 正文），用于写 SKILL.md
-cd {skill_directory}/scripts && python3 print_blocks.py <slug>
-
-# 列出已下载的图片（用于 read_file 逐张查看）
-ls {skill_directory}/scripts/work/<slug>/raw_images/
-```
-
-看图时用 `read_file` + 绝对路径：
-`{skill_directory}/scripts/work/<slug>/raw_images/dom_000.jpg`
+**注意：stage01.json / stage02.json / stage03.json 不要直接读取。** 三个 stage 的模型可见输出都由 `print_blocks.py` 施加同一全局预算；网页图片只依据 stage02 代表视图中的 alt 与周围文字审核，并只使用 `image_review.py` 输出的 `KEEP_PATHS_ARGS`，禁止扫描、列举或读取整个 `raw_images/`。
 
 **视频路径：**
 ```
 scrape_page.py → video_urls 非空（或直接识别视频 URL）
 → analyze_video.py <video_url_or_slug> --title "..."
-  （自动下载，以 1fps 抽帧到 work/<slug>/frames/，打印帧数和批次建议）
-→ 脚本输出会打印帧目录的**绝对路径**和每批次的完整文件路径，例如：
-    批次 1/33: /path/to/scripts/work/<slug>/frames/frame_0001.png → .../frame_0020.png
-  直接使用输出中打印的绝对路径调用 read_file，不要自行拼接路径
-  用自身视觉能力分析每批帧图片，提取操作步骤，累积所有步骤
-→ write_file 写 skills/<slug>/SKILL.md（按「输出格式规范（视频）」，步骤来自自身分析结果）
+  （只执行单阶段粗扫：短视频按 0.5fps；长视频自动降低频率并均匀覆盖全片；总帧数最多 90；每批最多 5 帧）
+  （脚本自动复用 stage01 的 slug；Bilibili 中断后通过持久化 .part 文件续传）
+→ 脚本首次只打印当前批次的 5 个精确 `review_frames/*.jpg` 绝对路径
+  只读取这 5 个路径；完成后运行 `analyze_video.py <slug> --next-review-batch` 获取下一批
+  选择后映射到同编号的 frames PNG，并记录步骤对应的帧编号
+→ 【必须执行】save_images.py — 将选用帧复制到 references/ 后再写 SKILL.md
+  选出最能说明各步骤的帧（建议每个关键步骤 1 张），收集相对路径列表，例如：
+    ["frames/frame_0040.png", "frames/frame_0120.png", ...]
+  运行：
+    {python} "{skill_directory}/scripts/save_images.py" <slug> --keep frames/frame_0040.png ...
+  脚本输出：
+    [save_images] video_frame_0040.png <- frames/frame_0040.png   ← 保留原帧编号
+    [save_images] SKILL_MD_PATH: /absolute/path/to/<slug>/SKILL.md
+  记录 SKILL_MD_PATH（后续 write_file 用此路径）
+  图片路径格式：references/video_frame_NNNN.png（原帧编号，4 位）
+→ 代码粗筛                         # 见「代码生成（agents/）」；命中则读 agents/code-detector.md 细判
+→ 【判定需要脚本时】agents/code-writer.md 编写 → agents/code-verifier.md 验证
+→ write_file 写入 SKILL_MD_PATH（按「输出格式规范（视频）」，图片路径从 save_images.py 输出中取；
+   含脚本时「前置依赖」一节在正文最前，只引用验证幸存的脚本）
 ```
 
 **网页含嵌入视频：**
@@ -449,8 +512,9 @@ scrape_page.py → video_urls 非空（或直接识别视频 URL）
 
 ## 运行环境
 
-- Python 3.11+，所有 bash 命令必须以 `cd {skill_directory}/scripts &&` 开头（`skill_directory` 由 `skill_tool` 返回）
-- 依赖：`playwright`、`beautifulsoup4`、`Pillow`、`requests`
-- 外部工具：`ffmpeg`、`ffprobe`、`yt-dlp`
-- Playwright 需安装 Chromium：`playwright install chromium`
+- Python 3.11+；网页/图片链路由 `environment_gate.py` 自动选择或创建项目虚拟环境，并在必要时重新执行当前脚本
+- Python 依赖：`playwright`、`beautifulsoup4`、`Pillow`、`requests`；视频另需同环境中的 `yt-dlp`
+- Playwright Chromium 与 Linux 系统库由代码门禁尽可能自动安装；无法安全自动修复时返回非零并停止
+- 外部工具：`ffmpeg`、`ffprobe`
+- `ENVIRONMENT_BLOCKED` 后不得继续构造 stage、执行图片审核、保存空图片结果或最终化
 - 无需配置 API 环境变量

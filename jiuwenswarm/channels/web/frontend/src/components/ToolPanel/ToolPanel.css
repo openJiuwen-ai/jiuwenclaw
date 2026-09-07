@@ -1,24 +1,58 @@
-.toolpanel-status-card {
-  padding: 1rem;
+.toolpanel-collapsed-sections {
+  display: flex;
+  min-height: 0;
+  flex: 1;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.toolpanel-collapsed-task-section {
+  display: flex;
+  min-height: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+  border-bottom: 1px solid var(--color-border-default);
+}
+
+.tool-panel-floating {
+  position: fixed;
+  top: 68px;
+  right: 24px;
+  width: 340px;
+  max-height: calc(100vh - 68px - 32px);
   overflow-y: auto;
-  max-height: 13rem;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-lg);
-  background: var(--card);
-  box-shadow:
-    0 2px 8px rgba(15, 23, 42, 0.06),
-    inset 0 1px 0 var(--card-highlight);
-  transition:
-    box-shadow var(--duration-fast) ease,
-    border-color var(--duration-fast) ease,
-    transform var(--duration-fast) ease;
+  scrollbar-gutter: stable;
+  border-left: 1px solid var(--color-border-default, rgb(240, 240, 240));
+  border-radius: 16px;
+  box-shadow: 0 2px 16px 0 rgba(0, 0, 0, 0.08);
+  z-index: 30;
+}
+
+.tool-panel-floating > div > div:not(:last-child) {
+  border-bottom: 1px solid var(--color-border-default);
 }
 
 .toolpanel-status-card:hover {
-  border-color: var(--border-strong);
-  box-shadow:
-    0 8px 20px rgba(15, 23, 42, 0.10),
-    inset 0 1px 0 var(--card-highlight);
+  border-color: var(--color-border-strong);
+  box-shadow: var(--effect-tool-panel-shadow);
+  transform: translateY(-1px);
+}
+
+.toolpanel-collapsed-task-section > * {
+  min-height: 0;
+  flex: 1 1 auto;
+  border-bottom: 0;
+}
+
+.toolpanel-status-card {
+  padding: 1rem 0 0 0;
+  overflow-y: auto;
+  max-height: 13rem;
+}
+
+.toolpanel-status-card:hover {
+  border-color: var(--color-border-strong);
+  box-shadow: var(--effect-tool-panel-shadow);
   transform: translateY(-1px);
 }
 
@@ -28,7 +62,7 @@
   gap: 0.25rem;
   font-size: 0.75rem;
   font-weight: 500;
-  color: var(--muted);
+  color: var(--color-text-secondary);
   text-transform: uppercase;
   letter-spacing: 0.05em;
   margin-bottom: 0.75rem;
@@ -39,6 +73,49 @@
   align-items: center;
   justify-content: space-between;
   font-size: 0.75rem;
+}
+
+/* ===========================
+   CollapsibleSection
+   =========================== */
+
+.collapsible-section {
+  display: flex;
+  flex-direction: column;
+  transition: max-height 0.3s ease-in-out;
+}
+
+.collapsible-section__header {
+  flex-shrink: 0;
+  width: 100%;
+}
+
+.collapsible-section__toggle-icon {
+  transition: transform 0.2s ease-in-out;
+}
+
+.collapsible-section__content {
+  overflow: visible;
+  padding-bottom: 24px;
+}
+
+.collapsible-section__expand-all {
+  flex-shrink: 0;
+}
+
+.collapsible-section__expand-all button {
+  display: block;
+  width: 100%;
+  text-align: left;
+  font-size: 0.75rem;
+  color: var(--color-text-secondary);
+  background: var(--color-surface-card);
+  transition: color 0.2s ease;
+  cursor: pointer;
+}
+
+.collapsible-section__expand-all button:hover {
+  color: var(--color-text-primary);
 }
 
 /* ===========================
@@ -58,19 +135,19 @@
   justify-content: space-between;
   gap: 0.5rem;
   padding: 0.75rem;
-  border-bottom: 1px solid var(--border);
-  background: var(--secondary);
+  border-bottom: 1px solid var(--color-border-default);
+  background: var(--color-action-secondary);
 }
 
 .harness-extension-tree-title {
   font-size: 0.875rem;
   font-weight: 500;
-  color: var(--text);
+  color: var(--color-text-primary);
 }
 
 .harness-extension-tree-path {
   font-size: 0.75rem;
-  color: var(--muted);
+  color: var(--color-text-secondary);
 }
 
 .harness-extension-tree-content {

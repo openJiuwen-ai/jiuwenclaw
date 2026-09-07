@@ -1,6 +1,6 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
-"""Claude Code ``LOCAL_REVIEW_PROMPT`` 对齐的 PR 审查 prompt（单一数据源）."""
+"""PR 审查 prompt（单一数据源）."""
 
 from __future__ import annotations
 

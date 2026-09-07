@@ -85,3 +85,9 @@ cd jiuwenswarm\channels\web\frontend
 npm run build
 node scripts/test-a2ui-action-defaults.mjs
 ```
+---
+
+## 返回导航
+
+- [返回文档首页](../README.md)
+- [返回项目首页](../../README_CN.md)

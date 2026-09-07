@@ -14,8 +14,13 @@ import httpx
 
 from jiuwenswarm.gateway.channel_manager.base import RobotMessageRouter, BaseChannel
 from jiuwenswarm.gateway.channel_manager.im_platforms.dingtalk.dingtalk_file_service import DingTalkFileService
-from jiuwenswarm.common.schema.message import Message, ReqMethod
+from jiuwenswarm.common.schema.message import EventType, Message, ReqMethod
+from jiuwenswarm.gateway.channel_manager.im_platforms.errors import (
+    AttachmentPersistError,
+)
 from jiuwenswarm.common.utils import get_agent_workspace_dir
+from jiuwenswarm.gateway.routing.keys import DeliveryTarget
+from jiuwenswarm.gateway.routing.session_sharing import RoutingTarget
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +37,9 @@ class DingTalkConfig(BaseModel):
     send_file_allowed: bool = True  # 是否启用文件上传功能
     enable_file_download: bool = True  # 是否启用文件下载功能
     workspace_dir: str = ""  # 工作空间目录
+    # API 域名前缀（由 app_gateway 从 config.yaml 加载并兜底，此处不硬编码默认值）
+    api_base: str = ""  # 新版 v1.0 接口域名
+    oapi_base: str = ""  # 旧版 media 接口域名
 
 
 @dataclass
@@ -219,6 +227,17 @@ class DingTalkHandler(CallbackHandler):
 
             return AckMessage.STATUS_OK, "OK"
 
+        except AttachmentPersistError:
+            # 决策 D6：目标 AgentServer 不可达，附件落盘失败。不做「附件暂缺」
+            # 降级，整条消息按可重试错误失败，回发提示。
+            logger.warning(
+                "[DingTalkChannel] 附件落盘失败（AgentServer 不可达），整条消息按可重试错误失败"
+            )
+            await self.channel.send_attachment_error_reply(
+                sender_id, conversation_id, conversation_type,
+            )
+            return AckMessage.STATUS_OK, "OK"
+
         except Exception as e:
             logger.error(f"处理钉钉消息时出错: {e}")
             # 返回OK以避免钉钉服务器重试循环
@@ -250,6 +269,8 @@ class DingTalkChannel(BaseChannel):
 
         # 文件服务
         self._file_service: DingTalkFileService | None = None
+        # IM 附件落盘钩子（Phase 3）
+        self._file_persist_hook: Any = None
         # 按 request_id 记录已发送文件路径，避免重复发送
         self._sent_file_paths_by_req: dict[str, set[str]] = {}
 
@@ -261,6 +282,12 @@ class DingTalkChannel(BaseChannel):
     def on_message(self, callback: Callable[[Message], None]) -> None:
         """注册钉钉通道的回调函数"""
         self._gateway_callback = callback
+
+    def set_file_persist_hook(self, hook: Any) -> None:
+        """注入 IM 附件落盘钩子（Phase 3）；文件服务未创建时缓存，创建后生效。"""
+        self._file_persist_hook = hook
+        if self._file_service is not None:
+            self._file_service.set_persist_hook(hook)
 
     async def _handle_message(
             self,
@@ -362,7 +389,11 @@ class DingTalkChannel(BaseChannel):
                 max_download_size=self.config.max_download_size,
                 download_timeout=self.config.download_timeout,
                 workspace_dir=workspace_dir,
+                api_base=self.config.api_base,
+                oapi_base=self.config.oapi_base,
             )
+            if self._file_persist_hook is not None:
+                self._file_service.set_persist_hook(self._file_persist_hook)
 
             self._initialize_stream_client()
 
@@ -450,7 +481,7 @@ class DingTalkChannel(BaseChannel):
 
     async def _request_new_token(self) -> str | None:
         """请求新的访问令牌"""
-        url = "https://api.dingtalk.com/v1.0/oauth2/accessToken"
+        url = f"{self.config.api_base}/v1.0/oauth2/accessToken"
         data = self._build_token_request_data()
 
         if not self._http:
@@ -476,6 +507,12 @@ class DingTalkChannel(BaseChannel):
 
     def _extract_message_content(self, msg: Message) -> str | None:
         """从消息对象中提取内容"""
+        if msg.event_type == EventType.HEALTH_CHECK_RELAY and isinstance(
+            msg.payload, dict
+        ):
+            health_check = msg.payload.get("health_check")
+            if health_check:
+                return str(health_check)
         if msg.params and "content" in msg.params:
             return str(msg.params["content"])
         elif msg.payload and "content" in msg.payload:
@@ -525,9 +562,9 @@ class DingTalkChannel(BaseChannel):
     def _get_send_api_url(self, conversation_type: str) -> str:
         """根据会话类型获取发送API URL"""
         if conversation_type == "2":
-            return "https://api.dingtalk.com/v1.0/robot/groupMessages/send"
+            return f"{self.config.api_base}/v1.0/robot/groupMessages/send"
         else:
-            return "https://api.dingtalk.com/v1.0/robot/oToMessages/batchSend"
+            return f"{self.config.api_base}/v1.0/robot/oToMessages/batchSend"
 
     def _build_send_request(self, chat_id: str, content: str, conversation_type: str, open_conversation_id: str) -> \
     tuple[str, dict]:
@@ -558,12 +595,24 @@ class DingTalkChannel(BaseChannel):
         except Exception as e:
             logger.error(f"发送钉钉消息时出错: {e}")
 
-    async def send(self, msg: Message) -> None:
-        """通过钉钉发送消息"""
+    async def send_attachment_error_reply(
+        self, sender_id: str, conversation_id: str, conversation_type: str,
+    ) -> None:
+        """决策 D6：附件落盘失败时回发可重试错误提示，整条消息按失败处理。"""
         token = await self._get_access_token()
         if not token:
             return
+        content = "⚠️ 附件处理失败（服务暂不可用），请稍后重试。"
+        url, data = self._build_send_request(
+            sender_id, content, conversation_type, conversation_id,
+        )
+        await self._send_http_request(url, data, token, sender_id)
 
+    async def send(
+        self, msg: Message,
+        *, routing_target: RoutingTarget | None = None,
+    ) -> None:
+        """通过钉钉发送消息"""
         # 提取事件类型
         payload = msg.payload if isinstance(msg.payload, dict) else {}
         event_type = getattr(msg.event_type, "value", None) or payload.get("event_type") or ""
@@ -578,11 +627,18 @@ class DingTalkChannel(BaseChannel):
         if not content:
             logger.warning("钉钉发送: 在 msg.params 或 msg.payload 中未找到内容")
             return
+        if not content.strip():
+            logger.debug("钉钉发送: 跳过纯空白流式内容")
+            return
 
         # 提取聊天ID
         chat_id = self._extract_chat_id(msg)
         if not chat_id:
             logger.warning("钉钉发送: 在消息中未找到 chat_id 或 session_id")
+            return
+
+        token = await self._get_access_token()
+        if not token:
             return
 
         # 构建请求
@@ -1029,7 +1085,7 @@ class DingTalkChannel(BaseChannel):
         """发送媒体消息"""
         if request.conversation_type == "2":
             # 群聊
-            url = "https://api.dingtalk.com/v1.0/robot/groupMessages/send"
+            url = f"{self.config.api_base}/v1.0/robot/groupMessages/send"
             data = {
                 "robotCode": self.config.client_id,
                 "openConversationId": request.open_conversation_id,
@@ -1038,7 +1094,7 @@ class DingTalkChannel(BaseChannel):
             }
         else:
             # 私聊
-            url = "https://api.dingtalk.com/v1.0/robot/oToMessages/batchSend"
+            url = f"{self.config.api_base}/v1.0/robot/oToMessages/batchSend"
             data = {
                 "robotCode": self.config.client_id,
                 "userIds": [request.chat_id],

@@ -120,3 +120,9 @@ A2UI 的核心在客户端，而不是消息文本。
 5. 如确需完整 A2UI：在 IM 内发送链接，跳转 JiuwenSwarm Web companion 页面完成交互；IM channel 只承担通知和入口。
 
 这个方向能保留 A2UI 的核心价值，同时避免把第三方 IM 客户端当作可控 Web runtime 使用。
+---
+
+## 返回导航
+
+- [返回文档首页](../README.md)
+- [返回项目首页](../../README_CN.md)

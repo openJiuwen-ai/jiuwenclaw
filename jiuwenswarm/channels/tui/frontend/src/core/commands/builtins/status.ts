@@ -1,6 +1,7 @@
 import { addError, addInfo } from "../helpers.js";
 import { CommandKind, type SlashCommand } from "../types.js";
 import type { SessionUsageSummary } from "../../../app-state.js";
+import { formatModeForDisplay } from "../../modes.js";
 import type { ConfigItemSchema } from "./config.js";
 
 export type MemoryWarning = {
@@ -35,7 +36,7 @@ function showOverview(ctx: import("../types.js").CommandContext, payload: Status
         { label: "session", value: payload.session_id || ctx.sessionId },
         { label: "name", value: ctx.sessionTitle || "/rename to add a name" },
         { label: "cwd", value: payload.cwd || "unknown" },
-        { label: "mode", value: ctx.mode },
+        { label: "mode", value: formatModeForDisplay(ctx.mode) },
       ],
     }),
   );

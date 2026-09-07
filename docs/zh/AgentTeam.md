@@ -210,20 +210,33 @@ Agent Team 模式是 JiuwenSwarm 平台的一种特殊协作模式，用户可�
 
 ### 2.4 Team Skills
 
-Agent Team 模式下同样支持技能（Skills）的使用和开发。团队中的每个 Agent 都可以配置和使用技能，团队也可以共享技能资源。
+Agent Team 模式下同样支持技能（Skills）的使用和开发。团队中的每个 Agent 都可以配置和使用技能。
 
-**Team Skills 的概念：**
+**技能实体只有一份：**
 
-- **个人技能**：每个 Agent 自己配置和使用的技能，存放在各自的 `workspaces/<agent_name>_workspace/skills/` 目录下
-- **团队共享技能**：团队级别的共享技能，存放在 `team-workspace/skills/` 目录下，所有团队成员都可以使用
+技能安装后只存放在全局技能库 `~/.jiuwenswarm/agent/workspace/skills/` 里，团队工作区和成员工作空间下**没有** `skills/` 目录，也不会有软链或副本。
+
+**谁能看见哪些技能，是元数据而不是目录：**
+
+- **成员可见性**：每个 Agent 工作空间根下一份 `skills-visibility.json`，记录该成员的 `allow` / `deny` 名单
+- **团队可见性**：`team-workspace/` 根下一份 `skills-visibility.json`，对全团队生效
+- **合成规则**：可见 = 成员 allow ∪ 团队 allow；禁用 = 成员 deny ∪ 团队 deny ∪ 库级全局禁用。`deny` 恒优先于 `allow`；`allow` 为空表示不做过滤，即继承整个技能库
+
+改可见性只改这两个 JSON，不动文件系统，下一轮对话即刻生效。
+
+**你会感知到的三条行为：**
+
+1. **默认全看得见**：没有配置过任何名单时，`allow` 为空，成员继承整个技能库；之后你新装的技能会自动出现在成员面前，不需要再做任何分发动作。
+2. **配置里的 `skills` 是"初始值"，不是"当前值"**：配置文件中 `agents` 下每个角色的 `skills` 列表只在**首次生成**该成员的可见性声明时作为初始 `allow` 写入。声明文件一旦存在，改配置不会覆盖它——后续调整请用 `skills.visibility.get` / `skills.visibility.set` / `skills.visibility.update` 接口，避免"改了配置却不生效"的困惑。
+3. **团队的 `deny` 成员撤不掉**：团队声明里禁掉的技能，成员即使把它写进自己的 `allow` 也依然不可用。团队 `deny` 是硬约束，用来做全队范围的收口。
 
 **技能在团队中的作用：**
 
 1. **增强专业能力**：每个 Agent 可以通过技能增强自己在特定领域的执行能力
-2. **共享工具资源**：团队共享技能可以让所有成员使用同一套工具，避免重复开发
+2. **统一工具来源**：全团队读同一个技能库，装一次即可全员可用，不存在副本漂移
 3. **协作效率提升**：技能可以让 Agent 更高效地完成分配的任务
 
-> 有关 Team Skills 的详细使用和开发教程，请参阅 [Team Skill 开发指南](TeamSkill.md)。
+> 有关 Team Skills 的详细使用和开发教程，请参阅 [Swarm Skills 团队技能](SwarmSkills.md)。
 
 ### 2.5 Team Memory
 
@@ -262,19 +275,19 @@ Agent Team 模式下，每个团队都有自己的双层记忆：成员各自的
 
 ---
 
-## 四、案例实践
+## 三、案例实践
 
-### 4.1 任务目标
+### 3.1 任务目标
 
 深度调研新能源汽车行业，生成一份分析报告。
 
-### 4.2 用户输入
+### 3.2 用户输入
 
 ```
 帮我调研新能源汽车行业的发展现状、主要厂商、技术趋势，并生成一份分析报告。
 ```
 
-### 4.3 协作过程
+### 3.3 协作过程
 
 **Leader 分析需求**
 
@@ -296,8 +309,8 @@ Leader Agent 组建团队：
 
 ![leader build teams](../assets/images/leader 组建团队.png)
 
-**Team Agent 执行**
-Team Agent 接收指派任务后，开始执行
+**Teammate Agent 执行**
+Teammate Agent 接收指派任务后，开始执行
 
 ![Team execute tasks](../assets/images/团队成员接收任务.png)
 
@@ -310,7 +323,7 @@ Leader Agent 整合所有结果：
 
 ![Team execute tasks](../assets/images/leader 总结结果.png)
 
-### 4.4 产出结果
+### 3.4 产出结果
 
 最终交付物：一份完整的新能源汽车行业分析报告，包含：
 - 行业发展现状
@@ -323,9 +336,9 @@ Leader Agent 整合所有结果：
 
 ---
 
-## 五、协作方式
+## 四、协作方式
 
-### 5.1 角色分工
+### 4.1 角色分工
 
 **Leader Agent 的职责**
 
@@ -362,7 +375,7 @@ Agent Team 采用的是"分级自主协同"模式：
 
 > **关键理解**：Leader 负责统筹协调，Teammate 负责专业执行，两者协同完成任务。
 
-### 5.2 共享协作
+### 4.2 共享协作
 
 **团队共享工作区**
 
@@ -386,8 +399,10 @@ Agent Team 提供团队共享工作区，成员之间可以围绕同一批中间
 
 Agent Team 的文件结构分为两个层级：**团队共享工作区**和**成员独立工作空间**。
 
-- **团队共享工作区（team-workspace）**：所有团队成员共享的目录，存放团队产出物和共享技能。每个 Agent Team Session 会独立创建一个文件夹，文件夹下包含 team-workspace。
-- **成员独立工作空间（workspaces）**：每个 Agent 的专属空间，存放各自的配置、记忆、技能和待办事项。
+- **团队共享工作区（team-workspace）**：所有团队成员共享的目录，存放团队产出物。每个 Agent Team Session 会独立创建一个文件夹，文件夹下包含 team-workspace。
+- **成员独立工作空间（workspaces）**：每个 Agent 的专属空间，存放各自的配置、记忆和待办事项。
+
+> 技能实体不在这棵树里，它只存在于全局技能库 `~/.jiuwenswarm/agent/workspace/skills/`；这里的 `skills-visibility.json` 只声明"看得见库里的哪些技能"。
 
 完整路径层级如下：
 
@@ -399,13 +414,13 @@ Agent Team 的文件结构分为两个层级：**团队共享工作区**和**成
     │   │   ├── code/                   ← 代码产出
     │   │   ├── docs/                   ← 文档产出
     │   │   └── reports/                ← 报告产出
-    │   └── skills/                     ← 团队共享技能
+    │   └── skills-visibility.json      ← 团队技能可见性声明（不是技能本体）
     └── workspaces/                     ← 各成员独立工作空间
         └── <agent_name>_workspace/     ← 各 Agent 的独立空间
             ├── AGENT.md                ← 智能体配置
             ├── memory/                 ← 个人长期记忆（general 场景）
             ├── coding_memory/          ← 个人编码记忆（coding 场景）
-            ├── skills/                 ← 技能库
+            ├── skills-visibility.json  ← 成员技能可见性声明（不是技能本体）
             ├── todo/                   ← 待办事项
             └── ...                     ← 其他 Agent 专属文件
 ```
@@ -418,7 +433,7 @@ Agent Team 的文件结构分为两个层级：**团队共享工作区**和**成
 
 > **协作体验**：用户可以看到团队共享的中间产物，了解任务推进情况，而不需要手动传递文件。
 
-### 5.3 任务推进
+### 4.3 任务推进
 
 **事件驱动机制**
 
@@ -448,7 +463,7 @@ Agent Team 不是一次性分完工就结束，而是依靠事件驱动持续推
 
 ---
 
-## 六、常见问题
+## 五、常见问题
 
 ### Q1：Agent Team 和普通对话有什么区别？
 
@@ -494,10 +509,16 @@ Agent Team 采用事件驱动机制：
 
 ---
 
-## 七、附录
+## 六、附录
 
-### 7.1 相关资源
+### 6.1 相关资源
 
 - [官网技术博客：Agent Team](https://openjiuwen.com/blogs/blog-artical?id=225)
 
 ---
+---
+
+## 返回导航
+
+- [返回文档首页](../README.md)
+- [返回项目首页](../../README_CN.md)

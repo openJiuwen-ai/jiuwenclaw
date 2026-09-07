@@ -103,7 +103,9 @@ Hand-built defaults use `source_protocol` = `e2a`. Legacy `binding` migrates to 
 | `content_blocks` | JSON array isomorphic to ACP `Vec<ContentBlock>`; when `method==session/prompt` and no `prompt`, can map to `prompt` |
 | `text` / `content` / `query` | Plain user text; if no `prompt`/`content_blocks`, first non-empty string becomes a single `text` block |
 | `files` / `attachments` | Attachment lists; elements follow **`E2AFileRef`** (`uri` required) |
-| Others | e.g. `mode`, `page_idx`, heartbeat text—extend per Gateway RPC |
+| `mode` | Runtime mode; values and semantics are documented in [Modes](Modes.md) |
+| `work_mode` | Optional. Web composition field (`work` / `code`); together with `mode`, selects the work/code profile and whether hard Plan mode is enabled. See **Work mode (`work_mode`)** in [Modes](Modes.md) |
+| Others | e.g. `page_idx`, heartbeat text—extend per Gateway RPC |
 
 ### 4.5 `auth` and extension slots
 
@@ -204,14 +206,17 @@ For any other `method`, return a shallow copy of `params`.
   "user_id": "u_001",
   "params": {
     "content": "Hello",
-    "mode": "plan",
-    "query": "Hello"
+    "query": "Hello",
+    "mode": "agent",
+    "work_mode": "work"
   },
   "provenance": {
     "source_protocol": "e2a"
   }
 }
 ```
+
+When using the E2A protocol, send both `mode` and `work_mode`.
 
 `channel_context` may be omitted (or `{}` when serialized empty).
 
@@ -227,8 +232,9 @@ For any other `method`, return a shallow copy of `params`.
   "timestamp": 1774524781.15,
   "params": {
     "content": "List desktop files",
-    "mode": "plan",
-    "query": "List desktop files"
+    "query": "List desktop files",
+    "mode": "agent",
+    "work_mode": "work"
   },
   "metadata": {
     "feishu_open_id": "ou_xxx",
@@ -447,3 +453,8 @@ as cancellation rather than being classified as a `chat.error`.
 ---
 
 *Maintained in sync with `jiuwenswarm/common/e2a/models.py` (`E2AEnvelope`, `E2AResponse`).*
+
+## Changelog
+
+- v0.2.4b3: Merged `agent.fast` and `agent.plan` into unified `agent` mode; added `work_mode`. In Web mode, `agent.plan` + `work_mode` enables hard Plan mode.
+

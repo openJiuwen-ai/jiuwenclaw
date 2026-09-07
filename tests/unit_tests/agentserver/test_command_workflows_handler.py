@@ -2,45 +2,35 @@
 
 """Tests for _handle_command_workflows handler in AgentWebSocketServer."""
 
-# pylint: disable=protected-access
-
 from __future__ import annotations
 
 import asyncio
 import json
-from types import SimpleNamespace
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
 from jiuwenswarm.common.schema.agent import AgentRequest, AgentResponse
 from jiuwenswarm.common.schema.message import ReqMethod
-from jiuwenswarm.common.e2a.wire_codec import encode_agent_response_for_wire
 
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
 
 def _make_request(
     session_id: str = "sess-1",
     channel_id: str = "web",
     request_id: str = "req-1",
+    params: dict[str, Any] | None = None,
 ) -> AgentRequest:
-    """Create a minimal AgentRequest for command.workflows."""
     return AgentRequest(
         request_id=request_id,
         session_id=session_id,
         channel_id=channel_id,
         req_method=ReqMethod.COMMAND_WORKFLOWS,
-        params={},
+        params=params or {},
     )
 
 
 class _FakeWS:
-    """Fake WebSocket that records sent messages."""
-
     def __init__(self) -> None:
         self.sent: list[str] = []
 
@@ -49,8 +39,6 @@ class _FakeWS:
 
 
 class _FakeTeamManager:
-    """Fake TeamManager that returns configurable workflow handler."""
-
     def __init__(self, workflow_handler: Any | None = None) -> None:
         self._workflow_handler = workflow_handler
 
@@ -59,8 +47,6 @@ class _FakeTeamManager:
 
 
 class _FakeWorkflowHandler:
-    """Fake WorkflowMonitorHandler with configurable snapshot."""
-
     def __init__(self, snapshot: list[dict[str, Any]] | None = None) -> None:
         self._snapshot = snapshot or []
 
@@ -69,226 +55,19 @@ class _FakeWorkflowHandler:
 
 
 class _FailingWorkflowHandler:
-    """Fake WorkflowMonitorHandler that raises on get_workflow_snapshot."""
-
     @staticmethod
     def get_workflow_snapshot() -> list[dict[str, Any]]:
         raise RuntimeError("snapshot explosion")
 
 
-# ---------------------------------------------------------------------------
-# Tests
-# ---------------------------------------------------------------------------
-
-
-class TestHandleCommandWorkflows:
-    """Tests for _handle_command_workflows method."""
-
-    @pytest.mark.anyio
-    async def test_no_handler_returns_empty_snapshot(self) -> None:
-        """When no workflow handler exists, return empty workflows list."""
-        from jiuwenswarm.server.agent_ws_server import AgentWebSocketServer
-
-        server = AgentWebSocketServer.__new__(AgentWebSocketServer)
-        ws = _FakeWS()
-        request = _make_request(session_id="sess-1", channel_id="web")
-        send_lock = asyncio.Lock()
-
-        fake_tm = _FakeTeamManager(workflow_handler=None)
-
-        with patch(
-            "jiuwenswarm.agents.harness.team.get_team_manager",
-            return_value=fake_tm,
-        ):
-            await server._handle_command_workflows(ws, request, send_lock)
-
-        assert len(ws.sent) == 1
-        wire = json.loads(ws.sent[0])
-        # Decode through the wire format to get the payload
-        # The payload should contain type=workflow_run_snapshot, workflows=[], session_id
-        # E2A wire format wraps the response; find the payload in the structure
-        payload = self._extract_payload_from_wire(wire)
-        assert payload["type"] == "workflow_run_snapshot"
-        assert payload["workflows"] == []
-        assert payload["session_id"] == "sess-1"
-
-    @pytest.mark.anyio
-    async def test_handler_returns_snapshot(self) -> None:
-        """When workflow handler exists, return its snapshot."""
-        from jiuwenswarm.server.agent_ws_server import AgentWebSocketServer
-
-        server = AgentWebSocketServer.__new__(AgentWebSocketServer)
-        ws = _FakeWS()
-        request = _make_request(session_id="sess-2", channel_id="cli")
-        send_lock = asyncio.Lock()
-
-        snapshot_data = [
-            {"id": "wf_1", "name": "research-flow", "status": "running"},
-            {"id": "wf_2", "name": "build-flow", "status": "completed"},
-        ]
-        fake_handler = _FakeWorkflowHandler(snapshot=snapshot_data)
-        fake_tm = _FakeTeamManager(workflow_handler=fake_handler)
-
-        with patch(
-            "jiuwenswarm.agents.harness.team.get_team_manager",
-            return_value=fake_tm,
-        ):
-            await server._handle_command_workflows(ws, request, send_lock)
-
-        assert len(ws.sent) == 1
-        wire = json.loads(ws.sent[0])
-        payload = self._extract_payload_from_wire(wire)
-        assert payload["type"] == "workflow_run_snapshot"
-        assert payload["workflows"] == snapshot_data
-        assert payload["session_id"] == "sess-2"
-
-    @pytest.mark.anyio
-    async def test_handler_exception_returns_empty_snapshot(self) -> None:
-        """When handler raises exception, return empty workflows list."""
-        from jiuwenswarm.server.agent_ws_server import AgentWebSocketServer
-
-        server = AgentWebSocketServer.__new__(AgentWebSocketServer)
-        ws = _FakeWS()
-        request = _make_request(session_id="sess-3", channel_id="web")
-        send_lock = asyncio.Lock()
-
-        fake_handler = _FailingWorkflowHandler()
-        fake_tm = _FakeTeamManager(workflow_handler=fake_handler)
-
-        with patch(
-            "jiuwenswarm.agents.harness.team.get_team_manager",
-            return_value=fake_tm,
-        ):
-            await server._handle_command_workflows(ws, request, send_lock)
-
-        assert len(ws.sent) == 1
-        wire = json.loads(ws.sent[0])
-        payload = self._extract_payload_from_wire(wire)
-        assert payload["type"] == "workflow_run_snapshot"
-        assert payload["workflows"] == []
-        assert payload["session_id"] == "sess-3"
-
-    @pytest.mark.anyio
-    async def test_response_ok_is_true(self) -> None:
-        """All responses from this handler should have ok=True."""
-        from jiuwenswarm.server.agent_ws_server import AgentWebSocketServer
-
-        server = AgentWebSocketServer.__new__(AgentWebSocketServer)
-        ws = _FakeWS()
-        request = _make_request()
-        send_lock = asyncio.Lock()
-
-        fake_tm = _FakeTeamManager(workflow_handler=None)
-
-        with patch(
-            "jiuwenswarm.agents.harness.team.get_team_manager",
-            return_value=fake_tm,
-        ):
-            await server._handle_command_workflows(ws, request, send_lock)
-
-        wire = json.loads(ws.sent[0])
-        # The ok field should be accessible in the wire format
-        # In E2A format, ok is in the response metadata or the legacy stash
-        # Check that the response was constructed with ok=True
-        payload = self._extract_payload_from_wire(wire)
-        assert payload["type"] == "workflow_run_snapshot"
-
-    @pytest.mark.anyio
-    async def test_empty_session_id_defaults_to_empty_string(self) -> None:
-        """When session_id is None, it defaults to empty string."""
-        from jiuwenswarm.server.agent_ws_server import AgentWebSocketServer
-
-        server = AgentWebSocketServer.__new__(AgentWebSocketServer)
-        ws = _FakeWS()
-        request = _make_request(session_id=None, channel_id="web")
-        send_lock = asyncio.Lock()
-
-        fake_tm = _FakeTeamManager(workflow_handler=None)
-
-        with patch(
-            "jiuwenswarm.agents.harness.team.get_team_manager",
-            return_value=fake_tm,
-        ):
-            await server._handle_command_workflows(ws, request, send_lock)
-
-        wire = json.loads(ws.sent[0])
-        payload = self._extract_payload_from_wire(wire)
-        assert payload["session_id"] == ""
-
-    @pytest.mark.anyio
-    async def test_empty_channel_id_defaults_to_web(self) -> None:
-        """When channel_id is None, it defaults to 'web'."""
-        from jiuwenswarm.server.agent_ws_server import AgentWebSocketServer
-
-        server = AgentWebSocketServer.__new__(AgentWebSocketServer)
-        ws = _FakeWS()
-        request = AgentRequest(
-            request_id="req-1",
-            session_id="sess-1",
-            channel_id=None,
-            req_method=ReqMethod.COMMAND_WORKFLOWS,
-            params={},
-        )
-        send_lock = asyncio.Lock()
-
-        fake_tm = _FakeTeamManager(workflow_handler=None)
-
-        with patch(
-            "jiuwenswarm.agents.harness.team.get_team_manager",
-            return_value=fake_tm,
-        ):
-            await server._handle_command_workflows(ws, request, send_lock)
-
-        # Verify the response was sent and channel_id defaulted to "web"
-        assert len(ws.sent) == 1
-
-    @staticmethod
-    def _extract_payload_from_wire(wire: dict[str, Any]) -> dict[str, Any]:
-        """Extract the AgentResponse payload from E2A wire format.
-
-        The E2A wire format wraps the response. The payload may be in
-        different locations depending on whether E2A encoding succeeded
-        or fell back to legacy. We try both paths.
-        """
-        # Try E2A format first: payload is in response.metadata or
-        # inside the response structure
-        if "response" in wire:
-            resp = wire["response"]
-            # In E2A format, the payload is embedded in the response
-            if "metadata" in resp and isinstance(resp["metadata"], dict):
-                meta = resp["metadata"]
-                if "payload" in meta:
-                    return meta["payload"]
-            # Some E2A formats put payload directly
-            if "payload" in resp:
-                return resp["payload"]
-
-        # Try legacy stash format
-        if "metadata" in wire and isinstance(wire["metadata"], dict):
-            meta = wire["metadata"]
-            if "payload" in meta:
-                return meta["payload"]
-
-        # Try the direct wire structure — sometimes the AgentResponse
-        # payload is at the top level after legacy fallback
-        # The payload in legacy format is typically inside metadata.payload
-        # or inside the agent_response dict
-        for key in ("payload", "metadata"):
-            if key in wire:
-                val = wire[key]
-                if isinstance(val, dict) and "payload" in val:
-                    return val["payload"]
-                if isinstance(val, dict) and "type" in val:
-                    return val
-
-        # Last resort: search recursively for the workflow_run_snapshot type
-        return _find_payload_recursive(wire)
-
-
 def _find_payload_recursive(data: Any) -> dict[str, Any]:
-    """Recursively search for a dict with 'type' == 'workflow_run_snapshot'."""
     if isinstance(data, dict):
-        if data.get("type") == "workflow_run_snapshot":
+        if data.get("type") in (
+            "workflow_run_snapshot",
+            "workflow_run_detail",
+            "workflow_phase_detail",
+            "workflow_agent_detail",
+        ):
             return data
         for v in data.values():
             result = _find_payload_recursive(v)
@@ -302,28 +81,319 @@ def _find_payload_recursive(data: Any) -> dict[str, Any]:
     return {}
 
 
-class TestCommandWorkflowsDispatch:
-    """Test that COMMAND_WORKFLOWS req_method triggers the correct handler."""
+def _extract_payload(wire: dict[str, Any]) -> dict[str, Any]:
+    if "response" in wire:
+        resp = wire["response"]
+        if isinstance(resp.get("metadata"), dict) and "payload" in resp["metadata"]:
+            return resp["metadata"]["payload"]
+        if "payload" in resp:
+            return resp["payload"]
+    if isinstance(wire.get("metadata"), dict) and "payload" in wire["metadata"]:
+        return wire["metadata"]["payload"]
+    for key in ("payload", "metadata"):
+        if key in wire:
+            val = wire[key]
+            if isinstance(val, dict) and "payload" in val:
+                return val["payload"]
+            if isinstance(val, dict) and "type" in val:
+                return val
+    found = _find_payload_recursive(wire)
+    if found:
+        return found
+    return wire
 
+
+def _snapshot_two_workflows() -> list[dict[str, Any]]:
+    return [
+        {
+            "id": "wf_1",
+            "name": "research-flow",
+            "status": "completed",
+            "phases": [
+                {
+                    "id": "phase-1",
+                    "name": "main",
+                    "status": "completed",
+                    "agents": [
+                        {
+                            "id": "agent-1",
+                            "name": "writer",
+                            "status": "completed",
+                            "prompt": "hello world",
+                            "outcome": "done",
+                        }
+                    ],
+                }
+            ],
+        },
+        {"id": "wf_2", "name": "build-flow", "status": "running"},
+    ]
+
+
+class TestHandleCommandWorkflows:
     @pytest.mark.anyio
-    async def test_command_workflows_dispatch_calls_handler(self) -> None:
-        """Verify the dispatch routing for ReqMethod.COMMAND_WORKFLOWS."""
-        # This is a structural test that verifies the dispatch was added.
-        # We mock the handler method and verify it gets called through
-        # the dispatch chain.
+    async def test_no_handler_returns_empty_snapshot(self) -> None:
         from jiuwenswarm.server.agent_ws_server import AgentWebSocketServer
 
         server = AgentWebSocketServer.__new__(AgentWebSocketServer)
+        ws = _FakeWS()
+        request = _make_request(session_id="sess-1", channel_id="web")
+        send_lock = asyncio.Lock()
 
-        # Mock the handler method
+        with patch(
+            "jiuwenswarm.agents.harness.team.get_team_manager",
+            return_value=_FakeTeamManager(workflow_handler=None),
+        ), patch(
+            "jiuwenswarm.server.runtime.agent_adapter.team_helpers.restore_workflow_runs",
+            return_value={},
+        ):
+            await server._handle_command_workflows(ws, request, send_lock)
+
+        assert len(ws.sent) == 1
+        payload = _extract_payload(json.loads(ws.sent[0]))
+        assert payload["type"] == "workflow_run_snapshot"
+        assert payload["action"] == "list"
+        assert payload["workflows"] == []
+        assert payload["session_id"] == "sess-1"
+
+    @pytest.mark.anyio
+    async def test_list_returns_summaries_with_detail_pending(self) -> None:
+        from jiuwenswarm.server.agent_ws_server import AgentWebSocketServer
+
+        server = AgentWebSocketServer.__new__(AgentWebSocketServer)
+        ws = _FakeWS()
+        request = _make_request(session_id="sess-2", channel_id="cli")
+        send_lock = asyncio.Lock()
+
+        fake_handler = _FakeWorkflowHandler(snapshot=_snapshot_two_workflows())
+        with patch(
+            "jiuwenswarm.agents.harness.team.get_team_manager",
+            return_value=_FakeTeamManager(workflow_handler=fake_handler),
+        ):
+            await server._handle_command_workflows(ws, request, send_lock)
+
+        payload = _extract_payload(json.loads(ws.sent[0]))
+        assert payload["type"] == "workflow_run_snapshot"
+        assert payload["action"] == "list"
+        assert len(payload["workflows"]) == 2
+        first = payload["workflows"][0]
+        assert first["id"] == "wf_1"
+        assert first["detail_pending"] is True
+        assert "phases" not in first
+        assert payload["session_id"] == "sess-2"
+        assert payload["total"] == 2
+
+    @pytest.mark.anyio
+    async def test_get_workflow_returns_phase_summaries(self) -> None:
+        from jiuwenswarm.server.agent_ws_server import AgentWebSocketServer
+
+        server = AgentWebSocketServer.__new__(AgentWebSocketServer)
+        ws = _FakeWS()
+        request = _make_request(
+            session_id="sess-get",
+            channel_id="cli",
+            params={"action": "get_workflow", "workflow_id": "wf_1"},
+        )
+        send_lock = asyncio.Lock()
+
+        fake_handler = _FakeWorkflowHandler(snapshot=_snapshot_two_workflows())
+        with patch(
+            "jiuwenswarm.agents.harness.team.get_team_manager",
+            return_value=_FakeTeamManager(workflow_handler=fake_handler),
+        ):
+            await server._handle_command_workflows(ws, request, send_lock)
+
+        payload = _extract_payload(json.loads(ws.sent[0]))
+        assert payload["type"] == "workflow_run_detail"
+        assert payload["action"] == "get_workflow"
+        workflow = payload["workflow"]
+        assert workflow["id"] == "wf_1"
+        phase = workflow["phases"][0]
+        assert phase["id"] == "phase-1"
+        assert phase["detail_pending"] is True
+        assert "agents" not in phase
+        assert payload["phase_total"] == 1
+        assert payload["has_more"] is False
+
+    @pytest.mark.anyio
+    async def test_get_phase_returns_agent_summaries(self) -> None:
+        from jiuwenswarm.server.agent_ws_server import AgentWebSocketServer
+
+        server = AgentWebSocketServer.__new__(AgentWebSocketServer)
+        ws = _FakeWS()
+        request = _make_request(
+            session_id="sess-phase",
+            channel_id="cli",
+            params={
+                "action": "get_phase",
+                "workflow_id": "wf_1",
+                "phase_id": "phase-1",
+            },
+        )
+        send_lock = asyncio.Lock()
+
+        fake_handler = _FakeWorkflowHandler(snapshot=_snapshot_two_workflows())
+        with patch(
+            "jiuwenswarm.agents.harness.team.get_team_manager",
+            return_value=_FakeTeamManager(workflow_handler=fake_handler),
+        ):
+            await server._handle_command_workflows(ws, request, send_lock)
+
+        payload = _extract_payload(json.loads(ws.sent[0]))
+        assert payload["type"] == "workflow_phase_detail"
+        assert payload["action"] == "get_phase"
+        phase = payload["phase"]
+        assert phase["id"] == "phase-1"
+        agent = phase["agents"][0]
+        assert agent["id"] == "agent-1"
+        assert agent["detail_pending"] is True
+        # Heavy text fields are omitted from the summary — fetched via get_agent.
+        assert "prompt" not in agent
+        assert "outcome" not in agent
+        # A short preview of outcome is carried for the tree row stub.
+        assert agent["outcome_preview"] == "done"
+        assert payload["agent_total"] == 1
+        assert payload["has_more"] is False
+
+    @pytest.mark.anyio
+    async def test_get_agent_returns_single_agent(self) -> None:
+        from jiuwenswarm.server.agent_ws_server import AgentWebSocketServer
+
+        server = AgentWebSocketServer.__new__(AgentWebSocketServer)
+        ws = _FakeWS()
+        request = _make_request(
+            session_id="sess-agent",
+            channel_id="cli",
+            params={
+                "action": "get_agent",
+                "workflow_id": "wf_1",
+                "phase_id": "phase-1",
+                "agent_id": "agent-1",
+            },
+        )
+        send_lock = asyncio.Lock()
+
+        fake_handler = _FakeWorkflowHandler(snapshot=_snapshot_two_workflows())
+        with patch(
+            "jiuwenswarm.agents.harness.team.get_team_manager",
+            return_value=_FakeTeamManager(workflow_handler=fake_handler),
+        ):
+            await server._handle_command_workflows(ws, request, send_lock)
+
+        payload = _extract_payload(json.loads(ws.sent[0]))
+        assert payload["type"] == "workflow_agent_detail"
+        assert payload["action"] == "get_agent"
+        agent = payload["agent"]
+        assert agent["id"] == "agent-1"
+        assert agent["prompt"] == "hello world"
+
+    @pytest.mark.anyio
+    async def test_unknown_action_returns_error(self) -> None:
+        from jiuwenswarm.server.agent_ws_server import AgentWebSocketServer
+
+        server = AgentWebSocketServer.__new__(AgentWebSocketServer)
+        ws = _FakeWS()
+        request = _make_request(
+            params={"action": "bogus"},
+        )
+        send_lock = asyncio.Lock()
+
+        with patch(
+            "jiuwenswarm.agents.harness.team.get_team_manager",
+            return_value=_FakeTeamManager(workflow_handler=None),
+        ), patch(
+            "jiuwenswarm.server.runtime.agent_adapter.team_helpers.restore_workflow_runs",
+            return_value={},
+        ):
+            await server._handle_command_workflows(ws, request, send_lock)
+
+        assert len(ws.sent) == 1
+        assert "unknown action" in ws.sent[0]
+        assert "bogus" in ws.sent[0]
+        wire = json.loads(ws.sent[0])
+        assert wire.get("response_kind") == "e2a.error"
+
+    @pytest.mark.anyio
+    async def test_handler_exception_returns_empty_snapshot(self) -> None:
+        from jiuwenswarm.server.agent_ws_server import AgentWebSocketServer
+
+        server = AgentWebSocketServer.__new__(AgentWebSocketServer)
+        ws = _FakeWS()
+        request = _make_request(session_id="sess-3", channel_id="web")
+        send_lock = asyncio.Lock()
+
+        with patch(
+            "jiuwenswarm.agents.harness.team.get_team_manager",
+            return_value=_FakeTeamManager(workflow_handler=_FailingWorkflowHandler()),
+        ):
+            await server._handle_command_workflows(ws, request, send_lock)
+
+        payload = _extract_payload(json.loads(ws.sent[0]))
+        assert payload["type"] == "workflow_run_snapshot"
+        assert payload["workflows"] == []
+        assert payload["session_id"] == "sess-3"
+
+    @pytest.mark.anyio
+    async def test_empty_session_id_defaults_to_empty_string(self) -> None:
+        from jiuwenswarm.server.agent_ws_server import AgentWebSocketServer
+
+        server = AgentWebSocketServer.__new__(AgentWebSocketServer)
+        ws = _FakeWS()
+        request = _make_request(session_id=None, channel_id="web")
+        send_lock = asyncio.Lock()
+
+        with patch(
+            "jiuwenswarm.agents.harness.team.get_team_manager",
+            return_value=_FakeTeamManager(workflow_handler=None),
+        ), patch(
+            "jiuwenswarm.server.runtime.agent_adapter.team_helpers.restore_workflow_runs",
+            return_value={},
+        ):
+            await server._handle_command_workflows(ws, request, send_lock)
+
+        payload = _extract_payload(json.loads(ws.sent[0]))
+        assert payload["session_id"] == ""
+
+    @pytest.mark.anyio
+    async def test_list_offset_pagination(self) -> None:
+        from jiuwenswarm.server.agent_ws_server import AgentWebSocketServer
+
+        server = AgentWebSocketServer.__new__(AgentWebSocketServer)
+        ws = _FakeWS()
+        snapshot = [
+            {"id": f"wf_{i}", "name": f"flow-{i}", "status": "running"}
+            for i in range(5)
+        ]
+        request = _make_request(
+            params={"action": "list", "offset": 2, "limit": 2},
+        )
+        send_lock = asyncio.Lock()
+
+        fake_handler = _FakeWorkflowHandler(snapshot=snapshot)
+        with patch(
+            "jiuwenswarm.agents.harness.team.get_team_manager",
+            return_value=_FakeTeamManager(workflow_handler=fake_handler),
+        ):
+            await server._handle_command_workflows(ws, request, send_lock)
+
+        payload = _extract_payload(json.loads(ws.sent[0]))
+        assert payload["total"] == 5
+        assert [w["id"] for w in payload["workflows"]] == ["wf_2", "wf_3"]
+        assert payload["has_more"] is True
+
+
+class TestCommandWorkflowsDispatch:
+    @pytest.mark.anyio
+    async def test_command_workflows_dispatch_calls_handler(self) -> None:
+        from unittest.mock import AsyncMock
+
+        from jiuwenswarm.server.agent_ws_server import AgentWebSocketServer
+
+        server = AgentWebSocketServer.__new__(AgentWebSocketServer)
         server._handle_command_workflows = AsyncMock()
 
-        # Create a minimal request
         request = _make_request()
         ws = _FakeWS()
         send_lock = asyncio.Lock()
-
-        # Call the handler directly to verify it exists and is callable
         await server._handle_command_workflows(ws, request, send_lock)
-
         server._handle_command_workflows.assert_called_once_with(ws, request, send_lock)
