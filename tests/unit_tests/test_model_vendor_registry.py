@@ -70,3 +70,24 @@ def test_modelarts_presets_use_current_v2_model_ids() -> None:
     assert custom_api is not None
     assert custom_api.default_model == "openpangu-2.0-pro"
     assert "pangu-large" not in custom_api.model_options
+
+
+def test_alibaba_custom_api_uses_curated_verified_model_allowlist() -> None:
+    preset = get_preset("alibaba", PlanKind.CUSTOM_API)
+
+    assert preset is not None
+    assert preset.default_model == "qwen3.8-max"
+    assert len(preset.model_options) == 28
+    assert {
+        "qwen3.8-max",
+        "qwen3-coder-next",
+        "deepseek-v4-pro",
+        "MiniMax-M2.5",
+        "qwen3-vl-plus",
+        "qwen3.5-omni-plus",
+        "qwen3.8-27b",
+        "qwen-mt-plus",
+        "qwen-deep-search-planning",
+    } <= set(preset.model_options)
+    assert "qwen-turbo-0919" not in preset.model_options
+    assert all("/" not in model_id for model_id in preset.model_options)

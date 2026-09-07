@@ -126,13 +126,19 @@ class _CapturingSessionListAgentClient:
 
 
 @pytest.mark.asyncio
-async def test_vendors_fetch_models_filters_namespaced_alibaba_models(monkeypatch):
+async def test_vendors_fetch_models_applies_alibaba_allowlist(monkeypatch):
     channel = FakeWebChannel()
     _register_web_handlers(WebHandlersBindParams(channel=channel))
     monkeypatch.setattr(
         "httpx.get",
         lambda *args, **kwargs: _FakeModelsResponse(
-            ["MiniMax-M2.5", "MiniMax/MiniMax-M2.5", "kimi/kimi-k3"]
+            [
+                "qwen-turbo-0919",
+                "MiniMax-M2.5",
+                "MiniMax/MiniMax-M2.5",
+                "qwen3.8-max",
+                "kimi/kimi-k3",
+            ]
         ),
     )
 
@@ -146,7 +152,7 @@ async def test_vendors_fetch_models_filters_namespaced_alibaba_models(monkeypatc
     response = channel.responses[-1]
     assert response["ok"] is True
     assert response["payload"] == {
-        "models": ["MiniMax-M2.5"],
+        "models": ["qwen3.8-max", "MiniMax-M2.5"],
         "source": "remote",
     }
 
@@ -198,7 +204,7 @@ async def test_vendors_fetch_models_falls_back_when_all_alibaba_models_are_names
     assert response["payload"]["source"] == "preset"
     assert response["payload"]["models"]
     assert response["payload"]["reason"] == (
-        "all remote models excluded by Alibaba namespace policy"
+        "no remote models matched the Alibaba plan allowlist"
     )
 
 

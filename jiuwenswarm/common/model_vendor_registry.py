@@ -254,13 +254,42 @@ _PRESETS: list[VendorPreset] = [
         endpoint_profile="dashscope",
         default_model="qwen3.8-max",
         model_options=(
+            # 通义旗舰/通用
             "qwen3.8-max",
-            "qwen3.7-max",
+            "qwen3.8-max-0902",
+            "qwen3.8-flash",
             "qwen3.7-plus",
-            "qwen3.7-flash",
-            "qwen3.6-max-preview",
+            # 代码
             "qwen3-coder-next",
-            "qwen3-vl-235b-a22b-thinking",
+            "qwen3-coder-plus",
+            "qwen3-coder-flash",
+            "kimi-k2.7-code",
+            # 常用第三方模型（百炼直供裸 ID）
+            "deepseek-v4-pro",
+            "deepseek-v4-flash",
+            "kimi-k3",
+            "MiniMax-M2.5",
+            "glm-5.2",
+            # 视觉/OCR
+            "qwen3-vl-plus",
+            "qwen3-vl-flash",
+            "qwen-vl-ocr-latest",
+            "qwen3.5-ocr",
+            # 全模态
+            "qwen3.5-omni-plus",
+            "qwen3.5-omni-flash",
+            # 通义开源
+            "qwen3.8-2.4t-a95b",
+            "qwen3.8-27b",
+            "qwen3-next-80b-a3b-instruct",
+            "qwen3-next-80b-a3b-thinking",
+            # 数学/翻译/长文本
+            "qwen-math-plus-latest",
+            "qwen-mt-plus",
+            "qwen-long",
+            # 研究/搜索
+            "qwen-deep-research-2025-12-15",
+            "qwen-deep-search-planning",
         ),
         icon_key="qwen",
         models_endpoint="https://dashscope.aliyuncs.com/compatible-mode/v1/models",
