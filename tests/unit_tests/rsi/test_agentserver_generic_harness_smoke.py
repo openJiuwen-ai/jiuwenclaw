@@ -136,7 +136,7 @@ async def test_agentserver_accepts_evobench_suite_and_generic_harness_refs(tmp_p
                 "batch_size": 1,
                 "max_issue_attempts": 8,
                 "max_repair_rounds": 1,
-                "sibling_candidate_count": 2,
+                "sibling_candidate_count": 1,
                 "rollout_concurrency": 2,
             }
         )
@@ -162,7 +162,7 @@ async def test_agentserver_accepts_evobench_suite_and_generic_harness_refs(tmp_p
     assert (local_harness / "harness_config.yaml").is_file()
     assert profile["max_epochs"] == 1
     assert profile["data_loader"]["batch_size"] == 1
-    assert profile["member_optimizer"]["sibling_candidate_count"] == 2
+    assert profile["member_optimizer"]["sibling_candidate_count"] == 1
     assert profile["member_optimizer"]["max_issue_attempts_per_batch"] == 8
     assert profile["member_optimizer"]["max_repair_rounds_per_batch"] == 1
     assert profile["rsi_runtime"] == {
