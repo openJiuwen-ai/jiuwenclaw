@@ -6,6 +6,7 @@ CJK_PDF_TO_WORD_NOTE = (
     "文档含中文，当前环境不支持生成中文 PDF，已自动改用 Word 格式输出。"
 )
 CJK_WATERMARK_BLOCKED_MESSAGE = "水印文本含中文，当前环境不支持在 PDF 中渲染中文水印，请使用纯英文水印文本。"
+CJK_PDF_BLOCKED_MESSAGE = "文档含中文，当前 PDF 渲染器不支持中文，请使用 Word 格式输出。"
 
 
 

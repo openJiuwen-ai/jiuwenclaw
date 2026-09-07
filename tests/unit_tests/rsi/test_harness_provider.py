@@ -173,7 +173,114 @@ def test_run_translates_request_and_result(tmp_path: Path) -> None:
     engine_request = stub.requests[0]
     assert engine_request.dataset_files == [str(tmp_path / "cases.json")]
     assert engine_request.resume is False
+    assert engine_request.auto_full_baseline is True
     assert len(stub.on_event_seen) == 1 and callable(stub.on_event_seen[0])
+
+
+@pytest.mark.parametrize("fingerprint", [{}, {"auto_full_baseline": False}, {"auto_full_baseline": True}])
+def test_resume_preserves_baseline_protocol(tmp_path: Path, fingerprint: dict) -> None:
+    import asyncio
+
+    state = {**_state_dict(), "fingerprint": fingerprint}
+    _write_state(tmp_path, "rsi-test0001", state)
+    stub = _StubOrchestrator(state)
+    asyncio.run(HarnessProvider(tmp_path, orchestrator=stub).resume(_request(tmp_path, resume=True)))
+    assert stub.requests[0].auto_full_baseline is fingerprint.get("auto_full_baseline", False)
+
+
+def test_baseline_progress_does_not_consume_an_epoch(tmp_path: Path) -> None:
+    _write_state(tmp_path, "rsi-test0001", {
+        **_state_dict(), "max_iteration": 5, "epoch_checkpoints": [], "status": "running",
+    })
+    state = HarnessProvider(tmp_path).read_state("rsi-test0001")
+    assert state.iteration == 0
+    assert state.total_iterations == 5
+    assert state.baseline == 0.5
+
+
+@pytest.mark.parametrize("baseline_score", [0.0, 0.5])
+def test_real_engine_baseline_reaches_push_report_tree_and_resume(tmp_path: Path, baseline_score: float) -> None:
+    import asyncio
+    from types import SimpleNamespace
+
+    from openjiuwen.rsi import AutoCoordinatingHarnessConfig, SingleHarnessIterativeOptimizationOrchestrator
+    from openjiuwen.rsi.harness_rsi.config import DataLoaderConfig, EvaluatorConfig
+    from jiuwenswarm.agents.harness.common.rsi.artifact_service import RsiArtifactService
+    from jiuwenswarm.agents.harness.common.rsi.event_consumer import RsiEventConsumer
+    from jiuwenswarm.agents.harness.common.rsi.projector import RsiProjector
+    from jiuwenswarm.agents.harness.common.rsi.services import RsiReportService
+    from jiuwenswarm.agents.harness.common.rsi.usage_recorder import RsiUsageRecorder
+
+    request = _request(tmp_path)
+    Path(request.dataset_files[0]).write_text(json.dumps({"cases": [
+        {"case_id": "one", "input": "first"}, {"case_id": "two", "input": "second"},
+    ]}), encoding="utf-8")
+    refs_path = Path(request.harness_refs_path)
+    refs_path.parent.mkdir()
+    refs_path.write_text("harness_refs:\n  solver: baseline\n", encoding="utf-8")
+    projector = RsiProjector(tmp_path)
+    projector.register_root(request.task_id)
+    usage = RsiUsageRecorder()
+    artifacts = RsiArtifactService(tmp_path)
+    consumer = RsiEventConsumer(request.task_id, usage, projector, artifacts)
+    pushes = []
+
+    async def on_progress(task_id, payload):
+        pushes.append(payload)
+
+    consumer.bind_push(on_progress=on_progress)
+    baseline_calls = []
+
+    class Evaluator:
+        async def evaluate_batch(self, **kwargs):
+            output = Path(kwargs["output_dir"])
+            if output.name != "frozen_baseline":
+                assert provider.read_state(request.task_id).baseline == baseline_score
+                raise RuntimeError("optimization-batch-reached")
+            baseline_calls.append(kwargs)
+            assert [case["case_id"] for case in kwargs["cases"]] == ["one", "two"]
+            assert provider.read_state(request.task_id).baseline is None
+            await kwargs["on_case_stage"]({"case_index": 1, "total_cases": 2, "status": "running"})
+            nodes = projector.derive_tree(request.task_id)["nodes"]
+            assert len(nodes) == 1 and nodes[0]["node_id"] == "ROOT"
+            assert nodes[0]["extra"]["stage"]["total_cases"] == 2
+            output.mkdir(parents=True, exist_ok=True)
+            result = output / "result.json"
+            result.write_text("{}", encoding="utf-8")
+            cases = [{"case_id": name, "score": score, "status": "passed" if score == 1 else "failed",
+                      "result_path": str(result), "trace_path": str(result)}
+                     for name, score in (("one", baseline_score * 2), ("two", 0.0))]
+            eval_ref = output / "eval_ref.yaml"
+            eval_ref.write_text(yaml.safe_dump({"harness_refs_path": str(refs_path), "cases": cases}), encoding="utf-8")
+            return str(eval_ref)
+
+    orchestrator = SingleHarnessIterativeOptimizationOrchestrator(
+        AutoCoordinatingHarnessConfig(max_epochs=3, evaluator=EvaluatorConfig(backend="single_harness"),
+                                      data_loader=DataLoaderConfig(batch_size=1)),
+        evaluator=Evaluator(), analyzer=object(), member_optimizer=object(),
+    )
+    provider = HarnessProvider(tmp_path, orchestrator=orchestrator)
+    with pytest.raises(RuntimeError, match="optimization-batch-reached"):
+        asyncio.run(provider.run(request, on_event=consumer.on_engine_event))
+    assert len(baseline_calls) == 1
+    assert pushes[-1]["progress"]["baseline"] == baseline_score
+    assert pushes[-1]["progress"]["iteration"] == 0
+    assert pushes[-1]["progress"]["total_iterations"] == 3
+    assert provider.get_tree(request.task_id).nodes[0].score == baseline_score
+
+    report_service = RsiReportService(SimpleNamespace(get=lambda _: None), projector, usage, artifacts)
+    report = report_service.get({"task_id": request.task_id}, adapter=provider)
+    assert report["baseline"] == baseline_score
+    assert report["best_score"] == baseline_score
+    reloaded = RsiProjector(tmp_path)
+    reloaded.load_from_disk(request.task_id)
+    assert reloaded.derive_progress(request.task_id)["baseline"] == baseline_score
+    assert reloaded.derive_tree(request.task_id)["nodes"][0]["score"] == baseline_score
+
+    with pytest.raises(RuntimeError, match="optimization-batch-reached"):
+        asyncio.run(provider.resume(request, on_event=consumer.on_engine_event))
+    assert len(baseline_calls) == 1
+    assert provider.read_state(request.task_id).baseline == baseline_score
 
 
 def test_resume_fingerprint_conflict_maps_to_resume_mismatch(tmp_path: Path) -> None:

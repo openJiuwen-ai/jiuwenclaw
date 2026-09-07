@@ -469,6 +469,8 @@ class RsiProjector:
 
 def _normalize_provider_node_id(task_id: str | None, node_id: str) -> str:
     """Use the service's stable ROOT ID for agent-core's provider root."""
+    if node_id == "h0":
+        return _ROOT
     if task_id and node_id in {
         f"artifact:{task_id}:root",
         f"artifact:{task_id}:node:0",

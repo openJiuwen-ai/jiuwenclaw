@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 from pathlib import Path
@@ -13,6 +14,8 @@ import yaml
 from jiuwenswarm.agents.harness.common.rsi.errors import (
     RsiDatasetInvalid,
     RsiModelNotFound,
+    RsiPathInvalid,
+    RsiUnsupportedParameter,
 )
 from jiuwenswarm.agents.harness.common.rsi import build_rsi_service_context
 from jiuwenswarm.agents.harness.common.rsi.harness_activation import (
@@ -22,6 +25,7 @@ from jiuwenswarm.agents.harness.common.rsi.harness_provider import (
     HarnessProvider,
     engine_validate_input,
 )
+from jiuwenswarm.agents.harness.common.rsi.harness_adapter import HarnessEngineAdapter
 from jiuwenswarm.agents.harness.common.rsi.materializer import RsiTaskMaterializer
 from jiuwenswarm.agents.harness.common.rsi.model_resolver import RsiModelConfigResolver
 
@@ -212,7 +216,6 @@ def test_materializer_copies_dataset_wraps_single_harness_and_writes_validation_
         task_id,
         model_paths,
         max_iterations=4,
-        search_width=3,
     )
 
     dataset_path = Path(dataset["path"])
@@ -241,7 +244,7 @@ def test_materializer_copies_dataset_wraps_single_harness_and_writes_validation_
     assert refs["source_sha256"] == _tree_digest(materialized_package)
     assert profile_payload["max_epochs"] == 4
     assert profile_payload["data_loader"]["batch_size"] == 8
-    assert profile_payload["member_optimizer"]["sibling_candidate_count"] == 3
+    assert profile_payload["member_optimizer"]["sibling_candidate_count"] == 1
     assert profile_payload["member_optimizer"]["max_issue_attempts_per_batch"] == 8
     assert profile_payload["member_optimizer"]["max_repair_rounds_per_batch"] == 1
     assert (
@@ -249,6 +252,58 @@ def test_materializer_copies_dataset_wraps_single_harness_and_writes_validation_
         == 5
     )
     assert profile["sha256"] == hashlib.sha256(profile_path.read_bytes()).hexdigest()
+
+
+@pytest.mark.parametrize(
+    "profile_args",
+    [
+        {"search_width": 2},
+        {"options": {"sibling_candidate_count": 2}},
+        {"options": {"improver_policy_ref": "policy.yaml"}},
+    ],
+)
+def test_materializer_rejects_unsupported_single_harness_policy(
+    tmp_path: Path, profile_args: dict,
+) -> None:
+    tasks_root = tmp_path / "tasks"
+    task_id = "rsi-invalid-policy"
+    models_dir = tasks_root / task_id / "models"
+    models_dir.mkdir(parents=True)
+    model_paths = {}
+    for role in ("evaluation", "analysis", "member_optimization"):
+        path = models_dir / f"{role}.yaml"
+        path.write_text("model_client_config: {}\n", encoding="utf-8")
+        model_paths[role] = str(path)
+
+    with pytest.raises(RsiPathInvalid, match="requires one candidate"):
+        RsiTaskMaterializer(tasks_root).materialize_validation_profile(
+            task_id, model_paths, **profile_args,
+        )
+    assert not (tasks_root / task_id / "config" / "harness_orchestrator.yaml").exists()
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        {"sibling_candidate_count": 2},
+        {"improver_policy_ref": "policy.yaml"},
+        {"training_options": {"sibling_candidate_count": 2}},
+        {"training_options": {"improver_policy_ref": "policy.yaml"}},
+    ],
+)
+def test_task_service_rejects_unsupported_policy_before_creating_task(
+    tmp_path: Path, options: dict,
+) -> None:
+    context = build_rsi_service_context(tmp_path / "tasks")
+    with pytest.raises(RsiUnsupportedParameter, match="requires one candidate"):
+        context.task_service.create({
+            "scenario": "HARNESS",
+            "name": "invalid-policy",
+            "input_file": str(tmp_path / "cases.json"),
+            "model_refs": {"optimizer": "optimizer", "tester": "tester"},
+            **options,
+        })
+    assert not context.store.list()
 
 
 def test_materializer_preserves_harness_package_directory_for_engine_checkpoints(
@@ -412,8 +467,11 @@ def test_materializer_copies_manifest_json_file_dependencies(tmp_path: Path) -> 
     assert (package / "skills" / "demo" / "SKILL.md").is_file()
 
 
+@pytest.mark.parametrize("legacy_options", [{}, {"search_width": 4}])
 def test_task_service_materializes_private_validation_inputs_and_keeps_manifest_non_secret(
     tmp_path: Path,
+    legacy_options: dict,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     source_dataset = tmp_path / "source" / "validation.json"
     source_dataset.parent.mkdir()
@@ -444,7 +502,8 @@ def test_task_service_materializes_private_validation_inputs_and_keeps_manifest_
         harness_materializer=RsiTaskMaterializer(tasks_root),
         model_resolver=resolver,
     )
-    context.register_harness_provider(HarnessProvider(tasks_root))
+    provider = HarnessProvider(tasks_root)
+    context.register_harness_provider(provider)
     context.bind_task_service(harness_refs_provider=lambda: str(source_harness))
 
     result = context.task_service.create(
@@ -454,7 +513,7 @@ def test_task_service_materializes_private_validation_inputs_and_keeps_manifest_
             "dataset_path": str(source_dataset),
             "model_refs": {"optimizer": "optimizer", "tester": "tester"},
             "max_iterations": 5,
-            "search_width": 4,
+            **legacy_options,
         }
     )
     task = context.store.get(result["task_id"])
@@ -466,7 +525,25 @@ def test_task_service_materializes_private_validation_inputs_and_keeps_manifest_
         Path(task.config["orchestrator_config_path"]).read_text(encoding="utf-8")
     )
     assert profile["max_epochs"] == 5
-    assert profile["member_optimizer"]["sibling_candidate_count"] == 4
+    assert profile["member_optimizer"]["sibling_candidate_count"] == 1
+    # Exercise the real constructor, not just the YAML parser or a stub engine.
+    request = HarnessEngineAdapter(provider).build_request(task.to_taskview())
+    orchestrator = provider._resolve_orchestrator(request)
+    assert orchestrator.config.max_epochs == 5
+    assert orchestrator.config.member_optimizer.sibling_candidate_count == 1
+    assert not orchestrator.config.member_optimizer.improver_policy_ref
+    evaluated = []
+
+    async def evaluation_boundary(self, **kwargs):
+        evaluated.append(kwargs)
+        raise RuntimeError("evaluation-startup-canary")
+
+    monkeypatch.setattr(type(orchestrator), "_evaluate", evaluation_boundary)
+    with pytest.raises(RuntimeError, match="evaluation-startup-canary"):
+        asyncio.run(provider.run(request))
+    assert len(evaluated) == 1
+    assert Path(evaluated[0]["output_dir"]).name == "frozen_baseline"
+    assert evaluated[0]["node_ref"] == "h0"
     assert task.config["dataset_id"] == "single_harness_benchmark"
     assert "api_key" not in (task_root / "task.json").read_text(encoding="utf-8")
     assert (task_root / "models" / "evaluation.yaml").is_file()

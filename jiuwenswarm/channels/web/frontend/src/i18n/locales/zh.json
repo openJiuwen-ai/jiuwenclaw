@@ -3174,6 +3174,8 @@
       "subtypePaper": "论文",
       "subtypeProgram": "程序",
       "optimizerModelLabel": "优化模型",
+      "pluginLabel": "初始插件",
+      "pluginDefault": "当前 Harness（未安装时使用原生基线）",
       "testerModelLabel": "测试模型",
       "datasetLabel": "评测集文件",
       "datasetPlaceholder": "请选择本地评测集 JSON 文件",

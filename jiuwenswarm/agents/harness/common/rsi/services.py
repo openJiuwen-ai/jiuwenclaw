@@ -752,9 +752,18 @@ def _harness_profile_options(params: Mapping[str, Any]) -> dict[str, Any]:
             "AgentServer Generic Harness 适配目前只支持 execution_mode=local"
         )
 
+    sibling_candidate_count = _positive_int(
+        value("sibling_candidate_count"), default=1, field="sibling_candidate_count"
+    )
+    improver_policy_ref = str(value("improver_policy_ref", "") or "").strip()
+    if sibling_candidate_count != 1 or improver_policy_ref:
+        raise RsiUnsupportedParameter(
+            "single-harness optimization requires one candidate and no improver evolution policy"
+        )
+
     return {
         "domain": domain_raw,
-        "improver_policy_ref": str(value("improver_policy_ref", "") or "").strip(),
+        "improver_policy_ref": improver_policy_ref,
         "execution_mode": execution_mode,
         "max_epochs": _positive_int(value("max_epochs"), default=1, field="max_epochs"),
         "batch_size": _positive_int(value("batch_size"), default=8, field="batch_size"),
@@ -764,9 +773,7 @@ def _harness_profile_options(params: Mapping[str, Any]) -> dict[str, Any]:
         "max_repair_rounds": _positive_int(
             value("max_repair_rounds"), default=1, field="max_repair_rounds"
         ),
-        "sibling_candidate_count": _positive_int(
-            value("sibling_candidate_count"), default=2, field="sibling_candidate_count"
-        ),
+        "sibling_candidate_count": sibling_candidate_count,
         "rollout_concurrency": _positive_int(
             value("rollout_concurrency"), default=1, field="rollout_concurrency"
         ),

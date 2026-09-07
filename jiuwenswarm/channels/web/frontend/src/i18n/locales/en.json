@@ -3196,6 +3196,8 @@
       "subtypePaper": "Paper",
       "subtypeProgram": "Program",
       "optimizerModelLabel": "Optimizer model",
+      "pluginLabel": "Initial plugin",
+      "pluginDefault": "Current Harness (native baseline when none is active)",
       "testerModelLabel": "Tester model",
       "datasetLabel": "Evaluation dataset file",
       "datasetPlaceholder": "Select a local evaluation dataset JSON file",
