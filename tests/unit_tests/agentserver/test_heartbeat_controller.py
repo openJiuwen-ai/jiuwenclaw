@@ -300,6 +300,32 @@ async def test_list_jobs_filtered_by_session(ctrl: HeartbeatController) -> None:
     assert result["jobs"][0]["session_id"] == "s1"
 
 
+async def test_list_jobs_reports_authoritative_active_capacity(
+    ctrl: HeartbeatController,
+) -> None:
+    base = {
+        "channel_id": "web",
+        "session_id": "s1",
+        "prompt": "p",
+        "source": "agent_tool",
+        "schedule": {"type": "interval", "interval_seconds": 120},
+    }
+    for index in range(3):
+        await ctrl.create_job({**base, "name": f"active-{index}"})
+    await ctrl.create_job({**base, "name": "disabled", "enabled": False})
+    completed = await ctrl.create_job({**base, "name": "completed"})
+    await _complete_job(ctrl, completed["id"], "completed-run")
+
+    result = await ctrl.list_jobs({}, access_session_id="s1")
+
+    assert len(result["jobs"]) == 5
+    assert result["active_count"] == 3
+    assert result["active_limit"] == 5
+    assert result["can_create"] is True
+    created = await ctrl.create_job({**base, "name": "new-job"})
+    assert created["status"] == "scheduled"
+
+
 async def test_list_jobs_has_stable_created_at_order(
     ctrl: HeartbeatController,
 ) -> None:
