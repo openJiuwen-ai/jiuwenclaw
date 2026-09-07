@@ -118,9 +118,9 @@ def build_delivery_summary_skeleton(
     if topic:
         input_source = f"{input_source}（{_missing(topic)}）"
     notes_line = _speaker_notes_line(need_speaker_notes, speaker_notes_status)
-    core_lines = "\n".join(
-        f"- P{num}：{_missing(title)} - {_missing(core)}" for num, title, core in core_pages
-    )
+    # Titles only: page 内容概要 is already streamed as Stage 6 process text.
+    # Pasting it here made the user-facing delivery summary look duplicated.
+    core_lines = "\n".join(f"- P{num}：{_missing(title)}" for num, title, _core in core_pages)
     added = filename if send_file_status == "sent" else f"{filename}（发送状态：{_missing(send_file_status)}）"
     return (
         f"{DELIVERY_SUMMARY_START}\n"
