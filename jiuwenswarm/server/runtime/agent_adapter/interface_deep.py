@@ -4894,13 +4894,10 @@ class JiuWenSwarmDeepAdapter:
         """Resolve the effective build permission and root before a reload."""
 
         from jiuwenswarm.agents.harness.common.tools.skill_retrieval_toolkits import (
-            is_skill_retrieval_index_enabled,
             skill_retrieval_artifact_root,
         )
 
-        allowed = is_skill_retrieval_enabled(
-            config_base
-        ) and is_skill_retrieval_index_enabled(config_base)
+        allowed = is_skill_retrieval_enabled(config_base)
         return allowed, skill_retrieval_artifact_root(config_base)
 
     async def _cancel_skill_retrieval_build_after_reload(
