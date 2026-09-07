@@ -4940,7 +4940,7 @@ class AgentWebSocketServer:
         params = request.params if isinstance(request.params, dict) else {}
         session_id = str(params.get("session_id") or request.session_id or "").strip()
         content = params.get("content")
-        if not session_id or content is None:
+        if not session_id or not is_valid_session_id(session_id) or content is None:
             wire = self._send_error_response(
                 ws, request, send_lock, "session_id and content required", "BAD_REQUEST"
             )

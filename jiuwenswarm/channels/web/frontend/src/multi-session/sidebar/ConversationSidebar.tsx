@@ -339,6 +339,7 @@ function ProjectEntityRow({
   path,
   isExpanded,
   isPinned,
+  hasUnreadCronResult = false,
   hideActions = false,
   onToggle,
   onNew,
@@ -352,6 +353,7 @@ function ProjectEntityRow({
   path?: string;
   isExpanded: boolean;
   isPinned?: boolean;
+  hasUnreadCronResult?: boolean;
   hideActions?: boolean;
   onToggle: () => void;
   onNew: () => void;
@@ -423,6 +425,13 @@ function ProjectEntityRow({
         <span className="conversation-entity-row__text">
           <span className="conversation-entity-row__title" data-testid="multi-session-project-row-title">{title}</span>
         </span>
+        {hasUnreadCronResult ? (
+          <span
+            className="conversation-list-item__status-dot"
+            aria-hidden="true"
+            data-testid="multi-session-project-row-cron-unread"
+          />
+        ) : null}
         {isExpanded ? <CollapseIcon className="conversation-entity-row__chevron" aria-hidden /> : <ArrowRightIcon className="conversation-entity-row__chevron" aria-hidden />}
         {isPinned ? <PinIcon className="conversation-entity-row__pin" aria-hidden /> : null}
       </button>
@@ -1200,6 +1209,9 @@ export function ConversationSidebar({
   function renderProject(project: ProjectInfo) {
     const sessionsForProject = sortedProjectSessions[project.project_id] || [];
     const expanded = Boolean(expandedProjectIds[project.project_id]);
+    const hasUnreadCronResult = (jobsByProject.get(project.project_id) || []).some(
+      (job) => Boolean(unreadCronJobs[job.id]),
+    );
     return (
       <div key={project.project_id} className="conversation-sidebar__group" data-testid="multi-session-project-group" data-variant={project.project_id}>
         <ProjectEntityRow
@@ -1207,6 +1219,7 @@ export function ConversationSidebar({
           path={project.project_dir || undefined}
           isExpanded={expanded}
           isPinned={project.pinned}
+          hasUnreadCronResult={hasUnreadCronResult}
           hideActions={isDefaultProject(project)}
           newLabel={getProjectNewLabel(project.name, t)}
           projectId={project.project_id}
