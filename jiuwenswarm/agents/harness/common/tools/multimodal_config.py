@@ -7,6 +7,7 @@
 2. embed.{audio_model/video_model/vision_model} 和 embed.embed_api_key/embed_api_base
 3. 环境变量 MODEL_NAME, API_KEY, API_BASE
 """
+
 import os
 from typing import Any
 
@@ -73,9 +74,7 @@ _MULTIMODAL_MODEL_TYPES = ("audio", "vision", "video")
 
 def _model_provider(model_config: dict[str, Any]) -> str:
     return str(
-        model_config.get("client_provider")
-        or model_config.get("model_provider")
-        or ""
+        model_config.get("client_provider") or model_config.get("model_provider") or ""
     ).strip()
 
 
@@ -302,9 +301,7 @@ def apply_image_gen_model_config_from_yaml(config_base: dict[str, Any] | None) -
     api_key = str(mc.get("api_key") or "").strip()
     api_base = str(mc.get("api_base") or "").strip()
     model_name = str(mc.get("model_name") or mc.get("model") or "").strip()
-    provider = str(
-        mc.get("client_provider") or mc.get("model_provider") or ""
-    ).strip()
+    provider = str(mc.get("client_provider") or mc.get("model_provider") or "").strip()
 
     if api_key:
         os.environ["IMAGE_GEN_API_KEY"] = api_key
@@ -338,7 +335,6 @@ def apply_video_gen_model_config_from_yaml(config_base: dict[str, Any] | None) -
         or os.getenv("VIDEO_GEN_API_KEY")
         or image_mc.get("api_key")
         or os.getenv("IMAGE_GEN_API_KEY")
-        or os.getenv("API_KEY")
         or ""
     ).strip()
     api_base = str(
@@ -346,7 +342,6 @@ def apply_video_gen_model_config_from_yaml(config_base: dict[str, Any] | None) -
         or os.getenv("VIDEO_GEN_API_BASE")
         or image_mc.get("api_base")
         or os.getenv("IMAGE_GEN_API_BASE")
-        or os.getenv("API_BASE")
         or "https://dashscope.aliyuncs.com/api/v1"
     ).strip()
     model_name = str(

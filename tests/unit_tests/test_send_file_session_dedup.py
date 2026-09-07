@@ -229,15 +229,16 @@ def test_deliver_file_to_user_uses_bound_toolkit(tmp_path):
         session_id="sess-2",
         channel_id="web",
     )
-    mock_server = MagicMock()
-    mock_server.send_push = AsyncMock()
+    pushed: list[dict] = []
+
+    async def _push(message: dict) -> bool:
+        pushed.append(message)
+        return True
+
     sfu.bind_active_send_file_toolkit(toolkit)
 
     try:
-        with patch(
-            "jiuwenswarm.server.agent_ws_server.AgentWebSocketServer.get_instance",
-            return_value=mock_server,
-        ), patch(
+        with patch.object(sfu, "send_runtime_push", _push), patch(
             "jiuwenswarm.server.runtime.session.session_history.append_history_record",
         ):
             result = asyncio.run(sfu.deliver_file_to_user(str(file_path)))
@@ -245,7 +246,7 @@ def test_deliver_file_to_user_uses_bound_toolkit(tmp_path):
         sfu.bind_active_send_file_toolkit(None)
 
     assert "成功发送" in result
-    assert mock_server.send_push.await_count == 1
+    assert len(pushed) == 1
 
 
 def test_deliver_file_to_user_noop_without_toolkit(tmp_path):
@@ -262,8 +263,11 @@ def test_session_registry_isolates_concurrent_bindings(tmp_path):
 
     toolkit_a = sfu.SendFileToolkit(request_id="ra", session_id="sess-a", channel_id="web")
     toolkit_b = sfu.SendFileToolkit(request_id="rb", session_id="sess-b", channel_id="web")
-    mock_server = MagicMock()
-    mock_server.send_push = AsyncMock()
+    pushed: list[dict] = []
+
+    async def _push(message: dict) -> bool:
+        pushed.append(message)
+        return True
 
     sfu.bind_active_send_file_toolkit(toolkit_a)
     sfu.bind_active_send_file_toolkit(toolkit_b)
@@ -275,22 +279,14 @@ def test_session_registry_isolates_concurrent_bindings(tmp_path):
     # Simulate a worker that lost the request ContextVar but knows its session.
     sfu._ACTIVE_SEND_FILE_TOOLKIT.set(None)
 
-    with patch(
-        "jiuwenswarm.server.agent_ws_server.AgentWebSocketServer.get_instance",
-        return_value=mock_server,
-    ), patch(
+    with patch.object(sfu, "send_runtime_push", _push), patch(
         "jiuwenswarm.server.runtime.session.session_history.append_history_record",
     ):
         result = asyncio.run(sfu.deliver_file_to_user(str(file_a), session_id="sess-a"))
 
     assert "成功发送" in result
-    assert mock_server.send_push.await_count == 1
-    call = mock_server.send_push.await_args
-    payload = call.kwargs.get("msg") if call.kwargs else None
-    if payload is None and call.args:
-        payload = call.args[0] if call.args else None
-    if isinstance(payload, dict):
-        assert payload.get("session_id") == "sess-a"
+    assert len(pushed) == 1
+    assert pushed[0].get("session_id") == "sess-a"
 
 
 def test_clear_active_send_file_toolkit_drops_session_entry():
