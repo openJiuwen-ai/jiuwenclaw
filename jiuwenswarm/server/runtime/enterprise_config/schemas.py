@@ -15,7 +15,7 @@ class TemplateRefSlot(StrEnum):
     AUDIO_MODEL = "audio_model"
     VISION_MODEL = "vision_model"
     EMBEDDING_MODEL = "embedding_model"
-    SKILL_WHITELIST = "skill_whitelist"
+    SKILL_PREBUILT = "skill_prebuilt"
     EXTENSION_CONFIG = "extension_config"
     MCP = "mcp"
     PERMISSIONS = "permissions"
@@ -27,7 +27,7 @@ SLOT_ENTITY_TABLE: dict[TemplateRefSlot, str] = {
     TemplateRefSlot.AUDIO_MODEL: "model_template",
     TemplateRefSlot.VISION_MODEL: "model_template",
     TemplateRefSlot.EMBEDDING_MODEL: "embedding_template",
-    TemplateRefSlot.SKILL_WHITELIST: "skill_whitelist_template",
+    TemplateRefSlot.SKILL_PREBUILT: "skill_prebuilt_template",
     TemplateRefSlot.EXTENSION_CONFIG: "extension_config_template",
     TemplateRefSlot.MCP: "mcp_template",
     TemplateRefSlot.PERMISSIONS: "permissions_template",
@@ -43,7 +43,7 @@ MODEL_SLOT_KEYS = frozenset({
 DEFAULT_AGENT_LOAD_SLOTS = frozenset({
     *MODEL_SLOT_KEYS,
     TemplateRefSlot.EMBEDDING_MODEL,
-    TemplateRefSlot.SKILL_WHITELIST,
+    TemplateRefSlot.SKILL_PREBUILT,
     TemplateRefSlot.EXTENSION_CONFIG,
     TemplateRefSlot.MCP,
     TemplateRefSlot.PERMISSIONS,
@@ -51,7 +51,10 @@ DEFAULT_AGENT_LOAD_SLOTS = frozenset({
 
 
 def normalize_template_ref(value: Any) -> dict[str, list[str]]:
-    """将 ``template_ref`` 规范为 ``{slot: [ref_string, ...]}``；空值键省略，同槽位去重保序。"""
+    """将 ``template_ref`` 规范为 ``{slot: [ref_string, ...]}``；空值键省略，同槽位去重保序。
+
+    丢弃已废弃的 ``skill_whitelist`` 槽位。
+    """
     if value is None:
         return {}
     if not isinstance(value, dict):
@@ -59,7 +62,7 @@ def normalize_template_ref(value: Any) -> dict[str, list[str]]:
     out: dict[str, list[str]] = {}
     for key, raw in value.items():
         slot = str(key).strip()
-        if not slot or raw is None:
+        if not slot or raw is None or slot == "skill_whitelist":
             continue
         if not isinstance(raw, list):
             raise ValueError(f"template_ref[{slot!r}] must be a list")
@@ -106,7 +109,7 @@ class EffectiveEnterpriseConfig:
     template_ref: dict[str, list[str]] = field(default_factory=dict)
     models: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
     embedding: list[dict[str, Any]] | None = None
-    skill_whitelist: list[dict[str, Any]] | None = None
+    skill_prebuilt: list[dict[str, Any]] | None = None
     extension_config: list[dict[str, Any]] | None = None
     mcp: list[dict[str, Any]] | None = None
     permissions: list[dict[str, Any]] | None = None
@@ -124,7 +127,7 @@ class EffectiveEnterpriseConfig:
             "template_ref": dict(self.template_ref),
             "models": dict(self.models),
             "embedding": self.embedding,
-            "skill_whitelist": self.skill_whitelist,
+            "skill_prebuilt": self.skill_prebuilt,
             "extension_config": self.extension_config,
             "mcp": self.mcp,
             "permissions": self.permissions,

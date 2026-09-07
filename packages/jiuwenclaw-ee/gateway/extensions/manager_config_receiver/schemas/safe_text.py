@@ -35,7 +35,6 @@ SAFE_TEXT_FIELD_NAMES: frozenset[str] = frozenset(
         "container_name",
         "port_name",
         "skill_id",
-        "skill_version",
         "model_id",
         "model_provider",
         "agent_runtime",
