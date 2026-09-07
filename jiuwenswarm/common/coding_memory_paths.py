@@ -253,7 +253,7 @@ def _source_state_token(source: Path) -> str:
 def _read_json_object(path: Path) -> dict[str, Any]:
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
-    except (FileNotFoundError, OSError, UnicodeError, json.JSONDecodeError):
+    except (OSError, UnicodeError, json.JSONDecodeError):
         return {}
     return value if isinstance(value, dict) else {}
 
@@ -288,7 +288,7 @@ def _parse_index_entries(path: Path) -> tuple[list[str], dict[str, tuple[str, st
         return [], {}
     try:
         lines = path.read_text(encoding="utf-8").splitlines()
-    except (FileNotFoundError, OSError, UnicodeError):
+    except (OSError, UnicodeError):
         return [], {}
     entries: dict[str, tuple[str, str]] = {}
     for line in lines:
@@ -394,6 +394,22 @@ def _append_index_entries(
     return truncated
 
 
+def _is_regular_memory_markdown(path: Path) -> bool:
+    if path.is_symlink() or not path.is_file():
+        return False
+    if path.suffix.casefold() != ".md":
+        return False
+    return path.name.casefold() != _INDEX_FILENAME.casefold()
+
+
+def _is_regular_legacy_source(source: Path, target_key: str) -> bool:
+    if _canonical_path(source) == target_key:
+        return False
+    if not source.is_dir():
+        return False
+    return not source.is_symlink()
+
+
 def _load_report(path: Path) -> dict[str, Any]:
     report = _read_json_object(path)
     if report.get("version") != _MIGRATION_REPORT_VERSION:
@@ -443,13 +459,10 @@ def prepare_project_coding_memory_dir(
             project_dir=project_dir,
         )
         target_key = _canonical_path(target)
-        regular_sources = [
-            source
-            for source in candidates
-            if _canonical_path(source) != target_key
-            and source.is_dir()
-            and not source.is_symlink()
-        ]
+        regular_sources: list[Path] = []
+        for source in candidates:
+            if _is_regular_legacy_source(source, target_key):
+                regular_sources.append(source)
 
         if not any(
             _canonical_path(source) != target_key and source.is_dir()
@@ -494,12 +507,7 @@ def prepare_project_coding_memory_dir(
 
             existing_hashes: dict[str, str] = {}
             for path in target.iterdir():
-                if (
-                    path.is_file()
-                    and not path.is_symlink()
-                    and path.suffix.casefold() == ".md"
-                    and path.name.casefold() != _INDEX_FILENAME.casefold()
-                ):
+                if _is_regular_memory_markdown(path):
                     existing_hashes[_hash_file(path)] = path.name
 
             report_changed = False
@@ -582,7 +590,7 @@ def prepare_project_coding_memory_dir(
                     totals["renamed"] += renamed
                     totals["index_truncated"] += truncated
                     report_changed = True
-                except (OSError, UnicodeError, ValueError) as exc:
+                except (OSError, ValueError) as exc:
                     warnings.append(f"failed to migrate {source}: {exc}")
 
             if report_changed:
