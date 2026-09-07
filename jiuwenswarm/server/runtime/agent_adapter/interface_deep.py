@@ -200,6 +200,15 @@ def _is_outer_react_tool_result(payload: Any) -> bool:
     return True
 
 
+def _ask_user_questions_key(payload: dict) -> str:
+    """ask_user 卡片的 questions 规范化键，用于判定同一中断的重复通道。"""
+    try:
+        questions = payload.get("questions") or []
+        return json.dumps(questions, sort_keys=True, default=str)
+    except (TypeError, ValueError):
+        return repr(payload.get("questions"))
+
+
 _DEEPRESEARCH_REWRITE_REPLAY_STATE_KEY = "deepresearch_rewrite_fast_path_replays"
 _DEEPRESEARCH_REWRITE_REPLAY_SCHEMA_VERSION = 1
 _DEEPRESEARCH_REWRITE_REPLAY_MAX_ENTRIES = 32
@@ -2116,6 +2125,9 @@ class JiuWenSwarmDeepAdapter:
         # trust 判定使用；由白名单同步/热刷新/_refresh_skill_identity 维护。
         self._prebuilt_skills: set[str] = set()
         self._stream_event_rail: JiuSwarmStreamEventRail | None = None
+        # ask_user 卡片序号：同一外层 tool_call_id 的第 N 次中断共用同一 id，
+        # 卡片 request_id 以 {id}#{n} 区分（跨请求存续，见 should_skip_duplicate_ask_user）
+        self._ask_user_card_seq: dict[str, int] = {}
         self._task_execution_rail: TaskExecutionRail | None = None
         self._skill_turbo_prompt_rail: Any = None
         self._skill_turbo_delivery_summary_rail: Any = None
@@ -16911,6 +16923,7 @@ class JiuWenSwarmDeepAdapter:
             "total_cost": 0.0,
         }
         emitted_ask_user_request_ids: set[str] = set()
+        emitted_ask_user_questions: dict[str, str] = {}
         accounted_deepresearch_usage_ids: set[str] = set()
         approved_plan_exit_tool_call_id = self._approved_plan_exit_resume_tool_call_id(
             request.params
@@ -16918,17 +16931,11 @@ class JiuWenSwarmDeepAdapter:
         saw_approved_plan_exit_result = False
 
         def should_skip_duplicate_ask_user(parsed: dict | None) -> bool:
-            if not isinstance(parsed, dict):
-                return False
-            if parsed.get("event_type") != "chat.ask_user_question":
-                return False
-            request_id = str(parsed.get("request_id") or "").strip()
-            if not request_id:
-                return False
-            if request_id in emitted_ask_user_request_ids:
-                return True
-            emitted_ask_user_request_ids.add(request_id)
-            return False
+            return self._dedupe_ask_user_card(
+                parsed,
+                emitted_ask_user_request_ids,
+                emitted_ask_user_questions,
+            )
 
         first_byte_marked = False
         first_answer_marked = False
@@ -17493,17 +17500,15 @@ class JiuWenSwarmDeepAdapter:
                 # After ask_user, skip trailing metadata until a real resume
                 # chunk arrives (in-place HITL). Unknown types default to clear
                 # so new SDK frames cannot re-hang the stream.
-                if suppress_stream_after_hitl:
-                    if self._is_hitl_suppress_noise_chunk(chunk):
-                        continue
-                    suppress_stream_after_hitl = False
-                    hitl_pending_stream = False
-                    logger.info(
-                        "[JiuWenSwarmDeepAdapter] HITL suppress cleared on "
-                        "runner resume: request_id=%s chunk_type=%s",
-                        rid,
-                        getattr(chunk, "type", None) or type(chunk).__name__,
-                    )
+                # Only suppress is cleared (resume forwarding); hitl_pending_stream
+                # stays True to drive the chat.invocation_paused end-frame.
+                suppress_stream_after_hitl, _skip = self._apply_hitl_suppress_clear(
+                    chunk,
+                    suppress_stream_after_hitl=suppress_stream_after_hitl,
+                    request_id=rid,
+                )
+                if _skip:
+                    continue
                 # First chunk handed back by the runner: records the time to
                 # first token for this round.
                 if not first_chunk_seen:
@@ -17866,7 +17871,11 @@ class JiuWenSwarmDeepAdapter:
                 )
                 emitted_chat_error = True
 
-            if accumulated_text and not hitl_pending_stream:
+            # 守卫用 suppress_stream_after_hitl（当前是否处于 HITL 抑制中）：
+            # ask_user 暂停中为 True 跳过；in-place 续跑后为 False 放行（此时
+            # 轮次已正常完成/取消，flush 与合成 final 必须发出，否则前端悬挂）。
+            # hitl_pending_stream 只反映"本轮出过 ask_user 卡片"，不随续跑复位。
+            if accumulated_text and not suppress_stream_after_hitl:
                 # Same rule as _adapt_goal_intermediate_final: demote host
                 # flush only when the flushed text belonged to a goal round.
                 if self._should_demote_goal_intermediate_final():
@@ -17887,7 +17896,7 @@ class JiuWenSwarmDeepAdapter:
                     payload=note_chat_payload(flush_payload),
                     is_complete=False,
                 )
-            if accumulated_reasoning and not hitl_pending_stream:
+            if accumulated_reasoning and not suppress_stream_after_hitl:
                 yield AgentResponseChunk(
                     request_id=rid,
                     channel_id=cid,
@@ -17898,9 +17907,11 @@ class JiuWenSwarmDeepAdapter:
             # pause→clear (and similar): round cancelled, iterator ends without
             # a model chat.final. Synthesize a real final so the frontend can
             # stopStreaming; do not demote.
-            # HITL 暂停时跳过合成 final：由循环后的 chat.invocation_paused 终结帧
-            # 收尾，避免 relayclaw sidecar 提前关闭 FrameQueue 导致 recoverable_pause 丢失。
-            if not hitl_pending_stream and self._should_emit_stream_end_chat_final(
+            # HITL 暂停中（suppress 未清除）跳过合成 final：由循环后的
+            # chat.invocation_paused 终结帧收尾，避免 relayclaw sidecar 提前关闭
+            # FrameQueue 导致 recoverable_pause 丢失；in-place 续跑后 suppress 已
+            # 清除，轮次完成/取消时必须合成 final 让前端 stopStreaming。
+            if not suppress_stream_after_hitl and self._should_emit_stream_end_chat_final(
                 had_assistant_output=had_assistant_output,
                 emitted_terminal_chat_final=emitted_terminal_chat_final,
             ):
@@ -18211,24 +18222,92 @@ class JiuWenSwarmDeepAdapter:
         """HITL 暂停判定：payload 是否为 ask_user 卡片事件。"""
         return isinstance(payload, dict) and payload.get("event_type") == "chat.ask_user_question"
 
+    def _dedupe_ask_user_card(
+        self,
+        parsed: dict | None,
+        emitted_request_ids: set[str],
+        emitted_questions: dict[str, str],
+    ) -> bool:
+        """ask_user 卡片去重与序号区分；返回 True 表示跳过本张卡。
+
+        - 同一中断的多通道重复（独立 ``__interaction__`` 与 controller 嵌套）：
+          同 call id + 同 questions → 跳过。
+        - 同一外层 skill_acceleration_exec 内的第 N 次中断共用同一 call id：
+          questions 不同 → 卡片 request_id 改为 ``{id}#{n}`` 放行（前端才显示为
+          独立卡片）；作答回传时由 _build_interactive_input_from_answers 入口
+          剥掉后缀对齐 harness 原始 id。序号计数在 adapter 实例上跨请求存续。
+        """
+        if not isinstance(parsed, dict):
+            return False
+        if parsed.get("event_type") != "chat.ask_user_question":
+            return False
+        request_id = str(parsed.get("request_id") or "").strip()
+        if not request_id:
+            return False
+        questions_key = _ask_user_questions_key(parsed)
+        if any(
+            (fid == request_id or fid.startswith(f"{request_id}#"))
+            and qk == questions_key
+            for fid, qk in emitted_questions.items()
+        ):
+            return True
+        seq = self._ask_user_card_seq.get(request_id, 0)
+        final_id = request_id if seq == 0 else f"{request_id}#{seq + 1}"
+        self._ask_user_card_seq[request_id] = seq + 1
+        emitted_request_ids.add(final_id)
+        emitted_questions[final_id] = questions_key
+        if final_id != request_id:
+            parsed["request_id"] = final_id
+        return False
+
     @staticmethod
     def _is_hitl_suppress_noise_chunk(chunk: Any) -> bool:
         """Metadata that may follow ask_user before the stream truly pauses.
 
         These must not clear suppress / hitl_pending; any other chunk means the
-        runner resumed in-place and outbound must resume. Includes
-        ``__interaction__`` / non-fatal ``controller_output`` tails that arrive
-        with the ask_user card itself (not a user-answer resume).
+        runner resumed in-place and outbound must resume. Includes non-fatal
+        ``controller_output`` tails that arrive with the ask_user card itself
+        (not a user-answer resume).
+
+        ``__interaction__`` is NOT noise: after the forced-emit revert it is the
+        only source of the ask_user card and must clear suppress to be
+        forwarded to the frontend.
 
         ``controller_output.task_failed`` is NOT noise: it must clear suppress
         and surface ``chat.error`` (otherwise HITL stays paused forever).
         """
         ctype = getattr(chunk, "type", None)
-        if ctype in ("llm_usage", "context.usage", "__interaction__"):
+        if ctype in ("llm_usage", "context.usage"):
             return True
         if ctype == "controller_output":
             return JiuWenSwarmDeepAdapter._run_failure(chunk) is None
         return False
+
+    @staticmethod
+    def _apply_hitl_suppress_clear(
+        chunk: Any,
+        *,
+        suppress_stream_after_hitl: bool,
+        request_id: str = "",
+    ) -> tuple[bool, bool]:
+        """HITL suppress 清除决策，返回 (suppress_after, skip_chunk)。
+
+        ask_user 之后的 chunk：噪声（llm_usage / context.usage）继续抑制并跳过；
+        首个非噪声 chunk 清除 suppress（恢复转发，防 invocation 永久挂起）。
+        ``hitl_pending_stream`` 不在此处触碰——由调用方持有，驱动
+        ``chat.invocation_paused`` 收尾帧，气泡保持开启等待用户输入。
+        """
+        if not suppress_stream_after_hitl:
+            return suppress_stream_after_hitl, False
+        if JiuWenSwarmDeepAdapter._is_hitl_suppress_noise_chunk(chunk):
+            return suppress_stream_after_hitl, True
+        logger.info(
+            "[JiuWenSwarmDeepAdapter] HITL suppress cleared on runner resume: "
+            "request_id=%s chunk_type=%s",
+            request_id,
+            getattr(chunk, "type", None) or type(chunk).__name__,
+        )
+        return False, False
 
     @staticmethod
     def _run_failure(chunk) -> tuple[str, str] | None:
