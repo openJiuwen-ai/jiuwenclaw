@@ -8097,7 +8097,7 @@ class AgentWebSocketServer:
                         ok=False,
                         payload={
                             "type": "connect_failed",
-                            "error": probe_reason or "MCP live-connect probe failed",
+                            "error": "MCP live-connect probe failed",
                             "code": "MCP_UNREACHABLE",
                             "name": name,
                         },

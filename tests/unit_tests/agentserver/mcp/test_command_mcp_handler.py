@@ -635,8 +635,8 @@ class TestHandleMcpConnect:
         assert payload["credential_kind"] == "token"
 
     @pytest.mark.anyio
-    async def test_connect_remote_unreachable_returns_failed_and_rolls_back(self, tmp_path) -> None:
-        """Remote-mcp host down: probe fails, type=connect_failed, entry rolled back, no reload."""
+    async def test_connect_remote_unreachable_redacts_probe_details_and_rolls_back(self, tmp_path) -> None:
+        """Probe failures must not expose credentials through the WebSocket payload."""
         from jiuwenswarm.server.agent_ws_server import AgentWebSocketServer
         server = AgentWebSocketServer.__new__(AgentWebSocketServer)
         applied = []
@@ -644,7 +644,12 @@ class TestHandleMcpConnect:
             async def apply_mcp_change(self_inner, name, action, *, enabled=True, target_channel_id=None):
                 applied.append((name, action, enabled))
             async def probe_mcp_live_connection(self_inner, name):
-                return (False, "tcp connect timed out")
+                return (
+                    False,
+                    "mcp server connect failed, server_config={'env': {"
+                    "'HUAWEI_ACCESS_KEY': 'AK-SENTINEL', "
+                    "'HUAWEI_SECRET_KEY': 'SK-SENTINEL'}}, error='timed out'",
+                )
         server._agent_manager = _AM()
         server._mask_sensitive_fields = lambda item: item
         ws = _FakeWS()
@@ -684,7 +689,9 @@ class TestHandleMcpConnect:
         payload = _extract_payload(json.loads(ws.sent[0]))
         assert payload["type"] == "connect_failed"
         assert payload["code"] == "MCP_UNREACHABLE"
-        assert "timed out" in payload["error"]
+        assert payload["error"] == "MCP live-connect probe failed"
+        assert "AK-SENTINEL" not in json.dumps(payload)
+        assert "SK-SENTINEL" not in json.dumps(payload)
         assert removed == ["github"]   # entry rolled back
         assert len(applied) == 0     # unreachable → no reload
 
@@ -767,7 +774,7 @@ class TestHandleMcpConnect:
         payload = _extract_payload(json.loads(ws.sent[0]))
         assert payload["type"] == "connect_failed"
         assert payload["code"] == "MCP_UNREACHABLE"
-        assert "npx" in payload["error"]
+        assert payload["error"] == "MCP live-connect probe failed"
         assert probed == ["context7"]  # stdio was probed at connect time
         assert rolled_back == ["context7"]  # entry rolled back
         assert len(applied) == 0
