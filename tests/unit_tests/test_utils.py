@@ -452,7 +452,7 @@ class TestHardcodedPathsPhase2:
             / "service_default"
             / "agent_default"
             / "agent"
-            / "workspace"
+            / "jiuwenclaw_workspace"
             / "task-data.json"
         )
         actual_path = Path(_get_task_data_path())
@@ -478,7 +478,7 @@ class TestHardcodedPathsPhase2:
             / "service_default"
             / "agent_default"
             / "agent"
-            / "workspace"
+            / "jiuwenclaw_workspace"
             / "USER.md"
         )
         actual_path = get_deepagent_user_md_path()
@@ -530,7 +530,7 @@ class TestAdditionalHardcodedPaths:
         os.environ["JIUWENSWARM_EDITION"] = "enterprise"
         try:
             workspace = get_multi_tenant_user_workspace_dir(scope.workspace_key)
-            expected_path = workspace / "agent" / "workspace" / "extensions"
+            expected_path = workspace / "agent" / "jiuwenclaw_workspace" / "extensions"
             rail_manager = get_rail_manager(scope)
 
             extensions_dir = rail_manager.extensions_dir
@@ -570,10 +570,106 @@ class TestAdditionalHardcodedPaths:
             / "service_default"
             / "agent_default"
             / "agent"
-            / "workspace"
+            / "jiuwenclaw_workspace"
             / "interactions"
         )
         actual_path = get_interactions_dir()
 
         assert str(actual_path.resolve()) == str(expected_path.resolve()), \
             f"Expected: {expected_path.resolve()}, Got: {actual_path.resolve()}"
+
+
+class TestWorkspaceToJiuwenclawWorkspaceMigration:
+    """Migrate runtime agent workspace: agent/workspace -> agent/jiuwenclaw_workspace."""
+
+    @staticmethod
+    def _make_old_layout(root: Path, tenant: str = "personal") -> Path:
+        if tenant == "personal":
+            agent_root = root / "service_default" / "agent_default" / "agent"
+        else:
+            agent_root = root / "workspace_abc" / "agent"
+        old_ws = agent_root / "workspace"
+        (old_ws / "skills").mkdir(parents=True)
+        (old_ws / "skills" / "demo.md").write_text("skill", encoding="utf-8")
+        (old_ws / "HEARTBEAT.md").write_text("heartbeat", encoding="utf-8")
+        return old_ws
+
+    def test_rename_personal_tenant(self, tmp_path: Path):
+        old_ws = self._make_old_layout(tmp_path, "personal")
+        utils._migrate_workspace_to_jiuwenclaw_workspace(tmp_path)
+
+        new_ws = tmp_path / "service_default" / "agent_default" / "agent" / "jiuwenclaw_workspace"
+        assert not old_ws.exists()
+        assert (new_ws / "HEARTBEAT.md").read_text(encoding="utf-8") == "heartbeat"
+        assert (new_ws / "skills" / "demo.md").exists()
+
+    def test_rename_enterprise_tenant(self, tmp_path: Path):
+        old_ws = self._make_old_layout(tmp_path, "enterprise")
+        utils._migrate_workspace_to_jiuwenclaw_workspace(tmp_path)
+
+        new_ws = tmp_path / "workspace_abc" / "agent" / "jiuwenclaw_workspace"
+        assert not old_ws.exists()
+        assert (new_ws / "HEARTBEAT.md").exists()
+
+    def test_merge_when_both_exist(self, tmp_path: Path):
+        old_ws = self._make_old_layout(tmp_path, "personal")
+        new_ws = tmp_path / "service_default" / "agent_default" / "agent" / "jiuwenclaw_workspace"
+        (new_ws / "memory").mkdir(parents=True)
+        (new_ws / "memory" / "MEMORY.md").write_text("memory", encoding="utf-8")
+
+        utils._migrate_workspace_to_jiuwenclaw_workspace(tmp_path)
+
+        assert not old_ws.exists()
+        # merged content from both sides
+        assert (new_ws / "memory" / "MEMORY.md").read_text(encoding="utf-8") == "memory"
+        assert (new_ws / "HEARTBEAT.md").read_text(encoding="utf-8") == "heartbeat"
+        assert (new_ws / "skills" / "demo.md").exists()
+
+    def test_merge_top_level_conflict(self, tmp_path: Path):
+        old_ws = self._make_old_layout(tmp_path, "personal")
+        new_ws = tmp_path / "service_default" / "agent_default" / "agent" / "jiuwenclaw_workspace"
+        new_ws.mkdir(parents=True)
+        (new_ws / "USER.md").write_text("new-side", encoding="utf-8")
+        (old_ws / "USER.md").write_text("old-side", encoding="utf-8")
+
+        utils._migrate_workspace_to_jiuwenclaw_workspace(tmp_path)
+
+        assert not old_ws.exists()
+        # New side wins the conflict...
+        assert (new_ws / "USER.md").read_text(encoding="utf-8") == "new-side"
+        # ...and the old-side content is preserved in a backup dir, not lost
+        backups = list(new_ws.glob(".migration-backup-*/USER.md"))
+        assert len(backups) == 1
+        assert backups[0].read_text(encoding="utf-8") == "old-side"
+
+    def test_merge_nested_conflict(self, tmp_path: Path):
+        old_ws = self._make_old_layout(tmp_path, "personal")
+        new_ws = tmp_path / "service_default" / "agent_default" / "agent" / "jiuwenclaw_workspace"
+        (new_ws / "memory").mkdir(parents=True)
+        (new_ws / "memory" / "MEMORY.md").write_text("new-side", encoding="utf-8")
+        (old_ws / "memory").mkdir()
+        (old_ws / "memory" / "MEMORY.md").write_text("old-side", encoding="utf-8")
+        # old-side-only nested file must still be merged in
+        (old_ws / "memory" / "2026-09-07.md").write_text("daily", encoding="utf-8")
+
+        utils._migrate_workspace_to_jiuwenclaw_workspace(tmp_path)
+
+        assert not old_ws.exists()
+        # Same priority direction as top-level: new side wins inside directories
+        assert (new_ws / "memory" / "MEMORY.md").read_text(encoding="utf-8") == "new-side"
+        assert (new_ws / "memory" / "2026-09-07.md").read_text(encoding="utf-8") == "daily"
+        # Old-side conflicting file backed up, not overwritten/lost
+        backups = list(new_ws.glob(".migration-backup-*/memory/MEMORY.md"))
+        assert len(backups) == 1
+        assert backups[0].read_text(encoding="utf-8") == "old-side"
+
+    def test_noop_when_no_legacy_layout(self, tmp_path: Path):
+        utils._migrate_workspace_to_jiuwenclaw_workspace(tmp_path)
+        assert not (tmp_path / "jiuwenclaw_workspace").exists()
+
+    def test_legacy_pre_tenant_layout(self, tmp_path: Path):
+        old_ws = tmp_path / "agent" / "workspace"
+        old_ws.mkdir(parents=True)
+        (old_ws / "todo").mkdir()
+        utils._migrate_workspace_to_jiuwenclaw_workspace(tmp_path)
+        assert (tmp_path / "agent" / "jiuwenclaw_workspace" / "todo").exists()
