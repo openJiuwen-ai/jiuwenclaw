@@ -113,10 +113,19 @@ class PptCommon:
         sections: list[dict[str, str]] = []
         for item in value:
             if not isinstance(item, dict):
+                logger.warning(
+                    "[PptCommon] drop required_section: not a dict item=%r",
+                    type(item).__name__,
+                )
                 continue
             title = str(item.get("title") or "").strip()
             page_type = str(item.get("page_type") or "").strip().lower()
             if not title or page_type not in _REQUIRED_SECTION_PAGE_TYPES:
+                logger.warning(
+                    "[PptCommon] drop required_section: invalid title=%r page_type=%r",
+                    title,
+                    page_type or item.get("page_type"),
+                )
                 continue
             sections.append({"title": title, "page_type": page_type})
         return sections
@@ -141,9 +150,7 @@ class PptCommon:
             section["page_type"] == "agenda" for section in sections
         )
         agenda_item_count = sum(
-            1
-            for section in sections
-            if section["page_type"] in {"content", "ending"}
+            1 for section in sections if section["page_type"] == "content"
         )
 
         try:
@@ -154,6 +161,7 @@ class PptCommon:
         if resolved_page_count > 0:
             inputs["page_count"] = resolved_page_count
 
+        extra_agenda_pages = 0
         if has_agenda:
             structural_request = str(
                 inputs.get("structural_page_request") or "none"
@@ -161,6 +169,16 @@ class PptCommon:
             if structural_request in {"", "none"}:
                 inputs["structural_page_request"] = "agenda"
                 inputs["structural_page_count"] = 1
+            elif structural_request != "agenda":
+                inputs["allow_required_agenda"] = True
+                current_structural_count = inputs.get("structural_page_count")
+                if (
+                    isinstance(current_structural_count, int)
+                    and current_structural_count > 0
+                ):
+                    inputs["structural_page_count"] = current_structural_count + 1
+                else:
+                    extra_agenda_pages = 1
 
         structural_count = inputs.get("structural_page_count")
         if not isinstance(structural_count, int) or structural_count <= 0:
@@ -169,7 +187,7 @@ class PptCommon:
                 if str(inputs.get("structural_page_request") or "none").lower()
                 != "none"
                 else 0
-            )
+            ) + extra_agenda_pages
         resolved_total = resolved_page_count + 2 + structural_count
         requested_total = inputs.get("requested_total_pages")
         try:

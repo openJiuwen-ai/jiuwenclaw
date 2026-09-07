@@ -21,6 +21,20 @@ _SEARCH_RESULT_MAX_CHARS = 3500
 _OUTLINE_NAME = "outline.md"
 _SEARCH_RESULTS_FOR_P43_MAX_CHARS = 8000
 _PAGE_HEADING_PATTERN = re.compile(r"^###\s+P(\d+)\s*:", re.MULTILINE)
+_SECTION_TITLE_PUNCT = str.maketrans({
+    "，": ",",
+    "。": ".",
+    "：": ":",
+    "；": ";",
+    "！": "!",
+    "？": "?",
+    "（": "(",
+    "）": ")",
+    "【": "[",
+    "】": "]",
+    "、": ",",
+    "\u3000": " ",
+})
 _OUTLINE_FIELD_PATTERN = re.compile(
     r"^-?\s*\*\*(?P<field>[^*]+)\*\*[：:]\s*(?P<value>.+?)\s*$",
     re.MULTILINE,
@@ -726,8 +740,16 @@ def _build_structural_page_directive(inputs: dict[str, Any]) -> str:
         count_str = "1 页（无法确定 page_count，默认 1 页）"
         total_structural = 1
 
+    extra_agenda = ""
+    if inputs.get("allow_required_agenda"):
+        extra_agenda = (
+            "  另须额外生成 1 页 agenda（目录页），与上述结构页并存，不得互相替代。\n"
+        )
+        if not (isinstance(spc, int) and spc > 0):
+            total_structural += 1
     return (
         f"- 中间结构页：用户已明确要求中间结构页，类型={type_hint}，数量={count_str}。\n"
+        f"{extra_agenda}"
         f"  规则：\n"
         f"  1. 中间结构页的「研究需求」标 ❌，不计入 page_count 内容页配额\n"
         f"  2. 总页数 = page_count + 2 + {total_structural}（内容页 + 封面/结束页 + 结构页）\n"
@@ -780,9 +802,13 @@ def _build_p43_prompt(
         parts.append(
             "- 用户指定页面清单（优先于原始总页数，必须逐项落实，不得删除或合并）：\n"
             f"{json.dumps(required_sections, ensure_ascii=False)}\n"
-            "- page_type=cover 必须由首页承载；agenda 必须生成目录页；"
-            "content 每项必须对应一个独立的研究需求✅内容页；"
-            "ending 必须由末页承载。目录应列出全部 content 与 ending 业务章节。\n"
+            "- page_type=cover 必须由首页承载（标题可跟随主题，不必与清单字面一致）；"
+            "agenda 必须生成独立目录页，其标题字段须与清单 title 逐字一致"
+            "（仅允许空白/全半角标点差异）；"
+            "content 每项必须对应一个独立的研究需求✅内容页，标题字段须与清单 title 逐字一致，"
+            "禁止改写、增删字或加修饰；"
+            "ending 必须由末页承载（标题可用感谢语等收尾文案，不必与清单字面一致）。"
+            "目录只列出全部 content 业务章节，不得列入 cover/ending/agenda 等结构页本身。\n"
         )
     # 模板叙事框架注入（template_canvas 模式下由 P3.5 读取 template-spec.json 获得）
     narrative_framework = str(inputs.get("narrative_framework") or "").strip()
@@ -848,6 +874,7 @@ def _validate_outline_markdown_basic(
     structural_page_request: str = "none",
     structural_page_count: Any = None,
     required_sections: Any = None,
+    allow_required_agenda: bool = False,
 ) -> None:
     stripped = text.strip()
     if not stripped:
@@ -919,6 +946,7 @@ def _validate_outline_markdown_basic(
         _struct_pages,
         structural_page_request=structural_page_request,
         structural_page_count=structural_page_count,
+        allow_required_agenda=allow_required_agenda,
     )
 
     required_fields = ("**类型**", "**研究需求**", "**标题**", "**内容概要**", "**研究查询**", "**数据需求**")
@@ -936,13 +964,32 @@ def _validate_outline_markdown_basic(
         }
         matched_page_indices: set[int] = set()
         for section in normalized_sections:
-            expected_title = section["title"].strip()
             expected_type = section["page_type"]
+            if expected_type in {"cover", "ending"}:
+                if not pages:
+                    raise ContentPlanError(
+                        f"P4.3 outline 未按指定页型落实章节："
+                        f"{section['title']} ({expected_type})"
+                    )
+                page_index = 0 if expected_type == "cover" else len(pages) - 1
+                actual_type = _extract_outline_field(
+                    pages[page_index][1], "类型"
+                ).strip().lower()
+                if actual_type not in type_aliases.get(expected_type, set()):
+                    raise ContentPlanError(
+                        f"P4.3 outline 未按指定页型落实章节："
+                        f"{section['title']} ({expected_type})"
+                    )
+                matched_page_indices.add(page_index)
+                continue
+            expected_title = _normalize_section_title(section["title"])
             matched = False
             for page_index, (_, block) in enumerate(pages):
                 if page_index in matched_page_indices:
                     continue
-                actual_title = _extract_outline_field(block, "标题").strip()
+                actual_title = _normalize_section_title(
+                    _extract_outline_field(block, "标题")
+                )
                 actual_type = _extract_outline_field(block, "类型").strip().lower()
                 if expected_title != actual_title:
                     continue
@@ -956,7 +1003,7 @@ def _validate_outline_markdown_basic(
             if not matched:
                 raise ContentPlanError(
                     f"P4.3 outline 未按指定页型落实章节："
-                    f"{expected_title} ({expected_type})"
+                    f"{section['title']} ({expected_type})"
                 )
 
 
@@ -969,6 +1016,7 @@ def _validate_structural_pages(
     *,
     structural_page_request: str = "none",
     structural_page_count: Any = None,
+    allow_required_agenda: bool = False,
 ) -> None:
     """校验中间结构页合法性，与 pptx-craft outline-planner Stage 3 对齐。
 
@@ -1008,6 +1056,9 @@ def _validate_structural_pages(
         allowed_types = {"section", "chapter"}
     else:
         allowed_types = _STRUCTURAL_PAGE_TYPES
+    if allow_required_agenda:
+        allowed_types = set(allowed_types)
+        allowed_types.add("agenda")
 
     # 检查是否有不允许的结构页类型
     for page_num, ptype in found_structural:
@@ -1025,6 +1076,12 @@ def _validate_structural_pages(
             raise ContentPlanError(
                 f"P4.3 outline 中间结构页数量应为 {expected}，实际 {actual}"
             )
+
+
+def _normalize_section_title(title: str) -> str:
+    """归一化清单/大纲标题后再做精确比较（去空白、全半角常见标点）。"""
+    text = str(title or "").translate(_SECTION_TITLE_PUNCT)
+    return re.sub(r"\s+", "", text)
 
 
 def _split_outline_pages(text: str) -> list[tuple[int, str]]:
@@ -1070,6 +1127,7 @@ def _validate_outline_markdown_full(
     structural_page_request: str = "none",
     structural_page_count: Any = None,
     required_sections: Any = None,
+    allow_required_agenda: bool = False,
 ) -> None:
     _validate_outline_markdown_basic(
         text,
@@ -1078,6 +1136,7 @@ def _validate_outline_markdown_full(
         structural_page_request=structural_page_request,
         structural_page_count=structural_page_count,
         required_sections=required_sections,
+        allow_required_agenda=allow_required_agenda,
     )
 
     if include_searched_sources and "## 已搜索来源" not in text:
@@ -1109,6 +1168,7 @@ def _outline_validate_kwargs(inputs: dict[str, Any]) -> dict[str, Any]:
         "structural_page_request": str(inputs.get("structural_page_request") or "none"),
         "structural_page_count": inputs.get("structural_page_count"),
         "required_sections": inputs.get("required_sections"),
+        "allow_required_agenda": bool(inputs.get("allow_required_agenda")),
     }
 
 

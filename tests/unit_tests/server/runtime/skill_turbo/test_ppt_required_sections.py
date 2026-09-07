@@ -45,6 +45,7 @@ def _validate_required_sections(
     required_sections: list[dict[str, str]],
     *,
     structural_page_request: str = "none",
+    allow_required_agenda: bool = False,
 ) -> None:
     outline = "# 大纲：测试主题\n\n## 页面规划\n\n" + "\n".join(pages)
     _validate_outline_markdown_basic(
@@ -53,6 +54,7 @@ def _validate_required_sections(
         page_count=None,
         structural_page_request=structural_page_request,
         required_sections=required_sections,
+        allow_required_agenda=allow_required_agenda,
     )
 
 
@@ -70,7 +72,7 @@ def test_required_sections_override_conflicting_total_page_count() -> None:
     assert inputs["structural_page_request"] == "agenda"
     assert inputs["structural_page_count"] == 1
     assert inputs["resolved_total_pages"] == 6
-    assert inputs["required_agenda_item_count"] == 4
+    assert inputs["required_agenda_item_count"] == 3
     assert inputs["page_count_resolution"] == "required_sections_override"
 
 
@@ -140,8 +142,8 @@ def test_required_section_title_does_not_use_substring_match() -> None:
 def test_transition_page_does_not_satisfy_required_ending() -> None:
     pages = [
         _outline_page(1, "标题页", "cover", False),
-        _outline_page(2, "展望结论", "transition", False),
-        _outline_page(3, "结束页", "ending", False),
+        _outline_page(2, "市场概况", "content", True),
+        _outline_page(3, "结束页", "transition", False),
     ]
     required_sections = [{"title": "展望结论", "page_type": "ending"}]
 
@@ -151,3 +153,79 @@ def test_transition_page_does_not_satisfy_required_ending() -> None:
             required_sections,
             structural_page_request="transition",
         )
+
+
+def test_cover_and_ending_ignore_title_and_use_position() -> None:
+    pages = [
+        _outline_page(1, "2025年新能源汽车市场趋势", "cover", False),
+        _outline_page(2, "市场概况", "content", True),
+        _outline_page(3, "感谢聆听", "ending", False),
+    ]
+    required_sections = [
+        {"title": "标题页", "page_type": "cover"},
+        {"title": "市场概况", "page_type": "content"},
+        {"title": "展望结论", "page_type": "ending"},
+    ]
+
+    _validate_required_sections(pages, required_sections)
+
+
+def test_required_section_title_normalizes_punctuation() -> None:
+    pages = [
+        _outline_page(1, "标题页", "cover", False),
+        _outline_page(2, "市场 概况", "content", True),
+        _outline_page(3, "展望结论", "ending", False),
+    ]
+    required_sections = [{"title": "市场概况", "page_type": "content"}]
+
+    _validate_required_sections(pages, required_sections)
+
+
+def test_required_agenda_is_allowed_with_section_pages() -> None:
+    pages = [
+        _outline_page(1, "标题页", "cover", False),
+        _outline_page(2, "目录", "agenda", False),
+        _outline_page(3, "第一章", "section", False),
+        _outline_page(4, "市场概况", "content", True),
+        _outline_page(5, "展望结论", "ending", False),
+    ]
+    required_sections = [
+        {"title": "目录", "page_type": "agenda"},
+        {"title": "市场概况", "page_type": "content"},
+    ]
+
+    _validate_required_sections(
+        pages,
+        required_sections,
+        structural_page_request="section",
+        allow_required_agenda=True,
+    )
+
+
+def test_required_agenda_with_existing_section_request_does_not_replace() -> None:
+    inputs = {
+        "page_count": 3,
+        "requested_total_pages": 6,
+        "structural_page_request": "section",
+        "structural_page_count": 1,
+        "required_sections": _required_sections(),
+    }
+
+    PptCommon.resolve_required_section_budget(inputs)
+
+    assert inputs["structural_page_request"] == "section"
+    assert inputs["allow_required_agenda"] is True
+    assert inputs["structural_page_count"] == 2
+    assert inputs["required_agenda_item_count"] == 3
+
+
+def test_invalid_required_sections_are_dropped() -> None:
+    sections = PptCommon.normalize_required_sections(
+        [
+            {"title": "市场概况", "page_type": "content"},
+            {"title": "插图", "page_type": "image"},
+            "not-a-dict",
+        ]
+    )
+
+    assert sections == [{"title": "市场概况", "page_type": "content"}]
