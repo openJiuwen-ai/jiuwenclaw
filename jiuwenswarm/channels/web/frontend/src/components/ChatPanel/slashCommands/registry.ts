@@ -2,6 +2,7 @@ import { webRequest } from '../../../services/webClient';
 import type { Message } from '../../../types/message';
 import { useGoalStore } from '../../../stores/goalStore';
 import { usePlanStore } from '../../../stores/planStore';
+import { isSessionBusyForPlanToggle } from '../../../features/planMode/planModeGate';
 import { NEW_CONVERSATION_ID } from '../../../multi-session/state/newConversationLifecycle';
 import { resolvePlanGoalInterlock } from './semantics';
 
@@ -46,15 +47,25 @@ interface GoalSlashStore {
   setArmed: (sessionId: string, armed: boolean) => void;
 }
 
-export type PlanSlashToggleResult = 'activated' | 'deactivated' | 'blocked_by_goal';
+export type PlanSlashToggleResult =
+  | 'activated'
+  | 'deactivated'
+  | 'blocked_by_goal'
+  | 'blocked_by_busy';
 
 /** Apply `/plan` through the same Goal interlock used by the toolbar. */
 export function togglePlanFromSlash(
   sessionId: string,
   planStore: PlanSlashStore = usePlanStore.getState(),
   goalStore: GoalSlashStore = useGoalStore.getState(),
+  // 会话进行中 / 暂停 / 等待 ask_user 回答时不允许切换——与 InputArea 的
+  // executeSlashCommand 守卫、输入框旁 Plan 开关、「计划」chip 关闭按钮共用
+  // 同一套 planModeGate 判断（ask_user 待回答时 isProcessing 已回到 false，
+  // 只看它的旧闸门会漏放）。默认参数便于单测注入。
+  sessionBusy: boolean = isSessionBusyForPlanToggle(sessionId),
 ): PlanSlashToggleResult {
   planStore.ensureRuntime(sessionId);
+  if (sessionBusy) return 'blocked_by_busy';
   if (planStore.isActive(sessionId)) {
     planStore.setActive(sessionId, false);
     return 'deactivated';
@@ -144,6 +155,11 @@ const compactCommand: SlashCommand = {
  * 面板选中或精确输入 `/plan` 时立即翻转，带参数的文本不进入此路径。
  * 开启时置 explicitEntry，下一条真实消息带 agent.plan + plan_entry_source；
  * 集群（team）不支持，与工具栏开关一致。
+ *
+ * 「会话进行中 / 等待 ask_user 回答 / 有未完成目标」时不允许切换：`togglePlanFromSlash`
+ * 里用 `isSessionBusyForPlanToggle`（planModeGate）+ Goal 互斥判断，与输入框旁的
+ * Plan 开关、「计划」chip 关闭按钮、InputArea 的 executeSlashCommand 守卫同一套口径。
+ * 命中限制时的用户提示由 executeSlashCommand 守卫负责（轻量提示条），这里再兜一道底。
  */
 const planCommand: SlashCommand = {
   name: 'plan',
@@ -158,9 +174,9 @@ const planCommand: SlashCommand = {
       return;
     }
     const result = togglePlanFromSlash(ctx.sessionId);
-    if (result === 'blocked_by_goal') {
-      // 选择器会直接禁用 /plan；手工输入或旧页面竞态命中时也只静默拦截，
-      // 不再把同一条互斥提示反复写进聊天记录。
+    if (result === 'blocked_by_goal' || result === 'blocked_by_busy') {
+      // 选择器/输入框守卫已先拦（会话忙时守卫弹轻量提示条）；手工输入或旧页面
+      // 竞态命中时这里静默兜底，不把同一条互斥提示反复写进聊天记录。
       return;
     }
   },
