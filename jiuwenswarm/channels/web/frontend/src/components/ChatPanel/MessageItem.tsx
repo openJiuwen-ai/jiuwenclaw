@@ -780,14 +780,14 @@ export const MessageItem = memo(function MessageItem({
           <div
             data-testid="chat-panel-message-meta"
             className={clsx(
-              'flex items-center gap-1 text-sm mt-2 text-text-muted',
+              'flex items-center gap-1 text-sm mt-2 text-text-meta',
               isUser ? 'justify-end' : 'justify-start'
             )}
           >
             <span data-testid="chat-panel-message-timestamp">{formatTimestamp(timestamp)}</span>
 
             {isUser && isGoalObjectiveMessage && (
-              <span className="inline-flex items-center gap-1 rounded-full bg-secondary px-2 py-0.5 text-xs text-text-muted" data-testid="chat-panel-message-goal-badge">
+              <span className="inline-flex items-center gap-1 rounded-full bg-secondary px-2 py-0.5 text-xs text-text-meta" data-testid="chat-panel-message-goal-badge">
                 <Target className="w-3 h-3" strokeWidth={2} />
                 {t('goal.badge')}
               </span>
@@ -816,24 +816,28 @@ export const MessageItem = memo(function MessageItem({
             )}
 
             {showTTS && (
-              <button
-                data-testid="chat-panel-message-tts-btn"
-                data-variant={isPlaying ? 'playing' : 'idle'}
-                onClick={handleSpeak}
-                className={clsx(
-                  'p-1.5 rounded-md ',
-                  isPlaying
-                    ? 'text-accent bg-accent/10'
-                    : 'hover:text-accent hover:bg-secondary'
-                )}
-                title={isPlaying ? t('chatUi.stopReading') : t('chatUi.readMessage')}
-              >
-                {isPlaying ? (
-                  <Square className="w-4 h-4 fill-current" strokeWidth={1.5} />
-                ) : (
-                  <Volume2 className="w-4 h-4" strokeWidth={1.5} />
-                )}
-              </button>
+              <div className="relative" data-testid="chat-panel-message-tts">
+                <button
+                  data-testid="chat-panel-message-tts-btn"
+                  data-variant={isPlaying ? 'playing' : 'idle'}
+                  data-tooltip={isPlaying ? t('chatUi.stopReading') : t('chatUi.readMessage')}
+                  {...tooltipHandlers}
+                  onClick={handleSpeak}
+                  className={clsx(
+                    'p-1.5 rounded-md ',
+                    isPlaying
+                      ? 'text-accent bg-accent/10'
+                      : 'hover:text-accent hover:bg-secondary'
+                  )}
+                >
+                  {isPlaying ? (
+                    <Square className="w-4 h-4 fill-current" strokeWidth={1.5} />
+                  ) : (
+                    <Volume2 className="w-4 h-4" strokeWidth={1.5} />
+                  )}
+                </button>
+                {tooltip}
+              </div>
             )}
           </div>
         )}
