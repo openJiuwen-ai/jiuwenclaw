@@ -3752,6 +3752,7 @@ class MessageHandler(FileTransferMixin, ABC):
                 msg.channel_id,
                 is_processing=False,
                 app_id=msg.app_id or "",
+                metadata=msg.metadata if isinstance(msg.metadata, dict) else None,
             )
             return
 
@@ -3791,6 +3792,7 @@ class MessageHandler(FileTransferMixin, ABC):
             msg.channel_id,
             is_processing=False,
             app_id=msg.app_id or "",
+            metadata=msg.metadata if isinstance(msg.metadata, dict) else None,
         )
 
     @staticmethod
@@ -4929,6 +4931,7 @@ class MessageHandler(FileTransferMixin, ABC):
                     await self._send_processing_status(
                         rid, session_id, channel_id,
                         is_processing=False, app_id=stream_app_id,
+                        metadata=request_metadata if isinstance(request_metadata, dict) else None,
                     )
                     logger.info(
                         "[MessageHandler] 该 session 流式任务已结束（cancelled=%s），已发送 is_processing=false: session_id=%s",
@@ -4988,6 +4991,7 @@ class MessageHandler(FileTransferMixin, ABC):
                 msg.channel_id,
                 is_processing=True,
                 app_id=msg.app_id or "",
+                metadata=msg.metadata if isinstance(msg.metadata, dict) else None,
             )
         task = asyncio.create_task(
             self.process_stream(
@@ -5096,6 +5100,7 @@ class MessageHandler(FileTransferMixin, ABC):
     async def _send_processing_status(
         self, request_id: str, session_id: str | None, channel_id: str, *,
         is_processing: bool, app_id: str = "",
+        metadata: dict[str, Any] | None = None,
     ) -> None:
         """发送 chat.processing_status 事件到客户端。"""
         from jiuwenswarm.common.schema.message import Message, EventType
@@ -5116,7 +5121,9 @@ class MessageHandler(FileTransferMixin, ABC):
                 "is_complete": not is_processing
             },
             event_type=EventType.CHAT_PROCESSING_STATUS,
-            metadata=None,
+            # 带上入站 ws_id，避免 HTTP cancel-replace 时旧 false 经 session
+            # 兜底打进新 SSE（与 chat.delta/final 的 request-scoped 路由对齐）。
+            metadata=dict(metadata) if isinstance(metadata, dict) else None,
         )
         await self.publish_robot_messages(status_msg)
         # 广播全局运行态快照给所有 ws 客户端（不按 session 路由），用于多窗口配置保存锁。

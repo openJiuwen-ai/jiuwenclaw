@@ -50,11 +50,13 @@ _WEB_CONNECTION_USER_ID_ATTR = "_web_connection_user_id"
 _HANDLER_BEFORE_CALLBACK_METHODS = frozenset({ReqMethod.CHAT_SEND.value})
 
 # 带了 ws_id 但 peer 已不在时，这些事件不得按 session 兜底到其它连接，
-# 否则旧 HTTP SSE abort 后残余 chat.delta 会打进同会话新 outbound，前端粘泡。
+# 否则旧 HTTP SSE abort 后残余 chat.delta / processing_status(false) 会打进
+# 同会话新 outbound（粘泡或企业版 SSE 被误结束）。
 _REQUEST_SCOPED_STREAM_EVENTS = frozenset({
     EventType.CHAT_DELTA.value,
     EventType.CHAT_REASONING.value,
     EventType.CHAT_FINAL.value,
+    EventType.CHAT_PROCESSING_STATUS.value,
 })
 
 _STREAM_COALESCE_EVENT_TYPES = frozenset({"chat.delta", "chat.reasoning"})
