@@ -3134,7 +3134,7 @@
       "cancelRun": "停止本次运行",
       "pause": "暂停",
       "resume": "恢复",
-      "resumeFromCompletedHint": "任务已完成或到期，需先在「编辑」里把调度／停止条件改成未来时间，任务会自动重新激活",
+      "resumeFromCompletedHint": "任务已完成或到期，请先在「编辑」里把调度／停止条件改好，再点击「恢复」",
       "delete": "删除",
       "deleteConfirm": "确定删除心跳任务「{{name}}」吗？",
       "filterLabel": "状态",
