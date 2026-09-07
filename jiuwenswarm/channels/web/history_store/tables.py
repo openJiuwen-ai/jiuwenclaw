@@ -36,9 +36,19 @@ SESSIONS_TABLE_DEF = TableDefinition(
         # 置顶状态（remote 模式 session.pin 的持久化字段；本地模式存 agent/sessions 元数据）
         ColumnDefinition("pinned", "boolean", nullable=False, default=False),
         ColumnDefinition("pin_order", "integer", nullable=False, default=0),
+        # 身份口径（与 pod workspace_{key} 的三元组目录对齐；空 = 存量行通配，见 identity.py）
+        ColumnDefinition("group_id", "string", length=128, nullable=True),
+        ColumnDefinition("bot_id", "string", length=128, nullable=True),
+        # 项目/定时任务归属与排序口径（project.get_sessions / get_cron_sessions 切 PG 的事实源）
+        ColumnDefinition("project_id", "string", length=128, nullable=True),
+        ColumnDefinition("cron_id", "string", length=128, nullable=True),
+        ColumnDefinition("work_mode", "string", length=32, nullable=True),
+        ColumnDefinition("last_user_message_at", "float", nullable=True),
     ],
     indexes=[
         IndexDefinition(["user", "updated_at"], unique=False),
+        IndexDefinition(["project_id"], unique=False),
+        IndexDefinition(["cron_id"], unique=False),
     ],
 )
 
