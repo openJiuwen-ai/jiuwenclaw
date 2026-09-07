@@ -55,6 +55,14 @@ def apply_trace_header(
         if str(key).lower() != "x-trace-id"
     } | {TRACE_ID_HEADER: resolved}
 
+
+def _request_trace_id(req: urllib.request.Request) -> str:
+    """Read ``X-Trace-Id`` from a urllib request (empty when absent)."""
+    try:
+        return extract_trace_id(dict(req.header_items()))
+    except Exception:
+        return extract_trace_id(getattr(req, "headers", None))
+
 from jiuwenswarm.common.e2a.agent_compat import e2a_to_agent_request
 from jiuwenswarm.common.e2a.models import E2AEnvelope
 from jiuwenswarm.common.e2a.wire_codec import (
@@ -531,8 +539,9 @@ class YuanrongFrontendAgentClient(AgentServerClient):
         if mounts:
             payload["mounts"] = list(mounts)
 
+        resolved_trace_id = normalize_trace_id(trace_id)
         status, body = await asyncio.to_thread(
-            self._do_agent_create, payload, trace_id
+            self._do_agent_create, payload, resolved_trace_id
         )
         parsed = self._parse_agent_api_response(body, status)
         instance_id = str(parsed.get("instance_id") or "").strip()
@@ -557,12 +566,13 @@ class YuanrongFrontendAgentClient(AgentServerClient):
         )
         logger.info(
             "[YuanrongFrontendAgentClient] create_sandbox: "
-            "instance_id=%s name=%s namespace=%s runtime=%s imageurl=%s",
+            "instance_id=%s name=%s namespace=%s runtime=%s imageurl=%s trace_id=%s",
             instance_id,
             normalized_name,
             normalized_namespace,
             normalized_runtime_spec.get("runtime"),
             (normalized_runtime_spec.get("rootfs") or {}).get("imageurl"),
+            resolved_trace_id,
         )
         return info
 
@@ -575,21 +585,25 @@ class YuanrongFrontendAgentClient(AgentServerClient):
         if not normalized_sandbox_id:
             raise ValueError("sandbox_id is required to delete sandbox")
 
+        resolved_trace_id = normalize_trace_id(trace_id)
         status, body = await asyncio.to_thread(
             self._do_agent_delete,
             normalized_sandbox_id,
-            trace_id,
+            resolved_trace_id,
         )
         if self._agent_api_not_found(status, body):
             logger.info(
-                "[YuanrongFrontendAgentClient] delete_sandbox: already gone instance_id=%s",
+                "[YuanrongFrontendAgentClient] delete_sandbox: already gone "
+                "instance_id=%s trace_id=%s",
                 normalized_sandbox_id,
+                resolved_trace_id,
             )
             return
         self._parse_agent_api_response(body, status)
         logger.info(
-            "[YuanrongFrontendAgentClient] delete_sandbox: instance_id=%s",
+            "[YuanrongFrontendAgentClient] delete_sandbox: instance_id=%s trace_id=%s",
             normalized_sandbox_id,
+            resolved_trace_id,
         )
 
     async def get_agent_info(
@@ -646,12 +660,14 @@ class YuanrongFrontendAgentClient(AgentServerClient):
         attempt = 0
         last_error: BaseException | None = None
         last_status = ""
+        # One X-Trace-Id for the whole GET poll loop (retries share it).
+        poll_trace_id = normalize_trace_id(trace_id)
         while True:
             attempt += 1
             instance: dict[str, Any] = {}
             try:
                 instance = await self.get_agent_info(
-                    normalized_id, trace_id=trace_id
+                    normalized_id, trace_id=poll_trace_id
                 )
                 last_error = None
             except YuanrongAgentApiError as exc:
@@ -667,10 +683,11 @@ class YuanrongFrontendAgentClient(AgentServerClient):
                 if attempt > 1:
                     logger.info(
                         "[YuanrongFrontendAgentClient] instance running after GET poll: "
-                        "instance_id=%s attempt=%s status=%s",
+                        "instance_id=%s attempt=%s status=%s trace_id=%s",
                         normalized_id,
                         attempt,
                         status or _AGENT_RUNNING_STATUS,
+                        poll_trace_id,
                     )
                 return instance
             remaining = deadline - asyncio.get_running_loop().time()
@@ -683,17 +700,20 @@ class YuanrongFrontendAgentClient(AgentServerClient):
                 raise YuanrongAgentApiError(
                     f"agent instance not running after "
                     f"{timeout_s:.0f}s: "
-                    f"instance_id={normalized_id}, last={detail}"
+                    f"instance_id={normalized_id}, last={detail}, "
+                    f"trace_id={poll_trace_id}"
                 )
             sleep_for = min(interval_s, remaining)
             logger.debug(
                 "[YuanrongFrontendAgentClient] GET not running yet: "
-                "instance_id=%s attempt=%s status=%s sleep=%.1fs last_error=%s",
+                "instance_id=%s attempt=%s status=%s sleep=%.1fs last_error=%s "
+                "trace_id=%s",
                 normalized_id,
                 attempt,
                 status or "empty",
                 sleep_for,
                 type(last_error).__name__ if last_error is not None else "-",
+                poll_trace_id,
             )
             await asyncio.sleep(sleep_for)
 
@@ -1196,19 +1216,21 @@ class YuanrongFrontendAgentClient(AgentServerClient):
             status = int(getattr(err, "code", 500) or 500)
             logger.error(
                 "[YuanrongFrontendAgentClient] file download HTTP error: "
-                "instance=%s path=%s code=%d",
+                "instance=%s path=%s code=%d trace_id=%s",
                 instance_id,
                 path,
                 status,
+                extract_trace_id(headers),
             )
             return status, body, "application/octet-stream", 0
         except Exception as err:
             logger.error(
                 "[YuanrongFrontendAgentClient] file download failed: "
-                "instance=%s path=%s error=%s",
+                "instance=%s path=%s error=%s trace_id=%s",
                 instance_id,
                 path,
                 err,
+                extract_trace_id(headers),
             )
             if self._is_timeout_error(err):
                 raise YuanrongAgentApiError(
@@ -1323,21 +1345,25 @@ class YuanrongFrontendAgentClient(AgentServerClient):
         except urllib.error.HTTPError as err:
             text = err.read().decode("utf-8", errors="replace") if err.fp else str(err)
             logger.error(
-                "[YuanrongFrontendAgentClient] HTTP error: url=%s code=%d",
+                "[YuanrongFrontendAgentClient] HTTP error: url=%s code=%d trace_id=%s",
                 req.full_url,
                 getattr(err, "code", 500),
+                _request_trace_id(req),
             )
             return int(getattr(err, "code", 500) or 500), text
         except Exception as err:
             logger.error(
-                "[YuanrongFrontendAgentClient] request failed: url=%s error=%s",
+                "[YuanrongFrontendAgentClient] request failed: url=%s error=%s "
+                "trace_id=%s",
                 req.full_url,
                 str(err),
+                _request_trace_id(req),
             )
             if raise_on_timeout and self._is_timeout_error(err):
                 raise YuanrongAgentTimeoutError(
                     f"request timeout after {resolved_timeout}s: "
-                    f"url={req.full_url}, error={err}"
+                    f"url={req.full_url}, error={err}, "
+                    f"trace_id={_request_trace_id(req)}"
                 ) from err
             return 500, str(err)
 
@@ -1616,24 +1642,28 @@ class YuanrongFrontendAgentClient(AgentServerClient):
         if uid:
             session_context = json.dumps({"sessionCtx": uid}, ensure_ascii=False)
             headers["X-Session-Context"] = session_context
+            headers = apply_trace_header(headers, request_id)
             logger.debug(
                 "[YuanrongFrontendAgentClient] invoke headers: method=%s session_id=%s user_id=%s "
-                "X-Session-Context=%s stream=%s",
+                "X-Session-Context=%s stream=%s trace_id=%s",
                 req_method,
                 session_id,
                 uid,
                 session_context,
                 stream,
+                headers[TRACE_ID_HEADER],
             )
         else:
+            headers = apply_trace_header(headers, request_id)
             logger.info(
                 "[YuanrongFrontendAgentClient] invoke headers: method=%s session_id=%s "
-                "uid_empty=yes X-Session-Context omitted stream=%s",
+                "uid_empty=yes X-Session-Context omitted stream=%s trace_id=%s",
                 req_method,
                 session_id,
                 stream,
+                headers[TRACE_ID_HEADER],
             )
-        return apply_trace_header(headers, request_id)
+        return headers
 
     def _do_invoke(
         self,
@@ -1670,7 +1700,6 @@ class YuanrongFrontendAgentClient(AgentServerClient):
                 payload,
                 session_id,
                 envelope.user_id,
-                envelope.request_id,
             )
         except YuanrongAgentApiError as e:
             logger.warning("[YuanrongFrontendAgentClient] invoke failed: %s", e)
@@ -1709,7 +1738,6 @@ class YuanrongFrontendAgentClient(AgentServerClient):
                 queue,
                 loop,
                 envelope.user_id,
-                envelope.request_id,
             )
         )
         try:
@@ -1785,7 +1813,13 @@ class YuanrongFrontendAgentClient(AgentServerClient):
 
                 if not (200 <= status < 300):
                     text = resp.read().decode("utf-8", errors="replace")
-                    logger.error("[YuanrontFrontendAgentClient] HTTP错误状态码: %d, 响应: %s", status, text[:500])
+                    logger.error(
+                        "[YuanrontFrontendAgentClient] HTTP错误状态码: %d, 响应: %s "
+                        "trace_id=%s",
+                        status,
+                        text[:500],
+                        _request_trace_id(req),
+                    )
                     loop.call_soon_threadsafe(
                         out_queue.put_nowait,
                         ("error", json.dumps({"http_status": status, "body": text}, ensure_ascii=False)),
@@ -1822,9 +1856,11 @@ class YuanrongFrontendAgentClient(AgentServerClient):
         except urllib.error.HTTPError as err:
             text = err.read().decode("utf-8", errors="replace") if err.fp else str(err)
             logger.error(
-                "[YuanrontFrontendAgentClient] stream HTTP error: session_id=%s, code=%d",
+                "[YuanrontFrontendAgentClient] stream HTTP error: session_id=%s, "
+                "code=%d trace_id=%s",
                 session_id,
                 getattr(err, "code", 500),
+                _request_trace_id(req),
             )
             loop.call_soon_threadsafe(
                 out_queue.put_nowait,
@@ -1838,9 +1874,11 @@ class YuanrongFrontendAgentClient(AgentServerClient):
             )
         except Exception as err:
             logger.error(
-                "[YuanrontFrontendAgentClient] stream request failed: session_id=%s, error=%s",
+                "[YuanrontFrontendAgentClient] stream request failed: session_id=%s, "
+                "error=%s trace_id=%s",
                 session_id,
                 str(err),
+                _request_trace_id(req),
             )
             loop.call_soon_threadsafe(out_queue.put_nowait, ("exception", str(err)))
         finally:

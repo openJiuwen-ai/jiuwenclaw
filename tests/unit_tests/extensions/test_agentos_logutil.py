@@ -17,6 +17,7 @@ def test_format_agentos_omits_empty_and_keeps_primary_order() -> None:
         sandbox_id="sbx",
         session_id="s1",
         request_id="r1",
+        trace_id="t-1",
         created=False,
         extra_flag="ok",
     )
@@ -27,6 +28,7 @@ def test_format_agentos_omits_empty_and_keeps_primary_order() -> None:
         "user_id=u1",
         "session_id=s1",
         "request_id=r1",
+        "trace_id=t-1",
         "sandbox_id=sbx",
         "method=chat.send",
         "created=false",

@@ -42,12 +42,15 @@ def _fake_agent_get_urlopen(
     *,
     requests: list[tuple[str, str, bytes | None]] | None = None,
     get_bodies: list[bytes] | None = None,
+    headers: list[dict[str, str]] | None = None,
 ):
     """Mock urlopen for GET /api/agent/:id (and ignore timeout)."""
     del timeout
     body = req.data
     if requests is not None:
         requests.append((req.method, req.full_url, body))
+    if headers is not None:
+        headers.append(dict(req.header_items()))
     resp = MagicMock()
     resp.status = 200
     if req.method == "GET" and "/api/agent/" in req.full_url:
@@ -172,7 +175,9 @@ async def test_send_request_passes_user_id_in_session_context(client: YuanrongFr
 
     assert response.ok is True
     assert json.loads(captured["X-session-context"]) == {"sessionCtx": "alice"}
-    assert _header(captured, TRACE_ID_HEADER) == "req-1"
+    minted = _header(captured, TRACE_ID_HEADER)
+    assert minted
+    assert minted != "req-1"
 
 
 @pytest.mark.asyncio
@@ -556,6 +561,7 @@ async def test_wait_until_running_polls_get_until_status_running(
 ):
     await client.connect("http://127.0.0.1:8080")
     requests: list[tuple[str, str, bytes | None]] = []
+    captured_headers: list[dict[str, str]] = []
     get_bodies = [
         b'{"code":404,"message":"instance not found or not running"}',
         b'{"code":200,"instance":{"instance_id":"'
@@ -573,7 +579,11 @@ async def test_wait_until_running_polls_get_until_status_running(
 
     def fake_urlopen(req, timeout=0):
         return _fake_agent_get_urlopen(
-            req, timeout, requests=requests, get_bodies=get_bodies
+            req,
+            timeout,
+            requests=requests,
+            get_bodies=get_bodies,
+            headers=captured_headers,
         )
 
     with patch("urllib.request.urlopen", side_effect=fake_urlopen):
@@ -587,6 +597,10 @@ async def test_wait_until_running_polls_get_until_status_running(
         item[1] == f"http://127.0.0.1:8080/api/agent/{_CREATE_INSTANCE_ID}"
         for item in get_calls
     )
+    poll_ids = [_header(item, TRACE_ID_HEADER) for item in captured_headers]
+    assert len(poll_ids) == 3
+    assert all(poll_ids)
+    assert len(set(poll_ids)) == 1
 
 
 @pytest.mark.asyncio

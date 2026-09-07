@@ -264,6 +264,7 @@ def _file_api_ids(request: Request) -> tuple[str, str]:
 _FILE_API_DONE_KEYS = (
     "user_id",
     "session_id",
+    "trace_id",
     "channel",
     "method",
     "path",
@@ -297,6 +298,7 @@ def _log_file_api_done(
     fields: dict[str, Any] = {
         "user_id": uid,
         "session_id": sid,
+        "trace_id": _file_api_trace_id(request),
         "channel": "file-api",
         "method": request.method,
         "path": request.url.path,
