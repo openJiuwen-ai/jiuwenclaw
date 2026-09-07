@@ -3,7 +3,7 @@
 """Permissions 配置加载：Agent template 槽位优先，否则回落 config.yaml。"""
 
 from __future__ import annotations
-from jiuwenswarm.common.local_env_config import is_enterprise
+from jiuwenswarm.edition import is_enterprise
 
 import asyncio
 import contextvars

@@ -2,7 +2,7 @@
 """日志脱敏引擎：内置规则、按 priority DESC 顺序应用已编译规则。"""
 
 from __future__ import annotations
-from jiuwenswarm.common.local_env_config import is_enterprise
+from jiuwenswarm.edition import is_enterprise
 
 import logging
 import os

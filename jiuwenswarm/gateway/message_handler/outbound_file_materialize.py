@@ -21,7 +21,7 @@ from urllib.parse import quote, urlparse
 import requests
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
-from jiuwenswarm.common.local_env_config import is_enterprise
+from jiuwenswarm.edition import is_enterprise
 from jiuwenswarm.gateway.channel_manager.web.file_http import (
     content_disposition,
     guess_mime,

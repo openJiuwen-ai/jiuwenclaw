@@ -28,7 +28,7 @@ from jiuwenswarm.common.e2a.constants import (
     FILE_TRANSFER_START,
 )
 from jiuwenswarm.common.file_transfer_types import FileTransferStartParams
-from jiuwenswarm.common.local_env_config import is_enterprise
+from jiuwenswarm.edition import is_enterprise
 
 if TYPE_CHECKING:
     from jiuwenswarm.common.e2a.models import E2AEnvelope

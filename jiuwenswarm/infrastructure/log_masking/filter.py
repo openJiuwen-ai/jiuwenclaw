@@ -6,7 +6,7 @@ from __future__ import annotations
 import logging
 import traceback as _traceback
 
-from jiuwenswarm.common.local_env_config import is_enterprise
+from jiuwenswarm.edition import is_enterprise
 
 from .engine import LogMaskingEngine
 

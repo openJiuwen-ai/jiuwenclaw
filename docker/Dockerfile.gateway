@@ -29,6 +29,7 @@ RUN pip install -e . \
 RUN yq -y -i '.dependencies = {}' packages/jiuwenclaw-ee/gateway/extensions/runtime_management_extension/extension.yaml
 RUN yq -y -i '.dependencies = {}' packages/jiuwenclaw-ee/gateway/extensions/manager_config_receiver/extension.yaml
 
+ENV JIUWENSWARM_EDITION=enterprise
 RUN mkdir -p /home/app/.jiuwenswarm && printf 'yes\nzh\n' | jiuwenswarm-init
 
 EXPOSE 19000

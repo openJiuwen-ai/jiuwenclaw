@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import copy
 from types import SimpleNamespace
 
 import pytest
@@ -17,6 +18,11 @@ from jiuwenswarm.agents.harness.common.rails.stream_event_rail import (
 from jiuwenswarm.common.schema.agent import AgentRequest
 from jiuwenswarm.common.schema.message import ReqMethod
 from jiuwenswarm.server.runtime.agent_adapter.interface_deep import JiuWenSwarmDeepAdapter
+from jiuwenswarm.server.runtime.skill_turbo.permission_bridge import (
+    SKILL_TURBO_RESUME_CTX_KEY,
+    load_resume_ctx,
+    mark_resume_in_flight,
+)
 from jiuwenswarm.server.runtime.skill_turbo.skill_turbo_tools import (
     _SKILL_TURBO_HITL_PLACEHOLDER,
     _SKILL_TURBO_STOP_HINT,
@@ -81,9 +87,11 @@ def test_deep_agent_has_skill_turbo_interrupt():
 
 
 @pytest.mark.asyncio
-async def test_try_skill_turbo_resume_defers_when_outer_interrupt_present():
+async def test_try_skill_turbo_resume_defers_when_outer_interrupt_and_no_ctx(monkeypatch):
+    """Outer interrupt alone still defers when there is no SkillTurbo resume_ctx."""
     adapter = object.__new__(JiuWenSwarmDeepAdapter)
     adapter._instance = SimpleNamespace(
+        card=object(),
         _loop_session=SimpleNamespace(
             get_state=lambda _key: SimpleNamespace(
                 interrupted_tools={
@@ -92,7 +100,7 @@ async def test_try_skill_turbo_resume_defers_when_outer_interrupt_present():
                     )
                 }
             )
-        )
+        ),
     )
     request = AgentRequest(
         request_id="req-1",
@@ -102,9 +110,256 @@ async def test_try_skill_turbo_resume_defers_when_outer_interrupt_present():
         params={
             "answers": [{"question": "页数", "selected_options": ["10"]}],
             "source": "ask_user_interrupt",
+            "request_id": "skill_turbo-tc-ask_user-1",
         },
     )
+
+    class _Session:
+        async def post_run(self):
+            return None
+
+        def update_state(self, _state):
+            return None
+
+    monkeypatch.setattr(
+        "openjiuwen.core.session.agent.create_agent_session",
+        lambda **_kwargs: _Session(),
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.agent_adapter.interface_deep._skill_turbo_set_agent_id",
+        lambda *_a, **_k: None,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.agent_adapter.interface_deep._skill_turbo_load_resume_ctx",
+        lambda _session: _async_none(),
+    )
     assert await adapter._try_skill_turbo_resume(request, {}) is None
+
+
+async def _async_none():
+    return None
+
+
+async def _async_resume_ctx():
+    return {"pending_tool_call_id": "skill_turbo-tc-ask_user-1", "plan_code": "x"}
+
+
+@pytest.mark.asyncio
+async def test_try_skill_turbo_resume_continues_with_outer_interrupt_when_ctx(
+    monkeypatch,
+):
+    """Nested ask_user: resume_ctx present must not defer to DeepAgent."""
+    adapter = object.__new__(JiuWenSwarmDeepAdapter)
+    adapter._instance = SimpleNamespace(
+        card=object(),
+        _loop_session=SimpleNamespace(
+            get_state=lambda _key: SimpleNamespace(
+                interrupted_tools={
+                    "call_1": SimpleNamespace(
+                        tool_call=SimpleNamespace(name="skill_acceleration_exec")
+                    )
+                }
+            )
+        ),
+    )
+    sentinel = object()
+    adapter._make_skill_turbo_resume_stream = (
+        lambda **_kwargs: sentinel  # type: ignore[method-assign]
+    )
+    request = AgentRequest(
+        request_id="req-1",
+        channel_id="officeclaw",
+        session_id="sess-1",
+        req_method=ReqMethod.CHAT_SEND,
+        params={
+            "answers": [{"question": "页数", "selected_options": ["10"]}],
+            "source": "ask_user_interrupt",
+            "request_id": "skill_turbo-tc-ask_user-1",
+        },
+    )
+
+    class _Session:
+        async def post_run(self):
+            return None
+
+        def update_state(self, _state):
+            return None
+
+    monkeypatch.setattr(
+        "openjiuwen.core.session.agent.create_agent_session",
+        lambda **_kwargs: _Session(),
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.agent_adapter.interface_deep._skill_turbo_set_agent_id",
+        lambda *_a, **_k: None,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.agent_adapter.interface_deep._skill_turbo_load_resume_ctx",
+        lambda _session: _async_resume_ctx(),
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.agent_adapter.interface_deep._skill_turbo_mark_resume_in_flight",
+        lambda _session, _ctx: _async_none(),
+    )
+    assert await adapter._try_skill_turbo_resume(request, {}) is sentinel
+
+
+async def _async_in_flight_resume_ctx():
+    return {
+        "pending_tool_call_id": "skill_turbo-tc-ask_user-1",
+        "plan_code": "x",
+        "resume_in_flight": True,
+    }
+
+
+@pytest.mark.asyncio
+async def test_try_skill_turbo_resume_ignores_duplicate_while_in_flight(monkeypatch):
+    """Second answer submit while resume is running must not start another stream."""
+    adapter = object.__new__(JiuWenSwarmDeepAdapter)
+    adapter._instance = SimpleNamespace(card=object(), _loop_session=None)
+    called = {"resume_stream": False}
+
+    def _should_not_run(**_kwargs):
+        called["resume_stream"] = True
+        raise AssertionError("duplicate resume must not start resume_stream")
+
+    adapter._make_skill_turbo_resume_stream = _should_not_run  # type: ignore[method-assign]
+    request = AgentRequest(
+        request_id="req-dup",
+        channel_id="officeclaw",
+        session_id="sess-1",
+        req_method=ReqMethod.CHAT_SEND,
+        params={
+            "answers": [{"question": "页数", "selected_options": ["10"]}],
+            "source": "ask_user_interrupt",
+            "request_id": "skill_turbo-tc-ask_user-1",
+        },
+    )
+
+    class _Session:
+        async def post_run(self):
+            return None
+
+        def update_state(self, _state):
+            return None
+
+    monkeypatch.setattr(
+        "openjiuwen.core.session.agent.create_agent_session",
+        lambda **_kwargs: _Session(),
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.agent_adapter.interface_deep._skill_turbo_set_agent_id",
+        lambda *_a, **_k: None,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.agent_adapter.interface_deep._skill_turbo_load_resume_ctx",
+        lambda _session: _async_in_flight_resume_ctx(),
+    )
+    stream = await adapter._try_skill_turbo_resume(request, {})
+    assert stream is not None
+    chunks = [chunk async for chunk in stream]
+    assert len(chunks) == 1
+    assert chunks[0].is_complete is True
+    assert chunks[0].payload is None
+    assert called["resume_stream"] is False
+
+
+@pytest.mark.asyncio
+async def test_mark_resume_in_flight_persists_across_sessions():
+    """in-flight flag must survive post_run so a second session load sees it."""
+    checkpoint: dict = {}
+
+    class _CheckpointSession:
+        def __init__(self):
+            self._state: dict = {}
+
+        async def pre_run(self, inputs=None):
+            self._state = copy.deepcopy(checkpoint)
+
+        async def post_run(self):
+            checkpoint.clear()
+            checkpoint.update(copy.deepcopy(self._state))
+
+        def update_state(self, mapping):
+            self._state.update(mapping)
+
+        def get_state(self, key):
+            return self._state.get(key)
+
+    ctx = {
+        "plan_code": "plan-x",
+        "pending_tool_call_id": "skill_turbo-tc-ask_user-1",
+        "inputs": {},
+    }
+    writer = _CheckpointSession()
+    await writer.pre_run()
+    writer.update_state({SKILL_TURBO_RESUME_CTX_KEY: ctx})
+    await writer.post_run()
+
+    marker = _CheckpointSession()
+    loaded = await load_resume_ctx(marker)
+    assert loaded is not None
+    assert loaded.get("resume_in_flight") is not True
+    await mark_resume_in_flight(marker, loaded)
+
+    reader = _CheckpointSession()
+    again = await load_resume_ctx(reader)
+    assert again is not None
+    assert again.get("resume_in_flight") is True
+    assert again.get("pending_tool_call_id") == "skill_turbo-tc-ask_user-1"
+
+
+@pytest.mark.asyncio
+async def test_emit_skill_turbo_hitl_keeps_pending_tool_call_request_id(monkeypatch):
+    """HITL card request_id must stay skill_turbo-tc-* (not HTTP request id)."""
+    pending_tcid = "skill_turbo-tc-ask_user-9"
+    http_rid = "http-req-abc"
+    tool_call = SimpleNamespace(
+        id=pending_tcid,
+        name="ask_user",
+        arguments={"questions": [{"question": "页数"}]},
+    )
+    tic = SimpleNamespace(tool_call=tool_call, request=SimpleNamespace())
+
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.agent_adapter.interface_deep._skill_turbo_extract_tool_interrupt",
+        lambda _exc: tic,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.agent_adapter.interface_deep._skill_turbo_build_interaction_output",
+        lambda _exc: SimpleNamespace(payload={"id": pending_tcid}),
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.agent_adapter.interface_deep.convert_interactions_to_ask_user_question",
+        lambda _items: {
+            "event_type": "chat.ask_user_question",
+            "request_id": pending_tcid,
+            "questions": [{"question": "页数"}],
+            "source": "ask_user_interrupt",
+        },
+    )
+
+    request = AgentRequest(
+        request_id=http_rid,
+        channel_id="officeclaw",
+        session_id="sess-1",
+        req_method=ReqMethod.CHAT_SEND,
+        params={},
+    )
+    chunks = [
+        chunk
+        async for chunk in JiuWenSwarmDeepAdapter._emit_skill_turbo_hitl_chunks(
+            request, RuntimeError("abort")
+        )
+    ]
+    ask = next(
+        c
+        for c in chunks
+        if isinstance(c.payload, dict)
+        and c.payload.get("event_type") == "chat.ask_user_question"
+    )
+    assert ask.payload["request_id"] == pending_tcid
+    assert ask.request_id == http_rid
 
 
 def test_resume_user_input_from_interactive_input():

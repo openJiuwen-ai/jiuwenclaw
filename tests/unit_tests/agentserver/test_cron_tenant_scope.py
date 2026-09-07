@@ -9,13 +9,16 @@ from jiuwenswarm.agents.harness.common.tools.cron.cron_tools import (
     resolve_cron_jobs_path,
 )
 from jiuwenswarm.server.runtime.cron_local_runtime import AgentCronRegistry
-from tests.unit_tests.tenant_workspace_test_helpers import (
-    patch_multi_tenant_workspace_dirs,
-)
 
 
 def test_resolve_cron_jobs_path_isolates_tenants(tmp_path, monkeypatch):
-    patch_multi_tenant_workspace_dirs(monkeypatch, tmp_path)
+    # 多租户分桶是企业版语义；个人版固定 service_default/agent_default。
+    # cron_tools 模块级 import 绑定了 get_multi_tenant_user_workspace_dir，
+    # 需 patch utils 内的 is_enterprise/get_user_workspace_dir 让旧函数对象走分桶。
+    monkeypatch.setattr("jiuwenswarm.common.utils.is_enterprise", lambda: True)
+    monkeypatch.setattr(
+        "jiuwenswarm.common.utils.get_user_workspace_dir", lambda: tmp_path
+    )
     office = resolve_cron_jobs_path("default", "office", workspace_key="office")
     default = resolve_cron_jobs_path("default", "default", workspace_key="default")
     assert office != default
@@ -25,7 +28,10 @@ def test_resolve_cron_jobs_path_isolates_tenants(tmp_path, monkeypatch):
 
 
 def test_cron_tools_store_path_follows_tenant(tmp_path, monkeypatch):
-    patch_multi_tenant_workspace_dirs(monkeypatch, tmp_path)
+    monkeypatch.setattr("jiuwenswarm.common.utils.is_enterprise", lambda: True)
+    monkeypatch.setattr(
+        "jiuwenswarm.common.utils.get_user_workspace_dir", lambda: tmp_path
+    )
     AgentCronRegistry.reset_for_tests()
     tools = CronTools(service_id="svc", agent_id="office", workspace_key="office")
     assert "workspace_office" in str(tools._local_store.path)

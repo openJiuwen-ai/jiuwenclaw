@@ -173,6 +173,73 @@ def test_same_round_streamed_answer_still_empty_final() -> None:
     assert parsed == {"event_type": "chat.final", "content": ""}
 
 
+def test_hitl_suppress_noise_keeps_flags() -> None:
+    """Pause-tail metadata must not clear suppress.
+
+    ``__interaction__`` is not noise: it is the ask_user card source after the
+    forced-emit revert and must be forwarded.
+    """
+    for chunk_type in (
+        "llm_usage",
+        "context.usage",
+        "controller_output",
+    ):
+        assert JiuWenSwarmDeepAdapter._is_hitl_suppress_noise_chunk(
+            SimpleNamespace(type=chunk_type, payload={})
+        )
+    assert not JiuWenSwarmDeepAdapter._is_hitl_suppress_noise_chunk(
+        SimpleNamespace(type="__interaction__", payload={})
+    )
+
+
+def test_hitl_suppress_task_failed_not_noise() -> None:
+    """controller_output.task_failed must clear suppress and surface chat.error."""
+    chunk = SimpleNamespace(
+        type="controller_output",
+        payload=SimpleNamespace(type="task_failed", data=[]),
+    )
+    assert not JiuWenSwarmDeepAdapter._is_hitl_suppress_noise_chunk(chunk)
+
+
+def test_hitl_suppress_dict_task_failed_not_noise() -> None:
+    """dict payload task_failed must also clear suppress (align stream_utils)."""
+    chunk = SimpleNamespace(
+        type="controller_output",
+        payload={"type": "task_failed", "data": [{"text": "model failed"}]},
+    )
+    assert not JiuWenSwarmDeepAdapter._is_hitl_suppress_noise_chunk(chunk)
+    assert JiuWenSwarmDeepAdapter._run_failure(chunk) == (
+        "task_failed",
+        "model failed",
+    )
+    parsed = JiuWenSwarmDeepAdapter._parse_stream_chunk(chunk)
+    assert parsed == {"event_type": "chat.error", "error": "model failed"}
+
+
+def test_hitl_suppress_cleared_on_resume_or_unknown_chunk() -> None:
+    """Content and unknown SDK frames clear suppress (default = resumed)."""
+    for chunk_type in ("llm_output", "answer", "chat.file", "task.start", "tool_call"):
+        assert not JiuWenSwarmDeepAdapter._is_hitl_suppress_noise_chunk(
+            SimpleNamespace(type=chunk_type, payload={})
+        )
+    assert not JiuWenSwarmDeepAdapter._is_hitl_suppress_noise_chunk(
+        SimpleNamespace(payload={})
+    )
+
+
+def test_is_ask_user_payload_detects_ask_user() -> None:
+    assert JiuWenSwarmDeepAdapter._is_ask_user_payload(
+        {"event_type": "chat.ask_user_question", "questions": []}
+    )
+
+
+def test_is_ask_user_payload_rejects_non_ask_user() -> None:
+    assert not JiuWenSwarmDeepAdapter._is_ask_user_payload(
+        {"event_type": "chat.delta", "content": "hi"}
+    )
+    assert not JiuWenSwarmDeepAdapter._is_ask_user_payload(None)
+
+
 def test_streamed_flag_without_visible_text_keeps_final_for_drain() -> None:
     answer = "以下是完成情况概要"
     parsed = JiuWenSwarmDeepAdapter._parse_stream_chunk(

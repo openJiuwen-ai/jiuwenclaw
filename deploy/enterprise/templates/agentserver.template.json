@@ -64,13 +64,13 @@
             "mountPath": "/usr/local/lib/python3.11/site-packages/openjiuwen"
           },
           {
-            "name": "gw-envfile",
-            "mountPath": "/root/.jiuwenswarm/config/.env",
-            "subPath": ".env"
-          },
-          {
             "name": "data",
             "mountPath": "<<AGENT_SERVER_HOME>>/.jiuwenswarm"
+          },
+          {
+            "name": "agentserver-config",
+            "mountPath": "/root/.jiuwenswarm/config/config.yaml",
+            "subPath": "config.yaml"
           }
         ]
       },
@@ -91,7 +91,7 @@
           },
           {
             "name": "JIUWENBOX_POLICY_PATH",
-            "value": "/usr/local/lib/python3.11/site-packages/jiuwenbox/configs/enterprise-policy.yaml"
+            "value": "<<JIUWENBOX_POD_PKG_PATH>>/configs/enterprise-policy.yaml"
           },
           {
             "name": "TZ",
@@ -184,15 +184,15 @@
             }
           },
           {
-            "name": "gw-envfile",
-            "configMap": {
-              "name": "<<GATEWAY_ENV_FILE_CM_NAME>>"
-            }
-          },
-          {
             "name": "data",
             "persistentVolumeClaim": {
               "claimName": "<<CLAW_PVC>>"
+            }
+          },
+          {
+            "name": "agentserver-config",
+            "configMap": {
+              "name": "<<GATEWAY_CONFIG_MAP_NAME>>"
             }
           },
           {

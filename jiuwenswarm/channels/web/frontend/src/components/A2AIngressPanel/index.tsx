@@ -3,6 +3,7 @@ import { useTranslation } from 'react-i18next';
 import { Check, Copy, Power, RefreshCw, RotateCw, X } from 'lucide-react';
 import type { WebError } from '../../types/websocket';
 import { A2AOutboundPanel } from './A2AOutboundPanel';
+import { A2AIngressSecurityFields } from './A2AIngressSecurityFields';
 import {
   canOperateA2AIngress,
   draftFromA2AIngressSnapshot,
@@ -49,7 +50,7 @@ export function A2AIngressPanel({ isConnected, request }: A2AIngressPanelProps) 
   const [snapshot, setSnapshot] = useState<A2AIngressSnapshot | null>(null);
   const [draft, setDraft] = useState<A2AIngressDraft | null>(null);
   const [loading, setLoading] = useState(false);
-  const [operation, setOperation] = useState<'save' | 'apply' | 'enable' | 'disable' | 'reload' | null>(null);
+  const [operation, setOperation] = useState<'save' | 'enable' | 'disable' | 'reload' | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [isDirty, setIsDirty] = useState(false);
@@ -64,16 +65,19 @@ export function A2AIngressPanel({ isConnected, request }: A2AIngressPanelProps) 
   const [copyError, setCopyError] = useState<string | null>(null);
   const [outboundHeaderActionsContainer, setOutboundHeaderActionsContainer] = useState<HTMLDivElement | null>(null);
   const responseGenerationRef = useRef(0);
+  const savedCredentialRef = useRef('');
   const historyResponseGenerationRef = useRef(0);
   const outboundHistoryResponseGenerationRef = useRef(0);
   const copyFeedbackTimerRef = useRef<number | null>(null);
 
   const acceptSnapshot = useCallback(
-    (payload: unknown) => {
+    (payload: unknown, credential?: string) => {
       const next = normalizeA2AIngressSnapshot(payload);
       if (!next) throw new Error(t('a2aIngress.errors.invalidResponse'));
+      if (credential !== undefined) savedCredentialRef.current = credential;
+      else if (!next.credential_configured) savedCredentialRef.current = '';
       setSnapshot(next);
-      setDraft(draftFromA2AIngressSnapshot(next));
+      setDraft(draftFromA2AIngressSnapshot(next, savedCredentialRef.current));
       setIsDirty(false);
       return next;
     },
@@ -86,9 +90,10 @@ export function A2AIngressPanel({ isConnected, request }: A2AIngressPanelProps) 
       const responseGeneration = ++responseGenerationRef.current;
       if (showLoading) setLoading(true);
       try {
-        const payload = await request('a2a.ingress.get');
+        const payload = await request<Record<string, unknown>>(showLoading ? 'a2a.ingress.edit' : 'a2a.ingress.get');
         if (!shouldAcceptA2AIngressResponse(responseGeneration, responseGenerationRef.current)) return;
-        acceptSnapshot(payload);
+        if (showLoading && typeof payload.credential !== 'string') throw new Error(t('a2aIngress.errors.invalidResponse'));
+        acceptSnapshot(payload, showLoading ? (payload.credential as string) : undefined);
         setError(null);
       } catch (refreshError) {
         if (!shouldAcceptA2AIngressResponse(responseGeneration, responseGenerationRef.current)) return;
@@ -104,10 +109,10 @@ export function A2AIngressPanel({ isConnected, request }: A2AIngressPanelProps) 
     void refresh();
   }, [refresh]);
   useEffect(() => {
-    if (!isA2AIngressTransitioning(snapshot?.state)) return;
+    if (loading || operation || isDirty || !isA2AIngressTransitioning(snapshot?.state)) return;
     const timer = window.setInterval(() => void refresh(false), 1200);
     return () => window.clearInterval(timer);
-  }, [refresh, snapshot?.state]);
+  }, [refresh, snapshot?.state, loading, operation, isDirty]);
 
   const refreshHistory = useCallback(
     async (showLoading = true) => {
@@ -189,20 +194,29 @@ export function A2AIngressPanel({ isConnected, request }: A2AIngressPanelProps) 
     setNotice(null);
   };
 
-  const save = async (apply: boolean) => {
+  const cancelEdit = () => {
+    if (!snapshot) return;
+    setDraft(draftFromA2AIngressSnapshot(snapshot, savedCredentialRef.current));
+    setIsDirty(false);
+    setError(null);
+    setNotice(null);
+  };
+
+  const save = async () => {
     if (!draft || operation || !isConnected) return;
     const invalidField = validateA2AIngressDraft(draft);
     if (invalidField) {
       setError(t('a2aIngress.errors.invalidField', { field: t(`a2aIngress.fields.${invalidField}`) }));
       return;
     }
-    setOperation(apply ? 'apply' : 'save');
+    setOperation('save');
     responseGenerationRef.current += 1;
     setLoading(false);
     setError(null);
     try {
-      acceptSnapshot(await request('a2a.ingress.update', { config: toA2AIngressPatch(draft), apply }));
-      setNotice(t(apply ? 'a2aIngress.savedAndApplied' : 'a2aIngress.saved'));
+      const savedCredential = draft.clear_credential ? '' : draft.credential || savedCredentialRef.current;
+      acceptSnapshot(await request('a2a.ingress.update', { config: toA2AIngressPatch(draft), apply: true }), savedCredential);
+      setNotice(t('a2aIngress.saved'));
     } catch (saveError) {
       const failedSnapshot = normalizeA2AIngressSnapshot((saveError as WebError).payload);
       if (failedSnapshot) acceptSnapshot(failedSnapshot);
@@ -353,6 +367,18 @@ export function A2AIngressPanel({ isConnected, request }: A2AIngressPanelProps) 
                   {snapshot.last_error}
                 </Alert>
               )}
+              {snapshot && (
+                <p className="mt-4 text-xs text-text-muted">
+                  {t('a2aIngress.security.effective', {
+                    method: snapshot.effective_auth_type ? t(`a2aIngress.security.types.${snapshot.effective_auth_type}`) : t('a2aIngress.status.notListening'),
+                  })}
+                </p>
+              )}
+              {snapshot?.security_pending_apply && (
+                <Alert tone="warn" className="mt-3">
+                  {t('a2aIngress.security.pendingApply')}
+                </Alert>
+              )}
               {snapshot?.exposure_warning && (
                 <Alert tone="warn" className="mt-4">
                   {snapshot.exposure_warning}
@@ -367,11 +393,11 @@ export function A2AIngressPanel({ isConnected, request }: A2AIngressPanelProps) 
                     <p className="mt-1 text-xs text-text-muted">{t('a2aIngress.config.description')}</p>
                   </div>
                   <div className="flex gap-2">
-                    <button type="button" className="btn secondary" onClick={() => void save(false)} disabled={!isConnected || busy}>
-                      {operation === 'save' ? t('common.saving') : t('a2aIngress.save')}
+                    <button type="button" className="btn secondary" onClick={cancelEdit} disabled={!isDirty || busy}>
+                      {t('common.cancel')}
                     </button>
-                    <button type="button" className="btn primary" onClick={() => void save(true)} disabled={!isConnected || busy}>
-                      {operation === 'apply' ? t('a2aIngress.applying') : t('a2aIngress.saveAndApply')}
+                    <button type="button" className="btn primary" onClick={() => void save()} disabled={!isConnected || busy}>
+                      {operation === 'save' ? t('common.saving') : t('a2aIngress.save')}
                     </button>
                   </div>
                 </div>
@@ -431,17 +457,8 @@ export function A2AIngressPanel({ isConnected, request }: A2AIngressPanelProps) 
                       disabled={busy}
                     />
                   </label>
-                  <label className="flex items-center gap-3 rounded-lg border border-border bg-bg px-3 py-3 md:col-span-2">
-                    <input
-                      type="checkbox"
-                      checked={draft.expose_reasoning}
-                      onChange={event => updateDraft('expose_reasoning', event.target.checked)}
-                      disabled={busy}
-                      className="h-4 w-4 accent-[var(--color-accent)]"
-                    />
-                    <span className="text-sm text-text">{t('a2aIngress.fields.expose_reasoning')}</span>
-                  </label>
                 </div>
+                <A2AIngressSecurityFields draft={draft} disabled={busy} onChange={updateDraft} />
               </section>
             )}
           </div>

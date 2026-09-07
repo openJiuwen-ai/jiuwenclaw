@@ -10,14 +10,6 @@ gen_gateway_env_file() {
 
     render_config_template "${env_template_file}" "${env_file}" "DEPLOY_VARS"
 
-    echo "CLAW_MOUNT_TYPE=${DEPLOY_VARS["CLAW_MOUNT_TYPE"]}" >> "${env_file}"
-    if [ "${DEPLOY_VARS["CLAW_MOUNT_TYPE"]}" == "nfs" ]; then
-        echo "CLAW_NFS_SERVER=${DEPLOY_VARS["NFS_SERVER_ADDR"]}" >> "${env_file}"
-        echo "CLAW_NFS_PATH=${DEPLOY_VARS["NFS_SHARE_PATH"]}/jiuwenclaw" >> "${env_file}"
-    else
-        echo "CLAW_PVC=${DEPLOY_VARS["CLAW_PVC"]}" >> "${env_file}"
-    fi
-
     # 移除所有注释行、过滤空值行 KEY=、按变量名排序
     # 注意：不能 sort > 同一个文件，shell 会在管道启动前就截断输出文件，
     # 导致左侧 grep 读到空。先写临时文件再 mv 覆盖。
@@ -27,7 +19,7 @@ gen_gateway_env_file() {
         | sort > "${env_file}.tmp" && mv -f "${env_file}.tmp" "${env_file}"
 
     kubectl create configmap -n "${namespace}" "${envfile_name}" \
-        --from-file=.env="${env_file}" \
+        --from-env-file="${env_file}" \
         --dry-run=client -o yaml \
         | yq eval 'del(.metadata.creationTimestamp)' > "${yaml_file}"
 }
@@ -76,11 +68,6 @@ gen_gateway_file() {
     local template_file="${CONFIG["GATEWAY_TEMPLATE_FILE"]}"
     local file="${CONFIG["GATEWAY_FILE"]}"
     local enable_gw_lable="${DEPLOY_VARS["GATEWAY_SCHED_LABEL_ENABLED"]}"
-
-    # 内置 MinIO 时 .env 的 OBS_URL 可能为空；模板占位符需要可达 endpoint
-    if [ -z "${DEPLOY_VARS["OBS_URL"]:-}" ] || [ "${DEPLOY_VARS["ENABLE_EXTERNAL_OBS"]}" != "true" ]; then
-        DEPLOY_VARS["OBS_URL"]="${DEPLOY_VARS["MINIO_NAME"]}-headless.default:9000"
-    fi
 
     render_config_template "${template_file}" "${file}" "DEPLOY_VARS"
     enable_dev_mode_if_needed "${file}" gateway
@@ -155,30 +142,17 @@ deploy_gateway() {
 }
 
 uninstall_gateway() {
-    local namespace="${DEPLOY_VARS["NAMESPACE"]}"
-    local gateway_name="${DEPLOY_VARS["GATEWAY_NAME"]}"
     local gateway_file="${CONFIG["GATEWAY_FILE"]}"
     local mount_type="${DEPLOY_VARS["CLAW_MOUNT_TYPE"]}"
     local pvc_file="${CONFIG["CLAW_PVC_FILE"]}"
-
     local env_yaml_file="${CONFIG["GATEWAY_ENV_YAML_FILE"]}"
     local conf_yaml_file="${CONFIG["GATEWAY_CONFIG_YAML_FILE"]}"
 
-    # 先优雅停 Pod，再清理周边资源
-    # gateway.yaml 含 ServiceAccount / Role / Deployment 等同文件资源。
-    # 不可 kubectl delete -f 一次性删掉：SA 被删后 Pod 仍在 Terminating 窗口内，
-    # in-cluster token 立即失效 → Gateway shutdown 删 Agent Pod 会 401。
-    info "Deleting Gateway Deployment first (keep ServiceAccount for graceful shutdown)"
-    exec_cmd kubectl delete deployment "${gateway_name}" -n "${namespace}" --ignore-not-found=true
-    wait_pod_terminated "${gateway_name}" "${namespace}"
-
-    info "Deleting remaining Gateway resources (ServiceAccount, Role, Service, ...)"
     exec_cmd kubectl delete -f "${gateway_file}" --ignore-not-found=true
     exec_cmd kubectl delete -f "${env_yaml_file}" --ignore-not-found=true
     exec_cmd kubectl delete -f "${conf_yaml_file}" --ignore-not-found=true
 
-    # down 不经过 check_if_nfs_sc_up，ENABLE_EXTERNAL_PVC 仍为默认 false；
-    # 与 0.0.9 一致：仅在内置 PVC（.env 未指定 CLAW_PVC）时删 claw-pvc.yaml。
+    # 仅在内置 PVC时删
     if [[ "${mount_type}" == "pvc" && -z "${DEPLOY_VARS["CLAW_PVC"]:-}" && -f "${pvc_file}" ]]; then
         exec_cmd kubectl delete -f "${pvc_file}" --ignore-not-found=true
     fi

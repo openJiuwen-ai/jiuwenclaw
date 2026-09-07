@@ -13,8 +13,8 @@ from jiuwenswarm.server.runtime.reload_result import (
     log_agent_config_hot_reload,
     log_reload_config_changes,
 )
+from jiuwenswarm.edition import is_enterprise
 from jiuwenswarm.common.local_env_config import (
-    is_enterprise,
     EnvNsIdError,
     apply_env_removals,
     apply_process_baseline_gaps,

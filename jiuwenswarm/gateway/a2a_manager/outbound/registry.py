@@ -205,6 +205,14 @@ class A2AOutboundRegistry:
     async def get_agent(self, agent_id: str) -> dict[str, Any]:
         return (await self._require_agent(agent_id)).public_dict()
 
+    async def edit_agent(self, agent_id: str) -> dict[str, Any]:
+        """Read the credential only for an explicit management editing request."""
+        async with self._agent_operation_locks.hold(agent_id):
+            agent = await self._require_agent(agent_id)
+            result = agent.public_dict()
+            result["credential"] = self._credentials.get(agent.credential_ref)
+            return result
+
     async def update_agent(
         self, agent_id: str, params: Mapping[str, Any]
     ) -> dict[str, Any]:

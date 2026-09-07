@@ -1572,14 +1572,20 @@ def _resolve_legacy_work_mode(
 def get_all_sessions_metadata(
     limit: int = 20,
     offset: int = 0,
+    sessions_root: str | Path | None = None,
 ) -> tuple[list[dict[str, Any]], int]:
     """
     获取所有会话的元数据。
 
+    Args:
+        limit: 分页大小。
+        offset: 分页偏移。
+        sessions_root: 显式会话目录；缺省时按当前绑定租户（个人版 / 默认）解析。
+
     Returns:
         (sessions, total): 当前页的会话列表 和 会话总数
     """
-    sessions_dir = get_agent_sessions_dir()
+    sessions_dir = Path(sessions_root) if sessions_root else get_agent_sessions_dir()
     if not sessions_dir.exists() or not sessions_dir.is_dir():
         return [], 0
 
@@ -1593,7 +1599,7 @@ def get_all_sessions_metadata(
         session_id = session_dir.name
         if session_id.startswith(_HEARTBEAT_SESSION_PREFIX):
             continue
-        metadata = _read_metadata(session_id)
+        metadata = _read_metadata(session_id, sessions_root=sessions_root)
 
         if not metadata:
             # 没有 metadata.json 的旧会话: 只构造最小信息,不读取 history.json

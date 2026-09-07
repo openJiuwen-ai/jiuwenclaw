@@ -146,6 +146,9 @@ def _card(
 
 
 class _DiscoverySequence:
+    def set_allow_loopback_http(self, enabled: bool) -> None:
+        self.allow_loopback_http = enabled
+
     def __init__(self, *cards: DiscoveredCard) -> None:
         self.cards = list(cards)
 
@@ -362,12 +365,68 @@ async def test_credential_update_and_clear_are_persisted_together() -> None:
     assert persisted is not None
     assert updated["has_credential"] is True
     assert secrets.values[persisted.credential_ref] == "new-secret"
+    assert "credential" not in await registry.get_agent(created["agent_id"])
+    assert (await registry.edit_agent(created["agent_id"]))[
+        "credential"
+    ] == "new-secret"
+    assert "credential" not in (await registry.list_agents())["items"][0]
 
     cleared = await registry.update_agent(
         created["agent_id"], {"clear_credential": True}
     )
     assert cleared["has_credential"] is False
     assert secrets.values == {}
+    assert (await registry.edit_agent(created["agent_id"]))["credential"] == ""
+
+
+@pytest.mark.asyncio
+async def test_http_get_and_error_snapshots_never_include_saved_credentials():
+    from jiuwenswarm.gateway.a2a_manager import A2AIngressConfig, A2AManager
+    from jiuwenswarm.gateway.channel_manager.base import RobotMessageRouter
+    from jiuwenswarm.gateway.channel_manager.web.app_web_handlers import (
+        WebHandlersBindParams,
+        _register_web_handlers,
+    )
+    from jiuwenswarm.gateway.channel_manager.web.web_connect import (
+        WebChannel,
+        WebChannelConfig,
+    )
+    from jiuwenswarm.gateway.channel_manager.web.web_http_app import create_web_http_app
+
+    secret = "test-http-secret-must-stay-private"
+    registry, _, _ = _registry(_card())
+    preview = await registry.discover("https://agent.example.com")
+    agent = await registry.register(
+        {"discovery_id": preview["discovery_id"], "credential": secret}
+    )
+    manager = A2AManager(
+        object(),
+        object(),
+        A2AIngressConfig().with_patch({"auth_type": "bearer", "credential": secret}),
+        outbound_registry=registry,
+    )
+    channel = WebChannel(
+        WebChannelConfig(host="127.0.0.1", port=0), RobotMessageRouter()
+    )
+    _register_web_handlers(WebHandlersBindParams(channel=channel, a2a_manager=manager))
+    transport = httpx.ASGITransport(app=create_web_http_app(channel))
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as http:
+        for path in [
+            "/a2a/ingress",
+            "/a2a/outbound/agents",
+            f"/a2a/outbound/agents/{agent['agent_id']}",
+        ]:
+            response = await http.get(f"/api/v1{path}")
+            assert response.status_code == 200
+            assert secret not in response.text
+            assert '"credential"' not in response.text
+            assert '"desired_credential"' not in response.text
+        failed = await http.patch(
+            "/api/v1/a2a/ingress", json={"config": {"rpc_path": "invalid"}}
+        )
+        assert failed.json()["ok"] is False
+        assert secret not in failed.text
+        assert '"credential"' not in failed.text
 
 
 @pytest.mark.asyncio

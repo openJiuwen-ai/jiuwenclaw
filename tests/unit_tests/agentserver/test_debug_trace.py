@@ -440,16 +440,12 @@ class TestTruncationAndRedaction:
         assert _looks_secret("password")
         assert _looks_secret("set-cookie")
 
-    def test_tool_args_secret_masked_even_when_shown(self, tmp_path, monkeypatch):
+    def test_tool_args_secret_masked_even_when_shown(self, tmp_path):
         # include_tool_args=True: arguments are SHOWN, yet secret values are
         # still masked as ***. Arguments are fed as a JSON STRING — the real
         # shape LLM tool-calls deliver — so this guards the parse-then-mask path
         # (without it, _mask_secrets would skip the string and leak the secret).
-        # 附指纹（与 SensitiveDataFilter / masked_with_fp 一致）。
-        monkeypatch.setattr(
-            "jiuwenswarm.common.local_env_config.is_enterprise",
-            lambda: False,
-        )
+        # 附指纹（与 SensitiveDataFilter / masked_with_fp 一致；脱敏与版本无关）。
         s = debug_config.DebugTraceSettings(
             mode="code.normal",
             enabled=True,
@@ -495,15 +491,11 @@ class TestTruncationAndRedaction:
         # plural token count must not be mis-masked
         assert '"tokens_used": 42' in out
 
-    def test_nested_secrets_masked_and_original_unchanged(self, tmp_path, monkeypatch):
+    def test_nested_secrets_masked_and_original_unchanged(self, tmp_path):
         # Secrets buried deep in nested dict/list must still be masked, AND the
         # masking must not mutate the original payload (the live chunk is shared
         # with the agent pipeline / real tool execution — mutating it would
         # corrupt the run). Dict shape is used so non-mutation is observable.
-        monkeypatch.setattr(
-            "jiuwenswarm.common.local_env_config.is_enterprise",
-            lambda: False,
-        )
         import copy
         s = debug_config.DebugTraceSettings(
             mode="code.normal",
