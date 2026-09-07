@@ -195,10 +195,6 @@ def test_design_mode_static_section_priorities_are_explicitly_ordered():
     ordered = [
         DesignPromptPriority.INTRO,
         DesignPromptPriority.SYSTEM,
-        DesignPromptPriority.ROLE,
-        DesignPromptPriority.PRODUCT_FUNDAMENTALS,
-        DesignPromptPriority.BOUNDARIES,
-        DesignPromptPriority.INTERACTION_PRINCIPLES,
         DesignPromptPriority.CORE_CAPABILITIES,
     ]
 
