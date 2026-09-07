@@ -3180,6 +3180,7 @@
       "datasetLabel": "评测集文件",
       "datasetPlaceholder": "请选择本地评测集 JSON 文件",
       "datasetTip": "请选择单个评测 JSON 文件（如 suites/train_suite.json）",
+      "datasetFieldTipTitle": "评测集字段格式",
       "browse": "浏览",
       "maxIterationsLabel": "最大迭代轮次",
       "searchWidthLabel": "最大搜索宽度",

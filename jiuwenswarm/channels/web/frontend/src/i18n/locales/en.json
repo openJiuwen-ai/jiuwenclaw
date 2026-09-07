@@ -3202,6 +3202,7 @@
       "datasetLabel": "Evaluation dataset file",
       "datasetPlaceholder": "Select a local evaluation dataset JSON file",
       "datasetTip": "Select one JSON file (for example, suites/train_suite.json).",
+      "datasetFieldTipTitle": "Dataset field format",
       "browse": "Browse",
       "maxIterationsLabel": "Max iterations",
       "searchWidthLabel": "Max search width",
