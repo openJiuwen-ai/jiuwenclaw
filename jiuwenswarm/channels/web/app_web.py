@@ -1693,6 +1693,9 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
             self.wfile.write(raw)
 
     def _handle_file_api_post(self, parsed) -> None:
+        if parsed.path == "/file-api/skills/upload-temp":
+            self._handle_skills_upload_temp()
+            return
         if parsed.path == "/file-api/skills/import":
             self._handle_skills_import_upload()
             return
@@ -1784,6 +1787,17 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
     def _read_request_body(self) -> bytes:
         length = int(self.headers.get("Content-Length", "0") or "0")
         return self.rfile.read(length) if length > 0 else b""
+
+    def _handle_skills_upload_temp(self) -> None:
+        from jiuwenswarm.server.runtime.skill.skills_multipart_http import (
+            handle_skills_upload_temp_http,
+        )
+
+        status, payload = handle_skills_upload_temp_http(
+            content_type=self.headers.get("Content-Type", ""),
+            body=self._read_request_body(),
+        )
+        self._write_json(status, payload)
 
     def _handle_skills_import_upload(self) -> None:
         try:
