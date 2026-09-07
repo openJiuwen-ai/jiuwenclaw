@@ -2463,14 +2463,14 @@ class TaskExecutionRail(DeepAgentRail):
         score = 0
         content = self._normalize_todo_match_text(task.get("content", ""))
         display = self._normalize_todo_match_text(display_name)
-        if display and content and (
-            content in display or display in content
-        ):
+        matched_content = False
+        if display and content:
+            matched_content = content in display or display in content
+        if matched_content:
             score += 100
-        elif display and len(display) >= 4 and (
-            display in todo_text or todo_text in display
-        ):
-            score += 80
+        elif display and len(display) >= 4:
+            if display in todo_text or todo_text in display:
+                score += 80
         skill = self._normalize_todo_match_text(skill_name)
         if skill and len(skill) >= 3 and skill in todo_text:
             score += 50
