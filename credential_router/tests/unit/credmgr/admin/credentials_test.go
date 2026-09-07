@@ -1158,3 +1158,51 @@ func TestListResponseNoID(t *testing.T) {
 		t.Error("list item contains an id field; want none")
 	}
 }
+
+// Security invariant: plaintext api_key is only returned by single GET,
+// not by Create or List. The list response struct (credentialListItem)
+// has no APIKey field; Create passes "" + relies on omitempty.
+func TestCreateCredentialResponseOmitsAPIKey(t *testing.T) {
+	h := newAdminHarness(t)
+	defer h.cleanup()
+	rec := h.do(t, "POST", "/v1/credentials", map[string]string{
+		"user_id": "u1", "api_base": "https://api.example.com", "key_tag": "default",
+		"api_key": "sk-supersecret", "auth_type": "openai",
+	})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var raw map[string]json.RawMessage
+	decodeEnvelope(t, rec.Body.Bytes(), &raw)
+	if _, ok := raw["api_key"]; ok {
+		t.Errorf("create response leaks api_key; want omitted (omitempty): body=%s", rec.Body.String())
+	}
+}
+
+func TestListCredentialsOmitsAPIKey(t *testing.T) {
+	h := newAdminHarness(t)
+	defer h.cleanup()
+	createRec := h.do(t, "POST", "/v1/credentials", map[string]string{
+		"user_id": "u1", "api_base": "https://api.example.com", "key_tag": "default",
+		"api_key": "sk-supersecret", "auth_type": "openai",
+	})
+	if createRec.Code != http.StatusCreated {
+		t.Fatalf("create: status=%d body=%s", createRec.Code, createRec.Body.String())
+	}
+	listRec := h.do(t, "GET", "/v1/credentials?limit=10", nil)
+	if listRec.Code != http.StatusOK {
+		t.Fatalf("list: status=%d body=%s", listRec.Code, listRec.Body.String())
+	}
+	var list struct {
+		Items []map[string]json.RawMessage `json:"items"`
+	}
+	decodeEnvelope(t, listRec.Body.Bytes(), &list)
+	if len(list.Items) == 0 {
+		t.Fatal("list returned 0 items")
+	}
+	for i, item := range list.Items {
+		if _, ok := item["api_key"]; ok {
+			t.Errorf("list item %d leaks api_key: %v", i, item)
+		}
+	}
+}
