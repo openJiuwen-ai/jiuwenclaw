@@ -200,6 +200,7 @@
       "savedRestartRequired": "已保存，重启后生效",
       "validationOk": "连接测试通过",
       "validationFailed": "连接测试失败",
+      "validationFailedWithDetail": "连接测试失败：{{detail}}",
       "testingConnection": "正在测试连接…",
       "savingModel": "正在保存…",
       "validationBeforeSaveTitle": "连接测试未通过",
