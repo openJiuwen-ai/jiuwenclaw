@@ -348,7 +348,6 @@ test('current Settings titles omit descriptions while the shared API retains opt
     'settingsPanel.agent.webSearchDescription',
     'settingsPanel.agent.mediaToolsDescription',
     'settingsPanel.agent.teamDescription',
-    'settingsPanel.experimental.externalCliAgentsDescription',
     'settingsPanel.experimental.a2uiDescription',
     'settingsPanel.experimental.proactiveDescription',
   ];
@@ -1258,7 +1257,7 @@ test('Settings form dialogs share the same dirty-close contract without disablin
 
 test('Agent configuration entry points are disabled while the backend is connecting', () => {
   const agentSettings = source('src/features/settings/modules/agent/AgentSettings.tsx');
-  assert.equal(agentSettings.match(/disabled=\{disabled \|\| !isConnected\}/g)?.length, 1);
+  assert.equal(agentSettings.match(/disabled=\{disabled \|\| !isConnected\}/g)?.length, 2);
   assert.equal(agentSettings.match(/disabled=\{disabled \|\| !isConnected \|\| busy\}/g)?.length, 3);
   assert.match(agentSettings, /<FormDialog[\s\S]*confirmDisabled=\{!isConnected\}/);
 });
