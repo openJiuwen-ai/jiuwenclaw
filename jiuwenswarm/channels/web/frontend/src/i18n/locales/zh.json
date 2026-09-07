@@ -3079,7 +3079,7 @@
       "tab": { "interval": "按间隔", "cron": "Cron 表达式", "once": "单次" },
       "interval": { "label": "每隔", "unit": "分钟回到当前会话" },
       "cron": { "hint": "标准 5 段格式：分 时 日 月 周（例：0 9 * * 1-5 表示工作日早上 9 点）" },
-      "once": { "hint": "选择具体日期和时间，到点后回到当前会话触发一次，之后自动标记为已完成" },
+      "once": { "hint": "选择具体日期和时间，到点后回到当前会话触发一次，之后自动标记为已完成", "dateLabel": "日期", "timeLabel": "时间" },
       "summary": {
         "interval": "每 {{minutes}} 分钟回到当前会话",
         "cron": "{{expr}}（{{timezone}}）回到当前会话",
@@ -3097,6 +3097,7 @@
       "fieldPromptHint": "心跳触发时，会把这段文字作为一条新消息投递回当前会话，Agent 在原有上下文里继续处理，不会开新会话",
       "fieldSchedule": "调度计划",
       "fieldScheduleHint": "选择心跳回到这个会话的触发方式：按间隔轮询 / 按 Cron 表达式定时 / 只触发一次",
+      "scheduleExpired": "所选时间已过期，请重新选择",
       "fieldConcurrencyPolicy": "重叠运行策略",
       "fieldConcurrencyPolicyHint": "上一轮还没跑完时新触发怎么处理：跳过（skip，默认）/ 排队补跑一次（queue）/ 取消上一轮改跑新的（replace）",
       "fieldSessionDeletedPolicy": "会话删除后策略",

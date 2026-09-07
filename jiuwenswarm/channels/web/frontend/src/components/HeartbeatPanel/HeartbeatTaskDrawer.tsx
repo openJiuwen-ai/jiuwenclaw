@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { HeartbeatConcurrencyPolicy, HeartbeatMeta, HeartbeatSessionDeletedPolicy, HeartbeatTaskUI } from '../../types/heartbeat';
 import {
@@ -9,6 +9,7 @@ import {
 import { validateHeartbeatCronExpr } from './heartbeatCronValidation';
 import HeartbeatScheduleEditor from './HeartbeatScheduleEditor';
 import SimpleSelect from '../CronPanel/SimpleSelect';
+import { nowWallClock } from '../CronPanel/scheduleConvert';
 
 const NAME_MAX_LENGTH = 64;
 const PROMPT_MAX_LENGTH = 2000;
@@ -61,6 +62,15 @@ export default function HeartbeatTaskDrawer({ mode, initial, meta, submitting, e
   const { t } = useTranslation();
   const [form, setForm] = useState<HeartbeatTaskFormValue>(initial);
 
+  // 「只触发一次」时用户可能停在抽屉里直到所选时间自然过期。每 10s 触发一次重渲染，
+  // 让下方日期/时间选择器的禁选范围、以及提交前的「已过期」拦截随真实时间推进即时刷新。
+  const [, forceNowTick] = useState(0);
+  useEffect(() => {
+    if (form.schedule.kind !== 'once') return;
+    const id = setInterval(() => forceNowTick((n) => n + 1), 10000);
+    return () => clearInterval(id);
+  }, [form.schedule.kind]);
+
   const concurrencyOptions = meta.concurrency_policies.map((p) => ({ value: p, label: t(`heartbeat.concurrencyPolicy.${p}`) }));
   const sessionDeletedOptions = meta.session_deleted_policies.map((p) => ({
     value: p,
@@ -79,7 +89,15 @@ export default function HeartbeatTaskDrawer({ mode, initial, meta, submitting, e
   if (form.schedule.kind === 'once' && (!form.schedule.onceDate || !form.schedule.onceTime)) {
     missingFieldLabels.push(t('heartbeat.drawer.fieldSchedule'));
   }
-  const canSubmit = missingFieldLabels.length === 0 && !submitting;
+  // 兜底：选择器已禁选过期日期时间，但用户停留在抽屉期间时间会流逝，选好的时间可能变成已过期。
+  // 提交前再按表单时区核一次（每 10s tick 会重算），过期则阻止提交，并用红色单独提示——
+  // 区别于下方灰色的「必填项未填」提示（见 bug002 用户确认第 2 点、第 3 轮反馈）。
+  const scheduleExpired =
+    form.schedule.kind === 'once' &&
+    !!form.schedule.onceDate &&
+    !!form.schedule.onceTime &&
+    `${form.schedule.onceDate}T${form.schedule.onceTime}` <= nowWallClock(form.schedule.timezone);
+  const canSubmit = missingFieldLabels.length === 0 && !scheduleExpired && !submitting;
 
   return (
     <div className="space-y-4 p-4">
@@ -163,7 +181,10 @@ export default function HeartbeatTaskDrawer({ mode, initial, meta, submitting, e
       </div>
 
       {error && <p className="text-sm text-red-500">{error}</p>}
-      {!error && missingFieldLabels.length > 0 && (
+      {!error && scheduleExpired && (
+        <p className="text-xs text-red-500">{t('heartbeat.drawer.scheduleExpired')}</p>
+      )}
+      {!error && !scheduleExpired && missingFieldLabels.length > 0 && (
         <p className="text-xs text-text-muted">{t('heartbeat.drawer.missingFields', { fields: missingFieldLabels.join('、') })}</p>
       )}
 
