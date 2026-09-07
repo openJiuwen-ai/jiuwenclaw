@@ -2173,7 +2173,7 @@
     "markdownOnly": "Only Markdown/JSON (.md/.mdx/.json) preview is supported",
     "errors": {
       "refreshFailed": "Refresh failed: unable to rebuild the agent file index. Check the generator script logs.",
-      "loadFailed": "Unable to read the agent file list. Check whether agent/workspace/agent-data.json has been generated."
+      "loadFailed": "Unable to read the agent file list. Check whether agent/jiuwenclaw_workspace/agent-data.json has been generated."
     }
   },
   "fileViewer": {
@@ -2497,7 +2497,7 @@
     "helpTitle": "Usage Guide",
     "help0": "Extension folder must contain rail.py as the entry file",
     "help1": "Rail extension files must inherit from DeepAgentRail or AgentRail base class",
-    "help2": "Extension files are saved to ~/.jiuwenswarm/agent/workspace/extensions/ directory",
+    "help2": "Extension files are saved to ~/.jiuwenswarm/agent/jiuwenclaw_workspace/extensions/ directory",
     "errors": {
       "missingFolderPath": "Missing folder_path parameter",
       "folderNotFound": "Folder does not exist or is not a directory: {{path}}",

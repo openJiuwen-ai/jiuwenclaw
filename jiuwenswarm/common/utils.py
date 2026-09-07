@@ -9,7 +9,7 @@ Runtime layout:
 - <root>/config/config.yaml
 - <root>/config/.env
 - <root>/agent/home
-- <root>/agent/workspace（DeepAgent 标准工作空间）
+- <root>/agent/jiuwenclaw_workspace（DeepAgent 标准工作空间）
   - memory/
   - skills/
   - todo/
@@ -21,7 +21,7 @@ Runtime layout:
   - HEARTBEAT.md
   - USER.md
 - <root>/agent/sessions
-- <root>/agent/workspace/agent-data.json
+- <root>/agent/jiuwenclaw_workspace/agent-data.json
 - <root>/agent/.checkpoint
 - <root>/agent/.logs（gateway.log / channel.log / agent_server.log / full.log）
 
@@ -903,42 +903,61 @@ def _migrate_from_jiuwenclaw_root() -> bool:
         return False
 
 
-def _migrate_jiuwenclaw_workspace_to_workspace(workspace_dir: Path) -> None:
-    """Migrate from legacy jiuwenclaw_workspace directory name to workspace.
+def _migrate_workspace_to_jiuwenclaw_workspace(workspace_dir: Path) -> None:
+    """Migrate from legacy workspace directory name to jiuwenclaw_workspace.
 
     Migration:
-    - Old: ~/.jiuwenswarm/agent/jiuwenclaw_workspace/
-    - New: ~/.jiuwenswarm/agent/workspace/
+    - Old: <tenant_root>/agent/workspace/
+    - New: <tenant_root>/agent/jiuwenclaw_workspace/
+
+    Covers every tenant layout:
+    - Personal: ``~/.jiuwenswarm/service_default/agent_default``
+    - Enterprise: ``~/.jiuwenswarm/workspace_{key}`` for each key bucket
+    - Legacy pre-tenant: ``~/.jiuwenswarm`` itself
 
     Args:
         workspace_dir: Path to workspace root (~/.jiuwenswarm).
     """
-    old_workspace = workspace_dir / "agent" / "jiuwenclaw_workspace"
-    new_workspace = workspace_dir / "agent" / "workspace"
 
-    if not old_workspace.exists():
-        return
-    if new_workspace.exists():
-        # Both exist - merge carefully
-        print(f"[migration] Both jiuwenclaw_workspace and workspace exist, merging...")
-        for item in old_workspace.iterdir():
-            dest = new_workspace / item.name
-            if item.is_dir():
-                if dest.exists():
-                    # Merge directories
-                    shutil.copytree(item, dest, dirs_exist_ok=True)
+    def _migrate_one(tenant_root: Path) -> None:
+        old_workspace = tenant_root / "agent" / "workspace"
+        new_workspace = tenant_root / "agent" / "jiuwenclaw_workspace"
+        if not old_workspace.exists():
+            return
+        if new_workspace.exists():
+            # Both exist - merge carefully
+            print(f"[migration] Both workspace and jiuwenclaw_workspace exist, merging...")
+            for item in old_workspace.iterdir():
+                dest = new_workspace / item.name
+                if item.is_dir():
+                    if dest.exists():
+                        # Merge directories
+                        shutil.copytree(item, dest, dirs_exist_ok=True)
+                    else:
+                        shutil.copytree(item, dest)
                 else:
-                    shutil.copytree(item, dest)
-            else:
-                if not dest.exists():
-                    shutil.copy2(item, dest)
-        # Remove old after successful merge
-        shutil.rmtree(old_workspace)
-        print(f"[migration] Merged and removed: {old_workspace}")
-    else:
-        # Simple rename
-        shutil.move(str(old_workspace), str(new_workspace))
-        print(f"[migration] Renamed: {old_workspace} -> {new_workspace}")
+                    if not dest.exists():
+                        shutil.copy2(item, dest)
+            # Remove old after successful merge
+            shutil.rmtree(old_workspace)
+            print(f"[migration] Merged and removed: {old_workspace}")
+        else:
+            # Simple rename
+            shutil.move(str(old_workspace), str(new_workspace))
+            print(f"[migration] Renamed: {old_workspace} -> {new_workspace}")
+
+    tenant_roots = [workspace_dir / "service_default" / "agent_default"]
+    if workspace_dir.is_dir():
+        tenant_roots.extend(
+            entry for entry in workspace_dir.iterdir()
+            if entry.is_dir() and entry.name.startswith("workspace_")
+        )
+    for tenant_root in tenant_roots:
+        if (tenant_root / "agent").is_dir():
+            _migrate_one(tenant_root)
+    # Legacy pre-tenant layout: <root>/agent/workspace
+    if (workspace_dir / "agent").is_dir():
+        _migrate_one(workspace_dir)
 
 
 def _migrate_legacy_workspace(
@@ -955,15 +974,15 @@ def _migrate_legacy_workspace(
     - Old: ~/.jiuwenswarm/agent/skills/
     - Old: ~/.jiuwenswarm/agent/memory/
 
-    - New: ~/.jiuwenswarm/agent/workspace/ (DeepAgent standard)
+    - New: ~/.jiuwenswarm/agent/jiuwenclaw_workspace/ (DeepAgent standard)
 
     Mapping:
-    - agent/home/HEARTBEAT.md -> agent/workspace/HEARTBEAT.md
-    - agent/skills/ -> agent/workspace/skills/
-    - agent/memory/ -> agent/workspace/memory/
+    - agent/home/HEARTBEAT.md -> agent/jiuwenclaw_workspace/HEARTBEAT.md
+    - agent/skills/ -> agent/jiuwenclaw_workspace/skills/
+    - agent/memory/ -> agent/jiuwenclaw_workspace/memory/
 
-    Note: jiuwenclaw_workspace -> workspace renaming is handled separately by
-    _migrate_jiuwenclaw_workspace_to_workspace.
+    Note: workspace -> jiuwenclaw_workspace renaming is handled separately by
+    _migrate_workspace_to_jiuwenclaw_workspace.
 
     Args:
         workspace_dir: Path to workspace root (~/.jiuwenswarm).
@@ -975,7 +994,7 @@ def _migrate_legacy_workspace(
     old_skills = workspace_dir / "agent" / "skills"
     old_memory = workspace_dir / "agent" / "memory"
 
-    new_workspace = workspace_dir / "agent" / "workspace"
+    new_workspace = workspace_dir / "agent" / "jiuwenclaw_workspace"
     new_workspace.mkdir(parents=True, exist_ok=True)
 
     # 1. Migrate old home files
@@ -1225,8 +1244,8 @@ def prepare_workspace(
     workspace_dir.mkdir(parents=True, exist_ok=True)
     migrate_legacy_user_config_if_needed()
 
-    # Migrate from legacy jiuwenclaw_workspace directory name to workspace
-    _migrate_jiuwenclaw_workspace_to_workspace(workspace_dir)
+    # Migrate from legacy workspace directory name to jiuwenclaw_workspace
+    _migrate_workspace_to_jiuwenclaw_workspace(workspace_dir)
 
     # Check for legacy workspace migration or cleanup (pre-DeepAgent layout)
     # These are even older layouts: agent/workspace, agent/home, agent/skills, agent/memory
@@ -1336,7 +1355,7 @@ def prepare_workspace(
     agent_sessions = agent_root / "sessions"
 
     # ----- DeepAgent workspace (standard DeepAgents schema) -----
-    deepagent_workspace = agent_root / "workspace"
+    deepagent_workspace = agent_root / "jiuwenclaw_workspace"
     default_project_workspace = deepagent_workspace / "projects"
     agent_skills = deepagent_workspace / "skills"
     agent_memory = deepagent_workspace / "memory"
@@ -1603,15 +1622,15 @@ def _resolve_paths(force=False) -> None:
 
     workspace_dir = get_user_workspace_dir()
 
-    # Migrate from legacy jiuwenclaw_workspace directory name to workspace
-    _migrate_jiuwenclaw_workspace_to_workspace(workspace_dir)
+    # Migrate from legacy workspace directory name to jiuwenclaw_workspace
+    _migrate_workspace_to_jiuwenclaw_workspace(workspace_dir)
 
     # 优先使用已初始化的用户工作区 (~/.jiuwenswarm)，
     # 保证源码运行与安装包运行后的读写路径完全一致。
     user_config_dir = workspace_dir / "config"
     # 租户默认工作区：个人版 service_default/agent_default；企业版 workspace_default
     multi_tenant_workspace = get_multi_tenant_user_workspace_dir("default")
-    user_workspace_dir = multi_tenant_workspace / "agent" / "workspace"
+    user_workspace_dir = multi_tenant_workspace / "agent" / "jiuwenclaw_workspace"
     if user_config_dir.exists():
         _root_dir = workspace_dir
         _config_dir = user_config_dir
@@ -1673,7 +1692,7 @@ def get_agent_workspace_dir() -> Path:
 
     Returns:
         Path to agent workspace:
-        ``~/.jiuwenswarm/workspace_default/agent/workspace``
+        ``~/.jiuwenswarm/workspace_default/agent/jiuwenclaw_workspace``
         (or the request-bound tenant workspace when ContextVar is set).
     """
     try:
@@ -1684,7 +1703,7 @@ def get_agent_workspace_dir() -> Path:
             return bound
     except ImportError:
         logger.debug("tenant_context unavailable for workspace bind", exc_info=True)
-    return get_agent_root_dir() / "workspace"
+    return get_agent_root_dir() / "jiuwenclaw_workspace"
 
 
 def get_default_project_workspace_dir() -> Path:
@@ -1763,7 +1782,7 @@ def get_agent_root_relative_dir() -> Path:
 
 def get_agent_workspace_relative_dir() -> Path:
     """Get the agent workspace relative path under a tenant workspace root."""
-    return get_agent_root_relative_dir() / "workspace"
+    return get_agent_root_relative_dir() / "jiuwenclaw_workspace"
 
 
 _AGENT_WORKSPACE_DIR_NAMES = frozenset({"workspace", "jiuwenclaw_workspace"})
@@ -1772,7 +1791,7 @@ _AGENT_WORKSPACE_DIR_NAMES = frozenset({"workspace", "jiuwenclaw_workspace"})
 def collapse_nested_agent_workspace_dir(path: Path | str) -> Path:
     """Collapse ``.../workspace/workspace`` back to the agent workspace.
 
-    The agent workspace is ``.../agent/workspace`` (this project) or
+    The agent workspace is ``.../agent/jiuwenclaw_workspace`` (this project) or
     ``.../agent/jiuwenclaw_workspace`` (upstream). PPT tooling historically
     used ``{cwd}/workspace`` as the session parent, which nests a second
     ``workspace`` directory when cwd is already the agent workspace.
@@ -1846,7 +1865,7 @@ def get_multi_tenant_user_workspace_dir(workspace_key: str) -> Path:
 
 
 def get_tenant_agent_workspace_dir(workspace_key: str | None = None) -> Path:
-    """DeepAgent 工作区：``<tenant_root>/agent/workspace``.
+    """DeepAgent 工作区：``<tenant_root>/agent/jiuwenclaw_workspace``.
 
     企业版 tenant_root 为 ``workspace_{key}``；个人版为 ``service_default/agent_default``。
     """
@@ -1862,7 +1881,7 @@ def get_tenant_agent_skills_dirs(workspace_key: str | None = None) -> list[Path]
 def get_multi_tenant_skill_dirs(workspace_key: str | None = None) -> list[Path]:
     """Resolve the skills directory list for multi-tenant / single-tenant mode.
 
-    - 显式提供 ``workspace_key``: ``[<tenant_root>/agent/workspace/skills]``
+    - 显式提供 ``workspace_key``: ``[<tenant_root>/agent/jiuwenclaw_workspace/skills]``
       （企业版 tenant_root=``workspace_{key}``，个人版固定 ``service_default/agent_default``）。
     - 未提供: ``[get_agent_skills_dir()]``（不读 bound key，避免误进多租户树）.
     """
@@ -1881,7 +1900,7 @@ def get_agent_memory_dir() -> Path:
     Uses DeepAgent standard workspace location for unified workspace.
 
     Returns:
-        Path to memory directory: ~/.jiuwenswarm/agent/workspace/memory
+        Path to memory directory: ~/.jiuwenswarm/agent/jiuwenclaw_workspace/memory
     """
     return get_agent_workspace_dir() / "memory"
 
@@ -1892,7 +1911,7 @@ def get_agent_skills_dir() -> Path:
     Uses DeepAgent standard workspace location for unified workspace.
 
     Returns:
-        Path to skills directory: ~/.jiuwenswarm/agent/workspace/skills
+        Path to skills directory: ~/.jiuwenswarm/agent/jiuwenclaw_workspace/skills
     """
     return get_agent_workspace_dir() / "skills"
 
@@ -1996,7 +2015,7 @@ def get_interactions_dir() -> Path:
     """Get the interactions directory for pending interaction contexts.
 
     Returns:
-        Path to interactions directory: {workspace}/agent/workspace/interactions
+        Path to interactions directory: {workspace}/agent/jiuwenclaw_workspace/interactions
     """
     return get_agent_workspace_dir() / "interactions"
 
@@ -2057,8 +2076,8 @@ def resolve_tenant_agent_root_dir(workspace_key: str | None = None) -> Path:
 
 
 def resolve_tenant_agent_workspace_dir(workspace_key: str | None = None) -> Path:
-    """Resolve ``<tenant_root>/agent/workspace``."""
-    return resolve_tenant_agent_root_dir(workspace_key) / "workspace"
+    """Resolve ``<tenant_root>/agent/jiuwenclaw_workspace``."""
+    return resolve_tenant_agent_root_dir(workspace_key) / "jiuwenclaw_workspace"
 
 
 def resolve_tenant_sessions_dir(workspace_key: str | None = None) -> Path:
@@ -2101,7 +2120,7 @@ def get_deepagent_todo_dir() -> Path:
     """Get the DeepAgent todo directory path.
 
     Returns:
-        Path to todo directory: ~/.jiuwenswarm/agent/workspace/todo
+        Path to todo directory: ~/.jiuwenswarm/agent/jiuwenclaw_workspace/todo
     """
     return get_agent_workspace_dir() / "todo"
 
@@ -2110,7 +2129,7 @@ def get_deepagent_messages_dir() -> Path:
     """Get the DeepAgent messages directory path.
 
     Returns:
-        Path to messages directory: ~/.jiuwenswarm/agent/workspace/messages
+        Path to messages directory: ~/.jiuwenswarm/agent/jiuwenclaw_workspace/messages
     """
     return get_agent_workspace_dir() / "messages"
 
@@ -2119,7 +2138,7 @@ def get_deepagent_agents_dir() -> Path:
     """Get the DeepAgent agents (sub-agent) directory path.
 
     Returns:
-        Path to agents directory: ~/.jiuwenswarm/agent/workspace/agents
+        Path to agents directory: ~/.jiuwenswarm/agent/jiuwenclaw_workspace/agents
     """
     return get_agent_workspace_dir() / "agents"
 
@@ -2128,7 +2147,7 @@ def get_deepagent_heartbeat_path() -> Path:
     """Get the DeepAgent HEARTBEAT.md file path.
 
     Returns:
-        Path to HEARTBEAT.md: ~/.jiuwenswarm/agent/workspace/HEARTBEAT.md
+        Path to HEARTBEAT.md: ~/.jiuwenswarm/agent/jiuwenclaw_workspace/HEARTBEAT.md
     """
     return get_agent_workspace_dir() / "HEARTBEAT.md"
 
@@ -2137,7 +2156,7 @@ def get_deepagent_agent_md_path() -> Path:
     """Get the DeepAgent AGENT.md file path.
 
     Returns:
-        Path to AGENT.md: ~/.jiuwenswarm/agent/workspace/AGENT.md
+        Path to AGENT.md: ~/.jiuwenswarm/agent/jiuwenclaw_workspace/AGENT.md
     """
     return get_agent_workspace_dir() / "AGENT.md"
 
@@ -2146,7 +2165,7 @@ def get_deepagent_soul_md_path() -> Path:
     """Get the DeepAgent SOUL.md file path.
 
     Returns:
-        Path to SOUL.md: ~/.jiuwenswarm/agent/workspace/SOUL.md
+        Path to SOUL.md: ~/.jiuwenswarm/agent/jiuwenclaw_workspace/SOUL.md
     """
     return get_agent_workspace_dir() / "SOUL.md"
 
@@ -2155,7 +2174,7 @@ def get_deepagent_identity_md_path() -> Path:
     """Get the DeepAgent IDENTITY.md file path.
 
     Returns:
-        Path to IDENTITY.md: ~/.jiuwenswarm/agent/workspace/IDENTITY.md
+        Path to IDENTITY.md: ~/.jiuwenswarm/agent/jiuwenclaw_workspace/IDENTITY.md
     """
     return get_agent_workspace_dir() / "IDENTITY.md"
 
@@ -2164,7 +2183,7 @@ def get_deepagent_user_md_path() -> Path:
     """Get the DeepAgent USER.md file path.
 
     Returns:
-        Path to USER.md: ~/.jiuwenswarm/agent/workspace/USER.md
+        Path to USER.md: ~/.jiuwenswarm/agent/jiuwenclaw_workspace/USER.md
     """
     return get_agent_workspace_dir() / "USER.md"
 
