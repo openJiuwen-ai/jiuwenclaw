@@ -3410,6 +3410,16 @@ class AgentWebSocketServer:
 
         return restored_after_approval
 
+    def _should_admit_interrupt_resume(self, request: AgentRequest) -> bool:
+        """Keep stale answers gated while allowing a live interrupt to resume."""
+        admission = getattr(self._heartbeat_runtime, "admission", None)
+        if admission is None:
+            return False
+        is_user_active = getattr(admission, "is_user_active", None)
+        if not callable(is_user_active):
+            return False
+        return not bool(is_user_active(request.session_id or "default"))
+
     async def _handle_unary(
         self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock
     ) -> None:
@@ -3431,6 +3441,8 @@ class AgentWebSocketServer:
             and not is_team_params(request.params)
         )
         session_id = request.session_id or "default"
+        if admitted and is_interrupt_resume_payload(request.params):
+            admitted = self._should_admit_interrupt_resume(request)
         if admitted:
             await self._heartbeat_runtime.admission.begin_user(session_id)
         try:
@@ -3547,6 +3559,8 @@ class AgentWebSocketServer:
             and not is_team_params(request.params)
         )
         session_id = request.session_id or "default"
+        if admitted and is_interrupt_resume_payload(request.params):
+            admitted = self._should_admit_interrupt_resume(request)
         if admitted:
             await self._heartbeat_runtime.admission.begin_user(session_id)
         try:
