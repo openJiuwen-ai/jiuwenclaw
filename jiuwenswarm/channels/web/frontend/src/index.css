@@ -1533,6 +1533,20 @@ body.workspace-resize-active iframe {
     margin-bottom: 0;
   }
 
+  /*
+   * Long restored conversations contain expensive Markdown, highlighted code,
+   * diagrams and tool trees. Let the webview skip layout/paint for timeline
+   * blocks outside the scroll viewport. `auto` keeps each measured block's real
+   * size, so revisiting it does not disturb the scroll anchor. Unsupported
+   * webviews ignore these declarations and retain the existing rendering path.
+   */
+  @supports (content-visibility: auto) {
+    .chat-timeline > *:not(.timeline-collapse) {
+      content-visibility: auto;
+      contain-intrinsic-size: auto 120px;
+    }
+  }
+
   /* ====== Tool Tree ====== */
   .tool-group-frame {
     margin: 0;
