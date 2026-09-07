@@ -410,12 +410,23 @@ function ProjectEntityRow({
         type="button"
         ref={mainRef}
         className="conversation-entity-row__main"
-        onClick={onToggle}
+        onClick={(event) => {
+          onToggle();
+          // 鼠标点击（detail>0）展开/收起后立即收起路径提示，避免浮层残留；键盘触发的点击保留 focus 提示
+          if (event.detail > 0) {
+            hoverRef.current = false;
+            setTooltipPos(null);
+          }
+        }}
         title={path ? undefined : title}
         aria-describedby={path ? tooltipId : undefined}
         onMouseEnter={() => showTooltip('hover')}
         onMouseLeave={() => hideTooltip('hover')}
-        onFocus={() => showTooltip('focus')}
+        onFocus={() => {
+          // 仅键盘导航（:focus-visible）显示 focus 提示；鼠标点击也会触发 focus，
+          // 若不区分会导致点击后 focusRef 残留为 true，鼠标移出时 tooltip 无法消失
+          if (mainRef.current?.matches(':focus-visible')) showTooltip('focus');
+        }}
         onBlur={() => hideTooltip('focus')}
         data-testid="multi-session-project-row-main"
       >
