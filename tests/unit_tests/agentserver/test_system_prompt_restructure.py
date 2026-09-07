@@ -187,19 +187,63 @@ def test_work_code_and_design_share_the_same_static_prefix():
     assert design_prompt[len(shared_prefix) :].startswith("# Design mode")
 
 
+def test_all_modes_place_the_shared_system_section_before_regional_conventions():
+    from jiuwenswarm.agents.harness.code.prompt.code_prompt_builder import (
+        build_code_system_prompt,
+    )
+    from jiuwenswarm.agents.harness.design.prompt.design_prompt_builder import (
+        build_design_system_prompt,
+    )
+
+    prompts = (
+        build_agent_identity_prompt(language="zh"),
+        build_code_system_prompt(),
+        build_design_system_prompt(),
+    )
+    for prompt in prompts:
+        assert prompt.index("# Content policy") < prompt.index("# System")
+        assert prompt.index("# System") < prompt.index("# Regional conventions")
+
+
 def test_design_mode_static_section_priorities_are_explicitly_ordered():
     from jiuwenswarm.agents.harness.design.prompt.design_prompt_builder import (
         DesignPromptPriority,
     )
 
     ordered = [
-        DesignPromptPriority.INTRO,
         DesignPromptPriority.SYSTEM,
+        DesignPromptPriority.INTRO,
         DesignPromptPriority.CORE_CAPABILITIES,
     ]
 
     assert ordered == sorted(ordered)
     assert len(ordered) == len(set(ordered))
+
+
+def test_code_session_guidance_precedes_executing_actions_with_care():
+    from jiuwenswarm.agents.harness.code.prompt.code_prompt_builder import (
+        build_code_system_prompt,
+    )
+
+    prompt = build_code_system_prompt()
+    assert prompt.index("# Session-specific guidance") < prompt.index(
+        "# Executing actions with care"
+    )
+
+
+def test_find_skills_policy_lives_in_tool_usage_rules_not_skills_preamble():
+    from openjiuwen.core.foundation.tool.base import ToolCard
+    from openjiuwen.harness.prompts.sections import context
+    from jiuwenswarm.agents.harness.common.prompt import skills_goal_override
+
+    ability_manager = SimpleNamespace(list=lambda: [ToolCard(name="read_file")])
+    tools_content = context.build_tools_content(ability_manager, language="en")
+
+    assert tools_content is not None
+    assert "# Tool Usage Rules" in tools_content
+    assert "## Skill Discovery and Installation (`find-skills-win`)" in tools_content
+    assert "Skill Discovery and Installation" not in skills_goal_override._SKILLS_PREAMBLE_EN
+    assert skills_goal_override._SKILLS_PREAMBLE_EN.startswith("# Skills")
 
 
 @pytest.mark.asyncio
