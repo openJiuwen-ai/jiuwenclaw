@@ -566,7 +566,7 @@ export function SkillPanel({
 }: SkillPanelProps) {
   const { t, i18n } = useTranslation();
   const [activeTab, setActiveTab] = useState<'my' | 'marketplace' | 'graph'>('marketplace');
-  const [mySkillsSubTab, setMySkillsSubTab] = useState<'all' | 'enabled' | 'disabled'>('enabled');
+  const [mySkillsSubTab, setMySkillsSubTab] = useState<'all' | 'enabled' | 'disabled' | 'builtin'>('enabled');
   const [mySkillsPublishFilter, setMySkillsPublishFilter] = useState<'all' | 'published' | 'unpublished'>('all');
   const [marketplaceCategory, setMarketplaceCategory] = useState<
     | 'all'
@@ -2054,6 +2054,9 @@ export function SkillPanel({
       case 'disabled':
         filtered = filtered.filter((s) => s.enabled === false);
         break;
+      case 'builtin':
+        filtered = filtered.filter((s) => s.source === 'builtin');
+        break;
       default:
         break;
     }
@@ -2065,6 +2068,80 @@ export function SkillPanel({
     }
     return filtered;
   }, [visibleSkills, mySkillsSubTab, mySkillsPublishFilter, installedSkillNames]);
+
+  // 内置/非内置分组（用于"我的技能"列表分组展示）
+  const builtinSkills = useMemo(() => mySkillsFiltered.filter((s) => s.source === 'builtin'), [mySkillsFiltered]);
+  const otherSkills = useMemo(() => mySkillsFiltered.filter((s) => s.source !== 'builtin'), [mySkillsFiltered]);
+
+  const renderMySkillCard = (skill: SkillItem) => {
+    const avatar = getSkillAvatar(skill.name);
+    const displayName = skill.display_name || skill.name;
+    const isDisabled = skill.enabled === false;
+    const isToggling = actionTarget === `toggle:${skill.name}`;
+    const isPackage = isSkillPackage(skill);
+    const isMenuOpen = openMenuSkillName === skill.name;
+    const listKey = skill.path || `${skill.source || 'local'}:${skill.name}`;
+    return (
+      <div
+        key={listKey}
+        onClick={() => handleOpenSkill(skill.name)}
+        className={CARD_CLASS}
+        data-testid="skill-card"
+      >
+        <div className="flex items-center gap-3 min-w-0">
+          <div className={`w-12 h-12 rounded-lg ${avatar.color} flex items-center justify-center flex-shrink-0 text-text-inverse font-semibold text-sm`}>
+            {avatar.firstChar}
+          </div>
+          <div className="min-w-0 flex-1 h-full flex flex-col justify-between">
+            <div className="flex items-center gap-1.5">
+              <span className="text-sm font-semibold text-text-strong truncate leading-5">{displayName}</span>
+              {skill.has_evolutions ? (
+                <button
+                  onClick={(e) => { e.stopPropagation(); handleOpenSkill(skill.name); setDetailTab('experience'); }}
+                  className="relative shrink-0 w-5 h-5 flex items-center justify-center text-text-muted hover:text-text"
+                  title={t('skills.actions.viewEvolution')}
+                >
+                  <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" className="lucide lucide-bell-dot-icon lucide-bell-dot">
+                    <path d="M10.268 21a2 2 0 0 0 3.464 0" />
+                    <path d="M11.68 2.009A6 6 0 0 0 6 8c0 4.499-1.411 5.956-2.738 7.326A1 1 0 0 0 4 17h16a1 1 0 0 0 .74-1.673c-.824-.85-1.678-1.731-2.21-3.348" />
+                    <circle cx="18" cy="5" r="3" />
+                  </svg>
+                </button>
+              ) : null}
+            </div>
+            <div className="mt-1 flex items-center gap-1.5 flex-wrap">
+              <SkillTypeBadge skillType={skill.skill_type} withTruncate />
+              {skill.source === 'builtin' && (
+                <span className="px-2 h-5 inline-flex items-center rounded bg-secondary border border-border text-xs text-text-muted">{t('skills.mySkillsTabs.builtin')}</span>
+              )}
+              {activeTab === 'my' ? (
+                <span className="px-2 h-5 inline-flex items-center rounded bg-secondary border border-border truncate text-xs text-text-muted">{t('skills.publishFilter.unpublished')}</span>
+              ) : null}
+            </div>
+          </div>
+          <div className="flex items-center gap-1.5 shrink-0" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center gap-1.5 opacity-0 group-hover:opacity-100 transition-opacity">
+              <div className="relative">
+                <button type="button" onClick={(e) => { e.stopPropagation(); setOpenMenuSkillName(isMenuOpen ? null : skill.name); }} className="w-7 h-7 flex items-center justify-center rounded-md hover:bg-secondary text-text-muted hover:text-text"><MoreIcon aria-hidden /></button>
+                {isMenuOpen ? (
+                  <>
+                    <div className="fixed inset-0 z-40" onClick={(e) => { e.stopPropagation(); setOpenMenuSkillName(null); }} />
+                    <div className="absolute right-0 top-full mt-1 z-50 min-w-[160px] rounded-lg border border-border bg-panel shadow-lg py-1">
+                      {!isPackage ? <button onClick={isDisabled ? undefined : (e: React.MouseEvent) => { e.stopPropagation(); setOpenMenuSkillName(null); handleEditSkill(skill.name, skill.skill_type); }} disabled={isDisabled} className="flex items-center w-full px-3 py-2 text-sm text-left text-text hover:bg-secondary disabled:opacity-40 disabled:cursor-not-allowed">{t('skills.actions.edit')}</button> : null}
+                      <button onClick={(e) => { e.stopPropagation(); setOpenMenuSkillName(null); const plugin = installedSkillMap.get(skill.name); handleUninstall(plugin?.plugin_name || skill.name); }} className="flex items-center w-full px-3 py-2 text-sm text-left text-text hover:bg-secondary">{t('skills.actions.uninstall')}</button>
+                    </div>
+                  </>
+                ) : null}
+              </div>
+              <button type="button" onClick={isDisabled ? undefined : (e: React.MouseEvent) => { e.stopPropagation(); handleGoToChat(skill.name, skill.skill_type); }} disabled={isDisabled} onMouseEnter={(e) => { if (isDisabled) return; const rect = e.currentTarget.getBoundingClientRect(); setGoTryTooltip({ left: rect.left + rect.width / 2, top: rect.top }); }} onMouseLeave={() => setGoTryTooltip(null)} className="w-7 h-7 flex items-center justify-center rounded-md hover:bg-secondary text-text-muted hover:text-text disabled:opacity-40 disabled:cursor-not-allowed"><NewConversationIcon aria-hidden width="16" height="16" /></button>
+            </div>
+            <Switch checked={!isDisabled} onChange={() => toggleSkillDisabled(skill.name)} disabled={isToggling} />
+          </div>
+        </div>
+        <div className="text-xs text-text-muted mt-[18px] line-clamp-2 leading-[22px]">{skill.description || t('skills.noDescription')}</div>
+      </div>
+    );
+  };
 
   const toggleSkillDisabled = async (skillName: string) => {
     const skill = skills.find((s) => s.name === skillName);
@@ -2190,8 +2267,6 @@ export function SkillPanel({
           {!(activeTab === 'my' && selectedSkill) &&
             !(activeTab === 'marketplace' && marketplaceSubView === 'detail') && (
               <>
-                {/* 固定区（header/toolbar）：page-shell 限宽 1400px 居中，与下方滚动列共用内容线 */}
-                <div className="page-shell flex-none">
                 <PageHeader title={t('skills.title')} subtitle={t('skills.subtitle')}>
                   <button
                     onClick={() => setSourceModalOpen(true)}
@@ -2305,6 +2380,7 @@ export function SkillPanel({
                             { value: 'all', label: t('skills.mySkillsTabs.all') },
                             { value: 'enabled', label: t('skills.mySkillsTabs.enabled') },
                             { value: 'disabled', label: t('skills.mySkillsTabs.disabled') },
+                            { value: 'builtin', label: t('skills.mySkillsTabs.builtin') },
                           ]}
                           style={{ width: '40px' }}
                         />
@@ -2373,15 +2449,11 @@ export function SkillPanel({
                     )}
                   </div>
                 </div>
-                </div>
               </>
             )}
 
           {activeTab === 'graph' ? (
-            <div
-              data-testid="skill-panel-graph-view"
-              className="page-shell mt-4 flex flex-1 min-h-0 flex-col gap-3"
-            >
+            <div data-testid="skill-panel-graph-view" className="mt-4 flex flex-1 min-h-0 flex-col gap-3">
               {indexRecommendationVisible ? (
                 <div
                   className="flex flex-none flex-col gap-3 rounded-lg border border-warn bg-warn-subtle px-4 py-3"
@@ -2473,7 +2545,7 @@ export function SkillPanel({
                 /* 广场技能详情页 */
                 <div className="flex-1 flex flex-col min-h-0">
                   {hubDetailState === 'loading' && (
-                    <div className="text-sm text-text-muted mb-3">{t('skills.detailLoading')}</div>
+                    <div className="text-sm text-text-muted mb-3" style={{ width: '100%', maxWidth: '1400px', marginLeft: 'auto', marginRight: 'auto' }}>{t('skills.detailLoading')}</div>
                   )}
                   {hubDetailState === 'error' && (
                     <div className="text-sm text-text-muted mb-3">{t('skills.detailError')}</div>
@@ -2590,7 +2662,7 @@ export function SkillPanel({
                     {t('agentManagement.actions.back')}
                   </button>
 
-                  <div className="page-scroll flex-1 min-h-0 overflow-y-auto">
+                  <div className="skill-list-scroll flex-1 min-h-0 overflow-y-auto">
                     <div className="flex items-center justify-between mb-3">
                       <span className="font-bold text-text-strong" style={{ fontSize: '16px' }}>
                         {t('skills.featuredTeamSkills')}
@@ -2614,7 +2686,6 @@ export function SkillPanel({
               ) : (
                 /* 默认列表视图 */
                 <>
-                  <div className="page-shell">
                   <CategoryTabs
                     items={MARKETPLACE_CATEGORIES.map((cat) => ({
                       value: cat,
@@ -2623,16 +2694,14 @@ export function SkillPanel({
                     value={marketplaceCategory}
                     onChange={setMarketplaceCategory}
                   />
-                  </div>
 
                   {hubLoading ? (
-                    <div className="page-shell mt-4 text-sm text-text-muted">{t('common.loading')}</div>
+                    <div className="mt-4 text-sm text-text-muted">{t('common.loading')}</div>
                   ) : hubSkills.length === 0 ? (
-                    <div className="page-shell mt-4 text-sm text-text-muted">{t('skills.noMatches')}</div>
+                    <div className="mt-4 text-sm text-text-muted">{t('skills.noMatches')}</div>
                   ) : search.trim() ? (
                     /* 搜索结果：全部罗列 */
-                    <div className="page-scroll mt-4 flex-1 min-h-0 overflow-y-auto">
-                      <div className="card-grid-auto">
+                    <div className="skill-list-scroll card-grid-auto mt-4 flex-1 min-h-0 overflow-y-auto">
                       {hubSkills.map((skill) => (
                         <HubSkillCard
                           key={skill.asset_id}
@@ -2644,11 +2713,10 @@ export function SkillPanel({
                           action={renderHubSkillActionButton(skill)}
                         />
                       ))}
-                      </div>
                     </div>
                   ) : (
                     /* 无搜索词：按 plugin_type 分组展示 */
-                    <div className="page-scroll mt-4 flex-1 min-h-0 overflow-y-auto">
+                    <div className="skill-list-scroll mt-4 flex-1 min-h-0 overflow-y-auto">
                       {/* 精选团队技能（最多一行，右侧"更多"） */}
                       {teamSkills.length > 0 && (
                         <>
@@ -2725,13 +2793,13 @@ export function SkillPanel({
           {activeTab === 'my' ? (
             <>
               {message && messageType === 'error' && (
-                <div className="page-shell mt-3 px-3 py-2 rounded-md bg-secondary text-sm text-danger">{message}</div>
+                <div className="mt-3 px-3 py-2 rounded-md bg-secondary text-sm text-danger">{message}</div>
               )}
               {selectedSkill ? (
                 <div className="flex-1 flex flex-col min-h-0">
                   {/* 加载/错误状态 */}
                   {detailState === 'loading' && (
-                    <div className="text-sm text-text-muted mb-3">{t('skills.detailLoading')}</div>
+                    <div className="text-sm text-text-muted mb-3" style={{ width: '100%', maxWidth: '1400px', marginLeft: 'auto', marginRight: 'auto' }}>{t('skills.detailLoading')}</div>
                   )}
                   {detailState === 'error' && (
                     <div className="text-sm text-text-muted mb-3">{t('skills.detailError')}</div>
@@ -3221,190 +3289,58 @@ export function SkillPanel({
               ) : (
                 <>
                   {listState === 'success' && mySkillsFiltered.length === 0 ? (
-                    <div className="page-shell mt-4 text-sm text-text-muted">
+                    <div className="mt-4 text-sm text-text-muted">
                       {mySkillsSubTab === 'disabled'
                         ? t('skills.noDisabledSkills')
                         : mySkillsSubTab === 'enabled'
                           ? t('skills.noEnabledSkills')
-                          : t('skills.noMatches')}
+                          : mySkillsSubTab === 'builtin'
+                            ? t('skills.noBuiltinSkills')
+                            : t('skills.noMatches')}
                     </div>
                   ) : null}
                   {listState !== 'success' || mySkillsFiltered.length > 0 ? (
-                    <div
-                      className="page-scroll flex-1 min-h-0 overflow-y-auto"
-                      style={{ paddingTop: '16px' }}
-                    >
-                      <div className="card-grid-auto">
+                    <div className="skill-list-scroll flex-1 min-h-0 overflow-y-auto">
                       {listState === 'loading' && (
                         <div className="mt-4 text-sm text-text-muted" data-testid="skill-panel-my-list-loading">
                           {t('common.loading')}
                         </div>
                       )}
                       {listState === 'error' && (
-                        <div className="col-span-3 text-sm text-text-muted">{t('skills.listError')}</div>
+                        <div className="mt-4 text-sm text-text-muted">{t('skills.listError')}</div>
                       )}
-                      {listState === 'success' &&
-                        mySkillsFiltered.map((skill) => {
-                          const avatar = getSkillAvatar(skill.name);
-                          const displayName = skill.display_name || skill.name;
-                          const isDisabled = skill.enabled === false;
-                          const isToggling = actionTarget === `toggle:${skill.name}`;
-                          const isPackage = isSkillPackage(skill);
-                          const isMenuOpen = openMenuSkillName === skill.name;
-                          const listKey = skill.path || `${skill.source || 'local'}:${skill.name}`;
-                          return (
-                            <div
-                              key={listKey}
-                              onClick={() => handleOpenSkill(skill.name)}
-                              className={CARD_CLASS}
-                              data-testid="skill-card"
-                            >
-                              {/* 上盒子：头像 + 名称/演进 + 来源 + 悬浮按钮 */}
-                              <div className="flex items-center gap-3 min-w-0">
-                                <div
-                                  className={`w-12 h-12 rounded-lg ${avatar.color} flex items-center justify-center flex-shrink-0 text-text-inverse font-semibold text-sm`}
-                                >
-                                  {avatar.firstChar}
+                      {listState === 'success' && (
+                        <>
+                          {/* 其他技能分组 */}
+                          {otherSkills.length > 0 && (
+                            <>
+                              {builtinSkills.length > 0 && (
+                                <div className="flex items-center justify-between mb-3">
+                                  <span className="font-bold text-text-strong" style={{ fontSize: '16px' }}>
+                                    {t('skills.mySkillsTabs.other')}
+                                  </span>
                                 </div>
-                                <div className="min-w-0 flex-1 h-full flex flex-col justify-between">
-                                  <div className="flex items-center gap-1.5">
-                                    <span className="text-sm font-semibold text-text-strong truncate leading-5">
-                                      {displayName}
-                                    </span>
-                                    {skill.has_evolutions ? (
-                                      <button
-                                        onClick={(e) => {
-                                          e.stopPropagation();
-                                          handleOpenSkill(skill.name);
-                                          setDetailTab('experience');
-                                        }}
-                                        className="relative shrink-0 w-5 h-5 flex items-center justify-center text-text-muted hover:text-text"
-                                        title={t('skills.actions.viewEvolution')}
-                                      >
-                                        <svg
-                                          xmlns="http://www.w3.org/2000/svg"
-                                          width="16"
-                                          height="16"
-                                          viewBox="0 0 24 24"
-                                          fill="none"
-                                          stroke="currentColor"
-                                          stroke-width="2"
-                                          stroke-linecap="round"
-                                          stroke-linejoin="round"
-                                          className="lucide lucide-bell-dot-icon lucide-bell-dot"
-                                        >
-                                          <path d="M10.268 21a2 2 0 0 0 3.464 0" />
-                                          <path d="M11.68 2.009A6 6 0 0 0 6 8c0 4.499-1.411 5.956-2.738 7.326A1 1 0 0 0 4 17h16a1 1 0 0 0 .74-1.673c-.824-.85-1.678-1.731-2.21-3.348" />
-                                          <circle cx="18" cy="5" r="3" />
-                                        </svg>
-                                      </button>
-                                    ) : null}
-                                  </div>
-                                  <div className="mt-1 flex items-center gap-1.5 flex-wrap">
-                                    <SkillTypeBadge skillType={skill.skill_type} withTruncate />
-                                    {activeTab === 'my' ? (
-                                      <span className="px-2 h-5 inline-flex items-center rounded bg-secondary border border-border truncate text-xs text-text-muted">
-                                        {t('skills.publishFilter.unpublished')}
-                                      </span>
-                                    ) : null}
-                                  </div>
-                                </div>
-                                {/* 悬浮按钮 + 始终显示的启用开关 */}
-                                <div
-                                  className="flex items-center gap-1.5 shrink-0"
-                                  onClick={(e) => e.stopPropagation()}
-                                >
-                                  <div className="flex items-center gap-1.5 opacity-0 group-hover:opacity-100 transition-opacity">
-                                    <div className="relative">
-                                      <button
-                                        type="button"
-                                        onClick={(e) => {
-                                          e.stopPropagation();
-                                          setOpenMenuSkillName(isMenuOpen ? null : skill.name);
-                                        }}
-                                        className="w-7 h-7 flex items-center justify-center rounded-md hover:bg-secondary text-text-muted hover:text-text"
-                                      >
-                                        <MoreIcon aria-hidden />
-                                      </button>
-                                      {isMenuOpen ? (
-                                        <>
-                                          <div
-                                            className="fixed inset-0 z-40"
-                                            onClick={(e) => {
-                                              e.stopPropagation();
-                                              setOpenMenuSkillName(null);
-                                            }}
-                                          />
-                                          <div className="absolute right-0 top-full mt-1 z-50 min-w-[160px] rounded-lg border border-border bg-panel shadow-lg py-1">
-                                            {!isPackage ? (
-                                              <button
-                                                onClick={
-                                                  isDisabled
-                                                    ? undefined
-                                                    : (e: React.MouseEvent) => {
-                                                        e.stopPropagation();
-                                                        setOpenMenuSkillName(null);
-                                                        handleEditSkill(skill.name, skill.skill_type);
-                                                      }
-                                                }
-                                                disabled={isDisabled}
-                                                className="flex items-center w-full px-3 py-2 text-sm text-left text-text hover:bg-secondary disabled:opacity-40 disabled:cursor-not-allowed"
-                                              >
-                                                {t('skills.actions.edit')}
-                                              </button>
-                                            ) : null}
-                                            <button
-                                              onClick={(e) => {
-                                                e.stopPropagation();
-                                                setOpenMenuSkillName(null);
-                                                const plugin = installedSkillMap.get(skill.name);
-                                                handleUninstall(plugin?.plugin_name || skill.name);
-                                              }}
-                                              className="flex items-center w-full px-3 py-2 text-sm text-left text-text hover:bg-secondary"
-                                            >
-                                              {t('skills.actions.uninstall')}
-                                            </button>
-                                          </div>
-                                        </>
-                                      ) : null}
-                                    </div>
-                                    <button
-                                      type="button"
-                                      onClick={
-                                        isDisabled
-                                          ? undefined
-                                          : (e: React.MouseEvent) => {
-                                              e.stopPropagation();
-                                              handleGoToChat(skill.name, skill.skill_type);
-                                            }
-                                      }
-                                      disabled={isDisabled}
-                                      onMouseEnter={(e) => {
-                                        if (isDisabled) return;
-                                        const rect = e.currentTarget.getBoundingClientRect();
-                                        setGoTryTooltip({ left: rect.left + rect.width / 2, top: rect.top });
-                                      }}
-                                      onMouseLeave={() => setGoTryTooltip(null)}
-                                      className="w-7 h-7 flex items-center justify-center rounded-md hover:bg-secondary text-text-muted hover:text-text disabled:opacity-40 disabled:cursor-not-allowed"
-                                    >
-                                      <NewConversationIcon aria-hidden width="16" height="16" />
-                                    </button>
-                                  </div>
-                                  <Switch
-                                    checked={!isDisabled}
-                                    onChange={() => toggleSkillDisabled(skill.name)}
-                                    disabled={isToggling}
-                                  />
-                                </div>
+                              )}
+                              <div className="card-grid-auto mb-6">
+                                {otherSkills.map(renderMySkillCard)}
                               </div>
-                              {/* 下盒子：描述 */}
-                              <div className="text-xs text-text-muted mt-[18px] line-clamp-2 leading-[22px]">
-                                {skill.description || t('skills.noDescription')}
+                            </>
+                          )}
+                          {/* 内置技能分组 */}
+                          {builtinSkills.length > 0 && (
+                            <>
+                              <div className="flex items-center justify-between mb-3">
+                                <span className="font-bold text-text-strong" style={{ fontSize: '16px' }}>
+                                  {t('skills.mySkillsTabs.builtin')}
+                                </span>
                               </div>
-                            </div>
-                          );
-                        })}
-                      </div>
+                              <div className="card-grid-auto">
+                                {builtinSkills.map(renderMySkillCard)}
+                              </div>
+                            </>
+                          )}
+                        </>
+                      )}
                     </div>
                   ) : null}
                 </>
