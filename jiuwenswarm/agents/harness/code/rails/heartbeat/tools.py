@@ -164,7 +164,8 @@ class HeartbeatRuntimeBridge:
         return [
             tool(
                 "heartbeat_list_jobs",
-                "List heartbeat follow-up jobs for the current session.",
+                "List all heartbeat jobs; use active_count, not len(jobs), "
+                "for the active-job count.",
                 {
                     "type": "object",
                     "properties": {
@@ -181,6 +182,7 @@ class HeartbeatRuntimeBridge:
             tool(
                 "heartbeat_create_job",
                 "Create a heartbeat follow-up job bound to the current conversation/session. "
+                "The backend performs the authoritative active-job limit check. "
                 "Use it only to return later to continue the existing task with the original "
                 "conversation and runtime configuration. For standalone daily reports, "
                 "periodic notifications, or independent saved-prompt tasks, use "

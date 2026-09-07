@@ -33,6 +33,8 @@ from jiuwenswarm.agents.harness.code.rails.heartbeat.models import (
     HeartbeatSchedule,
     MIN_INTERVAL_SECONDS,
     SOURCE_WEB_RPC,
+    STATUS_RUNNING,
+    STATUS_SCHEDULED,
     validate_metadata_source,
 )
 from jiuwenswarm.agents.harness.code.rails.heartbeat.scheduler import HeartbeatSchedulerService
@@ -197,6 +199,23 @@ class HeartbeatController:
                     raise PermissionError("heartbeat.jobs.all permission required")
             else:
                 session_id = access_session_id
+        active_jobs = [
+            job
+            for job in jobs
+            if job.enabled and job.status in {STATUS_SCHEDULED, STATUS_RUNNING}
+        ]
+        global_active_count = len(active_jobs)
+        global_active_limit = int(self._limits.get("max_active_jobs_global", 100))
+        if session_id:
+            active_count = sum(
+                job.session_id == session_id for job in active_jobs
+            )
+            active_limit = int(
+                self._limits.get("max_active_jobs_per_session", 5)
+            )
+        else:
+            active_count = global_active_count
+            active_limit = global_active_limit
         out = []
         for j in sorted(jobs, key=lambda item: (item.created_at or 0.0, item.id)):
             if session_id and j.session_id != session_id:
@@ -206,7 +225,15 @@ class HeartbeatController:
             if status and j.status != status:
                 continue
             out.append(j.to_dict())
-        return {"jobs": out}
+        return {
+            "jobs": out,
+            "active_count": active_count,
+            "active_limit": active_limit,
+            "can_create": (
+                active_count < active_limit
+                and global_active_count < global_active_limit
+            ),
+        }
 
     async def _owned_job(
         self, job_id: str, access_session_id: str | None
