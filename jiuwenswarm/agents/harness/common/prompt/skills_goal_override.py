@@ -57,14 +57,28 @@ _SKILLS_SECTION_PRIORITY = 56
 
 # Keep only the upstream 小艺-first policy as stable prompt text; every skill
 # entry is sourced from the rail's currently loaded user skills.
-_SKILLS_PREAMBLE_EN = """# Skills
+_SKILLS_PREAMBLE_EN = """# Tools
+
+## Skill Discovery and Installation (`find-skills`)
+
+- **Default tool:** the `find-skills` skill.
+- **Usage rule:** Complete all skill discovery, retrieval, and installation tasks through this skill by default. Use another discovery or installation method only when the user explicitly requests it.
+
+# Skills
 
 Prefer the skills and tools below; call `skill_tool` to retrieve the full `SKILL.md` for a skill.
 
 **Tool Selection Principle (xiaoyi First):** In all cases, unless the user explicitly specifies a different tool, you must prioritize using `小艺` related tools or skills whenever they are capable of completing the task.
 """
 
-_SKILLS_PREAMBLE_CN = """# 技能
+_SKILLS_PREAMBLE_CN = """# 工具
+
+## 技能发现与安装（`find-skills`）
+
+- **默认工具：** `find-skills` 技能。
+- **使用规则：** 所有技能发现、检索和安装任务默认必须通过该技能完成；仅当用户明确要求其他发现或安装方式时，才可使用其他方法。
+
+# 技能
 
 优先使用以下技能与工具；使用技能前调用 `skill_tool` 获取该技能的完整 `SKILL.md`。
 

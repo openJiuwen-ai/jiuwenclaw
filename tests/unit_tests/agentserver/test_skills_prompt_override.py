@@ -15,6 +15,9 @@ def test_all_mode_uses_dynamic_available_skills_xml_without_static_catalogue():
         ]
     )
 
+    assert "# Tools" in prompt
+    assert "Skill Discovery and Installation (`find-skills`)" in prompt
+    assert "Default tool:** the `find-skills` skill" in prompt
     assert "Tool Selection Principle (xiaoyi First)" in prompt
     assert "<available_skills>" in prompt
     assert "<name>custom-pdf</name>" in prompt
@@ -37,6 +40,8 @@ def test_all_mode_keeps_distinct_legacy_and_win_skill_names():
 def test_auto_list_keeps_only_the_stable_preamble():
     prompt = _build_auto_list_mode_skill_prompt()
 
+    assert "# Tools" in prompt
+    assert "find-skills" in prompt
     assert "Tool Selection Principle (xiaoyi First)" in prompt
     assert "<available_skills>" not in prompt
     assert "xiaoyi-ppt-win" not in prompt
