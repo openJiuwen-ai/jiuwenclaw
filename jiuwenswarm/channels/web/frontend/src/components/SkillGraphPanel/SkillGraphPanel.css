@@ -8,6 +8,7 @@
   height: 100%;
   min-height: 0;
   position: relative;
+  background: var(--color-surface-panel);
   color: var(--color-text-primary);
 }
 
@@ -454,6 +455,10 @@
   font-size: var(--skill-graph-font-size-xs);
   line-height: 30px;
   text-align: center;
+}
+
+.skill-graph-panel__zoom-controls button.skill-graph-panel__zoom-fullscreen {
+  border-left: 1px solid var(--color-border-default);
 }
 
 .skill-graph-panel__canvas-empty {

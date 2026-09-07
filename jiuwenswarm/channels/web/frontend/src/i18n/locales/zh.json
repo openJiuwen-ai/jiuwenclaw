@@ -1868,6 +1868,8 @@
       "zoomIn": "放大",
       "zoomOut": "缩小",
       "zoomLevel": "当前缩放 {{percent}}%",
+      "fullscreen": "全屏",
+      "exitFullscreen": "退出全屏",
       "actions": {
         "read": "读取图谱",
         "incrementalBuild": "增量构建",

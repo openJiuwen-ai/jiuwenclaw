@@ -668,6 +668,8 @@ export function AgentManagementPanel({
         data-testid="agent-management-panel"
         data-variant={isMine ? 'mine' : 'catalog'}
       >
+        {/* 固定区（header/toolbar/提示）：page-shell 限宽 1400px 居中，与下方滚动列共用内容线 */}
+        <div className="page-shell flex-none">
         <PageHeader title={t('agentManagement.title')} subtitle={t('agentManagement.subtitle')} />
         <div className="page-toolbar" data-testid="page-toolbar">
           <nav
@@ -785,6 +787,7 @@ export function AgentManagementPanel({
             {actionNotice}
           </div>
         ) : null}
+        </div>
         <CatalogPage
           scope={isMine ? 'mine' : 'catalog'}
           items={isMine ? mineView.items : catalogView.items}
