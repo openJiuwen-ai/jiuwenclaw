@@ -1668,9 +1668,8 @@
     "uploadSkillModal": {
       "title": "Upload Skill",
       "pathLabel": "Local Skill Path",
-      "pathPlaceholder": "Enter skill file/directory path",
-      "notice": "Folders or .zip files must contain a SKILL.md file. The .md file must include skill name and description in YAML format.",
-      "dropHint": "Click or drag a compressed file or folder here",
+      "notice": "Only .zip archives are supported. The .zip must contain a SKILL.md file with skill name (name) and description (description) declared in its YAML frontmatter.",
+      "dropHint": "Click or drag a .zip file here",
       "confirm": "Import",
       "cancel": "Cancel"
     },
