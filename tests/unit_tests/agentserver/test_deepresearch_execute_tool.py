@@ -742,6 +742,116 @@ async def test_execution_rail_force_finishes_terminal_result_without_next_llm():
 
 
 @pytest.mark.asyncio
+async def test_execution_rail_skips_force_finish_when_followup_todo_pending():
+    result = {
+        "schema_version": de.EXECUTION_SCHEMA,
+        "kind": "completed",
+        "content": "研究报告已生成并交付。",
+        "state": {"schema_version": 1, "phase": "completed", "revision": 5},
+    }
+    session = _Session()
+    rail = DeepResearchExecutionRail(model_provider=lambda: None)
+    ctx = _rail_ctx(result=result, session=session)
+    todos = [
+        {"id": "deepresearch", "status": "in_progress"},
+        {"id": "generate_ppt", "status": "pending"},
+    ]
+
+    with (
+        patch(
+            "jiuwenswarm.agents.harness.common.rails.deepresearch_execution_rail."
+            "_load_todo_items",
+            return_value=todos,
+        ),
+        patch(
+            "jiuwenswarm.agents.harness.common.rails.deepresearch_execution_rail."
+            "_save_todo_items",
+            return_value=True,
+        ) as save_todos,
+    ):
+        await rail.before_tool_call(ctx)
+        await rail.after_tool_call(ctx)
+
+    assert ctx.force_finish_requests == []
+    assert session.state[DEEPRESEARCH_EXECUTION_STATE_KEY] == {}
+    assert todos[0]["status"] == "completed"
+    assert todos[1]["status"] == "in_progress"
+    save_todos.assert_called_once()
+    assert ctx.inputs.tool_result["kind"] == "completed"
+    handoff = ctx.inputs.tool_result["content"]
+    assert "generate_ppt" in handoff
+    assert "deepresearch_execute" in handoff
+    assert "ask_user" in handoff
+
+
+@pytest.mark.asyncio
+async def test_execution_rail_compacts_long_report_in_followup_handoff():
+    long_report = (
+        "预搜索发现招行零售资产质量仍承压，需要你确认以下研究方向问题。" * 40
+    )
+    result = {
+        "schema_version": de.EXECUTION_SCHEMA,
+        "kind": "completed",
+        "content": long_report,
+        "state": {"schema_version": 1, "phase": "completed", "revision": 5},
+    }
+    rail = DeepResearchExecutionRail(model_provider=lambda: None)
+    ctx = _rail_ctx(result=result)
+    todos = [
+        {"id": "deepresearch", "status": "in_progress"},
+        {"id": "generate_ppt", "status": "pending"},
+    ]
+
+    with (
+        patch(
+            "jiuwenswarm.agents.harness.common.rails.deepresearch_execution_rail."
+            "_load_todo_items",
+            return_value=todos,
+        ),
+        patch(
+            "jiuwenswarm.agents.harness.common.rails.deepresearch_execution_rail."
+            "_save_todo_items",
+            return_value=True,
+        ),
+    ):
+        await rail.before_tool_call(ctx)
+        await rail.after_tool_call(ctx)
+
+    handoff = ctx.inputs.tool_result["content"]
+    assert len(handoff) < len(long_report)
+    assert "预搜索发现" not in handoff
+    assert "generate_ppt" in handoff
+    assert "ask_user" in handoff
+    assert "禁止" in handoff
+    assert ctx.inputs.tool_result["kind"] == "completed"
+
+
+@pytest.mark.asyncio
+async def test_execution_rail_force_finishes_when_only_research_todo_remains():
+    result = {
+        "schema_version": de.EXECUTION_SCHEMA,
+        "kind": "completed",
+        "content": "研究报告已生成并交付。",
+        "state": {"schema_version": 1, "phase": "completed", "revision": 5},
+    }
+    session = _Session()
+    rail = DeepResearchExecutionRail(model_provider=lambda: None)
+    ctx = _rail_ctx(result=result, session=session)
+
+    with patch(
+        "jiuwenswarm.agents.harness.common.rails.deepresearch_execution_rail."
+        "_load_todo_items",
+        return_value=[{"id": "deepresearch", "status": "in_progress"}],
+    ):
+        await rail.before_tool_call(ctx)
+        await rail.after_tool_call(ctx)
+
+    assert ctx.force_finish_requests == [
+        {"output": "研究报告已生成并交付。", "result_type": "answer"}
+    ]
+
+
+@pytest.mark.asyncio
 async def test_execution_rail_binds_request_id_for_nested_options_llm():
     result = {
         "schema_version": de.EXECUTION_SCHEMA,
