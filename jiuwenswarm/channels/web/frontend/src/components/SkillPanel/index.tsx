@@ -1,4 +1,4 @@
-/**
+﻿/**
  * SkillPanel 组件
  *
  * Skills 管理面板
@@ -2908,25 +2908,6 @@ export function SkillPanel({
                       >
                         {t('skills.actions.goTry')}
                       </button>
-                      {/* 发布 */}
-                      <button
-                        onClick={() => {
-                          if (getStoredOAuthToken()) {
-                            setPublishSkillName(selectedSkill.display_name || selectedSkill.name);
-                            setPublishVersion(selectedSkill.version || '');
-                            setPublishDisplayName(selectedSkill.display_name || selectedSkill.name);
-                            setPublishVersionDesc('');
-                            setPublishDrawerOpen(true);
-                          } else {
-                            setOauthLoginOpen(true);
-                          }
-                        }}
-                        className="flex items-center justify-center rounded-[16px] text-sm text-control-emphasis bg-card border border-control-emphasis hover:bg-secondary/30 whitespace-nowrap"
-                        style={{ height: '32px', padding: '0 24px' }}
-                        data-testid="skill-panel-my-detail-publish-btn"
-                      >
-                        {t('skills.actions.publish')}
-                      </button>
                     </div>
                   </div>
 
@@ -3317,7 +3298,7 @@ export function SkillPanel({
                       style={{ paddingTop: '16px' }}
                     >
                       {listState === 'loading' && (
-                        <div className="col-span-3 flex items-center justify-center h-full text-text-muted" data-testid="skill-panel-my-list-loading">
+                        <div className="mt-4 text-sm text-text-muted" data-testid="skill-panel-my-list-loading">
                           {t('common.loading')}
                         </div>
                       )}
@@ -3594,7 +3575,7 @@ export function SkillPanel({
                   onDrop={(e) => {
                     e.preventDefault();
                     const file = e.dataTransfer.files[0];
-                    if (file) {
+                    if (file && file.name.endsWith('.zip')) {
                       setUploadSkillPath(file.name);
                       setUploadSkillFile(file);
                     }
