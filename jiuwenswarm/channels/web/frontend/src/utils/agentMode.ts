@@ -1,7 +1,7 @@
 import type { AgentMode } from '../types';
 
 /** Concrete MACRO lanes after Auto resolves (excludes Auto selection and harness). */
-export type MacroLaneMode = 'agent.plan' | 'agent' | 'team';
+export type MacroLaneMode = 'agent' | 'team';
 
 /** Modes that use the single-agent rails / queue UX (not team / harness). */
 export function isSingleAgentMode(mode: AgentMode | null | undefined): boolean {
@@ -32,17 +32,13 @@ export function normalizeMacroLaneMode(raw: unknown): MacroLaneMode | null {
     return 'team';
   }
   if (
-    normalized === 'agent.plan' ||
-    normalized === 'plan' ||
-    normalized === 'planning'
-  ) {
-    return 'agent.plan';
-  }
-  if (
     normalized === 'agent' ||
     normalized === 'agent.fast' ||
     normalized === 'fast' ||
-    normalized === 'performance'
+    normalized === 'performance' ||
+    normalized === 'agent.plan' ||
+    normalized === 'plan' ||
+    normalized === 'planning'
   ) {
     return 'agent';
   }

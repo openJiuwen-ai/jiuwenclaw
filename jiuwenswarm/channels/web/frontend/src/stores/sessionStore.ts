@@ -161,6 +161,7 @@ function normalizeAgentMode(mode: unknown): AgentMode {
   if (normalized === 'auto' || normalized === 'agent.auto' || normalized === 'macro.auto') {
     return 'auto';
   }
+  // agent.plan / agent.fast / bare agent → UI base mode Agent (Plan is a separate toggle).
   return 'agent';
 }
 
@@ -751,6 +752,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
           [sessionId]: {
             ...runtime,
             mode: normalizedMode,
+            // Clear stale Auto route when the user picks a concrete (or new Auto) mode.
             lastMacroRoutedMode: null,
             contextUsageSnapshot: runtime.mode === normalizedMode ? runtime.contextUsageSnapshot : null,
             agentSelectionIntent,

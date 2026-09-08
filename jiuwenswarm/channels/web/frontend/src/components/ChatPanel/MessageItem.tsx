@@ -51,15 +51,17 @@ import { FileIcon } from '../FileIcon';
 import { webRequest } from '../../services/webClient';
 import { useChatStore } from '../../stores/chatStore';
 import { useSessionStore } from '../../stores/sessionStore';
+import { isEffectiveTeamMode } from '../../utils/agentMode';
 import { extractTokenFromDownloadUrl } from '../../utils/fileDownloadDedup';
 
 function openArtifactPanelForActiveMode(selectedArtifactId: string): void {
   const sessionId = useChatStore.getState().activeSessionId;
   const runtime = useSessionStore.getState().runtimes[sessionId ?? ''];
   const mode = runtime?.mode ?? 'agent';
-  const lastMacroRoutedMode = runtime?.lastMacroRoutedMode ?? null;
-  const effectiveMode = mode === 'auto' && lastMacroRoutedMode ? lastMacroRoutedMode : mode;
-  if (effectiveMode === 'team' || mode === 'auto_harness') {
+  if (
+    mode === 'auto_harness' ||
+    isEffectiveTeamMode(mode, runtime?.lastMacroRoutedMode)
+  ) {
     openArtifactPanel(selectedArtifactId);
     return;
   }
@@ -480,27 +482,27 @@ export const MessageItem = memo(function MessageItem({
 
   // 系统消息
   if (role === 'system') {
-	     if (content && content.startsWith('macro.routing:')) {
-	       const [, jsonStr] = content.split('macro.routing:');
-	       try {
-	         const routing = JSON.parse(jsonStr) as {
-	           mode?: string;
-	           confidence?: number;
-	           rationale?: string;
-	           source?: string;
-	           gate_confident?: boolean;
-	         };
-	         return (
-	           <div className="flex justify-center animate-fade-in">
-	             <MacroRoutingCard routing={routing} />
-	           </div>
-	         );
-	       } catch {
-	         // fall through to default system rendering
-	       }
-	     }
+    if (content && content.startsWith('macro.routing:')) {
+      const [, jsonStr] = content.split('macro.routing:');
+      try {
+        const routing = JSON.parse(jsonStr) as {
+          mode?: string;
+          confidence?: number;
+          rationale?: string;
+          source?: string;
+          gate_confident?: boolean;
+        };
+        return (
+          <div className="flex justify-center animate-fade-in">
+            <MacroRoutingCard routing={routing} />
+          </div>
+        );
+      } catch {
+        // fall through to default system rendering
+      }
+    }
 
-    // slash 命令输出按命令类型路由：compact 使用时间线分隔条，
+    // slash 命令输出按命令类型路由：BTW 使用侧问卡片，compact 使用时间线分隔条，
     // 其余命令退回通用文本；isCommandOutput 标记不会影响其他 system 消息。
     if (isCommandOutput) {
       const newlineIdx = content.indexOf('\n');

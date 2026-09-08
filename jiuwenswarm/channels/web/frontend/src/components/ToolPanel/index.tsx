@@ -142,8 +142,8 @@ export function ToolPanel({
 }: ToolPanelProps) {
   const { t } = useTranslation();
   const isConnected = useSessionStore((state) => state.isConnected);
-  const activeSessionId = useChatStore(s => s.activeSessionId);
-  const mode = useSessionStore(s => s.runtimes[activeSessionId ?? '']?.mode ?? 'agent');
+  const activeSessionId = useChatStore((s) => s.activeSessionId);
+  const mode = useSessionStore((s) => s.runtimes[activeSessionId ?? '']?.mode ?? 'agent');
   const lastMacroRoutedMode = useSessionStore(
     (s) => s.runtimes[activeSessionId ?? '']?.lastMacroRoutedMode ?? null,
   );
@@ -647,7 +647,7 @@ export function ToolPanel({
               diffWatch={codeGitDiffWatch}
               onReview={() => {
                 setCodeReviewTarget?.({ source: 'working_tree' });
-                if (mode === 'team') {
+                if (effectiveMode === 'team') {
                   setTeamAreaActiveTab('review');
                   setTeamAreaExpanded(true);
                 } else {

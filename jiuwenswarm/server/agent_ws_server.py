@@ -81,7 +81,16 @@ from jiuwenswarm.server.runtime.agent_adapter.sysop_builder import (
     validate_sandbox_files_runtime,
 )
 from jiuwenswarm.server.utils.utils import is_team_params
-from jiuwenswarm.common.mode_matrix import is_plan_mode, is_team_mode
+from jiuwenswarm.common.mode_matrix import (
+    ResolvedMode,
+    TEAM_PLAN_CODE_MODE,
+    TEAM_PLAN_NORMAL_MODE,
+    canonicalize_mode_text,
+    is_plan_mode,
+    is_team_mode,
+    resolve_new_canonical_mode,
+    resolve_request_mode,
+)
 from jiuwenswarm.agents.harness.common.rails.permissions.permissions_config_rpc import (
     get_permissions_config_req_methods,
 )
@@ -5909,7 +5918,9 @@ class AgentWebSocketServer:
             params = request.params or {}
 
             channel_id = request.channel_id or "default"
-            mode, sub_mode, canonical_mode = resolve_agent_request_mode(params.get("mode", "agent"))
+            mode, sub_mode, canonical_mode = resolve_agent_request_mode(
+                params.get("mode", "agent")
+            )
             agent_mode = _agent_manager_mode_for_request(mode)
             # 同 command.btw：先按 session_id 找承载会话的 agent，按 mode 兜底会命中影子 agent。
             agent = self._agent_manager.get_agent_for_session_nowait(

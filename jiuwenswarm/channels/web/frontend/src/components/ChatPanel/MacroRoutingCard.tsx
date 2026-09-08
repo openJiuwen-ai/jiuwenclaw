@@ -14,13 +14,11 @@ interface MacroRoutingCardProps {
 
 function modeLabelKey(mode: string | undefined): string {
   switch (mode) {
-    case 'agent':
-    case 'agent.fast':
-      return 'chat.config.mode.singleAgent';
     case 'team':
       return 'chat.config.mode.cluster';
+    case 'agent':
+    case 'agent.fast':
     case 'agent.plan':
-      return 'chat.modePlan';
     default:
       return 'chat.config.mode.singleAgent';
   }

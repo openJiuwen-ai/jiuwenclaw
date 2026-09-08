@@ -8,12 +8,11 @@ from dataclasses import asdict, dataclass, field
 from typing import Any
 
 
-# Align with develop Web wire modes: agent (execute) / agent.plan / team.
-# Legacy ``agent.fast`` normalizes to ``agent``.
-MACRO_MODES = frozenset({"agent.plan", "agent", "team"})
+# Auto lanes: single agent vs cluster. Plan (agent.plan) is a user-forced
+# toggle, not a scheduler option. Legacy ``agent.fast`` normalizes to ``agent``.
+MACRO_MODES = frozenset({"agent", "team"})
 AUTO_MODE_ALIASES = frozenset({"auto", "agent.auto", "macro.auto"})
 MACRO_MODE_LABELS = {
-    "agent.plan": "Planning Mode",
     "agent": "Agent Mode",
     "team": "Cluster Mode",
 }
@@ -28,8 +27,8 @@ def normalize_macro_mode(mode: str | None, *, default: str = "agent") -> str:
     text = str(mode or "").strip().lower()
     if text in MACRO_MODES:
         return text
-    if text in {"plan", "planning"}:
-        return "agent.plan"
+    if text in {"plan", "planning", "agent.plan"}:
+        return "agent"
     if text in {"fast", "performance", "agent.fast"}:
         return "agent"
     if text in {"cluster", "agent.team"}:
@@ -45,7 +44,7 @@ def macro_mode_label(mode: str | None) -> str:
 
 @dataclass
 class MacroRoutingDecision:
-    """Resolved top-level execution lane (Planning / Agent / Cluster)."""
+    """Resolved top-level execution lane (Agent / Cluster)."""
 
     mode: str
     confidence: float

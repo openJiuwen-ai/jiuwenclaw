@@ -10,9 +10,12 @@ from typing import Any
 
 def load_macro_routing_config(config_base: dict[str, Any] | None = None) -> dict[str, Any]:
     """Resolve modes.macro_routing with safe defaults."""
-    from jiuwenswarm.common.config import get_config
+    if isinstance(config_base, dict):
+        base = config_base
+    else:
+        from jiuwenswarm.common.config import get_config
 
-    base = config_base if isinstance(config_base, dict) else get_config()
+        base = get_config()
     modes = base.get("modes") if isinstance(base.get("modes"), dict) else {}
     raw = modes.get("macro_routing") if isinstance(modes, dict) else {}
     if not isinstance(raw, dict):
@@ -40,7 +43,6 @@ def load_macro_routing_config(config_base: dict[str, Any] | None = None) -> dict
         "model_name": str(raw.get("model_name", "")).strip(),
         "confidence_threshold": confidence_threshold,
         "team_markers": _str_list("team_markers"),
-        "plan_markers": _str_list("plan_markers"),
         "fast_markers": _str_list("fast_markers"),
         "raw": deepcopy(raw),
     }
