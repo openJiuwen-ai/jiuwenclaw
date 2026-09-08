@@ -321,7 +321,7 @@ export function DefinitionDetailPage({
           </button>
         </div>
         {detailTab === 'content' ? (
-          <article className="agent-management-detail-content prose prose-sm">
+          <article className="agent-management-detail-content prose prose-sm max-w-none">
             {detail.details ? <ReactMarkdown remarkPlugins={[remarkGfm]}>{detail.details}</ReactMarkdown> : null}
           </article>
         ) : !canPreviewFiles ? (

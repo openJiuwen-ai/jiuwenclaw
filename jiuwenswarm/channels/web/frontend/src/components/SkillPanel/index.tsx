@@ -2291,6 +2291,8 @@ export function SkillPanel({
           {!(activeTab === 'my' && selectedSkill) &&
             !(activeTab === 'marketplace' && marketplaceSubView === 'detail') && (
               <>
+                {/* 固定区（header/toolbar）：page-shell 限宽 1400px 居中，与下方滚动列共用内容线 */}
+                <div className="page-shell flex-none">
                 <PageHeader title={t('skills.title')} subtitle={t('skills.subtitle')}>
                   <button
                     onClick={() => setSourceModalOpen(true)}
@@ -2489,11 +2491,15 @@ export function SkillPanel({
                     )}
                   </div>
                 </div>
+                </div>
               </>
             )}
 
           {activeTab === 'graph' ? (
-            <div data-testid="skill-panel-graph-view" className="mt-4 flex flex-1 min-h-0 flex-col gap-3">
+            <div
+              data-testid="skill-panel-graph-view"
+              className="page-shell mt-4 flex flex-1 min-h-0 flex-col gap-3"
+            >
               {indexRecommendationVisible ? (
                 <div
                   className="flex flex-none flex-col gap-3 rounded-lg border border-warn bg-warn-subtle px-4 py-3"
@@ -2710,7 +2716,7 @@ export function SkillPanel({
                     {t('agentManagement.actions.back')}
                   </button>
 
-                  <div className="skill-list-scroll flex-1 min-h-0 overflow-y-auto">
+                  <div className="page-scroll flex-1 min-h-0 overflow-y-auto">
                     <div className="flex items-center justify-between mb-3">
                       <span data-testid="skill-panel-team-skills-title" className="font-bold text-text-strong" style={{ fontSize: '16px' }}>
                         {t('skills.featuredTeamSkills')}
@@ -2734,6 +2740,7 @@ export function SkillPanel({
               ) : (
                 /* 默认列表视图 */
                 <>
+                  <div className="page-shell">
                   <CategoryTabs
                     items={MARKETPLACE_CATEGORIES.map((cat) => ({
                       value: cat,
@@ -2742,14 +2749,20 @@ export function SkillPanel({
                     value={marketplaceCategory}
                     onChange={setMarketplaceCategory}
                   />
+                  </div>
 
                   {hubLoading ? (
-                    <div className="mt-4 text-sm text-text-muted" data-testid="skill-panel-hub-list-loading">{t('common.loading')}</div>
+                    <div className="page-shell mt-4 text-sm text-text-muted" data-testid="skill-panel-hub-list-loading">
+                      {t('common.loading')}
+                    </div>
                   ) : hubSkills.length === 0 ? (
-                    <div className="mt-4 text-sm text-text-muted" data-testid="skill-panel-hub-list-empty">{t('skills.noMatches')}</div>
+                    <div className="page-shell mt-4 text-sm text-text-muted" data-testid="skill-panel-hub-list-empty">
+                      {t('skills.noMatches')}
+                    </div>
                   ) : search.trim() ? (
                     /* 搜索结果：全部罗列 */
-                    <div className="skill-list-scroll card-grid-auto mt-4 flex-1 min-h-0 overflow-y-auto">
+                    <div className="page-scroll mt-4 flex-1 min-h-0 overflow-y-auto">
+                      <div className="card-grid-auto">
                       {hubSkills.map((skill) => (
                         <HubSkillCard
                           key={skill.asset_id}
@@ -2761,10 +2774,11 @@ export function SkillPanel({
                           action={renderHubSkillActionButton(skill)}
                         />
                       ))}
+                      </div>
                     </div>
                   ) : (
                     /* 无搜索词：按 plugin_type 分组展示 */
-                    <div className="skill-list-scroll mt-4 flex-1 min-h-0 overflow-y-auto">
+                    <div className="page-scroll mt-4 flex-1 min-h-0 overflow-y-auto">
                       {/* 精选团队技能（最多一行，右侧"更多"） */}
                       {teamSkills.length > 0 && (
                         <>
@@ -2842,7 +2856,9 @@ export function SkillPanel({
           {activeTab === 'my' ? (
             <>
               {message && messageType === 'error' && (
-                <div data-testid="skill-panel-my-error" className="mt-3 px-3 py-2 rounded-md bg-secondary text-sm text-danger">{message}</div>
+                <div className="page-shell mt-3 px-3 py-2 rounded-md bg-secondary text-sm text-danger" data-testid="skill-panel-my-error">
+                  {message}
+                </div>
               )}
               {selectedSkill ? (
                 <div className="flex-1 flex flex-col min-h-0" data-testid="skill-panel-my-detail">
@@ -3351,7 +3367,7 @@ export function SkillPanel({
               ) : (
                 <>
                   {listState === 'success' && mySkillsFiltered.length === 0 ? (
-                    <div className="mt-4 text-sm text-text-muted">
+                    <div className="page-shell mt-4 text-sm text-text-muted">
                       {mySkillsSubTab === 'disabled'
                         ? t('skills.noDisabledSkills')
                         : mySkillsSubTab === 'enabled'
@@ -3362,7 +3378,11 @@ export function SkillPanel({
                     </div>
                   ) : null}
                   {listState !== 'success' || mySkillsFiltered.length > 0 ? (
-                    <div className="skill-list-scroll flex-1 min-h-0 overflow-y-auto">
+                    <div
+                      className="page-scroll flex-1 min-h-0 overflow-y-auto"
+                      style={{ paddingTop: '16px' }}
+                    >
+                      <div className="card-grid-auto">
                       {listState === 'loading' && (
                         <div className="mt-4 text-sm text-text-muted" data-testid="skill-panel-my-list-loading">
                           {t('common.loading')}
@@ -3403,6 +3423,7 @@ export function SkillPanel({
                           )}
                         </>
                       )}
+                      </div>
                     </div>
                   ) : null}
                 </>

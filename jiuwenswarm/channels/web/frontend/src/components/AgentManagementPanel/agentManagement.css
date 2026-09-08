@@ -492,8 +492,7 @@
 }
 
 .agent-management-inline-error {
-  width: min(calc(100% - (var(--agent-page-gutter) * 2)), var(--agent-content-max));
-  margin: 16px auto 0;
+  margin: 16px 0 0;
 }
 
 .agent-management-pagination {
@@ -543,11 +542,7 @@
   font-family: var(--font-body);
 }
 
-/* detail-body 已移至 index.css 统一管理 */
-
-.detail-body>.agent-management-detail-content {
-  max-width: var(--agent-content-max, 1400px);
-}
+/* detail-body 已移至 index.css 统一管理（限宽由 .detail-body > * 规则承担） */
 
 
 .agent-management-editor h1 {
@@ -677,8 +672,7 @@
 }
 
 .agent-management-inline-notice {
-  width: min(calc(100% - (var(--agent-page-gutter) * 2)), var(--agent-content-max));
-  margin: 16px auto 0;
+  margin: 16px 0 0;
 }
 
 .agent-management-connection-warning {
