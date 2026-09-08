@@ -397,6 +397,9 @@ REG_VALUE_READ_ACL_PROGRESS = "read_acl_progress"
 # 本次 preinstall_paths, 若有新增路径 (如用户改了 tool_paths 后首次起 sandbox)
 # 则提示需 --force 重装让管理员补预装; 运行时普通用户无权改外部目录 DACL.
 REG_VALUE_PREINSTALLED_PATHS = "preinstalled_paths"
+# apply_sandbox_acl 施加过的非 workspace 路径历史 (JSON list[str]).
+# 服务启动时跟当前 policy 路径求差集, 清掉"曾配过现移除"的路径上残留的 ACE
+REG_VALUE_APPLIED_ACL_PATHS = "applied_acl_paths"
 # install 时已预授 WRITE_DAC 的 deny/allow 路径集合 (JSON).
 # ensure_windows_setup 增量检测: runtime policy 新增 deny/allow 路径时自动弹 UAC 补授权.
 REG_VALUE_ACL_POLICY_PATHS = "acl_policy_paths"
