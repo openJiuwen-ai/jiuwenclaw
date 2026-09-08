@@ -535,6 +535,9 @@ def test_materialized_request_is_validated_against_task_snapshots(tmp_path: Path
         "profile": {"sha256": digest(profile)},
         "models": {"evaluation": {"path": str(model), "config_sha256": digest(model)}},
     }
+    attachment = input_dir / "input.txt"
+    attachment.write_text("original attachment", encoding="utf-8")
+    materials["input_snapshot"]["files"] = {"input.txt": digest(attachment)}
     (task_root / "task.json").write_text(
         json.dumps({"config": {"rsi_materials": materials}}),
         encoding="utf-8",
@@ -556,6 +559,13 @@ def test_materialized_request_is_validated_against_task_snapshots(tmp_path: Path
 
     result = asyncio.run(provider.run(request))
     assert result.status == "completed"
+
+    attachment.write_text("changed attachment", encoding="utf-8")
+    with pytest.raises(RsiPathNotAllowed, match="dataset file changed"):
+        asyncio.run(provider.run(request))
+    with pytest.raises(RsiResumeInputChanged, match="dataset file changed"):
+        asyncio.run(provider.resume(request))
+    attachment.write_text("original attachment", encoding="utf-8")
 
     source_harness.write_text("name: changed\n", encoding="utf-8")
     with pytest.raises(RsiPathNotAllowed):

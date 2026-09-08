@@ -71,6 +71,26 @@ def _tree_digest(path: Path) -> str:
     return digest.hexdigest()
 
 
+@pytest.mark.parametrize(
+    ("params", "expected"),
+    [
+        ({}, 3),
+        ({"max_repair_rounds": 1}, 1),
+        ({"max_repair_rounds": 5}, 5),
+        ({"training_options": {"max_repair_rounds": 1}}, 1),
+        ({"max_repair_rounds": 2, "training_options": {"max_repair_rounds": 5}}, 2),
+    ],
+)
+def test_repair_round_defaults_preserve_explicit_options(params: dict, expected: int) -> None:
+    from jiuwenswarm.agents.harness.common.rsi.materializer import _profile_options
+    from jiuwenswarm.agents.harness.common.rsi.services import _harness_profile_options
+
+    options = _harness_profile_options(params)
+    assert options["max_repair_rounds"] == expected
+    assert _profile_options(options)["max_repair_rounds"] == expected
+    assert _profile_options({})["max_repair_rounds"] == 3
+
+
 def test_model_resolver_uses_models_list_global_origin_index(tmp_path: Path) -> None:
     entries = [
         _entry("same", alias="first", is_default=True, api_base="https://one.test/v1"),
@@ -179,6 +199,9 @@ def test_gdpval_validation_suite_is_normalized(tmp_path: Path) -> None:
     assert payload["dataset_id"] == "evobench_local_no_key_validation"
     assert payload["cases"] == [
         {
+            "id": "gdpval-case-1",
+            "prompt": "Prepare the report.",
+            "metadata": {"task_type": "spreadsheet"},
             "case_id": "gdpval-case-1",
             "task_id": "gdpval-case-1",
             "input": "Prepare the report.",
@@ -194,7 +217,7 @@ def test_materializer_copies_dataset_wraps_single_harness_and_writes_validation_
 ) -> None:
     source_dataset = tmp_path / "source" / "validation.json"
     source_dataset.parent.mkdir()
-    source_dataset.write_text('{"cases": [{"case_id": "a"}]}', encoding="utf-8")
+    source_dataset.write_text('{"cases": [{"case_id": "a", "input": "Task a"}]}', encoding="utf-8")
     source_harness = tmp_path / "harness" / "harness_config.yaml"
     source_harness.parent.mkdir()
     source_harness.write_text("name: demo\n", encoding="utf-8")
@@ -246,7 +269,7 @@ def test_materializer_copies_dataset_wraps_single_harness_and_writes_validation_
     assert profile_payload["data_loader"]["batch_size"] == 1
     assert profile_payload["member_optimizer"]["sibling_candidate_count"] == 1
     assert profile_payload["member_optimizer"]["max_issue_attempts_per_batch"] == 8
-    assert profile_payload["member_optimizer"]["max_repair_rounds_per_batch"] == 1
+    assert profile_payload["member_optimizer"]["max_repair_rounds_per_batch"] == 3
     assert (
         profile_payload["evaluation_result_analyzer"]["diagnosis_agent_max_concurrency"]
         == 5
@@ -475,7 +498,7 @@ def test_task_service_materializes_private_validation_inputs_and_keeps_manifest_
 ) -> None:
     source_dataset = tmp_path / "source" / "validation.json"
     source_dataset.parent.mkdir()
-    source_dataset.write_text('{"cases": [{"case_id": "a"}]}', encoding="utf-8")
+    source_dataset.write_text('{"cases": [{"case_id": "a", "input": "Task a"}]}', encoding="utf-8")
     source_harness = tmp_path / "harness" / "harness_config.yaml"
     source_harness.parent.mkdir()
     source_harness.write_text("name: demo\n", encoding="utf-8")
