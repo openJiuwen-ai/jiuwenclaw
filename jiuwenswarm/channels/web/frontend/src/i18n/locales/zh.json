@@ -1534,7 +1534,9 @@
     "mySkillsTabs": {
       "all": "全部",
       "enabled": "启用",
-      "disabled": "禁用"
+      "disabled": "禁用",
+      "builtin": "内置",
+      "other": "其他技能"
     },
     "publishFilter": {
       "all": "全部",
@@ -1561,6 +1563,7 @@
     "disable": "禁用",
     "noDisabledSkills": "暂无禁用的技能",
     "noEnabledSkills": "暂无启用的技能",
+    "noBuiltinSkills": "暂无内置技能",
     "setEnabledError": "设置技能启用状态失败",
     "setEnabledSuccess": "已启用技能 {name}",
     "setDisabledSuccess": "已禁用技能 {name}",

@@ -1546,7 +1546,9 @@
     "mySkillsTabs": {
       "all": "All",
       "enabled": "Enabled",
-      "disabled": "Disabled"
+      "disabled": "Disabled",
+      "builtin": "Builtin",
+      "other": "Other Skills"
     },
     "publishFilter": {
       "all": "All",
@@ -1573,6 +1575,7 @@
     "disable": "Disable",
     "noDisabledSkills": "No disabled skills",
     "noEnabledSkills": "No enabled skills",
+    "noBuiltinSkills": "No builtin skills",
     "setEnabledError": "Failed to set skill enabled status",
     "setEnabledSuccess": "Skill {name} enabled",
     "setDisabledSuccess": "Skill {name} disabled",
