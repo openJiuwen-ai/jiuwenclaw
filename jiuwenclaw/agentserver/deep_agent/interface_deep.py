@@ -843,8 +843,11 @@ class JiuWenClawDeepAdapter:
         workspace_dir: str | None = None,
         agent_id: str | None = None,
         service_id: str | None = None,
+        assembly_cache: Any | None = None,
     ) -> None:
         _apply_llm_io_trace_patch()
+        # 租户级装配缓存(AgentManager 注入): ent_cfg/skill_sync 结果复用, None=旧行为
+        self._assembly_cache = assembly_cache
         self._instance: DeepAgent | None = None
         self._workspace_dir: str = workspace_dir or str(get_agent_root_dir())
         self._agent_name: str = "main_agent"
@@ -2836,7 +2839,10 @@ class JiuWenClawDeepAdapter:
 
     async def _load_enterprise_config(self, request: AgentRequest) -> None:
         """按当前请求的 ``params`` 从 Gateway DB 加载生效企业策略到 ``self._enterprise_config``。"""
-        self._enterprise_config = None
+        self._enterprise_config = await self._do_load_enterprise_config(request)
+
+    async def _do_load_enterprise_config(self, request: AgentRequest) -> Any | None:
+        """执行企业配置加载并返回结果(不赋值, 供缓存版复用)。"""
         try:
             from jiuwenclaw.agentserver.enterprise_config import (
                 DEFAULT_AGENT_LOAD_SLOTS,
@@ -2844,13 +2850,12 @@ class JiuWenClawDeepAdapter:
             )
         except ImportError as exc:
             logger.error("[JiuWenClawDeepAdapter] enterprise_config unavailable: %s", exc)
-            return
+            return None
 
         loaded = await load_effective_enterprise_config(
             request,
             DEFAULT_AGENT_LOAD_SLOTS,
         )
-        self._enterprise_config = loaded
         if loaded is None:
             p = request.params
             logger.warning(
@@ -2860,12 +2865,29 @@ class JiuWenClawDeepAdapter:
                 p.get("bot_id"),
                 p.get("user_id"),
             )
-            return
+            return None
 
         logger.info(
             "[JiuWenClawDeepAdapter] enterprise config loaded: template_ref=%s models=%s",
             loaded.template_ref,
             list(loaded.models),
+        )
+        return loaded
+
+    async def _load_enterprise_config_cached(self, request: AgentRequest) -> None:
+        """租户缓存版: 同路由键 TTL 内复用, 首次构建单飞(消灭并发新 session 重复查库)。"""
+        from jiuwenclaw.agentserver.deep_agent.tenant_assembly import routing_cache_key
+
+        async def _build() -> Any | None:
+            return await self._do_load_enterprise_config(request)
+
+        loaded, cache_hit = await self._assembly_cache.get_enterprise_config(
+            routing_cache_key(request), _build
+        )
+        self._enterprise_config = loaded
+        logger.info(
+            "[AgentPerf] assembly ent_cfg: hit=%s request_id=%s",
+            cache_hit, getattr(request, "request_id", ""),
         )
 
     def _runtime_agent_scope_id(self) -> str:
@@ -2874,6 +2896,23 @@ class JiuWenClawDeepAdapter:
         if service_id and agent_id:
             return f"{service_id}_{agent_id}"
         return agent_id or "jiuwenclaw"
+
+    async def _sync_skills_cached(self, skill_config: Any) -> Any:
+        """租户缓存版白名单同步: 签名未变直接复用, 变更后重建(单飞)。"""
+        from jiuwenclaw.agentserver.deep_agent.tenant_assembly import skill_whitelist_signature
+
+        async def _build() -> Any:
+            return await SkillWhitelistSynchronizer(
+                self._workspace_dir,
+                service_id=self._service_id,
+                agent_id=self._agent_id,
+            ).sync(skill_config)
+
+        sync_result, cache_hit = await self._assembly_cache.get_skill_sync(
+            skill_whitelist_signature(self._workspace_dir, skill_config), _build
+        )
+        logger.info("[AgentPerf] assembly skill_sync: hit=%s", cache_hit)
+        return sync_result
 
     async def create_instance(self, config: dict[str, Any] | None = None, *, mode: str = "agent.plan") -> None:
         """初始化 DeepAgent 实例.
@@ -2898,7 +2937,10 @@ class JiuWenClawDeepAdapter:
         _rid = getattr(bootstrap_request, "request_id", "") or "?"
         _t_ent0 = time.monotonic()
         if bootstrap_request is not None:
-            await self._load_enterprise_config(bootstrap_request)
+            if self._assembly_cache is not None:
+                await self._load_enterprise_config_cached(bootstrap_request)
+            else:
+                await self._load_enterprise_config(bootstrap_request)
         _t_ent = time.monotonic()
         config_base = self._merge_enterprise_models_into_config(config_base)
         self._refresh_multimodal_configs(config_base)
@@ -2914,11 +2956,14 @@ class JiuWenClawDeepAdapter:
             if self._enterprise_config is not None:
                 enterprise_skills = getattr(self._enterprise_config, "skill_whitelist", None)
             skill_config = parse_agent_skill_whitelist(self._agent_id, self._service_id, enterprise_skills)
-            sync_result = await SkillWhitelistSynchronizer(
-                self._workspace_dir,
-                service_id=self._service_id,
-                agent_id=self._agent_id,
-            ).sync(skill_config)
+            if self._assembly_cache is not None:
+                sync_result = await self._sync_skills_cached(skill_config)
+            else:
+                sync_result = await SkillWhitelistSynchronizer(
+                    self._workspace_dir,
+                    service_id=self._service_id,
+                    agent_id=self._agent_id,
+                ).sync(skill_config)
             if sync_result.errors:
                 logger.warning(
                     "[SkillWhitelist] sync partial errors: agent_id=%s service_id=%s errors=%s",

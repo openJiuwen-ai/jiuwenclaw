@@ -97,6 +97,11 @@ class AgentManager:
         self.agent_id = agent_id
         self.service_id = service_id
         self.user_workspace_dir = user_workspace_dir
+        # 租户级装配缓存: 并发新 session 复用 ent_cfg/skill_sync 装配结果,
+        # 消除每 session 全量查 Gateway DB + 白名单同步排队(失效靠钩子+TTL)
+        from jiuwenclaw.agentserver.deep_agent.tenant_assembly import TenantAssemblyCache
+
+        self._assembly_cache = TenantAssemblyCache()
         logger.info(
             "[AgentManager] 初始化: agent_id=%s, service_id=%s, workspace=%s, has_config=%s",
             agent_id,
@@ -140,6 +145,7 @@ class AgentManager:
             user_workspace_dir=str(self.user_workspace_dir) if self.user_workspace_dir else None,
             agent_id=self.agent_id,
             service_id=self.service_id,
+            assembly_cache=self._assembly_cache,
         )
         agent._agent_name = f"agent_{self.agent_id}_{self.service_id}_{agent_key}_{session_id}"
         await agent.create_instance(config, mode=mode)
@@ -325,8 +331,17 @@ class AgentManager:
                 return mode_agents[effective_session_id]
         return None
 
+    def invalidate_assembly_cache(self) -> None:
+        """清空租户装配缓存(企业配置/白名单同步结果).
+
+        配置 reload / 技能账本变更时调用, 下次 create_instance 重新装配。
+        """
+        self._assembly_cache.invalidate()
+
     async def reload_agents_config(self, config, env) -> None:
         """reload agent config"""
+        # 配置变更: 装配缓存(企业配置/白名单同步结果)一并失效
+        self.invalidate_assembly_cache()
         # 保存配置（用于后续创建的 agent 重放）
         self._latest_env_overrides = dict(env) if isinstance(env, dict) else {}
         self._latest_config_base = config
@@ -356,6 +371,8 @@ class AgentManager:
 
     async def refresh_all_enabled_skills_from_db(self) -> None:
         """Refresh enabled skills on every live session agent after DB ledger changes."""
+        # 技能账本变更: 白名单同步结果缓存失效, 下次 create_instance 重新同步
+        self.invalidate_assembly_cache()
         refreshed = 0
         for channel_agents in self.agents.values():
             if not isinstance(channel_agents, dict):

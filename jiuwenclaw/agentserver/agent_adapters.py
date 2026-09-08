@@ -128,6 +128,7 @@ async def create_adapter(
     workspace_dir: str | None = None,
     agent_id: str | None = None,
     service_id: str | None = None,
+    assembly_cache: Any | None = None,
 ) -> AgentAdapter:
     """Factory function to create SDK adapter instance.
 
@@ -136,6 +137,7 @@ async def create_adapter(
         workspace_dir: Workspace directory path to pass to adapter.
         agent_id: Agent ID for multi-tenant isolation.
         service_id: Service ID for multi-tenant isolation.
+        assembly_cache: 租户级装配缓存(AgentManager 注入, 可选)。
 
     Returns:
         AgentAdapter instance for the specified SDK.
@@ -155,6 +157,7 @@ async def create_adapter(
                 workspace_dir=workspace_dir,
                 agent_id=agent_id,
                 service_id=service_id,
+                assembly_cache=assembly_cache,
             )
 
         return await asyncio.get_event_loop().run_in_executor(None, import_and_create)
