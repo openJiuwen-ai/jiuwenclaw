@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import shutil
 import struct
 import threading
@@ -83,9 +84,51 @@ def test_share_image_cli_flushes_json_protocol_events(monkeypatch, tmp_path: Pat
     ])
     monkeypatch.setattr(share_image_export, "render_share_image", renderer)
 
-    assert share_image_export._run_cli() == (1 if error is not None else 0)
+    previous_disable = logging.root.manager.disable
+    logging.disable(logging.CRITICAL)
+    try:
+        assert share_image_export._run_cli() == (1 if error is not None else 0)
+    finally:
+        logging.disable(previous_disable)
     expected_result = {"error": error} if error is not None else {"phase": "completed", "filename": "share.zip"}
     assert events == [{"phase": "rendering"}, expected_result]
+
+
+@pytest.mark.parametrize("failure_stage", ["write", "flush"])
+def test_share_image_cli_propagates_output_failures_and_closes_handler(monkeypatch, failure_stage: str) -> None:
+    failure = OSError("protocol_output_failed")
+    handlers = []
+    closed_handlers = []
+    handler_class = share_image_export._CliEventHandler
+
+    class FailingOutput:
+        def write(self, text: str) -> int:
+            if failure_stage == "write":
+                raise failure
+            return len(text)
+
+        def flush(self) -> None:
+            if failure_stage == "flush":
+                raise failure
+
+    class TrackingHandler(handler_class):
+        def __init__(self, stream):
+            super().__init__(stream)
+            handlers.append(self)
+
+        def close(self) -> None:
+            closed_handlers.append(self)
+            super().close()
+
+    monkeypatch.setattr(share_image_export.sys, "stdout", FailingOutput())
+    monkeypatch.setattr(share_image_export, "_CliEventHandler", TrackingHandler)
+
+    with pytest.raises(OSError) as raised:
+        share_image_export._write_cli_event({"phase": "rendering"})
+
+    assert raised.value is failure
+    assert len(handlers) == 1
+    assert closed_handlers == handlers
 
 
 def test_share_image_export_job_freezes_snapshot_and_publishes_result() -> None:

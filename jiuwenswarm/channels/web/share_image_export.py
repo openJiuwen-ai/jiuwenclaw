@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
 import re
 import shutil
@@ -458,10 +459,30 @@ class ShareImageExportManager:
             shutil.rmtree(job.directory, ignore_errors=True)
 
 
+class _CliEventHandler(logging.StreamHandler):
+    """Propagate protocol output failures instead of dropping events."""
+
+    def handleError(self, record: logging.LogRecord) -> None:
+        raise sys.exception()
+
+
 def _write_cli_event(event: dict[str, str]) -> None:
     """Write one flushed JSONL protocol event for the Vite export manager."""
-    sys.stdout.write(json.dumps(event) + "\n")
-    sys.stdout.flush()
+    handler = _CliEventHandler(sys.stdout)
+    handler.setFormatter(logging.Formatter("%(message)s"))
+    record = logging.LogRecord(
+        name=f"{__name__}.cli",
+        level=logging.INFO,
+        pathname=__file__,
+        lineno=0,
+        msg=json.dumps(event),
+        args=(),
+        exc_info=None,
+    )
+    try:
+        handler.handle(record)
+    finally:
+        handler.close()
 
 
 def _run_cli() -> int:
