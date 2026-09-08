@@ -12075,6 +12075,20 @@ class JiuWenSwarmDeepAdapter:
                 return text
 
             finish_text = ""
+            # 外层 skill_acceleration_exec call id：首个 ask_user 卡片经
+            # StreamEventRail TIE 重写后即用此 id 作 request_id。resume 内二次
+            # 中断的 ask_user 卡片需对齐同一 id，前端/relay-claw 才能按外层
+            # call id 路由作答。从入站 params.request_id 剥 {id}#{n} 后缀得到。
+            _resume_params = (
+                request.params if isinstance(getattr(request, "params", None), dict) else {}
+            )
+            outer_call_id = self._derive_outer_call_id(
+                str(_resume_params.get("request_id") or "")
+            )
+            # 同 run_stream 的 ask_user 卡片去重集合：同一外层 call id 内的第 N
+            # 次中断需加 {id}#{n} 后缀区分，避免与首个 ask_user 卡片 id 冲突。
+            _resume_emitted_ask_ids: set[str] = set()
+            _resume_emitted_ask_questions: dict[str, str] = {}
             try:
                 async for chunk in skill_turbo.resume_stream(
                     plan_code=resume_ctx["plan_code"],
@@ -12107,8 +12121,22 @@ class JiuWenSwarmDeepAdapter:
                 async for summary_chunk in _emit_usage_summary():
                     yield summary_chunk
                 async for hitl_chunk in self._emit_skill_turbo_hitl_chunks(
-                    request, e
+                    request, e, outer_call_id
                 ):
+                    # ask_user 卡片走 _dedupe_ask_user_card：与首个 ask_user
+                    # 共用外层 call id 时加 {id}#{n} 后缀，与 run_stream 口径
+                    # 一致；作答回传时 interface._build_inputs 剥后缀还原。
+                    _payload = getattr(hitl_chunk, "payload", None)
+                    if (
+                        isinstance(_payload, dict)
+                        and _payload.get("event_type") == "chat.ask_user_question"
+                    ):
+                        if self._dedupe_ask_user_card(
+                            _payload,
+                            _resume_emitted_ask_ids,
+                            _resume_emitted_ask_questions,
+                        ):
+                            continue
                     yield hitl_chunk
                 return
             except SkillTurboNotHandled as exc:
@@ -12144,6 +12172,18 @@ class JiuWenSwarmDeepAdapter:
             )
 
         return _resume_impl()
+
+    @staticmethod
+    def _derive_outer_call_id(params_request_id: str) -> str:
+        """从入站 ask_user 作答的 params.request_id 派生外层 call id。
+
+        与 ``interface._build_inputs`` 剥 ``{id}#{n}`` 后缀同一套规则：有后缀
+        取 base，无后缀保留原值（不返回空串）。resume 内二次中断的 ask_user
+        卡片需用此 id 作 request_id，对齐首个 ask_user（TIE 重写后用外层 call id）。
+        """
+        rid = (params_request_id or "").strip()
+        m = re.search(r"^(?P<base>.+)#\d+$", rid)
+        return (m.group("base").strip() if m and m.group("base").strip() else rid)
 
     @staticmethod
     def _skill_turbo_answers_to_confirm_payload(
@@ -12184,8 +12224,16 @@ class JiuWenSwarmDeepAdapter:
     async def _emit_skill_turbo_hitl_chunks(
         request: AgentRequest,
         abort_exc: Any,
+        outer_call_id: str = "",
     ) -> AsyncIterator[AgentResponseChunk]:
-        """AbortError → HITL 三件套 chunk。"""
+        """AbortError → HITL 三件套 chunk。
+
+        ``outer_call_id`` 是外层 ``skill_acceleration_exec`` 的 tool_call id
+        （由 StreamEventRail TIE 重写给首个 ask_user 卡用的同一 id）。传入后
+        ask_user 卡片 request_id 改用它而非 inner ask_user tcid，使本路径
+        与首个 ask_user 的发卡路径一致——前端按外层 call id 注册/作答，答案
+        才能被 relay-claw 路由回本会话。空串时退化为原行为（inner tcid）。
+        """
         tic = _skill_turbo_extract_tool_interrupt(abort_exc)
         if tic is None:
             raise abort_exc
@@ -12228,10 +12276,13 @@ class JiuWenSwarmDeepAdapter:
                     raw_interaction
                 ])
                 if ask_payload:
-                    # Keep convert()'s request_id (= interrupt tool_call.id /
-                    # skill_turbo-tc-*). Overwriting with HTTP request.request_id
-                    # diverges from StreamEventRail nested cards and makes the
-                    # resume mismatch check fire on every normal answer.
+                    # 对齐 StreamEventRail TIE 重写后的发卡口径：ask_user 卡片
+                    # request_id 用外层 skill_acceleration_exec call id（首个
+                    # ask_user 即如此），而非 inner skill_turbo-tc-ask_user-*。
+                    # 否则前端/relay-claw 按外层 call id 管理待答卡片时收不到
+                    # 第二张卡的作答（request_id 不匹配 → 答案无法路由回会话）。
+                    if outer_call_id:
+                        ask_payload["request_id"] = outer_call_id
                     yield AgentResponseChunk(
                         request_id=rid,
                         channel_id=cid,
