@@ -71,6 +71,7 @@ import {
   heartbeatUserMessageId,
   heartbeatAssistantMessageId,
   heartbeatErrorMessageId,
+  refreshHeartbeatListAtRunStart,
 } from '../utils';
 import {
   findOverlappingFileExecutionEvent,
@@ -3567,10 +3568,16 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           // 这里立即派发一次心跳列表刷新（面板没打开时没有 listener，事件本身无副作用），
           // 让卡片上的「下次触发时间/状态」在本轮执行期间就更新，而不是等本轮结束。
           // 同一 run 可能收到重复的 processing=true 帧，按 run_id 去重只刷一次。
-          if (!heartbeatStartRefreshedRunIdsRef.current.has(hbAutomation.run_id)) {
-            heartbeatStartRefreshedRunIdsRef.current.add(hbAutomation.run_id);
-            window.dispatchEvent(new CustomEvent('heartbeat-list-refresh', { detail: { sessionId } }));
-          }
+          refreshHeartbeatListAtRunStart(
+            heartbeatStartRefreshedRunIdsRef.current,
+            hbAutomation.run_id,
+            sessionId,
+            (heartbeatSessionId) => {
+              window.dispatchEvent(
+                new CustomEvent('heartbeat-list-refresh', { detail: { sessionId: heartbeatSessionId } }),
+              );
+            },
+          );
           const userMsgId = heartbeatUserMessageId(hbAutomation.run_id);
           const prompt = typeof payload.content === 'string' ? payload.content : '';
           const existing = useChatStore.getState().getRuntime(sessionId)?.messages.find((m) => m.id === userMsgId);
