@@ -422,6 +422,13 @@ async def test_create_rejects_client_id_unknown_fields_and_string_booleans(
         await ctrl.create_job({**base, "id": "client-selected"})
     with pytest.raises(ValueError, match="enabled must be boolean"):
         await ctrl.create_job({**base, "enabled": "false"})
+    with pytest.raises(ValueError, match="unknown fields"):
+        await ctrl.create_job({**base, "delete_after_run": True})
+
+    job = await ctrl.create_job(base)
+    assert "delete_after_run" not in job
+    with pytest.raises(ValueError, match="unknown fields"):
+        await ctrl.update_job(job["id"], {"delete_after_run": True})
 
 
 async def test_get_meta(ctrl: HeartbeatController) -> None:
@@ -431,7 +438,7 @@ async def test_get_meta(ctrl: HeartbeatController) -> None:
     assert "interval" in meta["schedule_types"]
     assert "skip" in meta["concurrency_policies"]
     assert meta["run_count_semantics"].startswith("increments for succeeded")
-    assert "delete_after_run" in meta["deprecated_fields"]
+    assert meta["deprecated_fields"] == {}
     assert "session_busy_wait_timeout_seconds" not in meta["limits"]
 
 

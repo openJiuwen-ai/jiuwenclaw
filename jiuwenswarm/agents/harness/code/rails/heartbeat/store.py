@@ -769,7 +769,6 @@ class HeartbeatJobStore:
         concurrency_policy: str = DEFAULT_CONCURRENCY_POLICY,
         session_deleted_policy: str = DEFAULT_SESSION_DELETED_POLICY,
         max_runs: int | None = DEFAULT_MAX_RUNS,
-        delete_after_run: bool = False,
         source: str = SOURCE_AGENT_TOOL,
         metadata: dict[str, Any] | None = None,
         next_run_at: float | None = None,
@@ -783,8 +782,6 @@ class HeartbeatJobStore:
         """
         if not isinstance(enabled, bool):
             raise ValueError("enabled must be boolean")
-        if not isinstance(delete_after_run, bool):
-            raise ValueError("delete_after_run must be boolean")
         ts = float(now) if now is not None else time.time()
         # source 校验:controller 应已校验,此处再校一遍防绕过。
         src = validate_metadata_source(source)
@@ -840,7 +837,6 @@ class HeartbeatJobStore:
                 session_deleted_policy or DEFAULT_SESSION_DELETED_POLICY
             ),
             max_runs=max_runs,
-            delete_after_run=delete_after_run,
             created_at=ts,
             updated_at=ts,
             next_run_at=(
@@ -959,11 +955,6 @@ class HeartbeatJobStore:
                     if mr < 1:
                         raise ValueError("max_runs must be at least 1")
                     updated = replace(updated, max_runs=mr)
-            if "delete_after_run" in patch:
-                value = patch.get("delete_after_run")
-                if not isinstance(value, bool):
-                    raise ValueError("delete_after_run must be boolean")
-                updated = replace(updated, delete_after_run=value)
             if "schedule" in patch:
                 updated = replace(
                     updated,

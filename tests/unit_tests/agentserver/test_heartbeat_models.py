@@ -221,13 +221,22 @@ def test_job_run_state_roundtrip() -> None:
     assert job2.run_state.last_run_status == "succeeded"
 
 
+def test_job_from_dict_migrates_legacy_delete_after_run() -> None:
+    data = _make_interval_job(max_runs=12).to_dict()
+    data["run_count"] = 2
+    data["delete_after_run"] = True
+
+    job = HeartbeatJob.from_dict(data)
+
+    assert job.max_runs == 3
+    assert "delete_after_run" not in job.to_dict()
+
+
 @pytest.mark.parametrize(
     ("field", "invalid_value"),
     [
         ("enabled", "false"),
         ("enabled", 0),
-        ("delete_after_run", "false"),
-        ("delete_after_run", 0),
     ],
 )
 def test_job_from_dict_rejects_non_boolean_persisted_flags(

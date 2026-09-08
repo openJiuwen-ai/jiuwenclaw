@@ -206,7 +206,6 @@ class HeartbeatRuntimeBridge:
                         },
                         "schedule": schedule,
                         "max_runs": {"type": "integer"},
-                        "delete_after_run": {"type": "boolean", "default": False},
                         "concurrency_policy": {"type": "string", "enum": ["skip", "queue", "replace"]},
                         "enabled": {"type": "boolean", "default": True},
                     },

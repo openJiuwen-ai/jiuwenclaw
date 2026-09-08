@@ -51,14 +51,13 @@ _CREATE_FIELDS: frozenset[str] = frozenset(
     {
         "name", "channel_id", "session_id", "prompt", "schedule", "timezone",
         "enabled", "concurrency_policy", "session_deleted_policy", "max_runs",
-        "delete_after_run", "source",
+        "source",
     }
 )
 _UPDATE_FIELDS: frozenset[str] = frozenset(
     {
         "name", "prompt", "schedule", "timezone", "enabled",
         "concurrency_policy", "session_deleted_policy", "max_runs",
-        "delete_after_run",
     }
 )
 
@@ -310,9 +309,6 @@ class HeartbeatController:
         if session_deleted_policy not in HEARTBEAT_SESSION_DELETED_POLICIES:
             raise ValueError(f"invalid session_deleted_policy {session_deleted_policy!r}")
         enabled = self._strict_bool(params.get("enabled", True), field="enabled")
-        delete_after_run = self._strict_bool(
-            params.get("delete_after_run", False), field="delete_after_run"
-        )
 
         # 资源限制
         self._check_resource_limits_sync(session_id=session_id, schedule=schedule)
@@ -331,7 +327,6 @@ class HeartbeatController:
             concurrency_policy=concurrency_policy,
             session_deleted_policy=session_deleted_policy,
             max_runs=max_runs,
-            delete_after_run=delete_after_run,
             source=source,
             metadata=dict(identity_metadata or {}),
             max_active_jobs_per_session=int(
@@ -365,10 +360,6 @@ class HeartbeatController:
 
         if "enabled" in patch:
             patch["enabled"] = self._strict_bool(patch["enabled"], field="enabled")
-        if "delete_after_run" in patch:
-            patch["delete_after_run"] = self._strict_bool(
-                patch["delete_after_run"], field="delete_after_run"
-            )
 
         if patch.get("enabled") is True:
             target_max_runs = patch.get("max_runs", existing.max_runs)
@@ -546,10 +537,5 @@ class HeartbeatController:
             "statuses": list(HEARTBEAT_STATUSES),
             "sources": list(HEARTBEAT_SOURCES),
             "run_count_semantics": "increments for succeeded and failed attempts only",
-            "deprecated_fields": {
-                "delete_after_run": (
-                    "retained for compatibility; it completes and preserves the job "
-                    "record after an attempted run"
-                )
-            },
+            "deprecated_fields": {},
         }

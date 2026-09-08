@@ -5,7 +5,7 @@
 覆盖范围:
   - schedule 计算: interval 基于 now 重算不补跑; cron 复用 helper; once completed 保留。
   - 并发策略: skip 上一轮运行中跳过并记录 skipped。
-  - 停止条件: max_runs 达上限 completed; delete_after_run completed。
+  - 停止条件: max_runs 达上限 completed。
   - ghost task: job 删除后当前 run 被清理。
   - 会话生命周期: session 不可达按 session_deleted_policy 处理。
   - source 审计: scheduler 缺失/非法 source 记 warning 兜底 schedule_recovery。
@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 
 import pytest
@@ -337,8 +338,6 @@ async def test_tick_normalizes_exhausted_legacy_scheduled_job_without_dispatch(s
         ),
         source="agent_tool", max_runs=12,
     )
-    import json
-
     data = json.loads(store.path.read_text(encoding="utf-8"))
     for item in data["jobs"]:
         if item["id"] == job.id:
@@ -385,13 +384,18 @@ async def test_run_now_rejects_completed_job_without_exceeding_max_runs(setup) -
     assert len(mh.messages) == 1
 
 
-async def test_delete_after_run_marks_completed(setup) -> None:
+async def test_legacy_single_run_job_honors_increased_max_runs(setup) -> None:
     store, mh, sched = setup
     job = await store.create_job(
         name="n", channel_id="web", session_id="s1", prompt="p",
         schedule=HeartbeatSchedule.from_dict({"type": "interval", "interval_seconds": 120}),
-        source="agent_tool", delete_after_run=True,
+        source="agent_tool", max_runs=1,
     )
+    data = json.loads(store.path.read_text(encoding="utf-8"))
+    data["jobs"][0]["delete_after_run"] = True
+    store.path.write_text(json.dumps(data), encoding="utf-8")
+
+    await store.update_job(job.id, {"max_runs": 5})
     await store.update_job(job.id, {"next_run_at": 1.0})
     await sched._tick_once()
     running = await store.get_job(job.id)
@@ -399,8 +403,9 @@ async def test_delete_after_run_marks_completed(setup) -> None:
         job.id, running.run_state.current_run_id, outcome="succeeded"
     )
     j = await store.get_job(job.id)
-    assert j.status == STATUS_COMPLETED
+    assert j.status == STATUS_SCHEDULED
     assert j.run_count == 1
+    assert j.max_runs == 5
 
 
 # ---------------------------------------------------------------------------
