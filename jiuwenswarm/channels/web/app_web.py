@@ -36,7 +36,7 @@ parse_dotenv_early("jiuwenswarm-web")
 from jiuwenswarm.agents.harness.common.tools.ssl_config import get_insecure_ssl_context, get_ssl_verify
 from jiuwenswarm.common.debug_dump import install_async_dump_handler
 from jiuwenswarm.common.ws_diagnostics import describe_ws_exception, format_ws_diagnostics
-from jiuwenswarm.common.local_env_config import is_enterprise
+from jiuwenswarm.edition import is_enterprise
 from jiuwenswarm.common.utils import (
     get_logs_dir,
     get_root_dir,
@@ -99,10 +99,13 @@ def _parse_login_auth_simulate(raw: str | None) -> bool:
 
 
 def _parse_web_transport(raw: str | None) -> str:
+    """Parse WEB_TRANSPORT; unset follows edition (enterprise→http, personal→websocket)."""
     value = (raw or "").strip().lower()
     if value in ("http", "a2"):
         return "http"
-    return "websocket"
+    if value in ("websocket", "ws"):
+        return "websocket"
+    return "http" if is_enterprise() else "websocket"
 
 
 def _probe_http_service(

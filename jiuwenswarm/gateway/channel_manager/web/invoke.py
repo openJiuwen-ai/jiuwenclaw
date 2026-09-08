@@ -13,6 +13,7 @@ from jiuwenswarm.common.request_identity import (
     web_routing_identity,
 )
 from jiuwenswarm.common.schema.message import Message
+from jiuwenswarm.edition import is_enterprise
 
 logger = logging.getLogger(__name__)
 
@@ -20,7 +21,7 @@ logger = logging.getLogger(__name__)
 # AgentServer's E2A normalization. Local handlers only receive ``params``, so
 # merge ``metadata.routing`` into the handler params copy (not Message.params).
 _LOCAL_ROUTING_IDENTITY_PREFIXES = ("cron.", "skills.enterprise.")
-_LOCAL_ROUTING_IDENTITY_METHODS = frozenset({"models.list"})
+_LOCAL_ROUTING_IDENTITY_METHODS = frozenset({"models.list", "project.get_sessions", "project.get_cron_sessions"})
 
 _ENTERPRISE_BLOCKED_EXACT = frozenset({
     "config.set", "config.save_all", "models.replace_all", "models.save",
@@ -47,8 +48,6 @@ _ENTERPRISE_SKILL_ALLOWED = frozenset({
 
 def is_enterprise_write_forbidden(method: str) -> bool:
     """Central guard shared by WS and HTTP; Cron and locale remain user-writable."""
-    from jiuwenswarm.common.utils import is_enterprise
-
     if not is_enterprise():
         return False
     if method in _ENTERPRISE_BLOCKED_EXACT or method.startswith(_ENTERPRISE_BLOCKED_PREFIXES):

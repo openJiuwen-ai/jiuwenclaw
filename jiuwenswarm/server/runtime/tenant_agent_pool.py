@@ -13,8 +13,8 @@ from jiuwenswarm.server.runtime.reload_result import (
     log_agent_config_hot_reload,
     log_reload_config_changes,
 )
+from jiuwenswarm.edition import is_enterprise
 from jiuwenswarm.common.local_env_config import (
-    is_enterprise,
     EnvNsIdError,
     apply_env_removals,
     apply_process_baseline_gaps,
@@ -486,8 +486,12 @@ class TenantAgentPool:
             )
 
             try:
-                # 工作目录仅由 workspace_key 决定：workspace_{key}/
-                agent_dir_path = get_multi_tenant_user_workspace_dir(request_workspace_key)
+                # 个人版: service_{sid}/agent_{aid}/；企业版: workspace_{key}/
+                agent_dir_path = get_multi_tenant_user_workspace_dir(
+                    request_workspace_key,
+                    service_id=request_service_id,
+                    agent_id=request_agent_id,
+                )
 
                 import os
                 # 企业版：stable string instance id (legacy "aid_sid" form).

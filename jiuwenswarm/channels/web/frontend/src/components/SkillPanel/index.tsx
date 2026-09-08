@@ -11,11 +11,15 @@ import { SourceManagerModal } from "../../features/SourceManagerModal";
 import { SkillNetSearchModal } from "../../features/SkillNetSearchModal";
 import { ClawHubSearchModal } from "../../features/ClawHubSearchModal";
 import { TeamSkillsHubModal } from "../../features/TeamSkillsHubModal";
-import { EnterpriseSkillSourcePanel } from "../../features/EnterpriseSkillSourcePanel";
+import { EnterpriseSkillSourcePanel, fetchEnterpriseSkillSources } from "../../features/EnterpriseSkillSourcePanel";
+import { resolveEnterpriseSourceCount } from "../../features/EnterpriseSkillSourcePanel/sourceAvailability";
+import { skillPresentationName } from "../../features/EnterpriseSkillSourcePanel/installMetadata";
 import { Pagination } from "../common/Pagination";
+import { ConfirmDialog } from "../common/ConfirmDialog";
 import { OnlineSkillSearchPanel } from "../../features/OnlineSkillSearchPanel";
 import { SkillEvolutionModal } from "../../features/SkillEvolutionModal";
 import { normalizeSkillNetUrl } from "../../utils/skillNetUrl";
+import { buildSkillListParams, LatestSkillListRequest, shouldFetchSkillList } from "./skillListRequest";
 import { getSkillAvatar } from "../../utils/skillAvatar";
 import { SkillGraphPanel, type SkillGraphPanelHandle } from "../SkillGraphPanel";
 import { MarkdownRenderer } from "../MarkdownRenderer";
@@ -28,7 +32,7 @@ const SKILLS_FETCH_TIMEOUT_NORMAL_MS = 30_000;
 const SKILL_RETRIEVAL_RUNNING_POLL_MS = 10_000;
 const SKILL_RETRIEVAL_IDLE_POLL_MS = 5 * 60_000;
 const GRAPH_READING_MIN_VISIBLE_MS = 500;
-const MY_SKILLS_PAGE_SIZE = 20;
+const MY_SKILLS_PAGE_SIZE_DEFAULT = 20;
 
 type SkillItem = {
   name: string;
@@ -609,7 +613,10 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
   const [activeTab, setActiveTab] = useState<"my" | "marketplace" | "index" | "graph">("my");
   const [mySkillsSubTab, setMySkillsSubTab] = useState<"all" | "enabled" | "disabled" | "builtin" | "prebuilt" | "user">("all");
   const [mySkillsPage, setMySkillsPage] = useState(1);
+  const [mySkillsPageSize, setMySkillsPageSize] = useState(MY_SKILLS_PAGE_SIZE_DEFAULT);
   const [marketplaceSubTab, setMarketplaceSubTab] = useState<"builtin" | "swarmskills" | "online">("builtin");
+  // 企业版：技能源为空时不展示 SwarmSkills 入口（null=未知，加载中先展示）
+  const [enterpriseSourceCount, setEnterpriseSourceCount] = useState<number | null>(null);
   const [searchTrigger, setSearchTrigger] = useState(0);
   const [skills, setSkills] = useState<SkillItem[]>([]);
   const [plugins, setPlugins] = useState<InstalledPluginItem[]>([]);
@@ -617,7 +624,9 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
   const [search, setSearch] = useState("");
   const [debouncedSearch, setDebouncedSearch] = useState("");
   const searchDebounceRef = useRef<number | null>(null);
-  const prevIsActiveRef = useRef(isActive);
+  const previousListContextRef = useRef<string | null>(null);
+  const previousListSessionRef = useRef(sessionId);
+  const skillListRequestsRef = useRef(new LatestSkillListRequest());
   /** 首次列表加载成功后置 true：刷新失败（如瞬态 SCOPE_FULL_TIMEOUT）保留旧列表，不清空页面 */
   const skillsLoadedRef = useRef(false);
   const [selectedSkill, setSelectedSkill] = useState<SkillDetail | null>(null);
@@ -625,6 +634,7 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
   const [detailState, setDetailState] = useState<LoadState>("idle");
   const [actionTarget, setActionTarget] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
+  const [pendingUninstall, setPendingUninstall] = useState<{ name: string; displayName: string; origin?: string } | null>(null);
   const [messageType, setMessageType] = useState<"success" | "error" | "loading" | null>(null);
   const messageTimerRef = useRef<number | null>(null);
   const retrievalPollRef = useRef<number | null>(null);
@@ -642,6 +652,21 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
   const [selectedTreeNodeCid, setSelectedTreeNodeCid] = useState<string | null>(null);
   const [retrievalShowExistingIndexFailureNotice, setRetrievalShowExistingIndexFailureNotice] = useState(false);
   const [retrievalLoading, setRetrievalLoading] = useState<"idle" | "status" | "tree" | "build" | "cancel">("idle");
+
+  // 企业版：加载技能源数量，为空时隐藏 SwarmSkills 入口
+  useEffect(() => {
+    if (!readOnly) return;
+    let cancelled = false;
+    setEnterpriseSourceCount(null);
+    void fetchEnterpriseSkillSources(sessionId).then((sources) => {
+      if (!cancelled) {
+        setEnterpriseSourceCount(current => resolveEnterpriseSourceCount(current, sources));
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [readOnly, sessionId]);
 
   useEffect(() => {
     return () => {
@@ -743,6 +768,11 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
     [installedSkillMap, skills]
   );
 
+  const enterpriseInstalledOrigins = useMemo(
+    () => new Set(skills.filter(skill => skill.installed === true && skill.origin).map(skill => skill.origin!)),
+    [skills],
+  );
+
   /** 已安装技能的来源 URL（规范化），与 SkillNet 搜索结果的 skill_url 匹配 */
   const installedSkillOrigins = useMemo(() => {
     const set = new Set<string>();
@@ -828,6 +858,7 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
   }, []);
 
   const fetchSkills = useCallback(async (refreshMarketplaces = false) => {
+    const requestId = skillListRequestsRef.current.begin();
     setListState("loading");
     try {
       const data = await webRequest<{
@@ -835,16 +866,14 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
         plugins?: InstalledPluginItem[];
       }>(
         "skills.list",
-        {
-          with_installed: true,
-          ...(refreshMarketplaces ? { refresh_marketplaces: true } : {}),
-        },
+        buildSkillListParams(sessionId, refreshMarketplaces),
         {
           timeoutMs: refreshMarketplaces
             ? SKILLS_FETCH_TIMEOUT_REFRESH_MS
             : SKILLS_FETCH_TIMEOUT_NORMAL_MS,
         }
       );
+      if (!skillListRequestsRef.current.isLatest(requestId)) return;
       setSkills((data.skills || []).map(normalizeSkillItem));
       setPlugins(data.plugins || []);
       skillsLoadedRef.current = true;
@@ -855,10 +884,11 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
       }
     } catch (error) {
       console.error(error);
+      if (!skillListRequestsRef.current.isLatest(requestId)) return;
       // 已有成功数据时保留旧列表（stale-while-error），避免页签切换期间瞬态失败清空整个页面
       setListState(skillsLoadedRef.current ? "success" : "error");
     }
-  }, [fetchMarketplaces, readOnly, withSession]);
+  }, [fetchMarketplaces, readOnly, sessionId]);
 
   const fetchSkillDetail = useCallback(
     async (skillName: string, origin?: string) => {
@@ -939,23 +969,34 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
     }
   }, [i18n.language, withSession]);
 
-  // 当左边栏切换到技能页面时，或切换到"我的技能"页签时，调用 list 接口
+  // 首次挂载、重新进入技能页、切回「我的技能」或切其子页签时刷新一次列表。
+  // 用 context 去重，避免首次挂载时两个 effect 同时发出 skills.list。
   useEffect(() => {
-    const prevIsActive = prevIsActiveRef.current;
-
-    // 场景1：从其他页面切换到技能页面（isActive 变为 true）
-    if (isActive && !prevIsActive) {
-      fetchSkills();
+    const previousContext = previousListContextRef.current;
+    const sessionChanged = previousListSessionRef.current !== sessionId;
+    const context = !isActive
+      ? "inactive"
+      : activeTab === "my"
+        ? `my:${mySkillsSubTab}`
+        : activeTab;
+    if (sessionChanged) {
+      skillListRequestsRef.current.begin();
+      skillsLoadedRef.current = false;
+      setSkills([]);
+      setPlugins([]);
     }
-
-    // 场景2：在技能页面内切换到"我的技能"页签（isActive 保持 true，activeTab 变化）
-    if (isActive && prevIsActive && activeTab === "my") {
-      fetchSkills();
+    if (shouldFetchSkillList({
+      isActive,
+      activeTab,
+      previousContext,
+      currentContext: context,
+      sessionChanged,
+    })) {
+      void fetchSkills();
     }
-
-    // 更新 ref
-    prevIsActiveRef.current = isActive;
-  }, [isActive, activeTab, fetchSkills]);
+    previousListContextRef.current = context;
+    previousListSessionRef.current = sessionId;
+  }, [isActive, activeTab, mySkillsSubTab, fetchSkills, sessionId]);
 
   useEffect(() => {
     if (readOnly) return;
@@ -1260,43 +1301,46 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
     }
   }, [fetchSkills, fetchSkillDetail, t, withSession]);
 
-  const handleUninstall = useCallback(
-    async (pluginName: string, origin?: string) => {
-      if (!pluginName) return;
-      const confirmed = window.confirm(t('skills.uninstallConfirm', { pluginName }));
-      if (!confirmed) return;
+  const handleUninstall = useCallback((pluginName: string, origin?: string) => {
+    if (!pluginName) return;
+    const skill = skills.find(item => origin ? item.origin === origin : item.name === pluginName);
+    const displayName = skill ? skillPresentationName(skill) : pluginName;
+    setPendingUninstall({ name: pluginName, displayName, origin });
+  }, [skills]);
 
-      setActionTarget(pluginName);
-      setMessage(null);
-      setMessageType(null);
-      try {
-        // 企业版 skills.uninstall 被网关拦截，卸载用户自装技能须走 skills.enterprise.uninstall
-        const data = await webRequest<{
-          success: boolean;
-          detail?: string;
-          message?: string;
-          error_message?: string;
-        }>(readOnly ? "skills.enterprise.uninstall" : "skills.uninstall", withSession({
-          name: pluginName,
-          // 传 origin 让后端按来源精确定位目录与记录，避免重名技能误删另一个
-          ...(origin ? { origin } : {}),
-        }));
-        if (!data.success) {
-          throw new Error(data.detail || data.message || data.error_message || t('skills.errors.uninstallFailed'));
-        }
-        showMessage("success", t('skills.messages.uninstalled', { pluginName }));
-        await fetchSkills();
-        handleBackToList();
-      } catch (error) {
-        console.error(error);
-        const errorMessage = error instanceof Error ? error.message : String(error);
-        showMessage("error", errorMessage || t('skills.errors.uninstallFailedHint'));
-      } finally {
-        setActionTarget(null);
+  const confirmUninstall = useCallback(async () => {
+    if (!pendingUninstall) return;
+    const { name, displayName, origin } = pendingUninstall;
+    setPendingUninstall(null);
+    setActionTarget(name);
+    setMessage(null);
+    setMessageType(null);
+    try {
+      // 企业版 skills.uninstall 被网关拦截，卸载用户自装技能须走 skills.enterprise.uninstall
+      const data = await webRequest<{
+        success: boolean;
+        detail?: string;
+        message?: string;
+        error_message?: string;
+      }>(readOnly ? "skills.enterprise.uninstall" : "skills.uninstall", withSession({
+        name,
+        // 传 origin 让后端按来源精确定位目录与记录，避免重名技能误删另一个
+        ...(origin ? { origin } : {}),
+      }));
+      if (!data.success) {
+        throw new Error(data.detail || data.message || data.error_message || t('skills.errors.uninstallFailed'));
       }
-    },
-    [fetchSkills, handleBackToList, readOnly, t, withSession]
-  );
+      showMessage("success", t('skills.messages.uninstalled', { pluginName: displayName }));
+      await fetchSkills();
+      handleBackToList();
+    } catch (error) {
+      console.error(error);
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      showMessage("error", errorMessage || t('skills.errors.uninstallFailedHint'));
+    } finally {
+      setActionTarget(null);
+    }
+  }, [pendingUninstall, fetchSkills, handleBackToList, readOnly, t, withSession]);
 
   const renderActionButton = (skill: SkillItem) => {
     if (isAdministratorManagedSkill(skill)) {
@@ -1496,14 +1540,19 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
   }, [visibleSkills, mySkillsSubTab, installedSkillMap, readOnly]);
 
   const mySkillsFiltered = useMemo(() => getMySkillsFiltered(), [getMySkillsFiltered]);
-  const mySkillsTotalPages = Math.max(1, Math.ceil(mySkillsFiltered.length / MY_SKILLS_PAGE_SIZE));
+  const mySkillsTotalPages = Math.max(1, Math.ceil(mySkillsFiltered.length / mySkillsPageSize));
   const pagedMySkills = useMemo(
     () => mySkillsFiltered.slice(
-      (mySkillsPage - 1) * MY_SKILLS_PAGE_SIZE,
-      mySkillsPage * MY_SKILLS_PAGE_SIZE
+      (mySkillsPage - 1) * mySkillsPageSize,
+      mySkillsPage * mySkillsPageSize
     ),
-    [mySkillsFiltered, mySkillsPage]
+    [mySkillsFiltered, mySkillsPage, mySkillsPageSize]
   );
+
+  const handleMySkillsPageSizeChange = (nextSize: number) => {
+    setMySkillsPageSize(nextSize);
+    setMySkillsPage(1);
+  };
 
   useEffect(() => {
     setMySkillsPage(1);
@@ -1649,6 +1698,16 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
   );
   return (
     <>
+      {pendingUninstall && (
+        <ConfirmDialog
+          title={t('skills.uninstallConfirmTitle')}
+          message={t('skills.uninstallConfirm', { pluginName: pendingUninstall.displayName })}
+          confirmLabel={t('skills.actions.uninstall')}
+          onConfirm={() => void confirmUninstall()}
+          onCancel={() => setPendingUninstall(null)}
+          loading={actionTarget === pendingUninstall.name}
+        />
+      )}
       {message && messageType === "success" && (
         <div className="fixed top-4 right-4 z-[9999] rounded-[4px] text-sm text-text shadow-lg flex items-center gap-3 px-4" style={{ backgroundColor: "var(--color-feedback-success-toast)", width: "564px", height: "40px" }}>
           <span className="w-4 h-4 rounded-full bg-[var(--color-feedback-success-indicator)] flex items-center justify-center flex-shrink-0">
@@ -2068,20 +2127,22 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
                     {t('skills.marketplaceTabs.builtin')}
                   </button>
                 )}
-              <button
-                onClick={() => {
-                  setMarketplaceSubTab("swarmskills");
-                  setDebouncedSearch(search);
-                  setSearchTrigger((prev) => prev + 1);
-                }}
-                className={`px-4 text-sm font-medium  ${
-                  marketplaceSubTab === "swarmskills"
-                    ? "rounded-[8px] bg-secondary h-8 text-text"
-                    : "text-text-muted hover:text-text"
-                }`}
-              >
-                {t('skills.swarmskills.title')}
-              </button>
+              {enterpriseSourceCount !== 0 && (
+                <button
+                  onClick={() => {
+                    setMarketplaceSubTab("swarmskills");
+                    setDebouncedSearch(search);
+                    setSearchTrigger((prev) => prev + 1);
+                  }}
+                  className={`px-4 text-sm font-medium  ${
+                    marketplaceSubTab === "swarmskills"
+                      ? "rounded-[8px] bg-secondary h-8 text-text"
+                      : "text-text-muted hover:text-text"
+                  }`}
+                >
+                  {t('skills.swarmskills.title')}
+                </button>
+              )}
               {!readOnly && (
                 <button
                   onClick={() => {
@@ -2221,11 +2282,11 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
                   {readOnly ? (
                     <EnterpriseSkillSourcePanel
                       sessionId={sessionId}
+                      installedSkillOrigins={enterpriseInstalledOrigins}
+                      installedStateLoaded={skillsLoadedRef.current}
                       viewMode={viewMode}
                       externalSearchQuery={debouncedSearch}
-                      onInstalled={() => {
-                        void fetchSkills();
-                      }}
+                      onInstalled={() => fetchSkills()}
                     />
                   ) : (
                     <TeamSkillsHubModal
@@ -2356,8 +2417,12 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
                     <div className="text-sm font-medium text-text mb-2">
                       {t('skills.contentPreview')}
                     </div>
-                    <div className="text-sm text-text whitespace-pre-wrap bg-secondary border border-border rounded-md p-3">
-                      {selectedSkill.content || t('skills.noContent')}
+                    <div className="text-sm text-text bg-secondary border border-border rounded-md p-3">
+                      {selectedSkill.content ? (
+                        <MarkdownRenderer content={selectedSkill.content} className="chat-markdown text-sm" />
+                      ) : (
+                        t('skills.noContent')
+                      )}
                     </div>
                   </div>
                 </div>
@@ -2451,9 +2516,6 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
                       placeholder={t('skills.searchPlaceholder')}
                       className="w-full px-3 py-2 rounded-md bg-panel border border-border text-sm text-text placeholder:text-text-muted"
                     />
-                  </div>
-                  <div className="text-xs text-text-muted flex-shrink-0">
-                    {t('skills.totalCount', { count: mySkillsFiltered.length })}
                   </div>
                 </div>
 
@@ -2579,6 +2641,9 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
                   <Pagination
                     page={mySkillsPage}
                     totalPages={mySkillsTotalPages}
+                    total={mySkillsFiltered.length}
+                    pageSize={mySkillsPageSize}
+                    onPageSizeChange={handleMySkillsPageSizeChange}
                     onPageChange={(page) => setMySkillsPage(page)}
                     className="mt-3"
                   />

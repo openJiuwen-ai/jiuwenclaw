@@ -6,6 +6,15 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
+from fastapi import HTTPException
+
+from jiuwenswarm.common.request_ext import (
+    INTERNAL_HEADER_NAME,
+    encode_internal_header,
+    reset_ext,
+    set_current,
+)
 from jiuwenswarm.common.request_identity import web_routing_identity
 from jiuwenswarm.server.agent_http_routes import request_context
 from jiuwenswarm.server.agent_http_server import build_agent_request
@@ -106,3 +115,59 @@ def test_request_context_reads_tenant_headers() -> None:
         "agent_id": "ag-hash",
         "workspace_key": "wk-hash",
     }
+
+
+def test_request_context_and_agent_request_restore_request_ext() -> None:
+    encoded = encode_internal_header({"tenant": "租户-a", "feature": "beta"})
+    request = SimpleNamespace(
+        headers={
+            "x-request-id": "r-ext",
+            INTERNAL_HEADER_NAME: encoded,
+        },
+        path_params={},
+    )
+
+    ctx = request_context(request)
+    req = build_agent_request(
+        method="chat.send",
+        params={"query": "hi"},
+        request_id=ctx.request_id,
+        session_id=None,
+        channel_id=ctx.channel_id,
+        user_id=ctx.user_id,
+        is_stream=True,
+        routing=ctx.routing,
+        tenant_ids=ctx.tenant_ids,
+        request_ext=ctx.request_ext,
+    )
+
+    assert ctx.request_ext == {"tenant": "租户-a", "feature": "beta"}
+    assert req.metadata["ext"] == ctx.request_ext
+
+
+def test_request_context_rejects_invalid_request_ext_header() -> None:
+    request = SimpleNamespace(
+        headers={INTERNAL_HEADER_NAME: "not+base64"},
+        path_params={},
+    )
+    with pytest.raises(HTTPException) as exc_info:
+        request_context(request)
+    assert exc_info.value.status_code == 400
+
+
+def test_build_agent_request_without_header_does_not_reuse_ambient_ext() -> None:
+    token = set_current({"ambient": "must-not-leak"})
+    try:
+        req = build_agent_request(
+            method="session.list",
+            params={},
+            request_id="r-no-ext",
+            session_id=None,
+            channel_id="web",
+            user_id=None,
+            is_stream=False,
+        )
+    finally:
+        reset_ext(token)
+
+    assert not (req.metadata or {}).get("ext")

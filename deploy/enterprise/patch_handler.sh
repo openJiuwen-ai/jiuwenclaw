@@ -63,7 +63,8 @@ render_patch_file() {
         error "AgentServer JSON rendering failed, invalid JSON format: ${json_file}"
     fi
 
-    # 计算要剔除的 hostPath 卷(+ 引用它们的 volumeMounts);product 模式额外删主容器 securityContext:
+    # 计算要剔除的 hostPath 卷(+ 引用它们的 volumeMounts);product 模式额外删主容器 securityContext
+    # 及所有容器的 privileged:
     # 规则1(两模式通用):三个代码目录变量(CLAW_CODE_PATH/RUNTIME_CODE_PATH/CORE_CODE_PATH)任一为空,
     #   引用该变量的 hostPath 路径会变坏、不能挂载,一并剔除。映射(按 hostPath path 引用):
     #   CLAW_CODE_PATH    -> hp-code, hp-jiuwenbox
@@ -91,7 +92,7 @@ render_patch_file() {
         jq_drop="$(printf '%s\n' "${drop_names[@]}" | jq -R . | jq -s .)"
         sec_filter=""
         if [[ "${DEPLOY_VARS["MODE"]}" == "product" ]]; then
-            sec_filter=' | .rawdata.containers |= map(if .container_id == "c-agentserver" then del(.securityContext) else . end)'
+            sec_filter=' | .rawdata.containers |= map(if .container_id == "c-agentserver" then del(.securityContext) else . end) | .rawdata.containers |= map(del(.securityContext.privileged))'
         fi
         jq --argjson drop "${jq_drop}" \
             ".rawdata.templates[].volumes |= map(select(.name as \$n | \$drop | map(. == \$n) | any | not))${sec_filter}" \
@@ -123,8 +124,8 @@ install_agentserver_patch() {
 install_model_patch() {
     local gw_node_port="${DEPLOY_VARS["GATEWAY_CONFIG_HTTP_NODE_PORT"]:-}"
     local host="${DEPLOY_VARS["CURRENT_NODE_IP"]:-127.0.0.1}"
-    local bot_id="${MODEL_BOT_ID:-default}"
-    local agent_template_id="${AGENT_TEMPLATE_ID:-default-agent}"
+    local bot_id="default"
+    local agent_template_id="default-agent"
     local model_template_id="default-model"
 
     # 下发前确认 gateway config NodePort 真正可达(等 kube-proxy 规则生效)。

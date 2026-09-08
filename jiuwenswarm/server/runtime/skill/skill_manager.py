@@ -4,11 +4,11 @@
 
 from __future__ import annotations
 
-import logging
 import asyncio
 import hashlib
 import io
 import json
+import logging
 import os
 import re
 import shutil
@@ -16,16 +16,18 @@ import ssl
 import tarfile
 import tempfile
 import uuid
-from contextlib import contextmanager
 import zipfile
-from datetime import datetime, date, timezone
+from contextlib import contextmanager
+from datetime import date, datetime, timezone
+from functools import wraps
 from pathlib import Path, PurePosixPath, PureWindowsPath
-from typing import Any, Awaitable, Callable
+from typing import Any, Awaitable, Callable, Iterator
 from urllib.parse import quote, urlparse
-import yaml
-import urllib3
+
 import httpx
 import requests
+import urllib3
+import yaml
 from requests.adapters import HTTPAdapter
 from urllib3.util.ssl_ import create_urllib3_context
 
@@ -33,7 +35,8 @@ from openjiuwen.agent_evolving.checkpointing.evolution_store import (
     EvolutionLog as EvolutionFile,
     EvolutionRecord as EvolutionEntry,
 )
-from jiuwenswarm.common.local_env_config import get_local_config, is_enterprise
+from jiuwenswarm.common.local_env_config import get_local_config
+from jiuwenswarm.edition import is_enterprise
 from jiuwenswarm.common.utils import (
     get_agent_root_dir,
     get_agent_skills_dir,
@@ -50,21 +53,15 @@ from jiuwenswarm.extensions.sdk.skill_source import (
     SkillSourceExtension,
     SkillSourceProvider,
     SourceConfig,
-    TrustPolicy,
 )
 from jiuwenswarm.server.runtime.skill.artifact_security import (
     ArtifactVerificationError,
-    EnvironmentSecretResolver,
-    verify_skillhub_artifact,
 )
 from jiuwenswarm.server.runtime.skill.source_registry import (
     SourceRegistry,
     SourceRegistryError,
 )
-from jiuwenswarm.server.runtime.skill.sources import (
-    SWARM_SKILL_HUB_SOURCE_ID,
-    SwarmSkillHubProvider,
-)
+from jiuwenswarm.server.runtime.skill.enterprise_state_lock import enterprise_skill_state_lock
 
 
 def _get_ssl_verify() -> bool:
@@ -98,6 +95,9 @@ def enabled_skills_from_environ() -> str | None:
 
 _SKILLNET_DOWNLOAD_TIMEOUT: int = int(os.environ.get("SKILLNET_DOWNLOAD_TIMEOUT", "60"))
 _SKILLNET_MAX_RETRIES: int = int(os.environ.get("SKILLNET_MAX_RETRIES", "3"))
+_MARKETPLACE_GIT_TIMEOUT_SECONDS: float = float(
+    os.environ.get("MARKETPLACE_GIT_TIMEOUT", "30")
+)
 # SkillNet 异步安装 job 必须跨 SkillManager 实例共享：skills.* 无状态 RPC 在
 # AgentManager 缓存未命中时会临时 new JiuWenSwarm()，install 与 install_status
 # 可能落到不同实例；若 job 仅存实例内存会误报「安装会话已过期」。
@@ -470,6 +470,28 @@ def _handle_copy_error(exc: OSError, dest: Path, logger_prefix: str, src: Path |
     }
 
 
+def _state_transactional(method: Callable[..., Any]) -> Callable[..., Any]:
+    """Wrap a synchronous SkillManager mutation in the workspace lock.
+
+    The outer-most wrapper reloads the authoritative skills_state.json from
+    disk before the body runs, so cross-pod AgentServer instances sharing one
+    workspace never overwrite each other's writes (last-writer-wins bug for
+    enterprise skill state). Nested wrappers reuse the same transaction and do
+    not reload, preserving inner helper mutations. Async handlers must call a
+    decorated synchronous helper through ``asyncio.to_thread`` so waiting for
+    the cross-process file lock never blocks the event-loop thread.
+    """
+    if asyncio.iscoroutinefunction(method):
+        raise TypeError("_state_transactional only supports synchronous methods")
+
+    @wraps(method)
+    def sync_wrapper(self: "SkillManager", *args: Any, **kwargs: Any) -> Any:
+        with self.state_transaction():
+            return method(self, *args, **kwargs)
+
+    return sync_wrapper
+
+
 class SkillManager:
     """Skill 管理器，对应 skills.* 请求方法."""
 
@@ -508,7 +530,6 @@ class SkillManager:
         self._agent_id = str(agent_id or "").strip() or None
         self._state: dict[str, Any] = self._load_state()
         self._source_registry = SourceRegistry()
-        self._secret_resolver = EnvironmentSecretResolver()
         self._register_builtin_skill_sources()
         # 把手动拷入 skills 目录、未经任何安装流程登记的本地技能，自动补登记到
         # local_skills，使其与"导入本地技能"完全等价（可展示/卸载/查看详情/禁用）。
@@ -529,48 +550,57 @@ class SkillManager:
         self._skillnet_install_complete_hook = hook
 
     def _register_builtin_skill_sources(self) -> None:
-        """Register built-in protocol adapters; clients are started lazily."""
-        config = self._default_swarm_skill_hub_config()
-        self._source_registry.register(
-            config,
-            SwarmSkillHubProvider(
-                self._get_team_skills_hub_base_url(),
-                timeout=_TEAM_SKILLS_HUB_MARKET_TIMEOUT,
-            ),
-        )
+        """Register extension-offered default sources; clients are started lazily."""
+        self._register_default_sources(self._source_registry)
 
     @staticmethod
-    def _default_swarm_skill_hub_config() -> SourceConfig:
-        """Build the personal/standalone default using the common SourceConfig."""
-        key_id = str(os.getenv("TEAM_SKILLS_HUB_HMAC_KEY_ID") or "default").strip()
-        secret_env = str(
-            os.getenv("TEAM_SKILLS_HUB_HMAC_SECRET_ENV")
-            or "SKILL_DOWNLOAD_HMAC_SECRET"
-        ).strip()
-        # 默认 if-present：Hub 未下发签名时仅记 verified=false 不拦截安装；
-        # 需要强验签的环境通过 TEAM_SKILLS_HUB_HMAC_VERIFICATION=required 显式开启
-        verification = str(
-            os.getenv("TEAM_SKILLS_HUB_HMAC_VERIFICATION") or "if-present"
-        ).strip().lower()
-        if verification not in {"required", "if-present"}:
-            logger.warning(
-                "Invalid TEAM_SKILLS_HUB_HMAC_VERIFICATION=%s; using if-present",
-                verification,
-            )
-            verification = "if-present"
-        return SourceConfig(
-            source_id=SWARM_SKILL_HUB_SOURCE_ID,
-            provider_type="swarmskillhub",
-            enabled=True,
-            priority=100,
-            endpoint_ref="env://TEAM_SKILLS_HUB_BASE_URL",
-            capabilities=frozenset({"search", "check_updates", "get_artifact"}),
-            download_policy=DownloadPolicy(),
-            trust_policy=TrustPolicy(
-                verification=verification,
-                hmac_key_refs={key_id: f"env://{secret_env}"},
-            ),
-        )
+    def _register_default_sources(
+        registry: SourceRegistry, *, skip: set[str] | None = None
+    ) -> None:
+        """Ask each registered Skill Source factory for its default source and bind it.
+
+        是否提供默认源由扩展包自决（``default_source_config()`` 返回 None 即不注册）。
+        扩展系统未运行（如单测直接构造 SkillManager）时无工厂可问，直接不注册。
+        """
+        try:
+            from jiuwenswarm.extensions.registry import ExtensionRegistry
+
+            factories = ExtensionRegistry.get_instance().list_skill_source_extensions()
+        except RuntimeError:
+            factories = []
+        skipped = skip or set()
+        for factory in factories:
+            try:
+                config = factory.default_source_config()
+            except Exception:  # noqa: BLE001
+                logger.warning(
+                    "skill source extension %s failed to provide default source config",
+                    getattr(factory, "provider_type", "?"),
+                    exc_info=True,
+                )
+                continue
+            if config is None or config.source_id in skipped:
+                continue
+            try:
+                registry.bind_extension(config, factory)
+            except (SourceRegistryError, ValueError) as exc:
+                logger.warning(
+                    "default skill source %s rejected: %s", config.source_id, exc
+                )
+
+    @staticmethod
+    def _get_skill_source_extension(provider_type: str) -> SkillSourceExtension | None:
+        """Look up a registered Skill Source factory.
+
+        Returns None when the extension system is not running (e.g. unit tests
+        instantiating SkillManager directly).
+        """
+        try:
+            from jiuwenswarm.extensions.registry import ExtensionRegistry
+
+            return ExtensionRegistry.get_instance().get_skill_source_extension(provider_type)
+        except RuntimeError:
+            return None
 
     @staticmethod
     def _source_config_custom_payload(record: dict[str, Any]) -> dict[str, Any] | None:
@@ -587,41 +617,10 @@ class SkillManager:
         return raw if isinstance(raw, dict) else None
 
     @staticmethod
-    def _resolve_source_endpoint(reference: str | None) -> str | None:
-        value = str(reference or "").strip()
-        if not value.startswith("env://"):
-            return None
-        variable = value[6:]
-        if not re.fullmatch(r"[A-Z][A-Z0-9_]{0,127}", variable):
-            return None
-        resolved = str(os.getenv(variable) or "").strip()
-        return resolved or None
-
-    @staticmethod
     def _parse_source_config(raw: dict[str, Any]) -> SourceConfig:
-        trust_raw = raw.get("trust_policy")
-        trust_policy = None
-        if isinstance(trust_raw, dict):
-            verification = str(trust_raw.get("verification") or "if-present").strip().lower()
-            if verification not in {"required", "if-present"}:
-                raise SourceRegistryError(
-                    "source_misconfigured", "invalid trust_policy.verification"
-                )
-            refs = trust_raw.get("hmac_key_refs") or {}
-            if not isinstance(refs, dict):
-                raise SourceRegistryError(
-                    "source_misconfigured", "trust_policy.hmac_key_refs must be an object"
-                )
-            algorithms = trust_raw.get("allowed_algorithms") or ["HmacSHA256"]
-            if not isinstance(algorithms, list):
-                raise SourceRegistryError(
-                    "source_misconfigured", "trust_policy.allowed_algorithms must be an array"
-                )
-            trust_policy = TrustPolicy(
-                verification=verification,
-                allowed_algorithms=frozenset(str(item) for item in algorithms),
-                hmac_key_refs={str(key): str(value) for key, value in refs.items()},
-            )
+        # trust_policy 已从管理面摘除：验签信任策略内聚到 Provider（由扩展工厂
+        # 注入），管理面 dict 中的 trust_policy 键一律忽略。该键自 !5611 引入，
+        # 无存量使用方；SourceConfig.trust_policy 字段本身保留（SDK 模型不动）。
         capabilities = raw.get("capabilities") or []
         if not isinstance(capabilities, list):
             raise SourceRegistryError("source_misconfigured", "capabilities must be an array")
@@ -665,7 +664,6 @@ class SkillManager:
             auth_ref=str(raw.get("auth_ref") or "").strip() or None,
             capabilities=frozenset(str(item) for item in capabilities),
             download_policy=download_policy,
-            trust_policy=trust_policy,
             options=dict(options),
         )
 
@@ -701,48 +699,20 @@ class SkillManager:
         configs = [self._parse_source_config(item) for item in raw_sources]
         candidate = SourceRegistry()
         configured_ids = {config.source_id for config in configs}
-        if SWARM_SKILL_HUB_SOURCE_ID not in configured_ids:
-            default_config = self._default_swarm_skill_hub_config()
-            candidate.register(
-                default_config,
-                SwarmSkillHubProvider(
-                    self._get_team_skills_hub_base_url(),
-                    timeout=_TEAM_SKILLS_HUB_MARKET_TIMEOUT,
-                ),
-            )
+        # 默认源由扩展工厂自决是否提供（含企业版门控），与配置源同表绑定。
+        self._register_default_sources(candidate, skip=configured_ids)
 
         for config in configs:
-            if config.provider_type == "swarmskillhub":
-                endpoint = self._resolve_source_endpoint(config.endpoint_ref)
-                if not endpoint and config.source_id == SWARM_SKILL_HUB_SOURCE_ID:
-                    endpoint = self._get_team_skills_hub_base_url()
-                if not endpoint:
-                    raise SourceRegistryError(
-                        "source_misconfigured",
-                        f"unresolved endpoint_ref for source {config.source_id}",
-                    )
-                provider = SwarmSkillHubProvider(
-                    endpoint,
-                    source_id=config.source_id,
-                    display_name=str(config.options.get("display_name") or config.source_id),
-                    timeout=_TEAM_SKILLS_HUB_MARKET_TIMEOUT,
-                )
-                candidate.register(config, provider)
-                continue
-            try:
-                from jiuwenswarm.extensions.registry import ExtensionRegistry
-
-                extension = ExtensionRegistry.get_instance().get_skill_source_extension(
-                    config.provider_type
-                )
-            except RuntimeError:
-                extension = None
+            extension = self._get_skill_source_extension(config.provider_type)
             if extension is None:
                 raise SourceRegistryError(
                     "source_misconfigured",
                     f"provider_type is not registered: {config.provider_type}",
                 )
-            candidate.bind_extension(config, extension)
+            try:
+                candidate.bind_extension(config, extension)
+            except ValueError as exc:
+                raise SourceRegistryError("source_misconfigured", str(exc)) from exc
 
         previous = self._source_registry
         self._source_registry = candidate
@@ -782,17 +752,20 @@ class SkillManager:
 
         params:
             refresh_marketplaces: bool (可选, 默认 False)
-                为 True 时，先对已配置 marketplace 执行 clone/pull，再扫描列表。
+                个人版为 True 时，先对已配置 marketplace 执行 clone/pull，再扫描列表；
+                企业版不消费 marketplace，忽略该参数。
             with_installed: bool (可选, 默认 False)
                 为 True 时，同一次响应中附带 plugins（与 skills.installed 一致），
                 避免网关串行处理两次 RPC 导致列表刷新超时或排队过久。
         """
         refresh_marketplaces = bool(params.get("refresh_marketplaces", False))
-        if refresh_marketplaces:
+        # 企业版不消费 marketplace 扫描结果（下方 marketplace 恒为 []），
+        # 跳过同步，避免无意义的 git clone/pull 拖慢列表请求（超时/502）。
+        if refresh_marketplaces and not is_enterprise():
             await self._sync_marketplace_repos()
         # 每次列举前，把手动拷入 skills 目录、尚未登记的本地技能补登记为 local，
         # 使其无需重启 server、刷新"我的技能"即可显示（与导入本地技能一致）。
-        self._register_unmanaged_local_skills()
+        await asyncio.to_thread(self._register_unmanaged_local_skills)
         local = self._scan_local_skills()
         # 内置技能（仓内内置）两版都扫描展示；企业版不再跳过 builtin。
         builtin = self._scan_builtin_skills()
@@ -991,6 +964,11 @@ class SkillManager:
                 记录，避免重名技能误操作另一条。
             enabled: 目标状态
         """
+        return await asyncio.to_thread(self._handle_skills_toggle_sync, params)
+
+    @_state_transactional
+    def _handle_skills_toggle_sync(self, params: dict) -> dict:
+        """Apply one toggle while holding the workspace state transaction."""
         name = params.get("name", "")
         origin = str(params.get("origin", "") or "").strip() or None
         enabled = params.get("enabled")
@@ -2357,7 +2335,7 @@ class SkillManager:
         skill_id: str,
         version_id: str,
         params: dict[str, Any],
-    ) -> tuple[ArtifactDescriptor, bytes, dict[str, Any]]:
+    ) -> tuple[ArtifactDescriptor, bytes, dict[str, Any] | None]:
         """Fetch and verify one exact artifact for both install and update."""
         provider = await self._source_registry.get(source_id, "get_artifact")
         descriptor = await provider.get_artifact(
@@ -2373,32 +2351,32 @@ class SkillManager:
         )
         config = self._source_registry.get_config(source_id)
         download_policy = config.download_policy
+        allowed_hosts = tuple(download_policy.allowed_hosts) if download_policy else ()
+        if not allowed_hosts:
+            # SPI 来源 fail-closed：经扩展工厂/管理面注册的来源必须持有显式下载
+            # 主机白名单（管理面 download_policy 或 Provider 声明的默认白名单），
+            # 空白名单直接拒绝，不回退 legacy 白名单（import_local/teamskillshub
+            # 内置链路行为不变）。
+            raise SourceRegistryError(
+                "source_misconfigured",
+                f"skill source {source_id} 未配置 download_policy.allowed_hosts，拒绝下载",
+            )
         self._assert_skill_download_url_allowed(
             descriptor.download_url,
-            allowed_hosts=(download_policy.allowed_hosts if download_policy else None),
+            allowed_hosts=allowed_hosts,
         )
-        body = await self._download_zip_and_verify(
-            descriptor.download_url,
-            checksum_sha256=str(descriptor.checksum_sha256 or ""),
-            timeout=(download_policy.timeout_seconds if download_policy else None),
-            max_bytes=(download_policy.max_bytes if download_policy else None),
-        )
+        body = await provider.download_artifact(descriptor, download_policy)
         if descriptor.content_length is not None and len(body) != descriptor.content_length:
             raise SourceRegistryError(
                 "artifact_download_failed", "artifact content length does not match"
             )
-        trust_policy = config.trust_policy or TrustPolicy(verification="if-present")
         try:
-            verification = verify_skillhub_artifact(
-                descriptor,
-                body,
-                trust_policy=trust_policy,
-                secret_resolver=self._secret_resolver,
-            )
+            verification = await provider.verify_artifact(descriptor, body)
         except ArtifactVerificationError as exc:
             raise SourceRegistryError(exc.code, str(exc)) from exc
-        return descriptor, body, verification.to_audit_dict()
+        return descriptor, body, dict(verification) if verification is not None else None
 
+    @_state_transactional
     def _commit_source_skill_entity(
         self,
         skill_dir: Path,
@@ -2412,8 +2390,13 @@ class SkillManager:
         fingerprint: str | None = None,
         verification: dict[str, Any] | None = None,
         market_display_name: str = "",
+        author: str = "",
+        source_type: str = "user",
     ) -> dict[str, Any]:
         """Atomically replace the entity, then commit the JSON installation record."""
+        normalized_source_type = str(source_type or "user").strip() or "user"
+        if normalized_source_type not in {"user", "prebuilt"}:
+            raise ValueError(f"invalid source_type for source install: {source_type}")
         existing_ref = self._find_installation_by_skill_ref(source_id, skill_id)
         existing_name = str((existing_ref or {}).get("name") or "").strip()
         if existing_ref is not None and not force:
@@ -2451,7 +2434,7 @@ class SkillManager:
             staging.rename(dest)
             record = self.record_skill_installation(
                 name=skill_name,
-                source_type="user",
+                source_type=normalized_source_type,
                 source=source_id,
                 origin=f"{source_id}:{skill_id}",
                 version=version,
@@ -2462,6 +2445,8 @@ class SkillManager:
                 verification=verification,
                 entity_dir=entity_dir,
                 market_display_name=market_display_name,
+                author=author,
+                replace_by_name=normalized_source_type == "prebuilt",
             )
         except Exception:
             if dest.exists():
@@ -2477,6 +2462,82 @@ class SkillManager:
         self._refresh_agent_data_indexes()
         return self._skill_installation_dto(record)
 
+    async def install_prebuilt_from_provider(
+        self,
+        *,
+        source_id: str,
+        skill_id: str,
+        version_id: str,
+        force: bool = True,
+    ) -> dict[str, Any]:
+        """Install one Provider artifact as ``source_type=prebuilt`` (enterprise reconcile)."""
+        source_id = str(source_id or "").strip()
+        skill_id = str(skill_id or "").strip()
+        version_id = str(version_id or "").strip()
+        if not source_id or not skill_id or not version_id:
+            return {
+                "ok": False,
+                "error_code": "missing_params",
+                "detail": "source_id, skill_id and version_id are required",
+            }
+        try:
+            descriptor, body, verification = await self._fetch_verified_source_artifact(
+                source_id=source_id,
+                skill_id=skill_id,
+                version_id=version_id,
+                params={},
+            )
+            with tempfile.TemporaryDirectory(prefix="jiuwenswarm_prebuilt_provider_") as tmpdir:
+                tmp_path = Path(tmpdir)
+                self._safe_extract_zip_bytes_to_dir(body, tmp_path)
+                skill_dir = self._locate_skill_dir(tmp_path)
+                if skill_dir is None:
+                    raise SourceRegistryError(
+                        "invalid_package", "downloaded content is missing SKILL.md"
+                    )
+                skill_md = self._try_find_skill_file(skill_dir)
+                metadata = self._parse_skill_md(skill_md) if skill_md is not None else None
+                if not isinstance(metadata, dict):
+                    raise SourceRegistryError("invalid_package", "SKILL.md cannot be parsed")
+                skill_name = _safe_path_name(
+                    str(metadata.get("name") or skill_dir.name), "skill"
+                )
+                version = str(
+                    metadata.get("version")
+                    or descriptor.metadata.get("version")
+                    or version_id
+                ).strip()
+                record = await asyncio.to_thread(
+                    self._commit_source_skill_entity,
+                    skill_dir,
+                    skill_name=skill_name,
+                    source_id=source_id,
+                    skill_id=skill_id,
+                    version_id=version_id,
+                    version=version,
+                    force=force,
+                    fingerprint=descriptor.fingerprint,
+                    verification=verification,
+                    source_type="prebuilt",
+                )
+            return {
+                "ok": True,
+                "skill_name": str(record.get("name") or skill_name).strip(),
+                "row": record,
+                "version": version,
+            }
+        except SourceRegistryError as exc:
+            return {"ok": False, "error_code": exc.code, "detail": str(exc)}
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "prebuilt provider install failed: source_id=%s skill_id=%s version_id=%s error=%s",
+                source_id,
+                skill_id,
+                version_id,
+                exc,
+            )
+            return {"ok": False, "error_code": "download_failed", "detail": str(exc)}
+
     async def handle_skills_source_install(self, params: dict) -> dict:
         """Install one exact Provider artifact through the common transaction."""
         source_id = str(params.get("source_id") or "").strip()
@@ -2489,6 +2550,8 @@ class SkillManager:
         force = bool(params.get("force", False))
         # 市场展示名（技能广场卡片名）透传落盘，让「我的技能」与技能广场同名显示
         market_display_name = str(params.get("display_name") or "").strip()[:200]
+        market_version = str(params.get("version") or "").strip()[:100]
+        market_author = str(params.get("author") or "").strip()[:200]
         try:
             descriptor, body, verification = await self._fetch_verified_source_artifact(
                 source_id=source_id,
@@ -2511,12 +2574,21 @@ class SkillManager:
                 skill_name = _safe_path_name(
                     str(metadata.get("name") or skill_dir.name), "skill"
                 )
+                descriptor_metadata = dict(descriptor.metadata or {})
                 version = str(
-                    metadata.get("version")
-                    or descriptor.metadata.get("version")
+                    descriptor_metadata.get("version")
+                    or market_version
+                    or metadata.get("version")
                     or version_id
                 ).strip()
-                record = self._commit_source_skill_entity(
+                author = str(
+                    descriptor_metadata.get("author")
+                    or descriptor_metadata.get("publisher_name")
+                    or descriptor_metadata.get("owner_display_name")
+                    or market_author
+                ).strip()[:200]
+                record = await asyncio.to_thread(
+                    self._commit_source_skill_entity,
                     skill_dir,
                     skill_name=skill_name,
                     source_id=source_id,
@@ -2527,12 +2599,13 @@ class SkillManager:
                     fingerprint=descriptor.fingerprint,
                     verification=verification,
                     market_display_name=market_display_name,
+                    author=author,
                 )
             skill_payload: dict[str, Any] = {}
             for key in (
                 "installation_id", "name", "declared_name", "source_type",
                 "source_id", "skill_id", "version_id", "version", "enabled",
-                "installed", "removable", "consistency",
+                "installed", "removable", "consistency", "author",
             ):
                 value = record.get(key)
                 if value is not None:
@@ -2614,6 +2687,7 @@ class SkillManager:
             grouped.setdefault(source_id, []).append(record)
 
         items: list[dict[str, Any]] = []
+        pending_updates: dict[str, dict[str, Any]] = {}
         checked_at = datetime.now(timezone.utc).isoformat()
         for source_id, records in grouped.items():
             try:
@@ -2664,8 +2738,11 @@ class SkillManager:
                     items.append(
                         {key: value for key, value in public_status.items() if value is not None}
                     )
-                    record.update(
-                        {
+                    installation_id = str(
+                        record.get("installation_id") or ""
+                    ).strip()
+                    if installation_id:
+                        pending_updates[installation_id] = {
                             "updatable": bool(status.has_update),
                             "latest_version_id": status.latest_version_id,
                             "latest_version": status.latest_version,
@@ -2675,7 +2752,6 @@ class SkillManager:
                             "remote_status": status.remote_status,
                             "update_checked_at": checked_at,
                         }
-                    )
             except Exception as exc:  # noqa: BLE001
                 code = exc.code if isinstance(exc, SourceRegistryError) else "update_check_failed"
                 logger.warning("Skill update check failed: source_id=%s error=%s", source_id, exc)
@@ -2693,8 +2769,10 @@ class SkillManager:
                             "checked_at": checked_at,
                         }
                     )
-        if grouped:
-            self._save_state()
+        await asyncio.to_thread(
+            self._commit_skill_update_statuses,
+            pending_updates,
+        )
         return {"success": True, "items": items, "count": len(items)}
 
     async def handle_skills_team_skills_hub_info(self, params: dict) -> dict:
@@ -3123,12 +3201,54 @@ class SkillManager:
             "skill": {"name": skill_name, "source": "skillnet"},
         }
 
+    @_state_transactional
+    def _commit_skillnet_entity(
+        self,
+        skill_dir: Path,
+        *,
+        skill_name: str,
+        force: bool,
+        protected_source_types: frozenset[str],
+    ) -> dict[str, Any] | None:
+        """Commit a downloaded entity without overwriting protected installations."""
+        existing = self._find_skill_installation(name=skill_name)
+        existing_type = str((existing or {}).get("source_type") or "").strip()
+        if existing_type in protected_source_types:
+            return {
+                "ok": False,
+                "detail": f"skill name already installed as {existing_type}: {skill_name}",
+                "error_code": "skill_name_conflict",
+            }
+
+        dest = _safe_child_path(self._skills_dir, skill_name, "skill")
+        if dest.exists():
+            if not force:
+                return {
+                    "ok": False,
+                    "detail": "该技能已安装。",
+                    "detail_key": "skills.skillNet.errors.skillAlreadyInstalled",
+                }
+            _safe_rmtree(dest)
+
+        shutil.copytree(skill_dir, dest)
+        for mirror_root in self._get_mirror_skills_dirs():
+            mirror_dest = _safe_child_path(mirror_root, skill_name, "skill")
+            if mirror_dest.exists():
+                if not force:
+                    continue
+                _safe_rmtree(mirror_dest)
+            mirror_root.mkdir(parents=True, exist_ok=True)
+            shutil.copytree(skill_dir, mirror_dest)
+        return None
+
     def _skillnet_install_files_sync(
         self,
         skill_url: str,
         force: bool,
         mirror_url: str | None = None,
         checksum_sha256: str = "",
+        *,
+        protected_source_types: frozenset[str] = frozenset(),
     ) -> dict[str, Any]:
         """在工作线程中下载并拷贝到 skills 目录；返回 ok / skill_name / meta / skill_url.
 
@@ -3208,25 +3328,14 @@ class SkillManager:
                 except ValueError as exc:
                     _log_rejected_name("skills.skillnet.install", "skill", raw_skill_name, exc)
                     return {"ok": False, "detail": str(exc)}
-                dest = _safe_child_path(self._skills_dir, skill_name, "skill")
-                if dest.exists():
-                    if not force:
-                        return {
-                            "ok": False,
-                            "detail": "该技能已安装。",
-                            "detail_key": "skills.skillNet.errors.skillAlreadyInstalled",
-                        }
-                    _safe_rmtree(dest)
-
-                shutil.copytree(skill_dir, dest)
-                for mirror_root in self._get_mirror_skills_dirs():
-                    mirror_dest = _safe_child_path(mirror_root, skill_name, "skill")
-                    if mirror_dest.exists():
-                        if not force:
-                            continue
-                        _safe_rmtree(mirror_dest)
-                    mirror_root.mkdir(parents=True, exist_ok=True)
-                    shutil.copytree(skill_dir, mirror_dest)
+                commit_error = self._commit_skillnet_entity(
+                    skill_dir,
+                    skill_name=skill_name,
+                    force=force,
+                    protected_source_types=protected_source_types,
+                )
+                if commit_error is not None:
+                    return commit_error
                 _safe_rmtree(skill_dir)
                 return {
                     "ok": True,
@@ -3268,6 +3377,8 @@ class SkillManager:
         force: bool = True,
         mirror_url: str | None = None,
         checksum_sha256: str = "",
+        *,
+        protected_source_types: frozenset[str] = frozenset(),
     ) -> dict[str, Any]:
         """同步安装 skill（线程安全，可在 ``asyncio.to_thread`` 中调用）.
 
@@ -3275,7 +3386,11 @@ class SkillManager:
         ``checksum_sha256`` 非空时校验归档完整性（管理面预置链路）。
         """
         return self._skillnet_install_files_sync(
-            skill_url, force, mirror_url, checksum_sha256=checksum_sha256
+            skill_url,
+            force,
+            mirror_url,
+            checksum_sha256=checksum_sha256,
+            protected_source_types=protected_source_types,
         )
 
     async def handle_skills_uninstall(self, params: dict) -> dict:
@@ -3286,6 +3401,11 @@ class SkillManager:
             origin: 可选，技能来源标识（如 ``clawhub:owner/slug``、URL）。提供时按
                 origin 精确定位目录与记录，避免重名技能误删另一个。
         """
+        return await asyncio.to_thread(self._handle_skills_uninstall_sync, params)
+
+    @_state_transactional
+    def _handle_skills_uninstall_sync(self, params: dict) -> dict:
+        """Uninstall one skill while holding the workspace state transaction."""
         raw_name = params.get("name", "")
         raw_origin = str(params.get("origin", "") or "").strip()
         if not raw_name:
@@ -3309,7 +3429,13 @@ class SkillManager:
         # 优先用 origin 精确定位目录（ClawHub 目录名 = slug，可由 origin 直推）
         dest = None
         name = ""
-        if raw_origin:
+        if installation is not None and installation.get("entity_dir"):
+            name = _safe_path_name(str(installation.get("name") or raw_name), "skill")
+            entity_path = _safe_child_path(self._skills_dir, str(installation["entity_dir"]), "skill")
+            if not entity_path.is_dir():
+                return {"success": False, "detail": f"未找到 skill: {name}"}
+            dest = entity_path
+        if dest is None and raw_origin:
             dest = self._resolve_local_skill_dir_by_origin(raw_origin)
             # origin 命中时 name 用于 builtin 校验/记录回退
             name = raw_name
@@ -3540,6 +3666,88 @@ class SkillManager:
         if dest.exists() and dest.is_dir():
             _safe_rmtree(dest)
 
+    @_state_transactional
+    def _commit_web_skill_install(
+        self,
+        skill_dir: Path,
+        *,
+        skill_name: str,
+        skill_version: str | None,
+        source_url: str,
+    ) -> dict[str, Any]:
+        """Commit the user Skill entity and ledger record in one transaction."""
+        existing = self._find_skill_installation(name=skill_name)
+        if existing is not None:
+            existing_type = str(existing.get("source_type") or "").strip()
+            existing_origin = str(existing.get("origin") or "").strip()
+            existing_version = str(existing.get("version") or "").strip()
+            if existing_type == "prebuilt":
+                return {
+                    "success": False,
+                    "installed": False,
+                    "error_code": "skill_name_conflict",
+                    "error_message": (
+                        f"skill `{skill_name}` is prebuilt and cannot be overwritten"
+                    ),
+                }
+            if existing_type != "user" or existing_origin != source_url:
+                return {
+                    "success": False,
+                    "installed": False,
+                    "error_code": "skill_name_conflict",
+                    "error_message": f"skill name already installed: {skill_name}",
+                }
+            if existing_version == str(skill_version or ""):
+                return {
+                    "success": False,
+                    "installed": False,
+                    "already_installed": True,
+                    "error_code": "skill_already_installed",
+                    "name": skill_name,
+                    "error_message": (
+                        f"skill `{skill_name}` already installed with the same version"
+                    ),
+                }
+
+        import_result = self._install_web_skill_dir(skill_dir, skill_name=skill_name)
+        if not import_result.get("success"):
+            return {
+                "success": False,
+                "error_code": "install_failed",
+                "error_message": str(import_result.get("detail") or "install failed"),
+            }
+        installed_name = str(
+            (import_result.get("skill") or {}).get("name") or skill_name
+        ).strip()
+
+        try:
+            self.record_skill_installation(
+                name=installed_name,
+                source_type="user",
+                source="web",
+                origin=source_url,
+                version=str(skill_version or ""),
+            )
+        except SkillNameConflictError as exc:
+            self.remove_skill_directory(installed_name)
+            return {
+                "success": False,
+                "installed": False,
+                "error_code": "skill_name_conflict",
+                "error_message": str(exc),
+            }
+        except Exception as exc:  # noqa: BLE001
+            self.remove_skill_directory(installed_name)
+            return {
+                "success": False,
+                "error_code": "state_write_failed",
+                "error_message": str(exc)[:500],
+            }
+        return {
+            "success": True,
+            "skill": {"name": installed_name, "version": skill_version},
+        }
+
     async def handle_skills_web_install(self, params: dict) -> dict:
         """企业 Web 安装兼容入口：下载、校验、落盘并提交 workspace JSON。"""
         from jiuwenswarm.agents.harness.common.installed_skill import (
@@ -3613,73 +3821,13 @@ class SkillManager:
                 }
             skill_version = str(meta.get("version") or "").strip() or None
 
-            existing = self._find_skill_installation(name=skill_name)
-            if existing is not None:
-                existing_type = str(existing.get("source_type") or "").strip()
-                existing_origin = str(existing.get("origin") or "").strip()
-                existing_version = str(existing.get("version") or "").strip()
-                if existing_type == "prebuilt":
-                    return {
-                        "success": False,
-                        "installed": False,
-                        "error_code": "skill_name_conflict",
-                        "error_message": (
-                            f"skill `{skill_name}` is prebuilt and cannot be overwritten"
-                        ),
-                    }
-                if existing_type != "user" or existing_origin != url:
-                    return {
-                        "success": False,
-                        "installed": False,
-                        "error_code": "skill_name_conflict",
-                        "error_message": f"skill name already installed: {skill_name}",
-                    }
-                if existing_version == str(skill_version or ""):
-                    return {
-                        "success": False,
-                        "installed": False,
-                        "already_installed": True,
-                        "error_code": "skill_already_installed",
-                        "name": skill_name,
-                        "error_message": (
-                            f"skill `{skill_name}` already installed with the same version"
-                        ),
-                    }
-
-            import_result = self._install_web_skill_dir(skill_dir, skill_name=skill_name)
-            if not import_result.get("success"):
-                return {
-                    "success": False,
-                    "error_code": "install_failed",
-                    "error_message": str(import_result.get("detail") or "install failed"),
-                }
-            skill_name = str((import_result.get("skill") or {}).get("name") or skill_name).strip()
-
-            try:
-                self.record_skill_installation(
-                    name=skill_name,
-                    source_type="user",
-                    source="web",
-                    origin=url,
-                    version=str(skill_version or ""),
-                )
-            except SkillNameConflictError as exc:
-                self.remove_skill_directory(skill_name)
-                return {
-                    "success": False,
-                    "installed": False,
-                    "error_code": "skill_name_conflict",
-                    "error_message": str(exc),
-                }
-            except Exception as exc:  # noqa: BLE001
-                self.remove_skill_directory(skill_name)
-                return {
-                    "success": False,
-                    "error_code": "state_write_failed",
-                    "error_message": str(exc)[:500],
-                }
-
-        return {"success": True, "skill": {"name": skill_name, "version": skill_version}}
+            return await asyncio.to_thread(
+                self._commit_web_skill_install,
+                skill_dir,
+                skill_name=skill_name,
+                skill_version=skill_version,
+                source_url=url,
+            )
 
     async def handle_skills_web_uninstall(self, params: dict) -> dict:
         """企业 Web 卸载兼容入口：仅允许删除 workspace 中的 user 安装。"""
@@ -3709,7 +3857,15 @@ class SkillManager:
                 "error_message": "service_id and agent_id are required",
             }
 
-        installation = self._find_skill_installation(name=name)
+        origin = str(params.get("origin") or "").strip()
+        if origin:
+            matches = [
+                record for record in self.list_skill_installations()
+                if str(record.get("origin") or "").strip() == origin
+            ]
+            installation = matches[0] if len(matches) == 1 else None
+        else:
+            installation = self._find_skill_installation(name=name)
         if installation is None:
             return {
                 "success": False,
@@ -3723,6 +3879,7 @@ class SkillManager:
                 "error_message": f"skill `{name}` is prebuilt and cannot be uninstalled",
             }
 
+        name = str(installation.get("name") or "").strip()
         result = await self.handle_skills_uninstall(
             {"name": name, "origin": str(installation.get("origin") or "")}
         )
@@ -4330,7 +4487,11 @@ class SkillManager:
                 break
         for plugin in self._get_installed_plugins():
             if plugin.get("name") == skill_name:
-                display_name = str(plugin.get("display_name") or "").strip()
+                display_name = str(
+                    plugin.get("market_display_name")
+                    or plugin.get("display_name")
+                    or ""
+                ).strip()
                 if display_name:
                     return display_name
                 break
@@ -4508,7 +4669,7 @@ class SkillManager:
 
     @staticmethod
     def _generate_agent_data_for_workspace(workspace_root: Path) -> None:
-        """Generate agent/workspace/agent-data.json from agent tree."""
+        """Generate agent/jiuwenclaw_workspace/agent-data.json from agent tree."""
         agent_root = workspace_root.resolve()
         output_path = (agent_root / "agent-data.json").resolve()
         root_folder_key = "__root__"
@@ -5337,6 +5498,16 @@ class SkillManager:
     async def _git_clone(self, url: str, dest: Path) -> str | None:
         """浅克隆 git 仓库，返回 commit hash 或 None."""
         dest.parent.mkdir(parents=True, exist_ok=True)
+        if dest.exists():
+            return await self._git_get_commit(dest)
+        staging = dest.with_name(f".{dest.name}.clone-{uuid.uuid4().hex}")
+
+        def cleanup_partial_clone() -> None:
+            if not staging.exists():
+                return
+            if not _safe_rmtree(staging):
+                logger.warning("清理未完成的 git clone 目录失败: %s", staging)
+
         try:
             proc = await asyncio.create_subprocess_exec(
                 "git",
@@ -5344,16 +5515,41 @@ class SkillManager:
                 "--depth",
                 "1",
                 url,
-                str(dest),
+                str(staging),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
-            _, stderr = await proc.communicate()
+            try:
+                _, stderr = await asyncio.wait_for(
+                    proc.communicate(),
+                    timeout=_MARKETPLACE_GIT_TIMEOUT_SECONDS,
+                )
+            except asyncio.TimeoutError:
+                if proc.returncode is None:
+                    proc.kill()
+                await proc.communicate()
+                logger.error(
+                    "git clone 超时（%.1fs）: %s",
+                    _MARKETPLACE_GIT_TIMEOUT_SECONDS,
+                    url,
+                )
+                cleanup_partial_clone()
+                return None
             if proc.returncode != 0:
                 logger.error("git clone 失败: %s", stderr.decode(errors="replace"))
+                cleanup_partial_clone()
                 return None
+            try:
+                staging.rename(dest)
+            except OSError:
+                # 另一个并发 clone 已率先发布时，只清理本请求独占的暂存目录。
+                if dest.exists():
+                    cleanup_partial_clone()
+                    return await self._git_get_commit(dest)
+                raise
             return await self._git_get_commit(dest)
         except Exception as exc:
+            cleanup_partial_clone()
             logger.error("git clone 异常: %s", exc)
             return None
 
@@ -5369,7 +5565,21 @@ class SkillManager:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
-            _, stderr = await proc.communicate()
+            try:
+                _, stderr = await asyncio.wait_for(
+                    proc.communicate(),
+                    timeout=_MARKETPLACE_GIT_TIMEOUT_SECONDS,
+                )
+            except asyncio.TimeoutError:
+                if proc.returncode is None:
+                    proc.kill()
+                await proc.communicate()
+                logger.warning(
+                    "git pull 超时（%.1fs）: %s",
+                    _MARKETPLACE_GIT_TIMEOUT_SECONDS,
+                    repo_path,
+                )
+                return None
             if proc.returncode != 0:
                 logger.warning("git pull 失败: %s", stderr.decode(errors="replace"))
                 return None
@@ -5581,6 +5791,25 @@ class SkillManager:
     # -----------------------------------------------------------------------
     # 状态持久化
     # -----------------------------------------------------------------------
+
+    @contextmanager
+    def state_transaction(self) -> Iterator[None]:
+        """Reload and mutate enterprise Skill state under one workspace lock.
+
+        Public transaction entry used by the ``_state_transactional`` decorator
+        and by user-install / uninstall / whitelist paths that mutate
+        ``skills_state.json``. Holds a cross-pod file lock (portalocker) on the
+        workspace ledger so concurrent AgentServer pods sharing one workspace
+        never lose each other's writes. Non-enterprise or non-persistent
+        instances yield immediately (no lock, no reload).
+        """
+        if not is_enterprise() or not self._persist_skills_state:
+            yield
+            return
+        with enterprise_skill_state_lock(self._state_file) as outermost:
+            if outermost:
+                self._state = self._load_state()
+            yield
 
     def _load_state(self) -> dict[str, Any]:
         """加载 skills_state.json，失败时返回默认空状态."""
@@ -5799,6 +6028,7 @@ class SkillManager:
             "sync_status",
             "consistency",
             "market_display_name",
+            "author",
         ):
             if key in dto:
                 payload[key] = dto[key]
@@ -5827,6 +6057,7 @@ class SkillManager:
                 return record
         return None
 
+    @_state_transactional
     def record_skill_installation(
         self,
         *,
@@ -5843,6 +6074,7 @@ class SkillManager:
         verification: dict[str, Any] | None = None,
         entity_dir: str | None = None,
         market_display_name: str | None = None,
+        author: str | None = None,
         replace_by_name: bool = False,
     ) -> dict[str, Any]:
         """Create or update one managed installation in workspace JSON."""
@@ -5913,6 +6145,7 @@ class SkillManager:
             ("version_id", version_id),
             ("fingerprint", fingerprint),
             ("market_display_name", market_display_name),
+            ("author", author),
         ):
             normalized = str(value or "").strip()
             if normalized:
@@ -5936,6 +6169,7 @@ class SkillManager:
             self._save_state()
         return dict(record)
 
+    @_state_transactional
     def remove_skill_installation(
         self,
         *,
@@ -5956,6 +6190,66 @@ class SkillManager:
         ]
         self._save_state()
         return True
+
+    @_state_transactional
+    def remove_skill_installation_entity(
+        self,
+        *,
+        name: str,
+        origin: str | None = None,
+        expected_source_type: str,
+    ) -> bool:
+        """Atomically remove a guarded installation record and its skill entity.
+
+        The record is reloaded and its source type is checked before touching
+        disk. This prevents a stale prebuilt synchronizer from deleting a
+        same-name user skill that another AgentServer pod has installed.
+        """
+        record = self._find_skill_installation(name=name, origin=origin)
+        if record is None:
+            return False
+        expected = str(expected_source_type or "").strip()
+        if not expected or str(record.get("source_type") or "").strip() != expected:
+            return False
+
+        entity_dir = _safe_path_name(
+            str(record.get("entity_dir") or record.get("name") or name),
+            "skill",
+        )
+        entity_path = _safe_child_path(self._skills_dir, entity_dir, "skill")
+        if entity_path.is_dir():
+            _safe_rmtree(entity_path)
+        for mirror_root in self._get_mirror_skills_dirs():
+            mirror_path = _safe_child_path(mirror_root, entity_dir, "skill")
+            if mirror_path.is_dir():
+                _safe_rmtree(mirror_path)
+
+        return self.remove_skill_installation(
+            name=name,
+            origin=origin,
+            expected_source_type=expected,
+        )
+
+    @_state_transactional
+    def _commit_skill_update_statuses(
+        self,
+        updates: dict[str, dict[str, Any]],
+    ) -> None:
+        """Merge update-check results into the latest workspace ledger."""
+        if not updates:
+            return
+        changed = False
+        for record in self._get_installed_plugins():
+            if not isinstance(record, dict):
+                continue
+            installation_id = str(record.get("installation_id") or "").strip()
+            values = updates.get(installation_id)
+            if values is None:
+                continue
+            record.update(values)
+            changed = True
+        if changed:
+            self._save_state()
 
     def list_enabled_skill_names(self) -> list[str]:
         """Return enabled, disk-backed skill names for the current workspace."""
@@ -6025,6 +6319,7 @@ class SkillManager:
             origins.add(f"clawhub:{child.name}")
         return origins
 
+    @_state_transactional
     def _register_unmanaged_local_skills(self) -> None:
         """Auto-register skills that exist on disk but were never recorded.
 

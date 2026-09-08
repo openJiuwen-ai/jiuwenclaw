@@ -3,7 +3,7 @@
 """Rail Extension Manager - 管理用户自定义的 Rail 扩展."""
 
 from __future__ import annotations
-from jiuwenswarm.common.local_env_config import is_enterprise
+from jiuwenswarm.edition import is_enterprise
 
 import importlib
 import importlib.util
@@ -93,7 +93,7 @@ class RailManager:
         import os
         if is_enterprise():
             workspace = get_multi_tenant_user_workspace_dir(self.workspace_key)
-            return workspace / "agent" / "workspace" / "extensions"
+            return workspace / "agent" / "jiuwenclaw_workspace" / "extensions"
         return get_agent_workspace_dir() / "extensions"
 
     @property

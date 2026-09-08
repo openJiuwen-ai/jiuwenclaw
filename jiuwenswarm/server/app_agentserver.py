@@ -26,39 +26,25 @@ from jiuwenswarm.dotenv_early import parse_dotenv_early, load_dotenv_runtime
 parse_dotenv_early("jiuwenswarm-agentserver")
 
 
-def is_enterprise() -> bool:
-    """判断当前 AgentServer 是否运行在企业版。
-
-    产品形态由 JIUWENSWARM_EDITION 统一标识；AGENT_RUNTIME 仅表示运行模式，
-    不再作为个人版/企业版的判定依据。
-
-    启动早期不要依赖 ``local_env_config``（该模块较重）；后续会再从该模块导入同名函数。
-    """
-    return os.getenv("JIUWENSWARM_EDITION", "").strip().lower() == "enterprise"
-
-
 from jiuwenswarm.common.utils import (
     get_env_file,
     get_logs_dir,
     get_user_workspace_dir,
-    is_enterprise,
     logger,
     prepare_workspace,
     reset_free_search_runtime_flags,
     update_config,
     migrate_legacy_user_config_if_needed,
 )
-# Needed before workspace update_config gate (module top-level uses is_enterprise;
-# enterprise multi-Pod shared PVC skips startup merge).
-from jiuwenswarm.common.local_env_config import is_enterprise
+from jiuwenswarm.edition import is_enterprise
 
 migrate_legacy_user_config_if_needed()
 
 # Ensure workspace initialized
 _workspace_dir = get_user_workspace_dir()
 _config_file = _workspace_dir / "config" / "config.yaml"
-_new_workspace = _workspace_dir / "agent" / "workspace"
-_old_workspace = _workspace_dir / "agent" / "jiuwenclaw_workspace"
+_new_workspace = _workspace_dir / "agent" / "jiuwenclaw_workspace"
+_old_workspace = _workspace_dir / "agent" / "workspace"
 if not _config_file.exists() or (_old_workspace.exists() and not _new_workspace.exists()):
     prepare_workspace(overwrite=False)
 else:
@@ -239,6 +225,15 @@ async def _run_with_telemetry(host: str, port: int, telemetry_lifecycle) -> None
     from jiuwenswarm.extensions.registry import ExtensionRegistry
     from jiuwenswarm.common.config import get_config
 
+    # 脱敏冷加载尽量提前：读库走 infrastructure.db，不依赖扩展加载完成。
+    # 失败时仍保留内置规则；企业版 identity 在 import 阶段已可对 user_id= 等脱敏。
+    try:
+        from jiuwenswarm.infrastructure.log_masking.engine import LogMaskingEngine
+
+        await LogMaskingEngine.reload_log_masking_rule()
+    except Exception:  # noqa: BLE001
+        logger.warning("[AgentServer] log_masking_rule cold load skipped", exc_info=True)
+
     logger.info("[AgentServer] starting: ws://%s:%s", host, port)
 
     from jiuwenswarm.perf.config import init_perf_summary_config
@@ -270,13 +265,6 @@ async def _run_with_telemetry(host: str, port: int, telemetry_lifecycle) -> None
         register_code_source_unicode_hook()
     except Exception:  # noqa: BLE001
         logger.warning("[AgentServer] code_source_unicode hook registration skipped", exc_info=True)
-
-    try:
-        from jiuwenswarm.infrastructure.log_masking.engine import LogMaskingEngine
-
-        await LogMaskingEngine.reload_log_masking_rule()
-    except Exception:  # noqa: BLE001
-        logger.warning("[AgentServer] log_masking_rule cold load skipped", exc_info=True)
 
     if is_enterprise():
         try:

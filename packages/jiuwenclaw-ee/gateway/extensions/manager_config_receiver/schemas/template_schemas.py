@@ -9,6 +9,7 @@ from pydantic import (
     AfterValidator,
     AliasChoices,
     BaseModel,
+    BeforeValidator,
     ConfigDict,
     Field,
     model_validator,
@@ -54,10 +55,26 @@ def _validate_http_url(value: str) -> str:
     return value
 
 
+def _optional_skill_source_url(value: Any) -> str | None:
+    """空字符串视为未填；有值则按 http(s) URL 校验。"""
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    if len(text) > 2048:
+        raise ValueError("package_url must be at most 2048 characters")
+    return _validate_http_url(text)
+
+
 SkillSourceUrl = Annotated[
     str,
     Field(min_length=1, max_length=2048),
     AfterValidator(_validate_http_url),
+]
+OptionalSkillSourceUrl = Annotated[
+    str | None,
+    BeforeValidator(_optional_skill_source_url),
 ]
 
 
@@ -147,20 +164,78 @@ class ExtensionConfigTemplateCreateRequest(ExtensionConfigTemplateUpdateRequest)
     hook_type: str = Field(..., min_length=1, max_length=32)
 
 
-class SkillWhitelistTemplateUpdateRequest(SafeTextMixin):
+class SkillPrebuiltTemplateUpdateRequest(SafeTextMixin):
     template_name: str | None = Field(default=None, max_length=128)
     description: str | None = Field(default=None, max_length=512)
     skill_id: str | None = Field(default=None, max_length=512)
-    skill_version: str | None = Field(default=None, max_length=64)
-    skill_source: SkillSourceUrl | None = None
+    package_url: OptionalSkillSourceUrl = None
+    source_id: str | None = Field(default=None, max_length=64)
+    version_id: str | None = Field(default=None, max_length=128)
     enabled: bool | None = None
     data: dict[str, Any] | None = None
 
 
-class SkillWhitelistTemplateCreateRequest(SkillWhitelistTemplateUpdateRequest):
+class SkillPrebuiltTemplateCreateRequest(SkillPrebuiltTemplateUpdateRequest):
     template_id: str = Field(..., min_length=1, max_length=100)
     template_name: str = Field(..., min_length=1, max_length=128)
     skill_id: str = Field(..., min_length=1, max_length=512)
+
+
+_VALID_MCP_TRANSPORTS = frozenset({
+    "stdio",
+    "sse",
+    "http",
+    "streamable-http",
+    "streamable_http",
+})
+
+
+def validate_mcp_entry(entry: dict[str, Any]) -> dict[str, Any]:
+    """校验 MCP 模板 ``mcp_entry``；丢弃条目级 ``enabled``（开关只认模板行）。"""
+    if not isinstance(entry, dict):
+        raise ValueError("mcp_entry must be a JSON object")
+    normalized = dict(entry)
+    normalized.pop("enabled", None)
+    name = str(normalized.get("name", "")).strip()
+    if not name:
+        raise ValueError("mcp_entry.name is required")
+    transport = str(normalized.get("transport", "")).strip().lower()
+    if transport not in _VALID_MCP_TRANSPORTS:
+        raise ValueError(
+            "mcp_entry.transport must be one of: "
+            + ", ".join(sorted(_VALID_MCP_TRANSPORTS))
+        )
+    if transport == "stdio":
+        command = str(normalized.get("command", "")).strip()
+        if not command:
+            raise ValueError("mcp_entry.command is required for stdio transport")
+    else:
+        url = str(normalized.get("url", "")).strip()
+        if not url:
+            raise ValueError("mcp_entry.url is required for remote MCP transport")
+    normalized["name"] = name
+    normalized["transport"] = transport
+    return normalized
+
+
+class McpTemplateUpdateRequest(SafeTextMixin):
+    template_name: str | None = Field(default=None, max_length=128)
+    description: str | None = Field(default=None, max_length=512)
+    mcp_entry: dict[str, Any] | None = None
+    enabled: bool | None = None
+    data: dict[str, Any] | None = None
+
+    @model_validator(mode="after")
+    def _validate_entry(self) -> McpTemplateUpdateRequest:
+        if self.mcp_entry is not None:
+            validate_mcp_entry(self.mcp_entry)
+        return self
+
+
+class McpTemplateCreateRequest(McpTemplateUpdateRequest):
+    template_id: str = Field(..., min_length=1, max_length=100)
+    template_name: str = Field(..., min_length=1, max_length=128)
+    mcp_entry: dict[str, Any]
 
 
 class PermissionsTemplateUpdateRequest(SafeTextMixin):

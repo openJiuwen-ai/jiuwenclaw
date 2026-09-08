@@ -4,12 +4,13 @@ import { useTranslation } from 'react-i18next';
 import { ChevronDown, Plus, Power, RefreshCw, Search, Server, Trash2, X } from 'lucide-react';
 import type { WebError } from '../../types/websocket';
 import { Switch } from '../Switch';
+import { A2AOutboundCredentialInput } from './A2AOutboundCredentialInput';
 import {
   normalizeA2AOutboundAgent,
   normalizeA2AOutboundDiscovery,
   normalizeA2AOutboundList,
   normalizeA2AOutboundSettings,
-  shouldAcceptA2AOutboundResponse,
+  createA2AOutboundRequestScope,
   type A2AOutboundAgent,
   type A2AOutboundAvailability,
   type A2AOutboundDiscovery,
@@ -52,14 +53,23 @@ export function A2AOutboundPanel({ isConnected, request, headerActionsContainer 
     credential: string;
     clearCredential: boolean;
   } | null>(null);
-  const generationRef = useRef(0);
+  const generationRef = useRef(createA2AOutboundRequestScope());
+  const editGenerationRef = useRef(createA2AOutboundRequestScope());
+
+  useEffect(() => {
+    editGenerationRef.current.next();
+    if (!isConnected) setEditing(null);
+    return () => {
+      editGenerationRef.current.next();
+    };
+  }, [isConnected]);
 
   const refresh = useCallback(async () => {
     if (!isConnected) return;
-    const generation = ++generationRef.current;
+    const generation = generationRef.current.next();
     try {
       const [payload, rawSettings] = await Promise.all([request('a2a.outbound.list'), request('a2a.outbound.settings.get')]);
-      if (!shouldAcceptA2AOutboundResponse(generation, generationRef.current)) return;
+      if (!generationRef.current.accepts(generation)) return;
       const next = normalizeA2AOutboundList(payload);
       const settings = normalizeA2AOutboundSettings(rawSettings);
       if (!next || !settings) throw new Error(t('a2aIngress.outbound.errors.invalidResponse'));
@@ -68,7 +78,7 @@ export function A2AOutboundPanel({ isConnected, request, headerActionsContainer 
       setSavedAllowLoopbackHttp(settings.allow_loopback_http);
       setError(null);
     } catch (nextError) {
-      if (shouldAcceptA2AOutboundResponse(generation, generationRef.current)) setError(errorMessage(nextError));
+      if (generationRef.current.accepts(generation)) setError(errorMessage(nextError));
     }
   }, [isConnected, request, t]);
 
@@ -119,7 +129,7 @@ export function A2AOutboundPanel({ isConnected, request, headerActionsContainer 
 
   const updateAllowLoopbackHttp = async (nextEnabled: boolean) => {
     if (busy || !isConnected) return;
-    const generation = ++generationRef.current;
+    const generation = generationRef.current.next();
     const previous = savedAllowLoopbackHttp;
     setAllowLoopbackHttp(nextEnabled);
     setBusy('settings');
@@ -132,12 +142,12 @@ export function A2AOutboundPanel({ isConnected, request, headerActionsContainer 
         }),
       );
       if (!settings) throw new Error(t('a2aIngress.outbound.errors.invalidResponse'));
-      if (!shouldAcceptA2AOutboundResponse(generation, generationRef.current)) return;
+      if (!generationRef.current.accepts(generation)) return;
       setAllowLoopbackHttp(settings.allow_loopback_http);
       setSavedAllowLoopbackHttp(settings.allow_loopback_http);
       setNotice(t('a2aIngress.outbound.localDebug.saved'));
     } catch (nextError) {
-      if (!shouldAcceptA2AOutboundResponse(generation, generationRef.current)) return;
+      if (!generationRef.current.accepts(generation)) return;
       setAllowLoopbackHttp(previous);
       setError(errorMessage(nextError));
     } finally {
@@ -158,7 +168,7 @@ export function A2AOutboundPanel({ isConnected, request, headerActionsContainer 
       });
       const created = normalizeA2AOutboundAgent(payload);
       if (!created) throw new Error(t('a2aIngress.outbound.errors.invalidResponse'));
-      generationRef.current += 1;
+      generationRef.current.next();
       setAgents(current => [created, ...current]);
       setDiscovery(null);
       setCredential('');
@@ -179,7 +189,7 @@ export function A2AOutboundPanel({ isConnected, request, headerActionsContainer 
     setBusy(`${operation}:${agent.agent_id}`);
     setError(null);
     setNotice(null);
-    generationRef.current += 1;
+    generationRef.current.next();
     try {
       let payload: unknown;
       if (operation === 'toggle') payload = await request('a2a.outbound.update', { agent_id: agent.agent_id, enabled: !agent.enabled });
@@ -211,7 +221,7 @@ export function A2AOutboundPanel({ isConnected, request, headerActionsContainer 
     }
     setBusy(`save:${agent.agent_id}`);
     setError(null);
-    generationRef.current += 1;
+    generationRef.current.next();
     try {
       const payload = await request('a2a.outbound.update', {
         agent_id: agent.agent_id,
@@ -234,19 +244,34 @@ export function A2AOutboundPanel({ isConnected, request, headerActionsContainer 
     }
   };
 
-  const toggleSettings = (agent: A2AOutboundAgent) => {
-    setEditing(current =>
-      current?.agentId === agent.agent_id
-        ? null
-        : {
-            agentId: agent.agent_id,
-            displayName: agent.display_name,
-            connectTimeout: String(agent.connect_timeout_seconds),
-            syncWait: String(agent.sync_wait_seconds),
-            credential: '',
-            clearCredential: false,
-          },
-    );
+  const toggleSettings = async (agent: A2AOutboundAgent) => {
+    if (busy || !isConnected) return;
+    if (editing?.agentId === agent.agent_id) {
+      setEditing(null);
+      return;
+    }
+    setBusy(`edit:${agent.agent_id}`);
+    setEditing(null);
+    setError(null);
+    const generation = editGenerationRef.current.next();
+    try {
+      const payload = await request<Record<string, unknown>>('a2a.outbound.edit', { agent_id: agent.agent_id });
+      if (!editGenerationRef.current.accepts(generation)) return;
+      const detail = normalizeA2AOutboundAgent(payload);
+      if (!detail || typeof payload.credential !== 'string') throw new Error(t('a2aIngress.outbound.errors.invalidResponse'));
+      setEditing({
+        agentId: detail.agent_id,
+        displayName: detail.display_name,
+        connectTimeout: String(detail.connect_timeout_seconds),
+        syncWait: String(detail.sync_wait_seconds),
+        credential: payload.credential,
+        clearCredential: false,
+      });
+    } catch (nextError) {
+      if (editGenerationRef.current.accepts(generation)) setError(errorMessage(nextError));
+    } finally {
+      setBusy(null);
+    }
   };
 
   return (
@@ -410,7 +435,7 @@ export function A2AOutboundPanel({ isConnected, request, headerActionsContainer 
                         <p className="mt-1 text-xs text-text-muted">{t('a2aIngress.outbound.discovery.registrationDescription')}</p>
                         <div className="mt-4 grid gap-3 sm:grid-cols-2">
                           <Input label={t('a2aIngress.outbound.fields.displayName')} value={displayName} onChange={setDisplayName} />
-                          <Input label={t('a2aIngress.outbound.fields.credential')} value={credential} onChange={setCredential} type="password" />
+                          <A2AOutboundCredentialInput card={discovery.agent_card} value={credential} onChange={setCredential} disabled={!!busy} />
                         </div>
                         <div className="mt-4 flex justify-end gap-2 border-t border-border pt-4">
                           <button type="button" className="btn secondary" onClick={() => setDiscovery(null)} disabled={!!busy}>
@@ -519,11 +544,11 @@ export function A2AOutboundPanel({ isConnected, request, headerActionsContainer 
                               value={editing.syncWait}
                               onChange={value => setEditing(current => (current ? { ...current, syncWait: value } : current))}
                             />
-                            <Input
-                              label={t('a2aIngress.outbound.fields.replaceCredential')}
+                            <A2AOutboundCredentialInput
+                              card={agent.agent_card}
                               value={editing.credential}
                               onChange={value => setEditing(current => (current ? { ...current, credential: value, clearCredential: false } : current))}
-                              type="password"
+                              disabled={!!busy || editing.clearCredential}
                             />
                           </div>
                           <label className="mt-3 flex items-center gap-2 text-sm text-text">
@@ -611,7 +636,10 @@ function Notice({
 }) {
   const style = tone === 'danger' ? 'border-danger/30 bg-danger/10' : tone === 'warn' ? 'border-warn/30 bg-warn/10' : 'border-ok/30 bg-ok/10';
   return (
-    <div className={`flex items-center justify-between gap-3 rounded-xl border px-4 py-3 text-sm text-text ${style}`} role={tone === 'danger' ? 'alert' : 'status'}>
+    <div
+      className={`flex items-center justify-between gap-3 rounded-xl border px-4 py-3 text-sm text-text ${style}`}
+      role={tone === 'danger' ? 'alert' : 'status'}
+    >
       <div className="min-w-0 flex-1 leading-5">{children}</div>
       {onClose && (
         <button

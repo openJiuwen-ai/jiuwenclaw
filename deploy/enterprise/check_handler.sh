@@ -248,6 +248,7 @@ check_if_obs_up() {
     fi
 
     info "Use built-in Minio server"
+    DEPLOY_VARS["OBS_URL"]="${name}-headless.default:9000"
 }
 
 ensure_redis_up() {
@@ -467,6 +468,7 @@ check_gateway_up_dependency(){
     check_if_db_up
     check_if_jina_up
     ensure_redis_up
+    check_if_obs_up
 }
 
 check_web_up_dependency(){
@@ -479,7 +481,6 @@ check_web_up_dependency(){
 }
 
 check_manager_up_dependency(){
-    #check_if_rabbitmq_up
     check_if_db_up
 }
 
