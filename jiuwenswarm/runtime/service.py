@@ -12,11 +12,18 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, TypeVar
 
 from jiuwenswarm.runtime.session_provisioner import (
+    PreparedSessionProvision,
     RuntimeSessionProvisioner,
     SessionDeleteResult,
+    SessionForkInput,
+    SessionForkResult,
+    SessionProvisionCommitContext,
+    SessionProvisionCommitTiming,
+    SessionProvisionResult,
+    SessionProvisionState,
 )
 from jiuwenswarm.server.runtime.agent_manager import AgentManager
 
@@ -29,6 +36,11 @@ if TYPE_CHECKING:
     from jiuwenswarm.runtime.session_provisioner import SessionDeleteLifecycle
 
 logger = logging.getLogger(__name__)
+
+_SessionProvisionResultT = TypeVar(
+    "_SessionProvisionResultT",
+    bound=SessionProvisionResult,
+)
 
 _PROCESS_RUNTIME_DEPENDENCY_LOCK = asyncio.Lock()
 _PROCESS_RUNTIME_DEPENDENCY_USERS = 0
@@ -232,7 +244,10 @@ class AgentRuntime:
 
     The class is intentionally one-shot: after ``close`` it cannot be started
     again.  A process-style CLI creates one instance per command, while
-    AgentServer owns one instance for its service lifetime.
+    AgentServer owns one instance for its service lifetime.  A prepared Session
+    provision is an outstanding Runtime operation: callers must commit or abort
+    it before closing.  ``close`` rejects unfinished provisions before touching
+    owned resources, so finalizers never run against a torn-down Runtime.
     """
 
     def __init__(
@@ -267,6 +282,10 @@ class AgentRuntime:
         self._enable_kvc_tracking = bool(enable_kvc_tracking)
         self._stateless_agents: dict[str, Any] = {}
         self._lifecycle_lock = asyncio.Lock()
+        self._session_provision_prepares = 0
+        self._pending_session_provisions: set[
+            PreparedSessionProvision[Any]
+        ] = set()
         self._started = False
         self._closed = False
 
@@ -352,6 +371,67 @@ class AgentRuntime:
             channel_id=channel_id,
             session_id=requested or None,
         )
+
+    async def prepare_session_fork(
+        self,
+        provision_input: SessionForkInput,
+    ) -> PreparedSessionProvision[SessionForkResult]:
+        """Prepare a transport-neutral Session fork on this Runtime."""
+        async with self._lifecycle_lock:
+            self._require_started()
+            self._session_provision_prepares += 1
+
+        prepared: PreparedSessionProvision[SessionForkResult] | None = None
+        try:
+            prepared = await self._session_provisioner.prepare_session_fork(
+                provision_input
+            )
+            return prepared
+        finally:
+            self._session_provision_prepares -= 1
+            if prepared is not None:
+                self._pending_session_provisions.add(prepared)
+
+    async def commit_session_provision(
+        self,
+        prepared: PreparedSessionProvision[_SessionProvisionResultT],
+        *,
+        timing: SessionProvisionCommitTiming,
+        context: SessionProvisionCommitContext | None = None,
+    ) -> _SessionProvisionResultT:
+        """Commit a prepared Session operation before Runtime shutdown."""
+        async with self._lifecycle_lock:
+            self._require_started()
+        try:
+            return await self._session_provisioner.commit_session_provision(
+                prepared,
+                timing=timing,
+                context=context,
+            )
+        finally:
+            self._discard_finalized_session_provision(prepared)
+
+    async def abort_session_provision(
+        self,
+        prepared: PreparedSessionProvision[_SessionProvisionResultT],
+    ) -> None:
+        """Abort a prepared Session operation before Runtime shutdown."""
+        async with self._lifecycle_lock:
+            self._require_started()
+        try:
+            await self._session_provisioner.abort_session_provision(prepared)
+        finally:
+            self._discard_finalized_session_provision(prepared)
+
+    def _discard_finalized_session_provision(
+        self,
+        prepared: PreparedSessionProvision[Any],
+    ) -> None:
+        if prepared.state in {
+            SessionProvisionState.COMMITTED,
+            SessionProvisionState.ABORTED,
+        }:
+            self._pending_session_provisions.discard(prepared)
 
     async def prepare_chat_turn(
         self,
@@ -935,10 +1015,26 @@ class AgentRuntime:
         self._session_provisioner.commit_session_delete(result)
 
     async def close(self) -> None:
-        """Cancel in-flight work and release all owned Runtime resources."""
+        """Release resources unless a Session provision is unfinished.
+
+        The check is fail-fast rather than a wait or implicit abort: only the
+        caller knows whether a two-phase operation must commit or compensate.
+        A rejected close leaves the Runtime started and can be retried after the
+        caller finalizes every issued provision lease.
+        """
         async with self._lifecycle_lock:
             if self._closed:
                 return
+            for prepared in tuple(self._pending_session_provisions):
+                self._discard_finalized_session_provision(prepared)
+            if (
+                self._session_provision_prepares > 0
+                or self._pending_session_provisions
+            ):
+                raise RuntimeStateError(
+                    "runtime has unfinished session provisions; "
+                    "commit or abort them before close"
+                )
             cleanup_errors: list[BaseException] = []
             try:
                 await self._agent_manager.cancel_all_inflight_work("[runtime close] ")

@@ -57,7 +57,13 @@ from jiuwenswarm.agents.harness.common.plugins.rail_manager import get_rail_mana
 from jiuwenswarm.agents.harness.common.rails.permissions.permissions_persist import persist_cli_trusted_directory
 from jiuwenswarm.extensions.hooks_context import AgentServerChatHookContext
 from jiuwenswarm.server.runtime.agent_manager import AgentManager, ACP_DEFAULT_CAPABILITIES
-from jiuwenswarm.runtime import AgentRuntime
+from jiuwenswarm.runtime import (
+    AgentRuntime,
+    SessionForkInput,
+    SessionProvisionCommitTiming,
+    SessionProvisionError,
+    SessionProvisionState,
+)
 from jiuwenswarm.server.runtime.agent_warm_pool import WarmClaim
 from jiuwenswarm.server.runtime.tokenizer_service import TokenizerService
 from jiuwenswarm.server.runtime.session.session_metadata import get_all_sessions_metadata, remove_session_metadata_cache
@@ -1589,7 +1595,10 @@ class AgentWebSocketServer:
         The current Runtime is permanently closed. After shutdown this server
         owns a new Runtime/AgentManager pair, so a later start() restores the
         established Gateway/WebSocket service contract. Callers must not retain
-        the pre-stop Runtime instance.
+        the pre-stop Runtime instance. If Runtime close is rejected before any
+        resources are released, the original Runtime is retained and the error
+        is propagated so its unfinished operation can be finalized before a
+        retry.
         """
         try:
             await self._stop_main_services()
@@ -1659,36 +1668,55 @@ class AgentWebSocketServer:
 
         await close_kv_cache_runtime()
 
+        closing_runtime = self._runtime
+        runtime_close_completed = False
+        runtime_close_error: BaseException | None = None
         try:
-            await self._runtime.close()
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("[AgentWebSocketServer] runtime.close failed: %s", exc)
+            await closing_runtime.close()
+            runtime_close_completed = True
+        except BaseException as exc:  # preserve cancellation until host cleanup
+            runtime_close_error = exc
+            if isinstance(exc, Exception):
+                logger.warning(
+                    "[AgentWebSocketServer] runtime.close failed: %s",
+                    exc,
+                )
         finally:
-            # AgentRuntime is intentionally one-shot for process-style CLI
-            # commands. AgentServer historically supports start after stop, so
-            # prepare a fresh Runtime, manager and plan-state owner for its next
-            # lifecycle. Plan state is process-local and must not cross a
-            # stop/start boundary.
-            plan_controller = _renew_server_plan_controller()
-            self._runtime = AgentRuntime(
-                plan_controller=plan_controller,
-                enable_kvc_tracking=True,
-            )
-            self._agent_manager = self._runtime.agent_manager
-            self._heartbeat_runtime = HeartbeatRailRuntime(self)
-            self._runtime.set_admission_controller(self._heartbeat_runtime.admission)
-            self._runtime.set_session_delete_lifecycle(self._heartbeat_runtime)
-            self._agent_manager.set_heartbeat_service(self._heartbeat_runtime)
-            self._adapter_registry = AdapterRegistry()
-            for adapter in (
-                SessionAdapter(),
-                WorkspaceFileAdapter(),
-                MemoryAdapter(),
-                ProjectAdapter(),
-                HarmonyOSAdapter(),
-                ConfigAdapter(),
-            ):
-                self._adapter_registry.register(adapter)
+            # Do not discard an open Runtime after a fail-fast close.  An
+            # unfinished two-phase provision still needs its original owner to
+            # commit or abort it before shutdown can be retried.
+            if runtime_close_completed or closing_runtime.closed:
+                # AgentRuntime is intentionally one-shot for process-style CLI
+                # commands. AgentServer historically supports start after stop,
+                # so prepare a fresh Runtime, manager and plan-state owner for
+                # its next lifecycle. Plan state is process-local and must not
+                # cross a completed stop/start boundary.
+                plan_controller = _renew_server_plan_controller()
+                self._runtime = AgentRuntime(
+                    plan_controller=plan_controller,
+                    enable_kvc_tracking=True,
+                )
+                self._agent_manager = self._runtime.agent_manager
+                self._heartbeat_runtime = HeartbeatRailRuntime(self)
+                self._runtime.set_admission_controller(
+                    self._heartbeat_runtime.admission
+                )
+                self._runtime.set_session_delete_lifecycle(
+                    self._heartbeat_runtime
+                )
+                self._agent_manager.set_heartbeat_service(
+                    self._heartbeat_runtime
+                )
+                self._adapter_registry = AdapterRegistry()
+                for adapter in (
+                    SessionAdapter(),
+                    WorkspaceFileAdapter(),
+                    MemoryAdapter(),
+                    ProjectAdapter(),
+                    HarmonyOSAdapter(),
+                    ConfigAdapter(),
+                ):
+                    self._adapter_registry.register(adapter)
 
         runtime_push_handler = getattr(self, "_runtime_push_handler", None)
         if runtime_push_handler is not None:
@@ -1699,11 +1727,21 @@ class AgentWebSocketServer:
             self._runtime_push_handler = None
 
         if not had_server:
+            if runtime_close_error is not None and (
+                not isinstance(runtime_close_error, Exception)
+                or not closing_runtime.closed
+            ):
+                raise runtime_close_error
             return
         try:
             await self._jiuwenbox_runner.stop()
         except Exception as exc:  # noqa: BLE001
             logger.warning("[AgentWebSocketServer] jiuwenbox_runner.stop failed: %s", exc)
+        if runtime_close_error is not None and (
+            not isinstance(runtime_close_error, Exception)
+            or not closing_runtime.closed
+        ):
+            raise runtime_close_error
         logger.info("[AgentWebSocketServer] 已停止")
 
     # ---------- 连接处理 ----------
@@ -10282,23 +10320,19 @@ class AgentWebSocketServer:
     async def _handle_session_fork(
             self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock
     ) -> None:
-        """Handle session.fork: filesystem copy + in-memory context copy.
+        """Translate ``session.fork`` between WebSocket wire and Runtime.
 
         Args:
             ws: WebSocket connection.
             request: AgentRequest with source_session_id, target_session_id, title.
             send_lock: Send lock.
         """
-        from jiuwenswarm.agents.harness.common.session_ops_service import (
-            copy_session_context,
-            copy_session_state,
-            fork_session,
-        )
-
         logger.info(
             "[AgentServer] session.fork: request_id=%s", request.request_id
         )
 
+        runtime = None
+        prepared = None
         try:
             params = request.params if isinstance(request.params, dict) else {}
             source = str(params.get("source_session_id") or "").strip()
@@ -10307,55 +10341,35 @@ class AgentWebSocketServer:
             channel_id = request.channel_id or "default"
 
             if not source:
-                raise ValueError("source_session_id is required")
+                raise SessionProvisionError(
+                    "source_session_id is required",
+                    code="BAD_REQUEST",
+                )
 
-            # session.fork reads and writes persistent checkpoint state.  Wait
-            # for the shared Runtime startup barrier before either the caller's
-            # explicit target or a Runtime-allocated target is used.
             runtime = self._execution_runtime()
             await runtime.start()
-            if not target:
-                target = await runtime.create_or_resume_session(
+            prepared = await runtime.prepare_session_fork(
+                SessionForkInput(
                     channel_id=channel_id,
-                    session_id=None,
+                    source_session_id=source,
+                    target_session_id=target or None,
+                    title=fork_title,
                 )
-
-            # 1. Filesystem fork (copies history.json, writes metadata)
-            result = fork_session(
-                source_session_id=source,
-                target_session_id=target,
-                title=fork_title,
-                channel_id=channel_id,
             )
-
-            # 2. Copy in-memory context (LLM conversation history)
-            agent = self._agent_manager.get_agent_nowait(channel_id)
-            deep_agent = None
-            if agent is not None:
-                deep_agent = await agent.ensure_instance()
-                await copy_session_context(deep_agent, source, target)
-            else:
-                logger.warning(
-                    "[AgentServer] session.fork: no agent for channel %s, "
-                    "in-memory context copy skipped",
-                    channel_id,
-                )
-
-            # 3. Copy DeepAgentState (task_plan, plan_mode, etc.)
-            from openjiuwen.core.single_agent.schema.agent_card import AgentCard
-
-            await copy_session_state(
-                source_session_id=source,
-                target_session_id=target,
-                card=deep_agent.card if deep_agent is not None else AgentCard(id="jiuwenswarm", name="jiuwenswarm"),
-                deep_agent=deep_agent,
+            result = await runtime.commit_session_provision(
+                prepared,
+                timing=SessionProvisionCommitTiming.BEFORE_RESULT_DELIVERY,
             )
 
             resp = AgentResponse(
                 request_id=request.request_id,
                 channel_id=request.channel_id,
                 ok=True,
-                payload=result,
+                payload={
+                    "session_id": result.session_id,
+                    "source_session_id": result.source_session_id,
+                    "title": result.title,
+                },
             )
             wire = encode_agent_response_for_wire(
                 resp, response_id=request.request_id
@@ -10365,9 +10379,27 @@ class AgentWebSocketServer:
 
             logger.info(
                 "[AgentServer] session.fork completed: source=%s target=%s title=%s",
-                source, target, result.get("title", ""),
+                source,
+                result.session_id,
+                result.title,
             )
 
+        except SessionProvisionError as e:
+            logger.warning("[AgentServer] session.fork rejected: %s", e)
+            payload = {"error": str(e)}
+            if e.code is not None:
+                payload["code"] = e.code
+            resp = AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=False,
+                payload=payload,
+            )
+            wire = encode_agent_response_for_wire(
+                resp, response_id=request.request_id
+            )
+            async with send_lock:
+                await send_wire_payload(ws, wire)
         except ValueError as e:
             logger.warning("[AgentServer] session.fork ValueError: %s", e)
             code = (
@@ -10399,6 +10431,28 @@ class AgentWebSocketServer:
             )
             async with send_lock:
                 await send_wire_payload(ws, wire)
+        finally:
+            if (
+                runtime is not None
+                and prepared is not None
+                and prepared.state is SessionProvisionState.PREPARED
+            ):
+                primary_error = sys.exception()
+                try:
+                    await runtime.abort_session_provision(prepared)
+                except asyncio.CancelledError:
+                    if primary_error is None:
+                        raise
+                    logger.warning(
+                        "[AgentServer] session.fork abort was cancelled while "
+                        "preserving %s",
+                        type(primary_error).__name__,
+                    )
+                except Exception as abort_exc:  # noqa: BLE001
+                    logger.warning(
+                        "[AgentServer] session.fork abort failed: %s",
+                        abort_exc,
+                    )
 
     async def _handle_acp_tool_response(
             self,

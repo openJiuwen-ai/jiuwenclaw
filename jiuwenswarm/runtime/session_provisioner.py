@@ -36,6 +36,15 @@ def _require_optional_bool(name: str, value: object) -> None:
         _require_bool(name, value)
 
 
+def _session_fork_error_code(error: ValueError) -> str:
+    message = str(error)
+    if "not found" in message:
+        return "NOT_FOUND"
+    if "already exists" in message:
+        return "ALREADY_EXISTS"
+    return "BAD_REQUEST"
+
+
 @dataclass(frozen=True, slots=True, kw_only=True)
 class SessionCreateInput:
     """Normalized business input for create; contains no transport objects.
@@ -466,6 +475,95 @@ class RuntimeSessionProvisioner:
     ) -> None:
         """Replace the optional lifecycle participant owned by the host."""
         self._delete_lifecycle = lifecycle
+
+    async def prepare_session_fork(
+        self,
+        provision_input: SessionForkInput,
+    ) -> PreparedSessionProvision[SessionForkResult]:
+        """Copy one Session without depending on a Server or transport.
+
+        Persistent history and metadata are copied first, followed by the
+        established best-effort in-memory context and checkpoint-state copy.
+        The returned lease commits before result delivery and has no deferred
+        transport-side work.
+        """
+        source_session_id = str(provision_input.source_session_id or "").strip()
+        target_session_id = str(provision_input.target_session_id or "").strip()
+        channel_id = provision_input.channel_id or "default"
+        title = str(provision_input.title or "").strip()
+
+        if not source_session_id:
+            raise SessionProvisionError(
+                "source_session_id is required",
+                code="BAD_REQUEST",
+            )
+
+        try:
+            if not target_session_id:
+                target_session_id = await self._agent_manager.create_session(
+                    channel_id=channel_id,
+                    session_id=None,
+                )
+
+            from jiuwenswarm.agents.harness.common.session_ops_service import (
+                copy_session_context,
+                copy_session_state,
+                fork_session,
+            )
+
+            fork_result = fork_session(
+                source_session_id=source_session_id,
+                target_session_id=target_session_id,
+                title=title,
+                channel_id=channel_id,
+            )
+
+            agent = self._agent_manager.get_agent_nowait(channel_id)
+            deep_agent = None
+            if agent is not None:
+                deep_agent = await agent.ensure_instance()
+                await copy_session_context(
+                    deep_agent,
+                    source_session_id,
+                    target_session_id,
+                )
+            else:
+                logger.warning(
+                    "session.fork: no agent for channel %s; "
+                    "in-memory context copy skipped",
+                    channel_id,
+                )
+
+            from openjiuwen.core.single_agent.schema.agent_card import AgentCard
+
+            await copy_session_state(
+                source_session_id=source_session_id,
+                target_session_id=target_session_id,
+                card=(
+                    deep_agent.card
+                    if deep_agent is not None
+                    else AgentCard(id="jiuwenswarm", name="jiuwenswarm")
+                ),
+                deep_agent=deep_agent,
+            )
+        except ValueError as error:
+            raise SessionProvisionError(
+                str(error),
+                code=_session_fork_error_code(error),
+            ) from error
+
+        result = SessionForkResult(
+            channel_id=channel_id,
+            source_session_id=str(
+                fork_result.get("source_session_id") or source_session_id
+            ),
+            session_id=str(fork_result.get("session_id") or target_session_id),
+            title=str(fork_result.get("title") or ""),
+        )
+        return self._stage_session_provision(
+            result,
+            commit_timing=SessionProvisionCommitTiming.BEFORE_RESULT_DELIVERY,
+        )
 
     def _stage_session_provision(
         self,
