@@ -26,7 +26,7 @@ import time
 from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Mapping
 from urllib.parse import ParseResult, quote, unquote, urlparse
 
 # --- Early --dotenv parsing (before jiuwenswarm imports) ---
@@ -103,13 +103,16 @@ def _get_insecure_ssl_context() -> ssl.SSLContext:
     return get_insecure_ssl_context()
 
 
-def _format_ws_diagnostics(**kwargs: Any) -> str:
+def _format_ws_diagnostics(
+    *parts: Mapping[str, Any] | None,
+    **fields: Any,
+) -> str:
     from jiuwenswarm.common.ws_diagnostics import format_ws_diagnostics
 
-    return format_ws_diagnostics(**kwargs)
+    return format_ws_diagnostics(*parts, **fields)
 
 
-def _describe_ws_exception(exc: BaseException) -> str:
+def _describe_ws_exception(exc: BaseException) -> dict[str, Any]:
     from jiuwenswarm.common.ws_diagnostics import describe_ws_exception
 
     return describe_ws_exception(exc)
@@ -1839,6 +1842,9 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
             self.wfile.write(raw)
 
     def _handle_file_api_post(self, parsed) -> None:
+        if parsed.path == "/file-api/skills/upload-temp":
+            self._handle_skills_upload_temp()
+            return
         if parsed.path == "/file-api/skills/import":
             self._handle_skills_import_upload()
             return
@@ -1930,6 +1936,17 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
     def _read_request_body(self) -> bytes:
         length = int(self.headers.get("Content-Length", "0") or "0")
         return self.rfile.read(length) if length > 0 else b""
+
+    def _handle_skills_upload_temp(self) -> None:
+        from jiuwenswarm.server.runtime.skill.skills_multipart_http import (
+            handle_skills_upload_temp_http,
+        )
+
+        status, payload = handle_skills_upload_temp_http(
+            content_type=self.headers.get("Content-Type", ""),
+            body=self._read_request_body(),
+        )
+        self._write_json(status, payload)
 
     def _handle_skills_import_upload(self) -> None:
         try:

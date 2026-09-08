@@ -30,6 +30,7 @@ import {
   useWorkspaceStore,
 } from '../../stores';
 import { supportsPlanMode } from '../../features/planMode/wireMode';
+import { applyPlanToggle, evaluatePlanToggle } from '../../features/planMode/planModeGate';
 import { queueOrAddGoalObjectiveMessage } from '../../features/goalPendingObjectiveBubble';
 import { AgentMode, MediaItem, Permission, type ProjectInfo } from '../../types';
 import { NEW_CONVERSATION_ID } from '../../multi-session/state/newConversationLifecycle';
@@ -50,6 +51,8 @@ import {
 } from './slashCommands/registry';
 import {
   getWebSlashCommandsForMode,
+  hasUnfinishedGoal as isUnfinishedGoal,
+  isSlashCommandDisabledByGoal,
   shouldExecuteRegisteredSlashCommand,
   supportsWebSlashCommands,
 } from './slashCommands/semantics';
@@ -76,6 +79,12 @@ import {
 import { useDesktopLocalFilePickerReady } from '../../hooks';
 import { useAdaptiveTooltip } from '../../hooks/useAdaptiveTooltip';
 import { getInputProjectOptions, isDefaultInputProject } from './projectSelection';
+import {
+  getClipboardImageFiles,
+  IMAGE_INPUT_DISABLED_ALERT_KEY,
+  isImageInputDisabled,
+  shouldAlertImagePasteDisabled,
+} from './clipboardImagePaste';
 import AgentPickerIcon from '../../assets/agent-management/智能体选择.svg?react';
 import AttachmentIcon from '../../assets/agent-management/attachment.svg?react';
 import GoalIcon from '../../assets/agent-management/goal.svg?react';
@@ -97,6 +106,7 @@ import sendActiveIcon from '../../assets/send_active.svg';
 import { TeamMemberAvatar } from '../TeamMemberAvatar';
 import { CodeBranchSelector } from '../../features/code-mode/CodeBranchSelector';
 import { generateUuidV4 } from '../../utils/uuid';
+import { buildInstalledSkillNames, filterEnabledMySkills } from '../../utils/mySkills';
 import { createAgentManagementClient, getAgentAvatarUrl, type AgentCatalogItem } from '../../features/agentManagement';
 import { ContextUsageIndicator } from './ContextUsageIndicator';
 import { isImeCompositionKey } from './imeComposition';
@@ -113,6 +123,7 @@ type InputAreaSkillItem = {
   enabled?: boolean;
   installed?: boolean;
   tags?: string[];
+  skill_type?: 'skill' | 'swarm_skill' | 'multimodal_skill';
 };
 
 type SlashCommandMeta = {
@@ -135,7 +146,7 @@ type InputAreaInstalledPlugin = {
   version: string;
   installed_at: string;
   git_commit?: string | null;
-  skills: string[];
+  skills: Array<string | { name: string; version?: string | null }>;
 };
 
 type InputAreaTeamMember = {
@@ -158,8 +169,9 @@ type ComposerSuggestionItem = {
   status?: string;
   description?: string;
   itemKind?: 'command' | 'skill';
-  source?: string;
   takesArgs?: boolean;
+  disabled?: boolean;
+  disabledReason?: string;
 };
 
 function getComposerSuggestionItems(
@@ -167,6 +179,7 @@ function getComposerSuggestionItems(
   members: ComposerSuggestionItem[],
   slashCommands: SlashCommandMeta[],
   slashSkills: InputAreaSkillItem[],
+  isTeamMode: boolean,
 ): ComposerSuggestionItem[] {
   if (!suggestion) return [];
   if (suggestion.kind === 'slash') {
@@ -181,9 +194,14 @@ function getComposerSuggestionItems(
         takesArgs: command.takesArgs,
       }));
     const skills = slashSkills
+      .filter((skill) => (
+        isTeamMode
+          ? skill.skill_type === 'swarm_skill'
+          : !skill.skill_type || skill.skill_type === 'skill'
+      ))
       .filter((skill) => {
         if (!query) return true;
-        return [skill.name, skill.display_name, skill.description, ...(skill.tags ?? [])]
+        return [skill.name, skill.display_name, skill.description]
           .filter(Boolean)
           .join(' ')
           .toLowerCase()
@@ -194,7 +212,6 @@ function getComposerSuggestionItems(
         label: skill.display_name || skill.name,
         description: skill.description,
         itemKind: 'skill' as const,
-        source: skill.source,
       }));
     return [...commands, ...skills];
   }
@@ -612,10 +629,12 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
   const [projectSearch, setProjectSearch] = useState('');
   const [projectCreateMode, setProjectCreateMode] = useState<ProjectCreateMode>('blank');
   const [menuDirection, setMenuDirection] = useState<'up' | 'down'>('up');
-  const [hoveredOptionDesc, setHoveredOptionDesc] = useState<string | null>(null);
   const [agentPickerOpen, setAgentPickerOpen] = useState(false);
   const [agentPickerQuery, setAgentPickerQuery] = useState('');
   const { tooltip: agentTooltipNode, handlers: agentTooltipHandlers } = useAdaptiveTooltip({ offsetX: -50 });
+  const { tooltip: attachTooltipNode, handlers: attachTooltipHandlers } = useAdaptiveTooltip();
+  const [hoveredOptionDesc, setHoveredOptionDesc] = useState<string | null>(null);
+  const [hoveredOptionRect, setHoveredOptionRect] = useState<DOMRect | null>(null);
   const [agentOptions, setAgentOptions] = useState<AgentCatalogItem[]>([]);
   const [agentOptionsStatus, setAgentOptionsStatus] = useState<'idle' | 'loading' | 'success' | 'error'>('idle');
   const agentManagementClient = useMemo(() => createAgentManagementClient(), []);
@@ -755,7 +774,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
   // 见 backend-requests.md #1）。走排队后消息复用现有的通用队列机制，行为和普通排队一致。
   const isGoalActive = currentGoal?.status === 'active';
   // 未完成目标：active/paused/blocked 都算，只有 completed（或没有目标）才能再设新目标
-  const hasUnfinishedGoal = currentGoal != null && currentGoal.status !== 'completed';
+  const hasUnfinishedGoal = isUnfinishedGoal(currentGoal);
   const isInterruptible = isProcessing || isPaused || isGoalActive;
   const isAgentMode = mode === 'agent';
   const isTeamMode = mode === 'team';
@@ -812,14 +831,27 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
       }));
   }, [teamMembers]);
 
-  const composerSuggestionItems = useMemo(
-    () => getComposerSuggestionItems(
+  const composerSuggestionItems = useMemo(() => {
+    const items = getComposerSuggestionItems(
       composerSuggestion,
       mentionableMembers,
       getWebSlashCommandsForMode(slashCommands, mode),
       slashSkills,
-    ),
-    [composerSuggestion, mentionableMembers, mode, slashCommands, slashSkills],
+      isTeamMode,
+    );
+    return items.map((item) => (
+      item.itemKind === 'command' && isSlashCommandDisabledByGoal(item.id, hasUnfinishedGoal)
+        ? { ...item, disabled: true, disabledReason: t('plan.toolbarUnavailableGoal') }
+        : item
+    ));
+  }, [composerSuggestion, hasUnfinishedGoal, isTeamMode, mentionableMembers, mode, slashCommands, slashSkills, t]);
+
+  const selectableComposerSuggestionIndices = useMemo(
+    () => composerSuggestionItems.reduce<number[]>((indices, item, index) => {
+      if (!item.disabled) indices.push(index);
+      return indices;
+    }, []),
+    [composerSuggestionItems],
   );
 
   useEffect(() => {
@@ -836,22 +868,8 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
         { timeoutMs: 30_000 },
       ),
     ]).then(([commandData, skillData]) => {
-      const installedNames = new Set(
-        (skillData.plugins ?? []).flatMap((plugin) => plugin.skills ?? []),
-      );
-      const availableSkills = (skillData.skills ?? []).filter((skill) => (
-        Boolean(skill.name) &&
-        skill.enabled !== false &&
-        Boolean(
-          skill.installed ||
-          skill.is_builtin ||
-          skill.is_builtin_source ||
-          skill.source === 'builtin' ||
-          skill.source === 'local' ||
-          skill.source === 'project' ||
-          installedNames.has(skill.name)
-        )
-      ));
+      const installedNames = buildInstalledSkillNames(skillData.plugins ?? []);
+      const availableSkills = filterEnabledMySkills(skillData.skills ?? [], installedNames);
       setSlashCommands(commandData.commands ?? []);
       setSlashSkills(availableSkills);
       setSlashCatalogLoaded(true);
@@ -863,20 +881,28 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
   }, [activeSession?.work_mode, composerSuggestion?.kind, slashCatalogLoaded, workMode]);
 
   useEffect(() => {
-    setComposerSuggestionIndex(0);
-  }, [composerSuggestion?.kind, composerSuggestion?.query]);
+    setComposerSuggestionIndex(selectableComposerSuggestionIndices[0] ?? -1);
+  }, [composerSuggestion?.kind, composerSuggestion?.query, selectableComposerSuggestionIndices]);
 
   useEffect(() => {
     setComposerSuggestionNavigationMode('pointer');
   }, [composerSuggestion?.kind]);
 
-  useEffect(() => {
-    if (composerSuggestionItems.length === 0) {
-      setComposerSuggestionIndex(0);
-      return;
-    }
-    setComposerSuggestionIndex((index) => Math.min(index, composerSuggestionItems.length - 1));
-  }, [composerSuggestionItems.length]);
+  const moveComposerSuggestionHighlight = useCallback((delta: 1 | -1) => {
+    if (selectableComposerSuggestionIndices.length === 0) return;
+    setComposerSuggestionIndex((current) => {
+      const position = selectableComposerSuggestionIndices.indexOf(current);
+      if (position === -1) {
+        return delta > 0
+          ? selectableComposerSuggestionIndices[0]
+          : selectableComposerSuggestionIndices[selectableComposerSuggestionIndices.length - 1];
+      }
+      const nextPosition = (
+        position + delta + selectableComposerSuggestionIndices.length
+      ) % selectableComposerSuggestionIndices.length;
+      return selectableComposerSuggestionIndices[nextPosition];
+    });
+  }, [selectableComposerSuggestionIndices]);
 
   const inputProjectOptions = useMemo(
     () => getInputProjectOptions(projects, projectSearch),
@@ -950,7 +976,13 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
     },
   });
 
-  const imageInputDisabled = isListening || composerDisabled || (isInterruptible && !isTeamMode);
+  const imageInputDisabled = isImageInputDisabled({
+    isListening,
+    isCompactRunning,
+    isInterruptible,
+    isTeamMode,
+    isAgentMode,
+  });
   const isDesktopBridgeReady = useDesktopLocalFilePickerReady();
   // "+" 触发按钮本身不跟图片/目标的可用性挂钩：菜单以后可能挂其他跟图片/目标无关的功能，
   // 触发按钮只要不在录音就该能点开；具体某一项能不能选，交给菜单里每一项各自的禁用态处理。
@@ -1614,6 +1646,20 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
 
   const executeSlashCommand = useCallback(
     async (command: SlashCommand, context: SlashCommandContext, args: string) => {
+      // /plan 是计划开关的命令入口。两条调用路径都汇聚到这里：
+      //   1) handleSubmit 里精确输入 `/plan` 回车
+      //   2) insertComposerToken 里在建议菜单选中 /plan（回车或点击）
+      // 能否切换由 planModeGate 统一判断，与输入框旁的 Plan 开关、下拉菜单项、
+      // 「计划」chip 关闭按钮同一套限制（会话进行中 / 等待 ask_user 回答 /
+      // 有未完成目标）。命中就弹轻量提示条、消费掉这次输入，不翻转开关、
+      // 不入会话历史、不发消息。
+      if (command.name === 'plan') {
+        const decision = evaluatePlanToggle(activeSessionId, !planActive);
+        if (!decision.ok) {
+          if (decision.reason) pushAttachmentAlert(t(decision.reason));
+          return;
+        }
+      }
       if (command.name !== 'compact') {
         await command.execute(context, args);
         return;
@@ -1631,7 +1677,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
         setCompactingSessionIds(new Set(compactingSessionIdsRef.current));
       }
     },
-    [],
+    [activeSessionId, planActive, pushAttachmentAlert, t],
   );
 
   const handleSubmit = useCallback(() => {
@@ -1642,7 +1688,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
     const trimmedBase = (richContent + pendingVoiceText).trim();
 
     // 单 Agent 下拦截斜杠命令：控制命令不走 chat.send / 队列 / 中断逻辑。
-    // Team 下不拦截，以普通文本发送，不会触发 command.btw / command.compact 等 RPC。
+    // Team 下不拦截，以普通文本发送，不会触发 command.compact 等 RPC。
     if (trimmedBase.startsWith('/')) {
       const { name, args } = parseSlashLine(trimmedBase);
       const cmd = findSlashCommand(name);
@@ -1941,7 +1987,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
         }
         return;
       }
-      // 有参命令（/btw）：把 "/query" 替换成蓝色原子 chip。提取文本时再还原为
+      // 有参命令（如 /persist）：把 "/query" 替换成蓝色原子 chip。提取文本时再还原为
       // "/<name>"，因此视觉表现和技能一致，同时保留既有命令解析/提交语义。
       const trigger = getCurrentComposerTrigger();
       if (trigger) {
@@ -2088,20 +2134,14 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
         if (e.key === 'ArrowDown') {
           e.preventDefault();
           setComposerSuggestionNavigationMode('keyboard');
-          if (composerSuggestionItems.length > 0) {
-            setComposerSuggestionIndex((index) => (index + 1) % composerSuggestionItems.length);
-          }
+          moveComposerSuggestionHighlight(1);
           return;
         }
 
         if (e.key === 'ArrowUp') {
           e.preventDefault();
           setComposerSuggestionNavigationMode('keyboard');
-          if (composerSuggestionItems.length > 0) {
-            setComposerSuggestionIndex((index) => (
-              index - 1 + composerSuggestionItems.length
-            ) % composerSuggestionItems.length);
-          }
+          moveComposerSuggestionHighlight(-1);
           return;
         }
 
@@ -2109,7 +2149,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
           if (isImeCompositionKey(e.nativeEvent, isComposingRef.current)) return;
           e.preventDefault();
           const item = composerSuggestionItems[composerSuggestionIndex];
-          if (item) {
+          if (item && !item.disabled) {
             insertComposerToken(
               composerSuggestion.kind,
               item.id,
@@ -2133,6 +2173,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
       composerSuggestionItems,
       handleSubmit,
       insertComposerToken,
+      moveComposerSuggestionHighlight,
       notifyKVCInputIntent,
     ]
   );
@@ -2210,16 +2251,16 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
 
       const hasBrowserFiles = clipboardHasFileItems(event.clipboardData);
       // Capture File blobs before any await; clipboardData can become unavailable.
-      const imageFiles = hasBrowserFiles
-        ? Array.from(event.clipboardData?.items || [])
-            .filter((item) => item.kind === 'file')
-            .map((item) => item.getAsFile())
-            .filter((file): file is File => Boolean(file && isImageFile(file)))
-        : [];
+      const imageFiles = hasBrowserFiles ? getClipboardImageFiles(event.clipboardData) : [];
 
       if (hasBrowserFiles) {
         event.preventDefault();
-        if (imageInputDisabled) return true;
+        if (imageInputDisabled) {
+          if (shouldAlertImagePasteDisabled(true, imageFiles.length > 0)) {
+            pushAttachmentAlert(t(IMAGE_INPUT_DISABLED_ALERT_KEY));
+          }
+          return true;
+        }
         void (async () => {
           const clipboardPicks = await getClipboardFilePicks();
           if (clipboardPicks.length) {
@@ -2245,20 +2286,40 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
       }
       return false;
     },
-    [appendAttachmentFiles, appendLocalFilePicks, imageInputDisabled, isDesktopBridgeReady],
+    [
+      appendAttachmentFiles,
+      appendLocalFilePicks,
+      imageInputDisabled,
+      isDesktopBridgeReady,
+      pushAttachmentAlert,
+      t,
+    ],
   );
 
   const handlePaste = useCallback(
     (event: ClipboardEvent<HTMLDivElement>) => {
-      if (event.clipboardData.getData('text/plain').trim()) {
+      const hasText = Boolean(event.clipboardData.getData('text/plain').trim());
+      if (hasText) {
         notifyKVCInputIntent();
       }
       if (handleDesktopFilePaste(event)) return;
-      if (clipboardHasFileItems(event.clipboardData)) {
+
+      const imageFiles = getClipboardImageFiles(event.clipboardData);
+      if (imageFiles.length && !hasText) {
+        event.preventDefault();
+        if (shouldAlertImagePasteDisabled(imageInputDisabled, true)) {
+          pushAttachmentAlert(t(IMAGE_INPUT_DISABLED_ALERT_KEY));
+          return;
+        }
+        appendAttachmentFiles(imageFiles);
+        return;
+      }
+
+      if (clipboardHasFileItems(event.clipboardData) && !hasText) {
         event.preventDefault();
       }
     },
-    [handleDesktopFilePaste, notifyKVCInputIntent],
+    [appendAttachmentFiles, handleDesktopFilePaste, imageInputDisabled, notifyKVCInputIntent, pushAttachmentAlert, t],
   );
 
   useEffect(() => {
@@ -2523,12 +2584,21 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
 
   const handleModeSelect = useCallback(async (targetMode: AgentMode) => {
     setIsModeMenuOpen(false);
+    setHoveredOptionDesc(null);
+    setHoveredOptionRect(null);
     await handleModeSwitch(targetMode);
   }, [handleModeSwitch]);
 
   useEffect(() => {
     setIsModeMenuOpen(false);
   }, [isProcessing, mode]);
+
+  useEffect(() => {
+    if (!isModeMenuOpen) {
+      setHoveredOptionDesc(null);
+      setHoveredOptionRect(null);
+    }
+  }, [isModeMenuOpen]);
 
   const openProjectCreateDialog = useCallback(async (mode: ProjectCreateMode) => {
     setProjectDirError(null);
@@ -2874,13 +2944,16 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                 attachTriggerDisabled && 'chat-input-btn--disabled',
                 attachMenuOpen && 'chat-input-btn--menu-open',
               )}
-              title={attachTriggerDisabled ? t('chat.addFileDisabled') : t('chat.addFile')}
+              title={attachTriggerDisabled ? t('chat.addFileDisabled') : undefined}
               aria-label={attachTriggerDisabled ? t('chat.addFileDisabled') : t('chat.addFile')}
               aria-haspopup="menu"
               aria-expanded={attachMenuOpen}
+              data-tooltip={attachTriggerDisabled ? t('chat.addFileDisabled') : t('chat.addFileTooltip')}
+              {...attachTooltipHandlers}
             >
               <Plus className="chat-input-btn-icon" strokeWidth={1.8} />
             </button>
+            {attachTooltipNode}
             {attachMenuOpen && attachMenuAnchor && createPortal(
               <div
                 ref={attachMenuPortalRef}
@@ -2921,6 +2994,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                   role="menuitem"
                   aria-haspopup="menu"
                   aria-expanded={agentPickerOpen}
+                  data-testid="chat-panel-input-attach-menu-agent"
                   onClick={() => {
                     setAgentPickerOpen((open) => !open);
                     setExtensionPanelOpen(false);
@@ -2940,6 +3014,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                     className="chat-agent-picker"
                     direction={attachMenuDirection}
                     ariaLabel={t('chat.agent')}
+                    testId="chat-panel-agent-picker-panel"
                     onMouseEnter={() => setAgentPickerOpen(true)}
                     rowHeight={AGENT_PICKER_ROW_HEIGHT}
                     itemCount={filteredAgentOptions.length}
@@ -2957,6 +3032,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                             value={agentPickerQuery}
                             onChange={(event) => setAgentPickerQuery(event.target.value)}
                             placeholder={t('chat.agentSearchPlaceholder')}
+                            data-testid="chat-panel-agent-picker-search-input"
                           />
                         </div>
                       </label>
@@ -2970,11 +3046,11 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                     }}
                   >
                     {agentOptionsStatus === 'loading' ? (
-                      <div className="chat-agent-picker__state">{t('common.loading')}</div>
+                      <div className="chat-agent-picker__state" data-testid="chat-panel-agent-picker-state" data-variant="loading">{t('common.loading')}</div>
                     ) : agentOptionsStatus === 'error' ? (
-                      <div className="chat-agent-picker__state">{t('agentManagement.states.loadError')}</div>
+                      <div className="chat-agent-picker__state" data-testid="chat-panel-agent-picker-state" data-variant="error">{t('agentManagement.states.loadError')}</div>
                     ) : filteredAgentOptions.length === 0 ? (
-                      <div className="chat-agent-picker__state">
+                      <div className="chat-agent-picker__state" data-testid="chat-panel-agent-picker-state" data-variant={installedAgentOptions.length === 0 ? 'no-installed' : 'no-matches'}>
                         {installedAgentOptions.length === 0 ? t('chat.agentNoInstalled') : t('chat.agentNoMatches')}
                       </div>
                     ) : (
@@ -2988,6 +3064,8 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                             className={clsx('chat-agent-picker__item', isSelected && 'is-selected')}
                             role="menuitemradio"
                             aria-checked={isSelected}
+                            data-testid="chat-panel-agent-picker-item"
+                            data-variant={item.id}
                             data-tooltip={item.description || undefined}
                             {...agentTooltipHandlers}
                             onClick={() => {
@@ -3030,6 +3108,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                   role="menuitem"
                   aria-haspopup="menu"
                   aria-expanded={skillPanelOpen}
+                  data-testid="chat-panel-input-attach-menu-skill"
                   onClick={() => {
                     setSkillPanelOpen((open) => !open);
                     setAgentPickerOpen(false);
@@ -3067,6 +3146,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                     role="menuitem"
                     aria-haspopup="menu"
                     aria-expanded={extensionPanelOpen}
+                    data-testid="chat-panel-input-attach-menu-extension"
                     onClick={() => {
                       setExtensionPanelOpen((open) => !open);
                       setAgentPickerOpen(false);
@@ -3092,38 +3172,30 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                 )}
                 <div className="chat-mode-select__divider" role="separator" />
                 {canUsePlanMenu && (() => {
-                  // 对称地：已有未完成目标时不能选计划；对话进行中（isProcessing）时也先禁掉，
-                  // 避免在当前这轮还没结束时又叠加切一次模式。这条"打开"方向的限制沿用原逻辑；
-                  // "关闭"方向只受 isProcessing 限制（跟输入框旁边现有的计划 chip 关闭按钮一致）。
-                  const planDisabledOn = hasUnfinishedGoal || isProcessing;
-                  const planDisabledOnTitle = hasUnfinishedGoal
-                    ? t('plan.toolbarUnavailableGoal')
-                    : isProcessing
-                      ? t('plan.toolbarUnavailableProcessing')
-                      : undefined;
-                  const planDisabled = planActive ? isProcessing : planDisabledOn;
-                  const planTitle = planActive
-                    ? (isProcessing ? t('plan.closeTagDisabled') : undefined)
-                    : planDisabledOnTitle;
+                  // 能否切换计划模式由 planModeGate 统一判断，与 `/plan` 命令、
+                  // 「计划」chip 关闭按钮共用同一套限制：打开方向受「有未完成目标 /
+                  // 会话忙」限制，关闭方向受「会话忙」限制。「会话忙」= 对话进行中 /
+                  // 暂停中 / 等待 ask_user 回答（后者 isProcessing 已回到 false，
+                  // 但会话没结束，必须一并算忙）。
+                  const planToggleDecision = evaluatePlanToggle(activeSessionId, !planActive);
+                  const planDisabled = !planToggleDecision.ok;
+                  const planTitle = planToggleDecision.reason ? t(planToggleDecision.reason) : undefined;
                   const togglePlan = (next: boolean) => {
                     if (!activeSessionId) return;
+                    // 命中限制直接返回（UI 靠 disabled 视觉，无需额外提示条）；
+                    // 通过后再跑「打开方向」的互斥副作用，最后由 applyPlanToggle 落状态。
+                    if (!evaluatePlanToggle(activeSessionId, next).ok) return;
                     if (next) {
-                      if (planDisabledOn) return;
                       // Plan 与 Swarmflow 互斥：开启 Plan 前先关掉 Swarmflow。
                       if (useSessionStore.getState().getRuntime(activeSessionId)?.enableSwarmflow) {
                         useSessionStore.getState().setSwarmflowActive(activeSessionId, false);
                         setSwarmflowConfigPanelOpen(false);
                       }
-                      // 走到这里 hasUnfinishedGoal 一定是 false，goalArmed 为 true 时只可能是
-                      // "刚选了目标、还没发消息"的未提交态，顶掉换成 Plan。
+                      // goalArmed 为 true 时只可能是"刚选了目标、还没发消息"的
+                      // 未提交态，顶掉换成 Plan。
                       useGoalStore.getState().setArmed(activeSessionId, false);
-                      // explicitEntry：这是用户手动打开开关，下一条 Plan 消息要带
-                      // plan_entry_source，否则会被后端的防重入闸门拦下。
-                      usePlanStore.getState().setActive(activeSessionId, true, { explicitEntry: true });
-                    } else {
-                      if (isProcessing) return;
-                      usePlanStore.getState().setActive(activeSessionId, false);
                     }
+                    applyPlanToggle(activeSessionId, next, { entrySource: 'plan_toggle' });
                     // 不关闭菜单：用户拨动开关后保持菜单打开，便于看到开关状态变化并继续操作。
                   };
                   return (
@@ -3151,6 +3223,8 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                   const toggleSwarmflow = (next: boolean) => {
                     if (!activeSessionId || swarmflowToggleDisabled) return;
                     // Swarmflow 与 Plan 互斥：开启 Swarmflow 前先关掉 Plan。
+                    // 这是内部互斥复位（只在 Plan 未提交且会话空闲时可达），不是
+                    // 用户主动退出计划模式，故直接 setActive、不过 planModeGate。
                     if (next && planActive) {
                       usePlanStore.getState().setActive(activeSessionId, false);
                     }
@@ -3218,6 +3292,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                       if (goalDisabledOn) return;
                       // 走到这里 planCommitted 一定是 false（否则上面已 disabled），所以 planActive
                       // 为 true 时只可能是"刚打开开关、还没发过消息"的未提交态，可以放心顶掉。
+                      // 内部互斥复位（非用户主动退出计划模式），直接 setActive、不过 planModeGate。
                       if (planActive) {
                         usePlanStore.getState().setActive(activeSessionId, false);
                       }
@@ -3310,8 +3385,15 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                     type="button"
                     key={m.value}
                     onClick={() => void handleModeSelect(m.value)}
-                    onMouseEnter={() => setHoveredOptionDesc(m.descriptionI18nKey ?? null)}
-                    onMouseLeave={() => setHoveredOptionDesc(null)}
+                    onMouseEnter={(e) => {
+                      const desc = m.descriptionI18nKey ? t(m.descriptionI18nKey) : null;
+                      setHoveredOptionDesc(desc);
+                      setHoveredOptionRect(desc ? e.currentTarget.getBoundingClientRect() : null);
+                    }}
+                    onMouseLeave={() => {
+                      setHoveredOptionDesc(null);
+                      setHoveredOptionRect(null);
+                    }}
                     className={clsx(
                       'chat-mode-select__option',
                       mode === m.value && 'chat-mode-select__option--active',
@@ -3333,24 +3415,26 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                       </svg>
                     )}
                   </button>
-                ))}
-              </div>,
-              document.body
-            )}
-            {isModeMenuOpen && hoveredOptionDesc && modeMenuAnchor && createPortal(
-              <div
-                className="chat-mode-option-tooltip"
-                data-testid="chat-panel-mode-select-tooltip"
-                style={menuDirection === 'up'
-                  ? { position: 'fixed', bottom: window.innerHeight - modeMenuAnchor.top + 10, left: modeMenuAnchor.left + 188, zIndex: 10000 }
-                  : { position: 'fixed', top: modeMenuAnchor.bottom + 10, left: modeMenuAnchor.left + 188, zIndex: 10000 }
-                }
-              >
-                {t(hoveredOptionDesc)}
-              </div>,
-              document.body
-            )}
-          </div>
+                  ))}
+                </div>,
+                document.body
+              )}
+              {isModeMenuOpen && hoveredOptionDesc && hoveredOptionRect && createPortal(
+                <div
+                  className="adaptive-tooltip"
+                  data-testid="chat-panel-mode-select-tooltip"
+                  style={{
+                    position: 'fixed',
+                    top: hoveredOptionRect.top + (hoveredOptionRect.height / 2) - 17,
+                    left: hoveredOptionRect.right + 11,
+                    zIndex: 10000,
+                  }}
+                >
+                  {hoveredOptionDesc}
+                </div>,
+                document.body
+              )}
+            </div>
           <PermissionSelector permissionsEnabled={permissionsEnabled} onSavePermission={onSavePermission} />
 
           {selectedAgentId && (
@@ -3407,21 +3491,26 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                 <PlanIcon aria-hidden="true" />
               </span>
               <span className="chat-agent-tag__label" data-testid="chat-panel-plan-tag-label">{t('plan.toolbarTag')}</span>
-              <button
-                type="button"
-                className="chat-agent-tag__close"
-                data-testid="chat-panel-plan-tag-close"
-                disabled={isProcessing}
-                title={isProcessing ? t('plan.closeTagDisabled') : t('plan.closeTag')}
-                aria-label={isProcessing ? t('plan.closeTagDisabled') : t('plan.closeTag')}
-                onClick={() => {
-                  if (isProcessing) return;
-                  if (!activeSessionId) return;
-                  usePlanStore.getState().setActive(activeSessionId, false);
-                }}
-              >
-                <X size={16} strokeWidth={2.5} aria-hidden="true" />
-              </button>
+              {(() => {
+                // 关闭「计划」chip 与输入框旁 Plan 开关、`/plan` 命令共用同一套限制
+                // （planModeGate）：会话进行中 / 暂停 / 等待 ask_user 回答时不可退出。
+                const closeBlocked = !evaluatePlanToggle(activeSessionId, false).ok;
+                return (
+                  <button
+                    type="button"
+                    className="chat-agent-tag__close"
+                    data-testid="chat-panel-plan-tag-close"
+                    disabled={closeBlocked}
+                    title={closeBlocked ? t('plan.closeTagDisabled') : t('plan.closeTag')}
+                    aria-label={closeBlocked ? t('plan.closeTagDisabled') : t('plan.closeTag')}
+                    onClick={() => {
+                      applyPlanToggle(activeSessionId, false);
+                    }}
+                  >
+                    <X size={16} strokeWidth={2.5} aria-hidden="true" />
+                  </button>
+                );
+              })()}
             </div>
           )}
 
@@ -4037,21 +4126,31 @@ function ComposerSuggestionMenu({
                 type="button"
                 className={clsx(
                   'chat-composer-suggestion__item',
-                  highlightedIndex === index && 'chat-composer-suggestion__item--active',
+                  !item.disabled && highlightedIndex === index && 'chat-composer-suggestion__item--active',
+                  item.disabled && 'chat-composer-suggestion__item--disabled',
                 )}
                 role="option"
-                aria-selected={highlightedIndex === index}
+                aria-selected={!item.disabled && highlightedIndex === index}
+                aria-disabled={item.disabled || undefined}
+                disabled={item.disabled}
+                title={item.disabledReason}
                 data-testid="chat-panel-composer-suggestion-item"
                 data-variant={item.id}
                 onMouseDown={(event) => event.preventDefault()}
-                onPointerMove={() => onPointerHighlight(index)}
-                onClick={() => onPick(
-                  suggestion.kind,
-                  item.id,
-                  item.label,
-                  item.itemKind,
-                  item.takesArgs,
-                )}
+                onPointerMove={() => {
+                  if (!item.disabled) onPointerHighlight(index);
+                }}
+                onClick={() => {
+                  if (!item.disabled) {
+                    onPick(
+                      suggestion.kind,
+                      item.id,
+                      item.label,
+                      item.itemKind,
+                      item.takesArgs,
+                    );
+                  }
+                }}
               >
                 {isSlash ? (
                   <>
@@ -4070,9 +4169,6 @@ function ComposerSuggestionMenu({
                         <span className="chat-composer-suggestion__meta">{item.description}</span>
                       ) : null}
                     </span>
-                    {item.source ? (
-                      <span className="chat-composer-suggestion__source">{item.source}</span>
-                    ) : null}
                   </>
                 ) : (
                   <>
