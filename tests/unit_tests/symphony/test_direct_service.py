@@ -554,6 +554,92 @@ async def test_service_plans_through_public_runtime_with_minimal_jgf(
 
 
 @pytest.mark.asyncio
+async def test_service_plan_uses_request_selected_model_instead_of_default(
+    monkeypatch,
+    tmp_path,
+):
+    config = _config(tmp_path)
+    selected = LLMConfig(model="selected-model")
+    runtime_calls = []
+
+    class FakeOrchestration:
+        async def plan(self, *args, **kwargs):
+            del args, kwargs
+            return OrchestrationPlan({"planned_graph": _minimal_planned_graph()})
+
+    service = SwarmSymphonyService()
+
+    async def fresh_status():
+        return {"success": True, "exists": True, "stale": False}
+
+    def runtime_for(_config, *, llm_config=None):
+        runtime_calls.append(llm_config)
+        return SimpleNamespace(orchestration=FakeOrchestration())
+
+    service.graph_status = fresh_status
+    service._runtime_for = runtime_for
+    monkeypatch.setattr(
+        "jiuwenswarm.symphony.service.load_symphony_config", lambda: config
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.symphony.service.get_config",
+        lambda: {"preferred_language": "zh"},
+    )
+
+    result = await service.plan("compose", llm_config=selected)
+
+    assert result["success"] is True
+    assert runtime_calls == [selected]
+
+
+@pytest.mark.asyncio
+async def test_service_plan_uses_request_selected_model_for_stale_graph_refresh(
+    monkeypatch,
+    tmp_path,
+):
+    config = _config(tmp_path)
+    selected = LLMConfig(model="selected-model")
+    refresh_calls = []
+
+    class FakeOrchestration:
+        async def plan(self, *args, **kwargs):
+            del args, kwargs
+            return OrchestrationPlan({"planned_graph": _minimal_planned_graph()})
+
+    service = SwarmSymphonyService()
+
+    async def stale_status():
+        return {"success": True, "exists": True, "stale": True}
+
+    async def refresh_graph(*, progress=None, llm_config=None):
+        refresh_calls.append((progress, llm_config))
+        return {"success": True}
+
+    service.graph_status = stale_status
+    service.refresh_graph = refresh_graph
+    service._runtime_for = lambda _config, **_kwargs: SimpleNamespace(
+        orchestration=FakeOrchestration()
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.symphony.service.load_symphony_config", lambda: config
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.symphony.service.get_config",
+        lambda: {"preferred_language": "zh"},
+    )
+
+    progress = object()
+    result = await service.plan(
+        "compose",
+        progress=progress,
+        llm_config=selected,
+    )
+
+    assert result["success"] is True
+    assert refresh_calls == [(progress, selected)]
+
+
+@pytest.mark.asyncio
 async def test_service_rebuilds_stale_graph_before_planning(monkeypatch, tmp_path):
     config = _config(tmp_path, evolution=False)
     calls = []
