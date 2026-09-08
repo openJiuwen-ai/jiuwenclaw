@@ -295,6 +295,47 @@ async def test_web_channel_only_cancels_matching_session() -> None:
 
 
 @pytest.mark.asyncio
+async def test_cancel_stream_tasks_interrupts_agent_before_gateway_consumer() -> None:
+    """HTTP 南向必须先 interrupt 再 abort SSE，否则旧 token 会打上新 request_id。"""
+
+    class _OrderClient:
+        def __init__(self) -> None:
+            self.stream_alive_at_interrupt: bool | None = None
+            self.stream_task: asyncio.Task | None = None
+
+        async def send_request(self, env: object) -> SimpleNamespace:
+            task = self.stream_task
+            self.stream_alive_at_interrupt = task is not None and not task.done()
+            return SimpleNamespace(
+                request_id="interrupt-1",
+                channel_id="web",
+                ok=True,
+                payload={"event_type": "chat.interrupt_result", "success": True},
+                metadata=None,
+            )
+
+        @staticmethod
+        async def send_request_stream(env: object):
+            if False:
+                yield env
+
+    client = _OrderClient()
+    handler = _TestMessageHandler.create_with_client(client)
+    stream_task = _seed_stream_task(
+        handler, rid="rid-old", channel_id="web", session_id="sess_a",
+    )
+    client.stream_task = stream_task
+
+    cancelled = await handler.cancel_stream_tasks_for_channel(
+        _chat_send_message(channel_id="web", session_id="sess_a"),
+    )
+
+    assert cancelled == 1
+    assert client.stream_alive_at_interrupt is True
+    assert stream_task.cancelled()
+
+
+@pytest.mark.asyncio
 async def test_tui_keeps_streams_on_different_session() -> None:
     """TUI is no longer single-user: different session preserves all in-flight streams."""
     handler = _TestMessageHandler.create()

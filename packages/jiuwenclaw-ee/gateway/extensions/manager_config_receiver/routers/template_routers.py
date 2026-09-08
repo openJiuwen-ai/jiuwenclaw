@@ -4,36 +4,41 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import Annotated, Any
+from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Request
-from openjiuwen_runtime.foundation.db.handler import DBHandler
+from fastapi import APIRouter, HTTPException, Request
 
+from ..core.template.agent_template import AgentTemplateService
 from ..core.template.embedding_template import EmbeddingTemplateService
 from ..core.template.extension_config_template import ExtensionConfigTemplateService
+from ..core.template.mcp_template import McpTemplateService
 from ..core.template.model_template import ModelTemplateService
-from ..core.template.service_config_template import ServiceConfigTemplateService
-from ..core.template.skill_whitelist_template import SkillWhitelistTemplateService
+from ..core.template.permissions_template import PermissionsTemplateService
+from ..core.template.skill_prebuilt_template import SkillPrebuiltTemplateService
 from ..schemas.common_schemas import ResponseModel
 from ..schemas.sync_schemas import SyncEnvelopeOnlyBody, make_sync_body
 from ..schemas.template_schemas import (
+    AgentTemplateCreateRequest,
+    AgentTemplateUpdateRequest,
     EmbeddingTemplateCreateRequest,
     EmbeddingTemplateUpdateRequest,
     ExtensionConfigTemplateCreateRequest,
     ExtensionConfigTemplateUpdateRequest,
     ModelTemplateCreateRequest,
     ModelTemplateUpdateRequest,
-    ServiceConfigTemplateCreateRequest,
-    ServiceConfigTemplateUpdateRequest,
-    SkillWhitelistTemplateCreateRequest,
-    SkillWhitelistTemplateUpdateRequest,
+    McpTemplateCreateRequest,
+    McpTemplateUpdateRequest,
+    PermissionsTemplateCreateRequest,
+    PermissionsTemplateUpdateRequest,
+    SkillPrebuiltTemplateCreateRequest,
+    SkillPrebuiltTemplateUpdateRequest,
 )
-from .deps import build_sync_context, get_db_handler, sync_write_data
+from .deps import build_sync_context, sync_write_data
 from .runtime_notify import trigger_runtime_config_update
 
 templates_router = APIRouter()
 
-_ServiceFactory = Callable[[DBHandler], Any]
+_ServiceFactory = Callable[[], Any]
 
 
 def _http_exc(exc: ValueError) -> HTTPException:
@@ -55,12 +60,11 @@ def _add_template_crud(
     async def create_template(
         request: Request,
         body: Any,
-        handler: Annotated[DBHandler, Depends(get_db_handler)],
     ):
         sync = await build_sync_context(body, request.method)
         try:
-            result = await svc_factory(handler).create(
-                sync.jiuwenclaw_id, sync.business
+            result = await svc_factory().create(
+                sync.business
             )
         except ValueError as exc:
             raise _http_exc(exc) from exc
@@ -73,12 +77,11 @@ def _add_template_crud(
         request: Request,
         template_id: str,
         body: Any,
-        handler: Annotated[DBHandler, Depends(get_db_handler)],
     ):
         sync = await build_sync_context(body, request.method)
         try:
-            await svc_factory(handler).update(
-                sync.jiuwenclaw_id, template_id, sync.business
+            await svc_factory().update(
+                template_id, sync.business
             )
         except ValueError as exc:
             raise _http_exc(exc) from exc
@@ -91,11 +94,10 @@ def _add_template_crud(
         request: Request,
         template_id: str,
         body: SyncEnvelopeOnlyBody,
-        handler: Annotated[DBHandler, Depends(get_db_handler)],
     ):
         sync = await build_sync_context(body, request.method)
         try:
-            await svc_factory(handler).delete(sync.jiuwenclaw_id, template_id)
+            await svc_factory().delete(template_id)
         except ValueError as exc:
             raise _http_exc(exc) from exc
         trigger_runtime_config_update()
@@ -128,36 +130,50 @@ def _add_template_crud(
 
 _add_template_crud(
     "/model-templates",
-    lambda h: ModelTemplateService(h),
+    ModelTemplateService,
     "model",
     ModelTemplateCreateRequest,
     ModelTemplateUpdateRequest,
 )
 _add_template_crud(
     "/embedding-templates",
-    lambda h: EmbeddingTemplateService(h),
+    EmbeddingTemplateService,
     "embedding",
     EmbeddingTemplateCreateRequest,
     EmbeddingTemplateUpdateRequest,
 )
 _add_template_crud(
     "/extension-config-templates",
-    lambda h: ExtensionConfigTemplateService(h),
+    ExtensionConfigTemplateService,
     "extension_config",
     ExtensionConfigTemplateCreateRequest,
     ExtensionConfigTemplateUpdateRequest,
 )
 _add_template_crud(
-    "/skill-whitelist-templates",
-    lambda h: SkillWhitelistTemplateService(h),
-    "skill_whitelist",
-    SkillWhitelistTemplateCreateRequest,
-    SkillWhitelistTemplateUpdateRequest,
+    "/skill-prebuilt-templates",
+    SkillPrebuiltTemplateService,
+    "skill_prebuilt",
+    SkillPrebuiltTemplateCreateRequest,
+    SkillPrebuiltTemplateUpdateRequest,
 )
 _add_template_crud(
-    "/service-config-templates",
-    lambda h: ServiceConfigTemplateService(h),
-    "service_config",
-    ServiceConfigTemplateCreateRequest,
-    ServiceConfigTemplateUpdateRequest,
+    "/permissions-templates",
+    PermissionsTemplateService,
+    "permissions",
+    PermissionsTemplateCreateRequest,
+    PermissionsTemplateUpdateRequest,
+)
+_add_template_crud(
+    "/mcp-templates",
+    McpTemplateService,
+    "mcp",
+    McpTemplateCreateRequest,
+    McpTemplateUpdateRequest,
+)
+_add_template_crud(
+    "/agent-templates",
+    AgentTemplateService,
+    "agent",
+    AgentTemplateCreateRequest,
+    AgentTemplateUpdateRequest,
 )

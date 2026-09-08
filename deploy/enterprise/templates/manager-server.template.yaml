@@ -69,8 +69,6 @@ spec:
           value: "<<MANAGER_REST_PORT>>"
         - name: MANAGER_DB_TYPE
           value: "<<DB_TYPE>>"
-        - name: MANAGER_SQLITE_PATH
-          value: "<<MANAGER_SQLITE_PATH>>"
         - name: MANAGER_DB_HOST
           value: "<<DB_HOST>>"
         - name: MANAGER_DB_PORT
@@ -81,6 +79,10 @@ spec:
           value: "<<MANAGER_DB_NAME>>"
         - name: IDENTITY_PUBLIC_KEY_URL
           value: "http://<<IDENTITY_NAME>>:<<IDENTITY_REST_PORT>>/v1/auth/public_key"
+        - name: AGENT_RUNTIME_ENDPOINT
+          value: "http://<<AGENT_RUNTIME_NAME>>:<<AGENT_RUNTIME_PORT>>"
+        - name: AGENT_RUNTIME_SYNC_TIMEOUT
+          value: "<<AGENT_RUNTIME_SYNC_TIMEOUT>>"
         - name: MANAGER_WS_ENABLED
           value: "true"
         - name: MANAGER_WS_HOST

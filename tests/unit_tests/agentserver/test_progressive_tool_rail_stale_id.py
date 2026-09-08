@@ -28,7 +28,13 @@ from jiuwenswarm.agents.harness.common.tools.invoke_tool_tool import (
 @pytest.mark.asyncio
 async def test_invoke_retries_with_refreshed_id_when_cached_id_is_stale():
     """When get_tool(stale_id) returns None, the rail refreshes the cache
-    and retries with the new id from the refreshed card."""
+    and retries with the new id from the refreshed card.
+
+    Same-session MCP rebind must keep the request allowlist (rail pin or
+    ContextVar) pointed at the fresh id; without that pin, request-scoped
+    OfficeClaw cards fail closed under concurrency.
+    """
+    from jiuwenswarm.common.mcp_config import bind_active_office_claw_mcp_tools
 
     old_card = SimpleNamespace(
         name="office_claw_register_scheduled_task",
@@ -59,7 +65,7 @@ async def test_invoke_retries_with_refreshed_id_when_cached_id_is_stale():
             return target
         return None
 
-    with patch.object(
+    with bind_active_office_claw_mcp_tools([new_card.id]), patch.object(
         Runner.resource_mgr, "get_tool", side_effect=_get_tool_side_effect
     ), patch.object(
         rail, "_refresh_deferred_tool_cache", new=_fake_refresh
@@ -289,6 +295,100 @@ async def test_invoke_falls_back_to_active_office_claw_tool_id():
 
 
 @pytest.mark.asyncio
+async def test_invoke_prefers_owned_id_when_foreign_card_still_live():
+    """Concurrent request's card is still in resource_mgr; rail must use owned id."""
+
+    foreign_live = (
+        "office-claw-request-other.office-claw.office_claw_list_schedule_templates"
+    )
+    owned_live = (
+        "office-claw-request-mine.office-claw.office_claw_list_schedule_templates"
+    )
+    foreign_card = SimpleNamespace(
+        name="office_claw_list_schedule_templates",
+        id=foreign_live,
+        description="d",
+        input_params={},
+        properties={"resilience": {"timeout_s": None}},
+    )
+    foreign_tool = SimpleNamespace(invoke=AsyncMock(return_value={"foreign": True}))
+    owned_tool = SimpleNamespace(invoke=AsyncMock(return_value={"owned": True}))
+    rail = ProgressiveToolRail(eager_tools=["tools_search", "invoke_tool"])
+    rail.set_office_claw_active_tool_ids([owned_live])
+    rail._cached_deferred_tool_infos = [foreign_card]
+
+    async def _fake_refresh(_agent=None):
+        rail._cached_deferred_tool_infos = [foreign_card]
+
+    def _get_tool_side_effect(tool_id, session=None):
+        if tool_id == foreign_live:
+            return foreign_tool
+        if tool_id == owned_live:
+            return owned_tool
+        return None
+
+    with patch.object(
+        Runner.resource_mgr, "get_tool", side_effect=_get_tool_side_effect
+    ), patch.object(rail, "_refresh_deferred_tool_cache", new=_fake_refresh):
+        result = await rail._invoke_target_tool(
+            None,
+            InvokeToolInput(
+                tool_name="office_claw_list_schedule_templates",
+                arguments={},
+            ),
+        )
+
+    assert result == {
+        "success": True,
+        "tool_name": "office_claw_list_schedule_templates",
+        "result": {"owned": True},
+    }
+    owned_tool.invoke.assert_awaited_once()
+    foreign_tool.invoke.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_invoke_rebinds_office_claw_allowlist_from_rail_attribute():
+    """Without facade ContextVar, rail-owned allowlist must still bind for invoke."""
+
+    from jiuwenswarm.common.mcp_config import get_active_office_claw_mcp_tool_ids
+
+    owned_live = (
+        "office-claw-request-mine.office-claw.office_claw_list_schedule_templates"
+    )
+    card = SimpleNamespace(
+        name="office_claw_list_schedule_templates",
+        id=owned_live,
+        description="d",
+        input_params={},
+        properties={"resilience": {"timeout_s": None}},
+    )
+    seen: dict[str, object] = {}
+
+    async def _invoke(arguments, session=None, **kwargs):
+        seen["allowed"] = get_active_office_claw_mcp_tool_ids()
+        return {"ok": True}
+
+    target = SimpleNamespace(invoke=AsyncMock(side_effect=_invoke))
+    rail = ProgressiveToolRail(eager_tools=["tools_search", "invoke_tool"])
+    rail.set_office_claw_active_tool_ids([owned_live])
+    rail._cached_deferred_tool_infos = [card]
+
+    with patch.object(Runner.resource_mgr, "get_tool", return_value=target):
+        result = await rail._invoke_target_tool(
+            None,
+            InvokeToolInput(
+                tool_name="office_claw_list_schedule_templates",
+                arguments={},
+            ),
+        )
+
+    assert result["success"] is True
+    assert seen["allowed"] == frozenset({owned_live})
+    assert get_active_office_claw_mcp_tool_ids() is None
+
+
+@pytest.mark.asyncio
 async def test_search_skips_dead_instance_without_active_fallback():
     """tools_search must not advertise a tool whose instance is gone and
     which has no active OfficeClaw binding for this request."""
@@ -332,3 +432,40 @@ def test_resolve_active_office_claw_tool_id_maps_short_name():
         assert resolve_active_office_claw_tool_id("missing_tool") is None
 
     assert resolve_active_office_claw_tool_id("office_claw_preview_scheduled_task") is None
+
+
+def test_rail_init_preserves_session_scoped_meta_tool_owner_id():
+    """Concurrent session adapters share AgentCard.id; meta tools must not.
+
+    Regression: ProgressiveToolRail.init() used to overwrite the constructor's
+    ``{card}_s_{session}`` owner with the shared AgentCard.id, so every
+    session registered the same InvokeToolTool id and last writer's OfficeClaw
+    pin served all sessions (scheduled-task deliveryThreadId cross-bind).
+    """
+    shared_card_id = "office-agent-card"
+    rail_a = ProgressiveToolRail(
+        eager_tools=["tools_search", "invoke_tool"],
+        agent_card_id=f"{shared_card_id}_s_session_a",
+        agent_id=f"{shared_card_id}_s_session_a",
+    )
+    rail_b = ProgressiveToolRail(
+        eager_tools=["tools_search", "invoke_tool"],
+        agent_card_id=f"{shared_card_id}_s_session_b",
+        agent_id=f"{shared_card_id}_s_session_b",
+    )
+    shared_agent_a = SimpleNamespace(card=SimpleNamespace(id=shared_card_id))
+    shared_agent_b = SimpleNamespace(card=SimpleNamespace(id=shared_card_id))
+
+    rail_a.init(shared_agent_a)
+    rail_b.init(shared_agent_b)
+
+    assert rail_a.agent_card_id == f"{shared_card_id}_s_session_a"
+    assert rail_b.agent_card_id == f"{shared_card_id}_s_session_b"
+
+    id_a = {tool.card.id for tool in rail_a._meta_tool_instances()}
+    id_b = {tool.card.id for tool in rail_b._meta_tool_instances()}
+    assert id_a.isdisjoint(id_b)
+    assert any("_s_session_a" in tool_id for tool_id in id_a)
+    assert any("_s_session_b" in tool_id for tool_id in id_b)
+    assert not any("_s_session_b" in tool_id for tool_id in id_a)
+    assert not any("_s_session_a" in tool_id for tool_id in id_b)

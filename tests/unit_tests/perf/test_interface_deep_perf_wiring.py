@@ -26,6 +26,8 @@ def test_interface_deep_wires_request_summary_rail() -> None:
         "maybe_mark_answer_first_byte",
         "snapshot_perf_summary_usage",
         "merge_perf_summary_usage_fallback",
+        "record_deepresearch_sdk_token_usage",
+        "_account_deepresearch_sdk_usage",
         "def _build_request_summary_rail",
         'RequestSummaryRail(record_only=True)',
         '_RailBuildInfo("_request_summary_rail"',

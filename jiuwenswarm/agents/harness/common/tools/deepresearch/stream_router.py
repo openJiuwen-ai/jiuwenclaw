@@ -393,7 +393,7 @@ def _stage_child_reasoning(stage: int, agent: str, display: tuple[str, str], con
     }
 
 
-def _stage_snapshot_frames(state: RouterState, *, complete: bool = False) -> list[dict]:
+def _stage_snapshot_frames(state: RouterState) -> list[dict]:
     tasks = []
     for index, title in enumerate(DEEPRESEARCH_STAGES, start=1):
         if state.stages_completed or index < state.current_stage:
@@ -410,29 +410,15 @@ def _stage_snapshot_frames(state: RouterState, *, complete: bool = False) -> lis
 
     completed = len(DEEPRESEARCH_STAGES) if state.stages_completed else state.current_stage - 1
     in_progress = 0 if state.stages_completed else 1
-    task_update = {
-        "event_type": "task.update",
-        "tasks": tasks,
-        "total_tasks": len(DEEPRESEARCH_STAGES),
-        "completed_tasks": completed,
-        "in_progress_tasks": in_progress,
-        "pending_tasks": len(DEEPRESEARCH_STAGES) - completed - in_progress,
-    }
-    title = DEEPRESEARCH_STAGES[state.current_stage - 1]
-    content = (
-        f"[DeepResearch 阶段完成] Stage {state.current_stage}：{title}\n"
-        if complete
-        else f"[DeepResearch 阶段切换] 开始 Stage {state.current_stage}：{title}\n"
-    )
-    message = {
-        "task_id": f"deepresearch_stage_{state.current_stage}",
-        "task_content": title,
-        "content": content,
-    }
     return [
-        task_update,
-        {"event_type": "chat.reasoning", **message},
-        {"event_type": "chat.delta", **message},
+        {
+            "event_type": "task.update",
+            "tasks": tasks,
+            "total_tasks": len(DEEPRESEARCH_STAGES),
+            "completed_tasks": completed,
+            "in_progress_tasks": in_progress,
+            "pending_tasks": len(DEEPRESEARCH_STAGES) - completed - in_progress,
+        }
     ]
 
 
@@ -443,7 +429,7 @@ def advance_stage(state: RouterState, stage: int, *, complete: bool = False) -> 
             return []
         state.current_stage = len(DEEPRESEARCH_STAGES)
         state.stages_completed = True
-        return _stage_snapshot_frames(state, complete=True)
+        return _stage_snapshot_frames(state)
 
     if state.stages_completed or stage <= state.current_stage:
         return []
@@ -907,16 +893,22 @@ def route_chunk(chunk: dict, state: RouterState) -> list[dict]:
     agent = _validate_identifier(chunk.get("agent", ""))
     event = str(chunk.get("event", "")).strip()
     section_idx = _validate_identifier(chunk.get("section_idx", "0")) or "0"
-    # The successful EndNode embeds the complete final result in ``content``.
+    # The EndNode embeds the complete final result in ``content`` (1+ MiB).
     # It is a workflow boundary, not process text for the frontend, so keep it
     # under the terminal 16 MiB protocol bound without applying the 1 MiB
-    # process-display accumulator limit.
+    # process-display accumulator limit — even when the result carries
+    # non-fatal exception_info (the SDK then emits event=error).  Delivery is
+    # still gated by _is_successful_workflow_end below.
+    is_end_node = (
+        agent == "end"
+        and section_idx in {"", "0"}
+    )
     successful_workflow_end = _is_successful_workflow_end(chunk, agent, event)
 
     _validate_router_input(
         chunk,
         state,
-        terminal_result_content=successful_workflow_end,
+        terminal_result_content=is_end_node,
     )
     frames: list[dict] = []
     if "__deepsearch_status__" in chunk:

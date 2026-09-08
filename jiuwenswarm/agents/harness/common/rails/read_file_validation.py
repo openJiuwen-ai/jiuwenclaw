@@ -9,7 +9,7 @@ import os
 from typing import Any, TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, ToolCallInputs
+    from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
 
 READ_FILE_TOOL_NAMES = frozenset(
     {
@@ -45,7 +45,6 @@ _IMAGE_EXTENSIONS = frozenset(
 
 _NON_TEXT_EXTENSIONS = frozenset(
     {
-        ".pdf",
         ".zip",
         ".gz",
         ".bz2",

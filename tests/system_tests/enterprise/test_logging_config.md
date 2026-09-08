@@ -217,7 +217,7 @@ sequenceDiagram
     Stack->>NewGW: subprocess 启动
     Note over NewGW: console_level=WARNING 已生效
     Stack->>ChLog: wait WebChannel 已启动
-    NewGW->>Utils: AGENT_RUNTIME=local 时冷加载
+    NewGW->>Utils: 企业版时冷加载
     Utils->>GDB: SELECT logging_config
     NewGW->>StdLog: App logging levels loaded
     Test->>StdLog: wait_for_log

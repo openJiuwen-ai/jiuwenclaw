@@ -537,7 +537,7 @@ async def test_create_instance_keeps_workspace_root_separate_from_project_dir(
     # Workspace root comes from get_agent_workspace_dir() (constructor), not
     # react.workspace_dir; project_dir is supplied via create_instance overrides.
     monkeypatch.setattr(interface_module, "get_agent_workspace_dir", lambda: str(workspace_dir))
-    monkeypatch.delenv("AGENT_RUNTIME", raising=False)
+    monkeypatch.delenv("JIUWENSWARM_EDITION", raising=False)
 
     adapter = JiuWenSwarmDeepAdapter()
     # Only a session-scoped adapter builds its own DeepAgent; the root adapter

@@ -7,12 +7,11 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from openjiuwen_runtime.foundation.db.handler import DBHandler
-
+from jiuwenswarm.gateway.config.enterprise.repository import EnterpriseRecordRepository
+from jiuwenswarm.gateway.config.enterprise.tables.application_config_models import LOG_MASKING_RULE_TABLE_DEF
 from jiuwenswarm.infrastructure.log_masking.engine import LogMaskingEngine
-
-from ...infrastructure.utils import assert_jiuwenclaw_id_matches, format_ts, utc_now
-from ...models.application_config_models import LOG_MASKING_RULE_TABLE_DEF
+from ...infrastructure.repository_access import require_enterprise_repository
+from ...infrastructure.utils import format_ts, parse_iso_datetime, utc_now
 from ...schemas.application_config_schemas import (
     LogMaskingRuleCreateRequest,
     LogMaskingRuleUpdateRequest,
@@ -22,37 +21,29 @@ _TABLE = LOG_MASKING_RULE_TABLE_DEF.table_name
 logger = logging.getLogger(__name__)
 
 
-def _rule_row_to_dict(obj: Any) -> dict[str, Any]:
+def _rule_row_to_dict(row: dict[str, Any]) -> dict[str, Any]:
     return {
-        "id": getattr(obj, "id", None),
-        "jiuwenclaw_id": getattr(obj, "jiuwenclaw_id", None),
-        "rule_id": getattr(obj, "rule_id", None),
-        "rule_name": getattr(obj, "rule_name", None),
-        "description": getattr(obj, "description", None),
-        "pattern": getattr(obj, "pattern", None),
-        "replacement": getattr(obj, "replacement", None),
-        "priority": getattr(obj, "priority", 0),
-        "source": getattr(obj, "source", None),
-        "enabled": bool(getattr(obj, "enabled", True)),
-        "data": getattr(obj, "data", None),
-        "created_at": format_ts(getattr(obj, "created_at", None)),
-        "updated_at": format_ts(getattr(obj, "updated_at", None)),
+        "id": row.get("id"),
+        "rule_id": row.get("rule_id"),
+        "rule_name": row.get("rule_name"),
+        "description": row.get("description"),
+        "pattern": row.get("pattern"),
+        "replacement": row.get("replacement"),
+        "priority": row.get("priority", 0),
+        "with_fingerprint": bool(row.get("with_fingerprint", False)),
+        "source": row.get("source"),
+        "enabled": bool(row.get("enabled", True)),
+        "data": row.get("data"),
+        "created_at": format_ts(row.get("created_at")),
+        "updated_at": format_ts(row.get("updated_at")),
     }
 
 
-def _instance_filters(jiuwenclaw_id: str, rule_id: str | None = None) -> dict[str, Any]:
-    filters: dict[str, Any] = {"jiuwenclaw_id": jiuwenclaw_id}
-    if rule_id is not None:
-        filters["rule_id"] = rule_id
-    return filters
-
-
-async def _create_log_masking_rule_record(
-    handler: DBHandler,
+async def _upsert_log_masking_rule_from_sync(
+    repo: EnterpriseRecordRepository,
     request: LogMaskingRuleCreateRequest,
-    *,
-    jiuwenclaw_id: str,
 ) -> dict[str, Any]:
+    """按 ``rule_id`` upsert（对齐 agent_template；全量同步 POST 幂等）。"""
     from jiuwenswarm.infrastructure.log_masking.engine import (
         normalize_replacement,
         normalize_rule_id,
@@ -61,14 +52,9 @@ async def _create_log_masking_rule_record(
     )
 
     rule_id = normalize_rule_id(request.rule_id)
-    dup = await handler.get(_TABLE, _instance_filters(jiuwenclaw_id, rule_id))
-    if dup is not None:
-        raise ValueError(f"rule_id already exists: {rule_id!r}")
-
     source = normalize_source(request.source)
     now = utc_now()
     row_data: dict[str, Any] = {
-        "jiuwenclaw_id": jiuwenclaw_id,
         "rule_id": rule_id,
         "rule_name": request.rule_name,
         "description": request.description,
@@ -79,22 +65,39 @@ async def _create_log_masking_rule_record(
         ),
         "replacement": normalize_replacement(request.replacement),
         "priority": int(request.priority),
+        "with_fingerprint": bool(request.with_fingerprint),
         "source": source,
         "enabled": bool(request.enabled),
         "data": request.data,
         "created_at": now,
         "updated_at": now,
     }
-    record = await handler.create(_TABLE, row_data)
-    return _rule_row_to_dict(record)
+
+    existing = await repo.get(rule_id=rule_id)
+    if existing is None:
+        record = await repo.create(row_data)
+        return _rule_row_to_dict(record)
+
+    created_at = existing.get("created_at")
+    if created_at is not None:
+        # existing 可能是 ISO 字符串；asyncpg 要求 datetime
+        row_data["created_at"] = parse_iso_datetime(created_at) or now
+    updates = {
+        key: value
+        for key, value in row_data.items()
+        if key not in ("rule_id",)
+    }
+    updates["updated_at"] = utc_now()
+    updated = await repo.update({"rule_id": rule_id}, updates)
+    if updated is None:
+        raise ValueError(f"failed to upsert log masking rule id={rule_id!r}")
+    return _rule_row_to_dict(updated)
 
 
 async def _update_log_masking_rule_record(
-    handler: DBHandler,
+    repo: EnterpriseRecordRepository,
     rule_id: str,
     request: LogMaskingRuleUpdateRequest,
-    *,
-    jiuwenclaw_id: str,
 ) -> dict[str, Any] | None:
     from jiuwenswarm.infrastructure.log_masking.engine import (
         normalize_replacement,
@@ -104,7 +107,7 @@ async def _update_log_masking_rule_record(
     )
 
     rid = normalize_rule_id(rule_id)
-    existing = await handler.get(_TABLE, _instance_filters(jiuwenclaw_id, rid))
+    existing = await repo.get(rule_id=rid)
     if existing is None:
         return None
 
@@ -124,138 +127,48 @@ async def _update_log_masking_rule_record(
         updates["source"] = normalize_source(updates["source"])
     if "priority" in updates and updates["priority"] is not None:
         updates["priority"] = int(updates["priority"])
+    if "with_fingerprint" in updates and updates["with_fingerprint"] is not None:
+        updates["with_fingerprint"] = bool(updates["with_fingerprint"])
 
     updates["updated_at"] = utc_now()
-    updated = await handler.update(_TABLE, _instance_filters(jiuwenclaw_id, rid), updates)
+    updated = await repo.update({"rule_id": rid}, updates)
     if updated is None:
         return None
     return _rule_row_to_dict(updated)
 
 
 async def _delete_log_masking_rule_record(
-    handler: DBHandler,
+    repo: EnterpriseRecordRepository,
     rule_id: str,
-    *,
-    jiuwenclaw_id: str,
 ) -> bool:
     from jiuwenswarm.infrastructure.log_masking.engine import normalize_rule_id
 
     rid = normalize_rule_id(rule_id)
-    return await handler.delete(_TABLE, _instance_filters(jiuwenclaw_id, rid))
-
-
-async def _upsert_log_masking_rule_record(
-    handler: DBHandler,
-    request: LogMaskingRuleCreateRequest,
-    *,
-    jiuwenclaw_id: str,
-) -> dict[str, Any]:
-    from jiuwenswarm.infrastructure.log_masking.engine import (
-        normalize_replacement,
-        normalize_rule_id,
-        normalize_source,
-        validate_pattern,
-    )
-
-    rid = normalize_rule_id(request.rule_id)
-    source = normalize_source(request.source)
-    row_data: dict[str, Any] = {
-        "jiuwenclaw_id": jiuwenclaw_id,
-        "rule_id": rid,
-        "rule_name": request.rule_name,
-        "description": request.description,
-        "pattern": validate_pattern(
-            request.pattern,
-            check_structure=False,
-            check_performance=False,
-        ),
-        "replacement": normalize_replacement(request.replacement),
-        "priority": int(request.priority),
-        "source": source,
-        "enabled": bool(request.enabled),
-        "data": request.data,
-    }
-    existing = await handler.get(_TABLE, _instance_filters(jiuwenclaw_id, rid))
-    if existing is None:
-        now = utc_now()
-        row_data["created_at"] = now
-        row_data["updated_at"] = now
-        record = await handler.create(_TABLE, row_data)
-        if record is None:
-            raise ValueError(f"failed to upsert log masking rule: {rid!r}")
-        return _rule_row_to_dict(record)
-
-    row_data["updated_at"] = utc_now()
-    updated = await handler.update(
-        _TABLE,
-        _instance_filters(jiuwenclaw_id, rid),
-        row_data,
-    )
-    if updated is None:
-        raise ValueError(f"failed to upsert log masking rule: {rid!r}")
-    return _rule_row_to_dict(updated)
-
-
-async def _sync_log_masking_rules_records(
-    handler: DBHandler,
-    rules: list[dict[str, Any]],
-    *,
-    jiuwenclaw_id: str,
-) -> dict[str, Any]:
-    incoming_rule_ids: set[str] = set()
-    synced = 0
-    for raw in rules:
-        if not isinstance(raw, dict):
-            raise ValueError("log_masking_rule.sync rules must be objects")
-        req = LogMaskingRuleCreateRequest.model_validate(raw)
-        jid = str(req.jiuwenclaw_id or jiuwenclaw_id).strip()
-        assert_jiuwenclaw_id_matches(jid)
-        from jiuwenswarm.infrastructure.log_masking.engine import normalize_rule_id
-
-        rid = normalize_rule_id(req.rule_id)
-        incoming_rule_ids.add(rid)
-        await _upsert_log_masking_rule_record(handler, req, jiuwenclaw_id=jid)
-        synced += 1
-
-    deleted = 0
-    existing_rows = await handler.list_records(_TABLE, {"jiuwenclaw_id": jiuwenclaw_id})
-    for row in existing_rows:
-        rid = str(getattr(row, "rule_id", "") or "")
-        if rid and rid not in incoming_rule_ids:
-            if await _delete_log_masking_rule_record(
-                handler, rid, jiuwenclaw_id=jiuwenclaw_id
-            ):
-                deleted += 1
-
-    return {"synced_count": synced, "deleted_count": deleted}
+    return await repo.delete(rule_id=rid)
 
 
 class LogMaskingRuleService:
-    def __init__(self, handler: DBHandler) -> None:
-        self._handler = handler
 
     async def create(
         self,
-        jiuwenclaw_id: str,
         rule: dict[str, Any],
     ) -> dict[str, Any]:
+        """POST create：按 ``rule_id`` upsert（全量同步幂等）。"""
         if not isinstance(rule, dict):
             raise ValueError("log_masking_rule.create requires rule object")
         req = LogMaskingRuleCreateRequest.model_validate(rule)
-        row = await _create_log_masking_rule_record(
-            self._handler, req, jiuwenclaw_id=jiuwenclaw_id
-        )
+        repo = require_enterprise_repository(_TABLE)
+        row = await _upsert_log_masking_rule_from_sync(repo, req)
         await LogMaskingEngine.reload_log_masking_rule(db_authoritative=True)
         result = {"rule_id": row["rule_id"]}
         logger.info(
-            "[ManagerConfigReceiver] log_masking_rule create rule_id=%s",
+            "[ManagerConfigReceiver] log_masking_rule upsert rule_id=%s",
             result["rule_id"],
         )
         return result
 
     async def update(
         self,
-        jiuwenclaw_id: str,
         rule_id: str,
         updates: dict[str, Any],
     ) -> dict[str, Any]:
@@ -265,9 +178,8 @@ class LogMaskingRuleService:
         if not isinstance(updates, dict) or not updates:
             raise ValueError("log_masking_rule.update requires non-empty updates")
         req = LogMaskingRuleUpdateRequest.model_validate(updates)
-        row = await _update_log_masking_rule_record(
-            self._handler, rid, req, jiuwenclaw_id=jiuwenclaw_id
-        )
+        repo = require_enterprise_repository(_TABLE)
+        row = await _update_log_masking_rule_record(repo, rid, req)
         if row is None:
             raise ValueError(f"log masking rule id={rid!r} not found")
         await LogMaskingEngine.reload_log_masking_rule(db_authoritative=True)
@@ -278,13 +190,12 @@ class LogMaskingRuleService:
         )
         return result
 
-    async def delete(self, jiuwenclaw_id: str, rule_id: str) -> None:
+    async def delete(self, rule_id: str) -> None:
         rid = str(rule_id or "").strip()
         if not rid:
             raise ValueError("log_masking_rule.delete requires rule_id")
-        deleted = await _delete_log_masking_rule_record(
-            self._handler, rid, jiuwenclaw_id=jiuwenclaw_id
-        )
+        repo = require_enterprise_repository(_TABLE)
+        deleted = await _delete_log_masking_rule_record(repo, rid)
         if not deleted:
             raise ValueError(f"log masking rule id={rid!r} not found")
         await LogMaskingEngine.reload_log_masking_rule(db_authoritative=True)

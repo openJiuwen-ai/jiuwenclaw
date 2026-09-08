@@ -1,5 +1,5 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-"""FastAPI 依赖：DB handler 与同步信封解析（无验签/解密）。"""
+"""FastAPI 依赖：同步请求 Body 解析（无验签/解密）。"""
 
 from __future__ import annotations
 
@@ -7,13 +7,10 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Annotated, Any, TypeVar
 
-from fastapi import Depends, HTTPException, Request
-from openjiuwen_runtime.foundation.db.handler import DBHandler
+from fastapi import Depends, Request
 from pydantic import BaseModel
 
-from ..http.sync_security import split_envelope
-from ..infrastructure.db import ensure_db_handler
-from ..infrastructure.utils import assert_jiuwenclaw_id_matches, get_jiuwenclaw_id
+from ..http.sync_security import split_business
 from ..schemas.sync_schemas import SyncEnvelopeOnlyBody
 
 TBody = TypeVar("TBody", bound=BaseModel)
@@ -23,44 +20,18 @@ TBody = TypeVar("TBody", bound=BaseModel)
 class SyncContext:
     """同步上下文（不含业务分发）。"""
 
-    revision: str
     business: dict[str, Any]
-    jiuwenclaw_id: str
     method: str
 
 
-async def get_db_handler() -> DBHandler:
-    return await ensure_db_handler()
-
-
-def require_jiuwenclaw_id(business: dict[str, Any] | None = None) -> str:
-    """统一从环境变量 ``JIUWENCLAW_ID`` 取实例 id；body 若带 id 则校验一致。"""
-    jid = str(get_jiuwenclaw_id() or "").strip()
-    if not jid:
-        raise HTTPException(
-            status_code=400,
-            detail="JIUWENCLAW_ID is not set; register required",
-        )
-    body_jid = ""
-    if business:
-        body_jid = str(business.get("jiuwenclaw_id") or "").strip()
-    if body_jid:
-        try:
-            assert_jiuwenclaw_id_matches(body_jid)
-        except ValueError as exc:
-            raise HTTPException(status_code=403, detail=str(exc)) from exc
-    return jid
-
-
 async def build_sync_context(body: BaseModel, method: str) -> SyncContext:
-    raw = body.model_dump(mode="python")
-    revision, business = split_envelope(raw)
-    jid = require_jiuwenclaw_id(business)
-    business.pop("jiuwenclaw_id", None)
+    # PATCH/PUT 只保留客户端显式传入的字段；exclude_unset=False 会把未传可选字段
+    # 填成 None，再经 model_validate 变成「已设置」，最终把 enabled 等 NOT NULL 列写成 null。
+    raw = body.model_dump(mode="python", exclude_unset=True)
+    business = split_business(raw)
+    business.pop("jiuwenclaw_id", None)  # 历史字段，忽略
     return SyncContext(
-        revision=revision,
         business=business,
-        jiuwenclaw_id=jid,
         method=method.upper(),
     )
 
@@ -89,6 +60,6 @@ VerifySyncEnvelopeOnly = Annotated[
 ]
 
 
-def sync_write_data(sync: SyncContext, result: Any) -> dict[str, Any]:
-    """写接口统一 data：revision + 业务结果。"""
-    return {"revision": sync.revision, "result": result}
+def sync_write_data(_sync: SyncContext, result: Any) -> Any:
+    """写接口统一 data：业务结果（可为 null）。"""
+    return result

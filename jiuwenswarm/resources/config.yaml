@@ -92,6 +92,19 @@ http_server:
   host:
   port: 8766
 
+# AgentServer 启动端到端预热：创建临时 DeepAgent 执行一次 query，
+# 触发模块 import / checkpointer / 模型 client / DeepAgent 工厂全链路首次初始化，
+# 降低首请求时延。后台执行，不阻塞启动完成。
+# 模型调用通过 mock 短路（不发真实 HTTP、不消耗 token），仅预热构建链路。
+startup:
+  warmup:
+    enabled: true               # 总开关，默认开启
+    query: "hello"              # 预热 query
+    channel_id: "__prewarm__"   # 专用 channel，与生产会话隔离
+    mode: "agent"               # 预热 agent 模式
+    timeout_s: 120              # 预热超时（秒），超时取消不阻塞启动
+    mock_model: true            # 是否 mock 模型调用（避免消耗 token），默认 true
+
 # 日志目录：~/.jiuwenswarm/agent/.logs/
 # gateway.log / channel.log / agent_server.log 按源码路径分流；full.log 为汇总。
 # level：未单独指定时的默认级别。console_level：控制台；可省略则用 level。
@@ -543,7 +556,6 @@ react:
       - glob
       - grep
       - bash
-      - code
       - skill_tool
       - skill_complete
       - skill_acceleration_exec
@@ -588,7 +600,7 @@ react:
   # 默认禁用 search_skill / install_skill / uninstall_skill（技能广场界面安装不受影响，
   # 那条链路走 SkillManager.handle_skills_install，不经模型工具）。
   # 单横线 ``-`` 仅在变量未设置时使用默认值；显式 DISABLED_TOOLS= 可清空黑名单。
-  disabled_tools: ${DISABLED_TOOLS-search_skill,install_skill,uninstall_skill}
+  disabled_tools: ${DISABLED_TOOLS-search_skill,install_skill,uninstall_skill,code}
   answer_chunk_size: 500
   stream_chunk_threshold: 50
   stream_character_threshold: 2000
@@ -617,7 +629,7 @@ react:
 
     # 消息摘要卸载器：把超大的工具消息摘要化卸载（保留 [[OFFLOAD:...]] 索引，可重载）
     message_summary_offloader_config:
-      protected_tool_names: ["read_file", "read_pdf"]  # 这些工具的输出保持原文，不卸载
+      protected_tool_names: ["read_file", "read_pdf", "skill_tool"]  # 这些工具的输出保持原文，不卸载
       add_message_threshold_ratio: 0.1      # 新增工具消息超过上下文窗口容量的该比例时，立即卸载
       ttl_seconds: 300                      # 距上次模型请求空闲超过该秒数后，才允许做 TTL（闲时）卸载
       ttl_context_occupancy_ratio: 0.5      # 上下文占用超过该比例时，才允许做 TTL 卸载
@@ -729,6 +741,9 @@ task_memory:
 # ========== Redis（主备 Gateway：状态存储 / Pub/Sub / Leader；standalone 下不连接）==========
 # 通过 gateway.deployment_mode 控制：standalone（不连接）/ active-standby（连接 Redis）
 redis:
+  # standalone | cluster；cluster 时下方 host 解析为逗号分隔的多节点列表
+  mode: ${REDIS_MODE:-standalone}
+  # 单机：host / host:port；cluster：逗号列表(如 10.0.0.11:6379,10.0.0.12:6379)；不带端口时用 port
   host: ${REDIS_HOST:-localhost}
   port: ${REDIS_PORT:-6379}
   password: ${REDIS_PASSWORD:-}
@@ -743,19 +758,23 @@ redis:
 
 gateway:
   # 产品形态：personal（个人版，默认）| enterprise（企业版）；影响 Gateway 存储选型（文件/DB、内存/Redis）
-  edition: ${GATEWAY_EDITION:-personal}
+  edition: ${JIUWENSWARM_EDITION:-personal}
 
   # SessionMap 仅用于企业claw场景，如 feishu_enterprise 等通道：将平台身份映射为 Agent 的 session_id。
   # 取值：per_chat_bot（默认，同 chat+bot 共享会话）, per_chat_bot_user（按 user 分会话）
   session_map_scope: per_chat_bot
 
-  # ========== 部署模式（企业/K8s；AGENT_RUNTIME 环境下生效）==========
+  # ========== 部署模式（企业/K8s；企业版下生效）==========
   # standalone（默认）：单机，不连 Redis
   # active-standby：主备，连接 Redis + LeaderElection 选主
   # distributed：多副本同时在线，连接 Redis 共享 session（无选主；cron 默认关闭；仅 web/tui 通道）
   deployment_mode: ${DEPLOYMENT_MODE:-standalone}
   # 分布式下用于实例标识；空则启动时自动生成
   instance_id: ${GATEWAY_INSTANCE_ID:-}
+
+  # Web 会话存储位置：local（默认，会话文件在网关本地磁盘）| remote（会话在 Web Pod / 远程存储）
+  # remote 时前端 SessionsPanel 不再浏览网关本地会话文件，仅支持恢复会话历史。
+  web_session_storage: ${GATEWAY_WEB_SESSION_STORAGE:-local}
 
   # 企业版 Gateway 多副本：从共享库轮询 Gateway 自身配置（channel/logging/log_masking）
   config_poll:
@@ -815,12 +834,18 @@ heartbeat:
     end: 22:00
 
 execution_guard:
-  # LLM 重试护栏：处理模型重复输出和流式帧超时，命中后重新发起模型请求
+  # LLM 重试护栏：处理模型重复输出、流式帧超时，以及非流式 invoke 的瞬时网络/超时错误
   llm_retry_rail:
     # 总开关。关闭后不注册 LLMRetryRail，也不会额外拦截重复输出/流式帧超时
     enabled: true
     # 单次 invoke 内同一类异常最多重试次数；超过后把异常继续抛给上层
     max_retries: 2
+    # 非流式 invoke 遇到 Connection error / Request timed out 等瞬时错误时是否自动重试
+    retry_transient_invoke_errors: true
+    # 重试进行中是否向前端推送可见提示（映射为 chat.delta）
+    notify_user_on_retry: true
+    # 重试用尽后是否向前端推送 chat.error，避免静默结束
+    notify_user_on_exhausted: true
     # 重复片段检测的最短长度，单位：字符；用于检测短句/短片段循环输出
     repeat_min_pattern_chars: 2
     # 重复片段检测的最长长度，单位：字符；过长片段不作为循环模式检测
@@ -871,7 +896,7 @@ agent_ras:
     notify_user_on_warning: true
 
 # web_enterprise 聊天附件上传（自部署 MinIO / S3 兼容对象存储）
-# 环境变量可覆盖：JIUWENCLAW_MINIO_ENDPOINT / ACCESS_KEY / SECRET_KEY / BUCKET / SECURE / PUBLIC_BASE_URL
+# 环境变量：OBS_URL / OBS_ACCESS_KEY / OBS_SECRET_KEY / OBS_BUCKET / OBS_SECURE / OBS_PUBLIC_BASE_URL / OBS_REGION
 minio:
   endpoint:
   access_key:
@@ -1055,6 +1080,10 @@ permissions:
   enabled: false
   schema: tiered_policy
   permission_mode: normal
+  # 技能级动态授权（Skill overlay）：默认关闭；开启后根 SKILL.md 加载经
+  # SkillAuthorizationRail 门禁审批，ACTIVE Grant 参与权限合成。
+  skill_authorization:
+    enabled: false
   defaults:
     '*': allow
   tools:
@@ -1102,7 +1131,7 @@ permissions:
     cron_toggle_job: allow
     cron_preview_job: allow
     acp_chat: ask
-    skill_acceleration_exec: allow
+    skill_acceleration_exec: ask
 
   rules:
     - id: shell_allow_dir
@@ -1302,6 +1331,19 @@ updater:
   timeout_seconds: 20
   pypi_mirror: "https://mirrors.aliyun.com/pypi"
 
+# Gateway ↔ AgentServer 分块文件传输（Agent→Gateway 下载 · 逃生阀）
+# 默认关闭（个人与企业均关）。企业下载主路径为 OBS URL + Gateway 代理，不依赖本块。
+# 显式 enabled: true 或 env JIUWENSWARM_FILE_DOWNLOAD_VIA_PUSH=1 才开启 file.download.* push。
+# 企业上传仍走 MinIO URL（is_enterprise 跳过 GW→Agent 分片）。
+file_transfer:
+  chunk_size: 65536
+  max_file_size: 104857600
+  transfer_timeout: 300
+  received_files_dir: "agent/jiuwenclaw_workspace/received_files"
+  cleanup_interval: 3600
+  cleanup_age: 86400
+  max_concurrent_transfers: 5
+
 extensions:
   # 扩展包搜索目录（字符串），用 ';' 分割多个目录：
   # EXTENSION_DIRS="E:/a;D:/b"
@@ -1403,6 +1445,11 @@ modes:
     rails:
     tools:
   code:
+    artifact_post_process:
+      # 为生成的代码文件添加语言对应的 header 注释：
+      # "Co-authored by OfficeAce Coding Agent"。可通过 .env 开关控制，默认关闭。
+      coauthor_header: ${JIUWENSWARM_CODE_COAUTHOR_HEADER_ENABLED:-false}
+
     # 记忆开关 — 控制 CodingMemoryRail 和 ProjectMemoryRail 加载
     # 关闭后，coding_memory_read/write/edit 工具不可用，项目记忆文件不自动加载
     memory:
@@ -1412,7 +1459,8 @@ modes:
     # 固定 Rails（以下 Rails 已在代码中固定挂载，无需在此配置）：
     #   RuntimePromptRail, ResponsePromptRail, JiuSwarmStreamEventRail, SecurityRail,
     #   PermissionInterruptRail, SysOperationRail(FileSystemRail), LspRail,
-    #   AgentModeRail, StructuredAskUserRail, ConfirmInterruptRail, ContextProcessorRail
+    #   CodingArtifactPostProcessRail, AgentModeRail, StructuredAskUserRail,
+    #   ConfirmInterruptRail, ContextProcessorRail
     # 注意：ProjectMemoryRail, CodingMemoryRail 受 memory.enabled 开关控制，
     #       开关关闭时不加载，开关开启时固定挂载。
     rails:

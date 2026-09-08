@@ -38,6 +38,43 @@ _FILE_CONTENT_BLOCK_RE = re.compile(
 )
 
 
+def _strip_tool_arguments_env(arguments: Any) -> Any:
+    """Drop ``env`` from tool-call arguments so skill_envs never hit history disk."""
+    if isinstance(arguments, dict):
+        if "env" not in arguments:
+            return arguments
+        cleaned = dict(arguments)
+        cleaned.pop("env", None)
+        return cleaned
+    if isinstance(arguments, str) and arguments.strip().startswith("{"):
+        try:
+            parsed = json.loads(arguments)
+        except (TypeError, ValueError):
+            return arguments
+        if not isinstance(parsed, dict) or "env" not in parsed:
+            return arguments
+        parsed = dict(parsed)
+        parsed.pop("env", None)
+        return json.dumps(parsed, ensure_ascii=False)
+    return arguments
+
+
+def _strip_skill_env_from_history_item(item: dict[str, Any]) -> None:
+    """Remove tool_args.env from a history record before persist."""
+    tool_call = item.get("tool_call")
+    if isinstance(tool_call, dict) and "arguments" in tool_call:
+        tool_call["arguments"] = _strip_tool_arguments_env(tool_call.get("arguments"))
+
+    tool_calls = item.get("tool_calls")
+    if isinstance(tool_calls, list):
+        for call in tool_calls:
+            if isinstance(call, dict) and "arguments" in call:
+                call["arguments"] = _strip_tool_arguments_env(call.get("arguments"))
+
+    if "arguments" in item:
+        item["arguments"] = _strip_tool_arguments_env(item.get("arguments"))
+
+
 def collapse_file_content_blocks(content: str) -> str:
     """Replace inlined ``<file-content>`` bodies with ``@path`` references.
 
@@ -402,8 +439,8 @@ def get_read_history_path(session_id: str, sessions_root: str | None = None) -> 
     return jsonl_path
 
 
-def history_exists(session_id: str) -> bool:
-    return get_read_history_path(session_id).exists()
+def history_exists(session_id: str, sessions_root: str | None = None) -> bool:
+    return get_read_history_path(session_id, sessions_root=sessions_root).exists()
 
 
 def get_history_mtime(session_id: str) -> float | None:
@@ -494,8 +531,8 @@ def _read_history_jsonl(path: Path) -> list[dict[str, Any]]:
     return records
 
 
-def load_history_records(session_id: str) -> list[dict[str, Any]]:
-    return _read_history(get_read_history_path(session_id))
+def load_history_records(session_id: str, sessions_root: str | None = None) -> list[dict[str, Any]]:
+    return _read_history(get_read_history_path(session_id, sessions_root=sessions_root))
 
 
 def _write_records_to_path(path: Path, records: list[dict[str, Any]]) -> None:
@@ -1115,6 +1152,8 @@ def append_history_record(
     if mode:
         item["mode"] = str(mode)
     item["session_id"] = sid
+    # skill_envs injected into bash tool_args.env must not be persisted.
+    _strip_skill_env_from_history_item(item)
 
     sessions_root_s = str(sessions_root) if sessions_root else None
     et = event_type if (role_norm == "assistant" and event_type) else None

@@ -19,7 +19,7 @@ def cron_controller(tmp_path: Path):
         "jiuwenswarm.gateway.cron.controller.enterprise_cron_enabled",
         return_value=False,
     ), patch(
-        "jiuwenswarm.gateway.cron.controller.is_enterprise_edition",
+        "jiuwenswarm.gateway.cron.controller.is_enterprise",
         return_value=False,
     ):
         yield CronController.get_instance(store=store, scheduler=scheduler)

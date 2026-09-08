@@ -17,7 +17,6 @@ from jiuwenswarm.gateway.config.section import (
     DbFlatSectionCodec,
     YamlSectionCodec,
 )
-from jiuwenswarm.gateway.edition import EDITION_ENTERPRISE, EDITION_PERSONAL
 from jiuwenswarm.gateway.storage.backends.file_persistent import FilePersistentBackend
 from jiuwenswarm.gateway.storage.backends.memory_persistent import InMemoryPersistentBackend
 from jiuwenswarm.gateway.storage_assembly.layouts import build_gateway_store_registry
@@ -69,21 +68,6 @@ async def test_permissions_tool_and_rule_helpers() -> None:
 
 
 @pytest.mark.asyncio
-async def test_permissions_db_body_roundtrip() -> None:
-    store = InMemoryPersistentBackend()
-    repo = PermissionsConfigRepository(
-        store, DbBodySectionCodec(), instance_id="inst-1"
-    )
-    await repo.merge({"enabled": True})
-    document = await repo.get()
-    assert document is not None
-    assert document.body["enabled"] is True
-    row = await store.get("permissions_config", {"jiuwenclaw_id": "inst-1"})
-    assert row is not None
-    assert row["body"]["enabled"] is True
-
-
-@pytest.mark.asyncio
 async def test_logging_yaml_merge_levels() -> None:
     store = InMemoryPersistentBackend()
     repo = LoggingConfigRepository(store, YamlSectionCodec())
@@ -99,14 +83,42 @@ async def test_logging_yaml_merge_levels() -> None:
 async def test_logging_db_flat_codec() -> None:
     store = InMemoryPersistentBackend()
     repo = LoggingConfigRepository(
-        store, db_logging_codec(), instance_id="inst-1"
+        store, db_logging_codec(), instance_id=""
     )
     await repo.merge_levels({"level": "ERROR", "full": "DEBUG"})
-    row = await store.get("logging_config", {"jiuwenclaw_id": "inst-1"})
-    assert row is not None
-    assert row["level"] == "ERROR"
-    assert row["full"] == "DEBUG"
-    assert "body" not in row
+    rows = await store.list("logging_config", limit=1)
+    assert rows
+    assert rows[0]["level"] == "ERROR"
+    assert rows[0]["full"] == "DEBUG"
+    assert "body" not in rows[0]
+    assert rows[0].get("created_at") is not None
+    assert rows[0].get("updated_at") is not None
+
+    created_at = rows[0]["created_at"]
+    await repo.merge_levels({"gateway": "WARNING"})
+    rows = await store.list("logging_config", limit=1)
+    assert rows[0]["gateway"] == "WARNING"
+    assert rows[0]["created_at"] == created_at
+    assert rows[0].get("updated_at") is not None
+
+
+@pytest.mark.asyncio
+async def test_permissions_db_body_writes_timestamps() -> None:
+    store = InMemoryPersistentBackend()
+    repo = PermissionsConfigRepository(
+        store, DbBodySectionCodec(), instance_id=""
+    )
+    await repo.merge({"enabled": True})
+    rows = await store.list("permissions_config", limit=1)
+    assert rows
+    assert rows[0].get("created_at") is not None
+    assert rows[0].get("updated_at") is not None
+    created_at = rows[0]["created_at"]
+    await repo.merge({"enabled": False})
+    rows = await store.list("permissions_config", limit=1)
+    assert rows[0]["body"]["enabled"] is False
+    assert rows[0]["created_at"] == created_at
+    assert rows[0].get("updated_at") is not None
 
 
 @pytest.mark.asyncio
@@ -168,27 +180,28 @@ async def test_section_yaml_file_overlay(tmp_path) -> None:
     assert "bar: 2" in text
 
 
-def test_factory_codec_selection() -> None:
+def test_factory_codec_selection(monkeypatch) -> None:
     store = InMemoryPersistentBackend()
-    personal = create_permissions_config_repository(store, EDITION_PERSONAL)
-    enterprise = create_permissions_config_repository(
-        store, EDITION_ENTERPRISE, instance_id="x"
-    )
+    monkeypatch.delenv("JIUWENSWARM_EDITION", raising=False)
+    personal = create_permissions_config_repository(store)
     assert isinstance(personal._inner._codec, YamlSectionCodec)
-    assert isinstance(enterprise._inner._codec, DbBodySectionCodec)
+    # 企业版亦仅 yaml：实例级 permissions_config 表已移除，策略走 template 槽位
+    monkeypatch.setenv("JIUWENSWARM_EDITION", "enterprise")
+    enterprise = create_permissions_config_repository(store, instance_id="x")
+    assert isinstance(enterprise._inner._codec, YamlSectionCodec)
 
-    log_personal = create_logging_config_repository(store, EDITION_PERSONAL)
-    log_enterprise = create_logging_config_repository(
-        store, EDITION_ENTERPRISE, instance_id="x"
-    )
+    monkeypatch.delenv("JIUWENSWARM_EDITION", raising=False)
+    log_personal = create_logging_config_repository(store)
     assert isinstance(log_personal._inner._codec, YamlSectionCodec)
+    monkeypatch.setenv("JIUWENSWARM_EDITION", "enterprise")
+    log_enterprise = create_logging_config_repository(store, instance_id="x")
     assert isinstance(log_enterprise._inner._codec, DbFlatSectionCodec)
 
-    mem_personal = create_memory_config_repository(store, EDITION_PERSONAL)
-    mem_enterprise = create_memory_config_repository(
-        store, EDITION_ENTERPRISE, instance_id="x"
-    )
+    monkeypatch.delenv("JIUWENSWARM_EDITION", raising=False)
+    mem_personal = create_memory_config_repository(store)
     assert isinstance(mem_personal._inner._codec, YamlSectionCodec)
+    monkeypatch.setenv("JIUWENSWARM_EDITION", "enterprise")
+    mem_enterprise = create_memory_config_repository(store, instance_id="x")
     assert isinstance(mem_enterprise._inner._codec, DbBodySectionCodec)
 
 @pytest.mark.asyncio
@@ -242,7 +255,7 @@ async def test_preferred_language_scalar_overlay(tmp_path) -> None:
     assert "preferred_language:\n  preferred_language:" not in text
 
 
-def test_new_section_factory_codec_selection() -> None:
+def test_new_section_factory_codec_selection(monkeypatch) -> None:
     store = InMemoryPersistentBackend()
     for factory in (
         create_heartbeat_config_repository,
@@ -250,10 +263,12 @@ def test_new_section_factory_codec_selection() -> None:
         create_preferred_language_config_repository,
         create_a2ui_config_repository,
     ):
-        personal = factory(store, EDITION_PERSONAL)
+        monkeypatch.delenv("JIUWENSWARM_EDITION", raising=False)
+        personal = factory(store)
         assert isinstance(personal._inner._codec, YamlSectionCodec)
+        monkeypatch.setenv("JIUWENSWARM_EDITION", "enterprise")
         try:
-            factory(store, EDITION_ENTERPRISE, instance_id="x")
+            factory(store, instance_id="x")
             raise AssertionError("expected personal-only ValueError")
         except ValueError as exc:
             assert "personal-only" in str(exc)

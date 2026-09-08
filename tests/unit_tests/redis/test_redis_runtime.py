@@ -30,7 +30,7 @@ def restore_import():
 
 
 @pytest.mark.asyncio
-async def test_standalone_skips_redis(restore_import):
+async def test_personal_edition_skips_redis(restore_import):
     from jiuwenswarm.extensions.redis import (
         get_declared_deployment_mode,
         get_effective_distributed_redis_active,
@@ -39,7 +39,9 @@ async def test_standalone_skips_redis(restore_import):
 
     builtins.__import__ = _block_redis_import
 
-    await init_gateway_redis_from_config({"gateway": {"deployment_mode": "standalone"}})
+    await init_gateway_redis_from_config({
+        "gateway": {"deployment_mode": "standalone", "edition": "personal"},
+    })
     assert get_declared_deployment_mode() == "standalone"
     assert not get_effective_distributed_redis_active()
 
@@ -54,11 +56,10 @@ async def test_active_standby_without_redis_package_degrades(
         init_gateway_redis_from_config,
     )
 
-    monkeypatch.setenv("AGENT_RUNTIME", "1")
     builtins.__import__ = _block_redis_import
 
     await init_gateway_redis_from_config({
-        "gateway": {"deployment_mode": "active-standby"},
+        "gateway": {"deployment_mode": "active-standby", "edition": "enterprise"},
         "redis": {"host": "127.0.0.1", "port": 6379},
     })
     assert get_declared_deployment_mode() == "active-standby"
@@ -88,13 +89,12 @@ async def test_active_standby_unreachable_server_degrades(
         async def close(self) -> None:
             pass
 
-    monkeypatch.setenv("AGENT_RUNTIME", "1")
     monkeypatch.setattr(
         "jiuwenswarm.extensions.redis.redis_runtime._load_gateway_redis_client_class",
         lambda: _UnreachableRedisClient,
     )
     await init_gateway_redis_from_config({
-        "gateway": {"deployment_mode": "active-standby"},
+        "gateway": {"deployment_mode": "active-standby", "edition": "enterprise"},
         "redis": {"host": "unreachable.test", "port": 1},
     })
     assert get_declared_deployment_mode() == "active-standby"
@@ -102,7 +102,7 @@ async def test_active_standby_unreachable_server_degrades(
 
 
 @pytest.mark.asyncio
-async def test_active_standby_without_agent_runtime_skips_connect(
+async def test_personal_edition_active_standby_skips_connect(
     restore_import, monkeypatch: pytest.MonkeyPatch
 ):
     from jiuwenswarm.extensions.redis import (
@@ -111,10 +111,10 @@ async def test_active_standby_without_agent_runtime_skips_connect(
         init_gateway_redis_from_config,
     )
 
-    monkeypatch.delenv("AGENT_RUNTIME", raising=False)
+    monkeypatch.delenv("JIUWENSWARM_EDITION", raising=False)
     builtins.__import__ = _block_redis_import
     await init_gateway_redis_from_config({
-        "gateway": {"deployment_mode": "active-standby"},
+        "gateway": {"deployment_mode": "active-standby", "edition": "personal"},
         "redis": {"host": "127.0.0.1", "port": 6379},
     })
     assert get_declared_deployment_mode() == "active-standby"

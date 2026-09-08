@@ -1,8 +1,8 @@
 # A2A 接入说明
 
-本文说明 Gateway 侧 **A2A Server**（`A2AChannel`）的实现位置、配置方式、与内部 `Message`/E2A 的对应关系及本地验证命令；出站 A2A（Agent 调外部）见 §7。
+本文说明 Gateway 侧 **A2A 入站服务**的管理入口、配置方式、与内部 `Message`/E2A 的对应关系及端到端验证方式；出站 A2A（Agent 调外部）见 §7。
 
-> **实现**：`jiuwenswarm/gateway/channel_manager/protocol/a2a/a2a_connect.py`（`A2AChannel` + `a2a-sdk`）。**入口进程**：`python -m jiuwenswarm.gateway.app_gateway`（`jiuwenswarm/gateway/app_gateway.py` 中注册并启动）。**冲突时**：以源码为准，并回头修正本文。
+> **运行时所有者**：`jiuwenswarm/gateway/a2a_manager/manager.py`（`A2AManager`）。**协议适配器**：`jiuwenswarm/gateway/channel_manager/protocol/a2a/a2a_connect.py`（`A2AChannel` + `a2a-sdk`）。**入口进程**：`python -m jiuwenswarm.gateway.app_gateway`。冲突时以源码为准，并回头修正本文。
 
 ---
 
@@ -11,8 +11,9 @@
 | 位置 | 角色 |
 |------|------|
 | **docs/zh/A2A.md**（本文） | 接入与开发联调：模块、配置、映射、验证 |
+| `jiuwenswarm/gateway/a2a_manager/` | 入站配置、持久化、生命周期状态机与管理快照 |
 | `jiuwenswarm/gateway/channel_manager/protocol/a2a/a2a_connect.py` | A2A HTTP 服务、`AgentCard`、请求/响应与 `Message` 互转 |
-| `jiuwenswarm/gateway/app_gateway.py` | 环境变量读取、`A2AChannel` 构造与 `channel_manager.register_channel` |
+| `jiuwenswarm/gateway/app_gateway.py` | 组装 `A2AManager`，注册管理 API，并随 Gateway 启停 Manager |
 | `jiuwenswarm/gateway/message_handler/message_handler.py` | 与 AgentServer 的 E2A 收发、内部 `Message` 编排 |
 | `jiuwenswarm/gateway/channel_manager/channel_manager.py` | 频道注册与 `robot_messages` → `Channel.send` 派发 |
 | [E2A-protocol.md](E2A-protocol.md) | Gateway↔AgentServer 内层协议 |
@@ -31,7 +32,7 @@
 | 项目 | Web | ACP | A2A（当前） |
 |------|-----|-----|-------------|
 | 绑定 | `WEB_HOST` / `WEB_PORT` / `WEB_PATH` | `ACP_GATEWAY_*` | `A2A_SERVER_*` |
-| 配置来源 | 环境变量 + CLI（`--host` 等） | 仅环境变量 | 仅环境变量 |
+| 配置来源 | 环境变量 + CLI（`--host` 等） | 仅环境变量 | `.env` 配置 + Web 管理 API |
 | `.env` | `app_gateway` 启动时 `load_dotenv(get_env_file())`，即 `~/.jiuwenswarm/config/.env` | 同上 | 同上 |
 
 ---
@@ -61,8 +62,14 @@ uv sync --extra a2a
 | `A2A_SERVER_APP_DESCRIPTION` | `A2A ingress for JiuwenSwarm Gateway` | Agent Card `description` |
 | `A2A_SERVER_APP_VERSION` | `0.1.0` | Agent Card `version` |
 | `A2A_SERVER_EXPOSE_REASONING` | `true`（默认开启） | 开启后思考（reasoning）内容以 working 状态的 `TaskStatusUpdateEvent` 输出（见 §6.2）；设为 `false`/`0`/`no`/`off` 时直接丢弃 |
+| `A2A_SERVER_AUTH_TYPE` | `none` | `none` / `bearer` / `api_key` |
+| `A2A_SERVER_API_KEY_HEADER` | `X-API-Key` | API Key 使用的专用请求头名称 |
+| `A2A_SERVER_CARD_AUTH_REQUIRED` | `false` | 公开 Agent Card 是否也要求认证 |
+| `A2A_SERVER_API_KEY` | 空 | 安全凭据，沿用模型 API Key 的存储加解密机制 |
 
 AgentServer 连接仍由网关既有逻辑配置（例如 `AGENT_SERVER_URL` 等），与 A2A 监听端口独立。
+
+运行期间可在 Web 的“更多设置 → A2A 调度中心”查看状态、保存配置、启用、停用或重载入站服务，无需重启 Gateway。页面目前只管理入站监听，不提供外部 Agent 发现、出站调用或自动调度。
 
 当 `A2A_SERVER_ENABLED=true` 且未安装 `jiuwenswarm[a2a]`（或 `uv sync --extra a2a`）时，Gateway 主流程仍会继续启动；A2A 通道启动失败会在日志中输出明确安装指引。
 
@@ -74,6 +81,33 @@ AgentServer 连接仍由网关既有逻辑配置（例如 `AGENT_SERVER_URL` 等
 - **Agent Card**：`http://{host}:{port}/.well-known/agent-card.json`（路径由 `A2AChannelConfig.card_path` 定义，默认 `/.well-known/agent-card.json`）
 
 `AgentCard` 在 `A2AChannel.start()` 内构造：`supported_interfaces[0].url` 指向上述 JSON-RPC；`capabilities.streaming` 与技能列表见源码。
+
+### 4.1 管理 API
+
+Gateway Web HTTP 默认监听 `WEB_PORT + 2`（默认 `19002`），管理端点为：
+
+| HTTP | 路径 | 作用 |
+|------|------|------|
+| `GET` | `/api/v1/a2a/ingress` | 读取目标配置、有效监听与运行状态 |
+| `GET` | `/api/v1/a2a/ingress/history` | 读取入站请求处理历史；可通过 `limit` 查询参数读取最近 1–200 条 |
+| `PATCH` | `/api/v1/a2a/ingress` | 保存配置；正文带 `apply: true` 时立即应用 |
+| `POST` | `/api/v1/a2a/ingress:enable` | 持久化启用并启动监听 |
+| `POST` | `/api/v1/a2a/ingress:disable` | 持久化停用并关闭监听 |
+| `POST` | `/api/v1/a2a/ingress:reload` | 使用已保存配置重建监听 |
+
+返回快照以 `desired_*` 表示持久化目标，以 `effective_*` 表示当前真实监听；异常时提供稳定错误码和可展示摘要。绑定 `0.0.0.0` 时页面会展示对外暴露告警。
+
+### 4.2 安全凭据
+
+在“入站配置 → 安全配置”选择 Bearer Token 或 API Key，输入或生成随机凭据。凭据要求 16–512 个可打印 ASCII 字符且不含空格；建议使用生成器产生的随机值。已保存凭据默认隐藏，点击输入框内的眼睛可查看或复制明文，刷新页面后仍可查看。存储沿用模型 API Key 的机制：配置了加密提供方时加密保存，否则保存原值。编辑界面通过专用 WebSocket 请求按需读取凭据；常规状态快照、HTTP GET 和失败响应不返回凭据，公开 Agent Card 不包含凭据或摘要，入站认证仅使用运行时摘要进行校验。
+
+- Bearer：调用方发送 `Authorization: Bearer <凭据>`。
+- API Key：调用方通过配置的专用请求头发送凭据，默认 `X-API-Key: <凭据>`。
+- 启用认证后，所有 JSON-RPC 操作（含流式、查询、取消）及扩展 Card 都需要认证。“允许匿名查看服务信息”默认开启，关闭后查看公开 Agent Card 也需要认证。Card 中会公布认证方案，不包含凭据。
+- 留空保留已有凭据；输入新值替换。要清除凭据，先选择“无认证”，再勾选清除。默认认证方式为无认证。
+- 页面“保存”统一执行保存并应用，正在运行的入站服务会重启并使用新凭据；“取消”放弃未保存的修改并恢复已保存配置及凭据。
+
+这是一组共享服务凭据，不提供调用方身份、逐任务访问隔离或 OAuth 登录。远程部署应通过 HTTPS 反向代理保护凭据传输。
 
 ---
 
@@ -131,25 +165,16 @@ flowchart LR
 
 ---
 
-## 8. 本地验证（示例）
+## 8. 端到端验证
 
-非流式：
+仓库根目录的 [`demo/a2a_ingress_e2e.py`](../../demo/a2a_ingress_e2e.py) 使用真实 Gateway、AgentServer 和官方 `a2a-sdk`，验证热启停、改端口重载、Agent Card、`SendMessage` 与 `SendStreamingMessage`。先启动完整后端，再从仓库根目录运行：
 
-```bash
-curl -sS -X POST "http://127.0.0.1:${A2A_SERVER_PORT:-19100}${A2A_SERVER_PATH:-/a2a}" \
-  -H 'Content-Type: application/json' \
-  -d '{"jsonrpc":"2.0","id":"t1","method":"SendMessage","params":{"message":{"messageId":"m1","contextId":"c1","role":"ROLE_USER","parts":[{"text":"ping"}]}}}'
+```powershell
+.\.venv\Scripts\python.exe .\demo\a2a_ingress_e2e.py `
+  --jsonl .\demo\a2a_ingress_e2e_result.jsonl
 ```
 
-流式：
-
-```bash
-curl -sS -N -X POST "http://127.0.0.1:${A2A_SERVER_PORT:-19100}${A2A_SERVER_PATH:-/a2a}" \
-  -H 'Content-Type: application/json' \
-  -d '{"jsonrpc":"2.0","id":"t2","method":"SendStreamingMessage","params":{"message":{"messageId":"m2","contextId":"c2","role":"ROLE_USER","parts":[{"text":"ping"}]}}}'
-```
-
-需同时启动 AgentServer 与 Gateway，且 `A2A_SERVER_ENABLED=true`。
+脚本会在结束时恢复运行前的 A2A 配置；多实例、端口覆盖和失败证据说明见 [`demo/README.md`](../../demo/README.md)。
 
 ---
 

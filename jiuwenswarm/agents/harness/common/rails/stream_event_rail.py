@@ -30,6 +30,7 @@ from openjiuwen.core.single_agent.rail.base import (
     ToolCallInputs,
 )
 from openjiuwen.harness.rails.base import DeepAgentRail
+from openjiuwen.harness.rails.skills.skill_use_rail import get_current_skill_name
 from openjiuwen.harness.schema.task import TodoStatus
 from openjiuwen.harness.tools import TodoListTool
 from openjiuwen.harness.workspace.workspace import WorkspaceNode
@@ -40,6 +41,10 @@ from jiuwenswarm.agents.harness.common.rails.interrupt.interrupt_helpers import 
 from jiuwenswarm.agents.harness.common.prompt.user_prompt_builder import (
     strip_image_content_from_model_context,
 )
+from jiuwenswarm.agents.harness.common.tools.todo_resume import (
+    get_stale_todo_ids,
+    get_pre_invoke_todo_ids,
+)
 from jiuwenswarm.agents.harness.common.rails.symphony import (
     SymphonyToolStreamHandler,
 )
@@ -48,6 +53,10 @@ from jiuwenswarm.agents.harness.common.rails.read_file_validation import (
     handle_read_file_before_tool_call,
     is_read_file_tool,
     normalize_read_file_tool_outcome,
+)
+from jiuwenswarm.agents.harness.common.rails.task_execution_rail import (
+    SKILL_TURBO_OUTER_TODO_ACTIVE_EXTRA_KEY,
+    extract_effective_project_dir,
 )
 from jiuwenswarm.common.tool_display import (
     build_tool_display_name,
@@ -70,6 +79,21 @@ def _early_checkpoint_disabled_by_env() -> bool:
 # non-enterprise runs. Enterprise deploy normally sets the env (e.g. 500).
 _DEFAULT_TOOL_RESULT_DISPLAY_MAX_CHARS = 60000
 _TOOL_RESULT_DISPLAY_MAX_CHARS_LIMIT = 100_000
+
+
+def _resolve_source_skill(session: Any = None) -> str:
+    """Return active skill name for tool-call attribution, or empty string.
+
+    Prefer session-backed binding (set by skill_tool); ContextVar alone does
+    not propagate across tool execution contexts — same issue as skill_turbo
+    request_metadata rebinding below.
+    """
+    try:
+        name = get_current_skill_name(session)
+    except Exception:
+        logger.debug("resolve source_skill failed", exc_info=True)
+        return ""
+    return str(name or "").strip()
 
 
 def _resolve_tool_result_display_max_chars() -> int:
@@ -287,6 +311,8 @@ _SKILL_TURBO_ADAPTER_TOKEN_EXTRA_KEY = "_jiuwenswarm_skill_turbo_adapter_token"
 _SKILL_TURBO_METADATA_TOKEN_EXTRA_KEY = "_jiuwenswarm_skill_turbo_metadata_token"
 _SKILL_TURBO_WORKSPACE_TOKEN_EXTRA_KEY = "_jiuwenswarm_skill_turbo_workspace_token"
 _SKILL_TURBO_INTERACTIVE_ASK_TOKEN_EXTRA_KEY = "_jiuwenswarm_skill_turbo_interactive_ask_token"
+_SKILL_TURBO_RESUME_ANSWERS_TOKEN_EXTRA_KEY = "_jiuwenswarm_skill_turbo_resume_answers_token"
+_SKILL_TURBO_OUTER_TODO_TOKEN_EXTRA_KEY = "_jiuwenswarm_skill_turbo_outer_todo_token"
 _SUBAGENT_PARENT_SESSION_TOKEN_EXTRA_KEY = "_jiuwenswarm_subagent_parent_session_token"
 
 
@@ -328,6 +354,41 @@ def _reset_skill_turbo_interactive_ask_token(ctx: AgentCallbackContext) -> None:
             reset_interactive_ask,
         )
         reset_interactive_ask(token)
+
+
+def _reset_skill_turbo_resume_answers_token(ctx: AgentCallbackContext) -> None:
+    extra = getattr(ctx, "extra", None)
+    if not isinstance(extra, dict):
+        return
+    token = extra.pop(_SKILL_TURBO_RESUME_ANSWERS_TOKEN_EXTRA_KEY, None)
+    if token is not None:
+        from jiuwenswarm.server.runtime.skill_turbo.skill_turbo_tools import (
+            reset_skill_turbo_resume_answers,
+        )
+        reset_skill_turbo_resume_answers(token)
+
+
+def _reset_skill_turbo_outer_todo_token(ctx: AgentCallbackContext) -> None:
+    """Restore the display-ownership binding for this tool call."""
+    token = ctx.extra.pop(_SKILL_TURBO_OUTER_TODO_TOKEN_EXTRA_KEY, None)
+    if token is not None:
+        from jiuwenswarm.server.runtime.skill_turbo.skill_turbo_tools import (
+            reset_skill_turbo_outer_todo_active,
+        )
+        reset_skill_turbo_outer_todo_active(token)
+
+
+def _bind_skill_turbo_outer_todo_token(ctx: AgentCallbackContext) -> None:
+    """Rebind outer-todo display ownership into the tool context."""
+    active = ctx.extra.get(SKILL_TURBO_OUTER_TODO_ACTIVE_EXTRA_KEY)
+    if not isinstance(active, bool):
+        return
+    from jiuwenswarm.server.runtime.skill_turbo.skill_turbo_tools import (
+        set_skill_turbo_outer_todo_active,
+    )
+    ctx.extra[_SKILL_TURBO_OUTER_TODO_TOKEN_EXTRA_KEY] = (
+        set_skill_turbo_outer_todo_active(active)
+    )
 
 
 def _reset_subagent_parent_session_token(ctx: AgentCallbackContext) -> None:
@@ -934,6 +995,8 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
         _reset_skill_turbo_metadata_token(ctx)
         _reset_skill_turbo_workspace_token(ctx)
         _reset_skill_turbo_interactive_ask_token(ctx)
+        _reset_skill_turbo_resume_answers_token(ctx)
+        _reset_skill_turbo_outer_todo_token(ctx)
         _reset_subagent_parent_session_token(ctx)
 
     # ------------------------------------------------------------------
@@ -1080,6 +1143,8 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
                 "这次调用要达成的目标（如「调研 openJiuwen 官网信息」「创建三子棋对战团队」），"
                 "不要只写工具名或裸 URL。"
                 "该字段仅用于界面展示，不影响工具实际执行。\n"
+                "若工具参数里已有 `description`：`call_goal` 必须与 `description` 使用同一句，"
+                "禁止再写一句近义复述（避免同一信息输出两遍）。\n"
                 "团队工具也必须填 `call_goal`，且不能用其它字段代替：\n"
                 "- `spawn_member` / `spawn_teammate`：`call_goal` 写「为何创建该成员」；"
                 "`display_name` 仍是成员展示名，两者都要填。\n"
@@ -1092,6 +1157,8 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
                 "When calling any tool, set `call_goal`: one short phrase for the goal of this call "
                 "(e.g. \"Research openJiuwen official site\", \"Create tic-tac-toe team\"). "
                 "Do not just repeat the tool name or raw URL. UI only; does not affect execution.\n"
+                "If the tool already has a `description` parameter: set `call_goal` to the exact same "
+                "string — do not invent a second near-duplicate phrase.\n"
                 "Team tools must also set `call_goal`; do not substitute other fields:\n"
                 "- `spawn_member` / `spawn_teammate`: `call_goal` = why spawn this member; "
                 "`display_name` remains the member label — fill both.\n"
@@ -1154,9 +1221,18 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
                         exc,
                     )
                 ctx.inputs.tool_args = cleaned_args
-            await self._emit_tool_call(session, tc, model_display_name=model_display)
-            if not ctx.extra.get("_skip_tool"):
-                await self._emit_tool_update(session, tc, status="in_progress")
+            extra = getattr(ctx, "extra", None)
+            if not isinstance(extra, dict):
+                extra = {}
+            from openjiuwen.core.single_agent.interrupt.state import RESUME_USER_INPUT_KEY
+            skip_resume_tool_call = (
+                tool_name == "skill_acceleration_exec"
+                and extra.get(RESUME_USER_INPUT_KEY) is not None
+            )
+            if not skip_resume_tool_call:
+                await self._emit_tool_call(session, tc, model_display_name=model_display)
+                if not ctx.extra.get("_skip_tool"):
+                    await self._emit_tool_update(session, tc, status="in_progress")
             self._symphony_stream_handler.bind_progress(ctx, session, tc)
             # Track in-flight tool call for cancellation
             tc_id = getattr(tc, "id", "")
@@ -1183,6 +1259,8 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
                     exc_info=True,
                 )
 
+        _bind_skill_turbo_outer_todo_token(ctx)
+
         # SkillTurbo request metadata ContextVar 转绑：
         # 请求任务里 set_current_request_metadata 的绑定无法传播到本工具执行上下文，
         # 这里用 rail 上保存的副本重新绑定，供 skill_turbo 工具读取 session_id 等。
@@ -1206,9 +1284,9 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
                 set_effective_request_workspace_dir,
                 set_interactive_ask,
             )
-            _epd = _md.get("effective_project_dir")
-            if isinstance(_epd, str) and _epd.strip():
-                ws_token = set_effective_request_workspace_dir(_epd.strip())
+            _epd = extract_effective_project_dir(_md)
+            if _epd is not None:
+                ws_token = set_effective_request_workspace_dir(_epd)
                 ctx.extra[_SKILL_TURBO_WORKSPACE_TOKEN_EXTRA_KEY] = ws_token
             _ia = _md.get("interactive_ask")
             if _ia is not None:
@@ -1230,12 +1308,26 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
             parent_token = set_subagent_parent_session(actual_session)
             ctx.extra[_SUBAGENT_PARENT_SESSION_TOKEN_EXTRA_KEY] = parent_token
 
+        extra = getattr(ctx, "extra", None)
+        if isinstance(extra, dict):
+            from openjiuwen.core.single_agent.interrupt.state import RESUME_USER_INPUT_KEY
+            resume_answers = extra.get(RESUME_USER_INPUT_KEY)
+            if resume_answers is not None:
+                from jiuwenswarm.server.runtime.skill_turbo.skill_turbo_tools import (
+                    set_skill_turbo_resume_answers,
+                )
+                extra[_SKILL_TURBO_RESUME_ANSWERS_TOKEN_EXTRA_KEY] = (
+                    set_skill_turbo_resume_answers(resume_answers)
+                )
+
     # ------------------------------------------------------------------
     # after_tool_call: emit tool_result + todo.updated
     # ------------------------------------------------------------------
 
     async def after_tool_call(self, ctx: AgentCallbackContext) -> None:
         _reset_subagent_parent_session_token(ctx)
+        _reset_skill_turbo_resume_answers_token(ctx)
+        _reset_skill_turbo_outer_todo_token(ctx)
 
         session = ctx.session
         if session is None or not isinstance(ctx.inputs, ToolCallInputs):
@@ -1255,6 +1347,9 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
             _reset_skill_turbo_metadata_token(ctx)
             _reset_skill_turbo_workspace_token(ctx)
             _reset_skill_turbo_interactive_ask_token(ctx)
+            # Already reset at after_tool_call entry for the session-is-None
+            # early return; this pop is defensive if that path was skipped.
+            _reset_skill_turbo_resume_answers_token(ctx)
             try:
                 from jiuwenswarm.server.runtime.skill_turbo.skill_turbo_tools import (
                     get_skill_turbo_hitl_tic,
@@ -1272,14 +1367,22 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
                             tool_call=ctx.inputs.tool_call,
                         )
                         ctx.inputs.tool_result = new_tic
-                        ctx.inputs.tool_msg = None
+                        ctx.inputs.tool_msg = ToolMessage(
+                            content=self._tool_interrupted_message(
+                                ctx.inputs.tool_name or "skill_acceleration_exec"
+                            ),
+                            tool_call_id=ctx.inputs.tool_call.id,
+                        )
                     logger.info(
                         "[StreamEventRail] SkillTurbo HITL: rewrote tool_result to TIE. "
                         "original_tcid=%s harness_tcid=%s",
                         _skill_turbo_tic.tool_call.id if _skill_turbo_tic.tool_call else "?",
                         ctx.inputs.tool_call.id if isinstance(ctx.inputs, ToolCallInputs) else "?",
                     )
-                    return  # 跳过 _emit_tool_result，由 harness __interaction__ 取代
+                    # 卡片由 harness __interaction__ 转换统一发出（外层
+                    # tool_call_id，harness 恢复按同一 id 对齐）；此处不再主动
+                    # emit，避免同一次中断发出两张 ask_user 卡片。
+                    return  # 跳过 _emit_tool_result：中断态无结果可发
             except Exception:
                 logger.debug(
                     "[StreamEventRail] skill_turbo HITL rewrite failed",
@@ -1337,6 +1440,8 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
         _reset_skill_turbo_metadata_token(ctx)
         _reset_skill_turbo_workspace_token(ctx)
         _reset_skill_turbo_interactive_ask_token(ctx)
+        _reset_skill_turbo_resume_answers_token(ctx)
+        _reset_skill_turbo_outer_todo_token(ctx)
         _reset_subagent_parent_session_token(ctx)
         if ctx.context is not None:
             logger.info("[StreamEventRail] Attempting context repair after model exception")
@@ -1367,6 +1472,9 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
             )
             if display_name:
                 tool_call_payload["display_name"] = display_name
+            source_skill = _resolve_source_skill(session)
+            if source_skill:
+                tool_call_payload["source_skill"] = source_skill
             await session.write_stream(
                 OutputSchema(
                     type="tool_call",
@@ -1403,6 +1511,9 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
                 if error_state:
                     tool_result_payload["status"] = "error"
                     tool_result_payload["is_error"] = True
+            source_skill = _resolve_source_skill(session)
+            if source_skill:
+                tool_result_payload["source_skill"] = source_skill
             await session.write_stream(
                 OutputSchema(
                     type="tool_result",
@@ -1446,17 +1557,21 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
     @staticmethod
     async def _emit_tool_update(session: Session, tool_call: Any, *, status: str) -> None:
         try:
+            update_payload: dict[str, Any] = {
+                "tool_name": getattr(tool_call, "name", "") if tool_call else "",
+                "tool_call_id": getattr(tool_call, "id", "") if tool_call else "",
+                "arguments": getattr(tool_call, "arguments", {}) if tool_call else {},
+                "status": str(status or "").strip() or "in_progress",
+            }
+            source_skill = _resolve_source_skill(session)
+            if source_skill:
+                update_payload["source_skill"] = source_skill
             await session.write_stream(
                 OutputSchema(
                     type="tool_update",
                     index=0,
                     payload={
-                        "tool_update": {
-                            "tool_name": getattr(tool_call, "name", "") if tool_call else "",
-                            "tool_call_id": getattr(tool_call, "id", "") if tool_call else "",
-                            "arguments": getattr(tool_call, "arguments", {}) if tool_call else {},
-                            "status": str(status or "").strip() or "in_progress",
-                        }
+                        "tool_update": update_payload,
                     },
                 )
             )
@@ -1477,6 +1592,39 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
                 "[StreamEventRail] Failed to load todos: %s", exc
             )
             return
+
+        # skip 窗口内（prepare hook 清理了跨请求残留 todo）过滤掉同一批旧 id：
+        # todo.updated 是全量快照旁路，不过滤会把旧任务的 completed 条目重新
+        # 弹回前端（task.update 通道的 _stale_todo_ids 过滤管不到这条旁路）。
+        try:
+            stale_ids = get_stale_todo_ids(session)
+        except Exception:
+            stale_ids = set()
+        if stale_ids:
+            # 仅过滤 stale 集中仍处于终态（cancelled/completed）的旧残留项。
+            # 本轮 LLM 通过 todo_create/todo_modify 重建的同 ID 项状态为
+            # pending/in_progress，不会被过滤。
+            # 额外排除本轮新建的同 ID 项：若 id 不在磁盘快照（pre_invoke_todo_ids）
+            # 中，说明是本轮 LLM 新建的，即使 id 与 stale 集合重合也不应过滤。
+            pre_invoke_ids = get_pre_invoke_todo_ids(session)
+            _DONE_STATUSES = frozenset({"cancelled", "completed"})  # pylint: disable=huawei-invalid-name
+            before = len(todos_data)
+            todos_data = [
+                t for t in todos_data
+                if not (  # pylint: disable=complicate-comprehension
+                    str(getattr(t, "id", "")) in stale_ids  # pylint: disable=complicate-comprehension
+                    and str(getattr(t, "status", "")).lower() in _DONE_STATUSES
+                    and (not pre_invoke_ids or str(getattr(t, "id", "")) in pre_invoke_ids)
+                )
+            ]
+            logger.info(
+                "[StreamEventRail] todo.updated filtered stale todos: "
+                "session_id=%s stale_ids=%d before=%d after=%d",
+                session_id,
+                len(stale_ids),
+                before,
+                len(todos_data),
+            )
 
         # Parent StreamEventRail only: team-member rails use their own
         # workspace and must not feed request_summaries.tasks.

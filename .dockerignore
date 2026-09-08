@@ -1,0 +1,13 @@
+.git
+**/.git
+**/.venv
+**/__pycache__
+**/*.pyc
+**/.pytest_cache
+**/.mypy_cache
+**/node_modules
+htmlcov
+coverage.xml
+unit_test_report.html
+logs
+**/logs

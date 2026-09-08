@@ -3,6 +3,7 @@
 """Transport-agnostic Web RPC host: method registry, history capture, handler invoke."""
 
 from __future__ import annotations
+from jiuwenswarm.edition import is_enterprise
 
 import inspect
 import ipaddress
@@ -127,7 +128,7 @@ class WebRpcHost:
         """Enterprise: capture frames on Listen for ``GET /api/sessions*``."""
         if self._history_runner is not None:
             return
-        if not os.getenv("AGENT_RUNTIME", "").strip():
+        if not is_enterprise():
             return
         try:
             from jiuwenswarm.channels.web.history_store import (
@@ -146,16 +147,17 @@ class WebRpcHost:
             runner = HistoryFrameRunner(store)
             runner.start()
             self._history_runner = runner
-            if store.backend == "mysql" and store.mysql_settings is not None:
+            if store.mysql_settings is not None:
                 s = store.mysql_settings
                 logger.info(
-                    "WebChannel enterprise history capture: mysql %s:%s/%s",
-                    s.host, s.port, s.database,
+                    "WebChannel enterprise history capture: %s %s:%s/%s%s",
+                    store.backend, s.host, s.port, s.database,
+                    f" schema={s.pg_schema}" if store.backend == "postgresql" else "",
                 )
             else:
                 logger.info(
-                    "WebChannel enterprise history capture: %s db=%s",
-                    store.backend, store.db_path,
+                    "WebChannel enterprise history capture: %s",
+                    store.backend,
                 )
         except Exception:
             logger.warning("WebChannel 启动会话历史采集失败", exc_info=True)
@@ -269,7 +271,7 @@ class WebRpcHost:
         if not files or not isinstance(files, list):
             return params
 
-        strip_path_for_url = bool(os.getenv("AGENT_RUNTIME", "").strip())
+        strip_path_for_url = is_enterprise()
         downloaded_files = []
         workspace = Path(get_agent_workspace_dir()).resolve()
 

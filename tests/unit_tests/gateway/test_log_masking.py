@@ -29,6 +29,98 @@ def test_builtin_sanitize_masks_email_and_kv():
     assert not engine.uses_external_rules
 
 
+def test_builtin_pii_has_no_fingerprint():
+    engine = LogMaskingEngine.get_instance()
+    out = engine.sanitize("mail user@example.com phone 13800138000")
+    assert "user@example.com" not in out
+    assert "13800138000" not in out
+    assert "fp:" not in out
+
+
+def test_builtin_rule_ids_include_pii_and_kv():
+    ids = {r.rule_id for r in LogMaskingEngine.compiled_default_rules()}
+    assert {
+        "builtin_email",
+        "builtin_cn_mobile",
+        "builtin_cn_id_card",
+        "builtin_kv_sensitive",
+        "builtin_data_image",
+    } <= ids
+    by_id = {r.rule_id: r for r in LogMaskingEngine.compiled_default_rules()}
+    for rid in (
+        "builtin_email",
+        "builtin_cn_mobile",
+        "builtin_cn_id_card",
+        "builtin_data_image",
+    ):
+        assert not by_id[rid].with_fingerprint
+    assert by_id["builtin_kv_sensitive"].with_fingerprint
+
+
+def test_compile_masking_rows_reads_with_fingerprint_default_false():
+    rules = LogMaskingEngine.compile_masking_rows(
+        [
+            {
+                "id": 1,
+                "rule_id": "custom_a",
+                "rule_name": "a",
+                "pattern": r"AAA-\d+",
+                "replacement": "[A]",
+                "priority": 1,
+                "enabled": True,
+            },
+            {
+                "id": 2,
+                "rule_id": "custom_b",
+                "rule_name": "b",
+                "pattern": r"BBB-\d+",
+                "replacement": "[B]",
+                "priority": 2,
+                "enabled": True,
+                "with_fingerprint": True,
+            },
+        ]
+    )
+    by_id = {r.rule_id: r for r in rules}
+    assert by_id["custom_a"].with_fingerprint is False
+    assert by_id["custom_b"].with_fingerprint is True
+
+
+def test_with_fingerprint_false_masks_without_fp(monkeypatch):
+    monkeypatch.setenv("JIUWENSWARM_EDITION", "personal")
+    LogMaskingEngine.reload_from_rows(
+        [
+            {
+                "id": 1,
+                "rule_id": "sk_plain",
+                "rule_name": "sk",
+                "pattern": r"\bsk-[A-Za-z0-9]{8,}\b",
+                "replacement": "******",
+                "priority": 50,
+                "enabled": True,
+                "with_fingerprint": False,
+            }
+        ],
+        db_authoritative=True,
+    )
+    out = LogMaskingEngine.get_instance().sanitize("key sk-abcdefghijklmnop")
+    assert "sk-abcdefghijklmnop" not in out
+    assert "******" in out
+    assert "fp:" not in out
+
+
+def test_builtin_kv_with_fingerprint_even_in_enterprise(monkeypatch):
+    """敏感 KV（with_fingerprint=True）企业版同样附指纹。"""
+    from jiuwenswarm.infrastructure.utils import fingerprint
+
+    monkeypatch.setenv("JIUWENSWARM_EDITION", "enterprise")
+    LogMaskingEngine.reset_for_tests()
+    secret = "mySecretValue"
+    out = LogMaskingEngine.get_instance().sanitize(f"api_key={secret}")
+    assert secret not in out
+    assert f"******(fp:{fingerprint(secret)})" in out
+
+
 def test_reload_from_rows_sets_external_flag():
     LogMaskingEngine.reload_from_rows(
         [
@@ -134,7 +226,7 @@ async def test_reload_log_masking_rule_skips_gdb_in_standalone(monkeypatch):
     import jiuwenswarm.infrastructure.log_masking.engine as engine_mod
     from jiuwenswarm.infrastructure.config import Settings
 
-    monkeypatch.setenv("AGENT_RUNTIME", "")
+    monkeypatch.setenv("JIUWENSWARM_EDITION", "personal")
     monkeypatch.setattr(engine_mod, "settings", Settings())
 
     with (
@@ -157,7 +249,7 @@ async def test_reload_log_masking_rule_reads_gdb_in_enterprise(monkeypatch):
     import jiuwenswarm.infrastructure.log_masking.engine as engine_mod
     from jiuwenswarm.infrastructure.config import Settings
 
-    monkeypatch.setenv("AGENT_RUNTIME", "enterprise")
+    monkeypatch.setenv("JIUWENSWARM_EDITION", "enterprise")
     monkeypatch.setenv("JIUWENCLAW_ID", "sp-test")
     monkeypatch.setattr(engine_mod, "settings", Settings())
 
@@ -181,7 +273,7 @@ async def test_reload_log_masking_rule_db_authoritative_when_rows_present(monkey
     import jiuwenswarm.infrastructure.log_masking.engine as engine_mod
     from jiuwenswarm.infrastructure.config import Settings
 
-    monkeypatch.setenv("AGENT_RUNTIME", "enterprise")
+    monkeypatch.setenv("JIUWENSWARM_EDITION", "enterprise")
     monkeypatch.setenv("JIUWENCLAW_ID", "sp-test")
     monkeypatch.setattr(engine_mod, "settings", Settings())
     rows = [{"rule_id": "r1", "pattern": r"X", "replacement": "Y", "enabled": True}]
@@ -201,12 +293,12 @@ async def test_reload_log_masking_rule_db_authoritative_when_rows_present(monkey
 
 
 @pytest.mark.asyncio
-async def test_reload_log_masking_rule_skips_gdb_without_jiuwenclaw_id(monkeypatch):
-    """企业版 ``JIUWENCLAW_ID`` 未就绪时不访问 GDB，保留内置规则。"""
+async def test_reload_log_masking_rule_loads_gdb_without_jiuwenclaw_id(monkeypatch):
+    """企业版不依赖 ``JIUWENCLAW_ID``，直接读本网关 DB。"""
     import jiuwenswarm.infrastructure.log_masking.engine as engine_mod
     from jiuwenswarm.infrastructure.config import Settings
 
-    monkeypatch.setenv("AGENT_RUNTIME", "enterprise")
+    monkeypatch.setenv("JIUWENSWARM_EDITION", "enterprise")
     monkeypatch.delenv("JIUWENCLAW_ID", raising=False)
     monkeypatch.delenv("JIUWENSWARM_ID", raising=False)
     monkeypatch.setattr(engine_mod, "settings", Settings())
@@ -217,19 +309,19 @@ async def test_reload_log_masking_rule_skips_gdb_without_jiuwenclaw_id(monkeypat
             LogMaskingEngine,
             "list_enabled_log_masking_rule_rows",
             new_callable=AsyncMock,
+            return_value=[],
         ) as list_rows,
         patch.object(LogMaskingEngine, "reload_from_rows") as reload_from_rows,
     ):
         await LogMaskingEngine.reload_log_masking_rule()
 
-    list_rows.assert_not_called()
-    reload_from_rows.assert_not_called()
-    assert "******" in LogMaskingEngine.get_instance().sanitize("token=abc123")
+    list_rows.assert_awaited_once()
+    reload_from_rows.assert_called_once_with([], db_authoritative=False)
 
 
 @pytest.mark.asyncio
 async def test_reload_from_gateway_db_loads_rows(monkeypatch):
-    monkeypatch.setenv("AGENT_RUNTIME", "1")
+    monkeypatch.setenv("JIUWENSWARM_EDITION", "enterprise")
     monkeypatch.setenv("JIUWENCLAW_ID", "sp-1")
     import jiuwenswarm.infrastructure.log_masking.engine as engine_mod
     from jiuwenswarm.infrastructure.config import Settings

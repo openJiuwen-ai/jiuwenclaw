@@ -15,7 +15,7 @@ class TableApplyContext:
     removed_channel_ids: frozenset[str] = frozenset()
 
 
-ApplyTableFn = Callable[[str, TableApplyContext], Awaitable[None]]
+ApplyTableFn = Callable[[TableApplyContext], Awaitable[None]]
 
 
 def _enabled_log_masking_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -32,8 +32,7 @@ def _enabled_log_masking_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]
     return enabled_rows
 
 
-async def apply_logging_config_table(jiuwenclaw_id: str, ctx: TableApplyContext) -> None:
-    _ = jiuwenclaw_id
+async def apply_logging_config_table(ctx: TableApplyContext) -> None:
     from jiuwenswarm.common.utils import (
         _logging_config_row_to_dict,
         apply_logging_config_payload,
@@ -51,8 +50,7 @@ async def apply_logging_config_table(jiuwenclaw_id: str, ctx: TableApplyContext)
     logger.info("[ConfigPoll] logging_config applied rows=%d", len(ctx.rows))
 
 
-async def apply_log_masking_rule_table(jiuwenclaw_id: str, ctx: TableApplyContext) -> None:
-    _ = jiuwenclaw_id
+async def apply_log_masking_rule_table(ctx: TableApplyContext) -> None:
     from jiuwenswarm.infrastructure.log_masking.engine import LogMaskingEngine
 
     rows = _enabled_log_masking_rows(ctx.rows)
@@ -60,8 +58,7 @@ async def apply_log_masking_rule_table(jiuwenclaw_id: str, ctx: TableApplyContex
     logger.info("[ConfigPoll] log_masking_rule applied rows=%d", len(rows))
 
 
-async def apply_channel_config_table(jiuwenclaw_id: str, ctx: TableApplyContext) -> None:
-    _ = jiuwenclaw_id
+async def apply_channel_config_table(ctx: TableApplyContext) -> None:
     try:
         from jiuwenswarm.gateway.channel_config_overlay import ChannelConfigChange
         from jiuwenswarm.gateway.channel_config_reload import maybe_trigger_channel_config_reload

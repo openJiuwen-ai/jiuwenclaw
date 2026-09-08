@@ -101,7 +101,6 @@ def _row_to_dict(row: Any) -> dict[str, Any]:
         return {k: getattr(row, k) for k in fields if not str(k).startswith("_")}
     keys = (
         "id",
-        "jiuwenclaw_id",
         "group_id",
         "bot_id",
         "user_id",
@@ -119,20 +118,11 @@ def _row_to_dict(row: Any) -> dict[str, Any]:
     return {k: getattr(row, k) for k in keys if hasattr(row, k)}
 
 
-def _require_jiuwenclaw_id() -> str:
-    from jiuwenswarm.gateway.cron.enterprise_gate import get_bound_jiuwenclaw_id
-
-    jid = get_bound_jiuwenclaw_id()
-    if not jid:
-        raise RuntimeError("installed_skill requires bound jiuwenclaw_id")
-    return jid
-
-
 async def _handler() -> Any:
-    from jiuwenswarm.infrastructure.module_importer import import_manager_config_receiver_module
+    from jiuwenswarm.infrastructure.db.database import Database
 
-    db_mod = import_manager_config_receiver_module("infrastructure.db")
-    return await db_mod.ensure_db_handler(log_prefix=TABLE)
+    # AgentServer 无 PersistentStore；直连 Database 单例。
+    return await Database.current().ensure_ready(log_prefix=TABLE)
 
 
 async def list_installed_skills(
@@ -146,14 +136,8 @@ async def list_installed_skills(
     aid = str(agent_id or "").strip()
     if not sid or not aid:
         return []
-    try:
-        jid = _require_jiuwenclaw_id()
-    except RuntimeError:
-        logger.warning("[InstalledSkill] list skipped: jiuwenclaw_id not bound")
-        return []
 
     filters: dict[str, Any] = {
-        "jiuwenclaw_id": jid,
         "service_id": sid,
         "agent_id": aid,
     }
@@ -200,15 +184,10 @@ async def get_installed_skill(
     name = str(skill_name or "").strip()
     if not sid or not aid or not name:
         return None
-    try:
-        jid = _require_jiuwenclaw_id()
-    except RuntimeError:
-        return None
     handler = await _handler()
     row = await handler.get(
         TABLE,
         {
-            "jiuwenclaw_id": jid,
             "service_id": sid,
             "agent_id": aid,
             "skill_name": name,
@@ -241,21 +220,16 @@ async def upsert_installed_skill(
     if st not in (SOURCE_PREBUILT, SOURCE_USER):
         raise ValueError(f"invalid source_type: {source_type}")
 
-    jid = _require_jiuwenclaw_id()
     now = _utc_now()
     handler = await _handler()
-    existing = await handler.get(
-        TABLE,
-        {
-            "jiuwenclaw_id": jid,
-            "service_id": sid,
-            "agent_id": aid,
-            "skill_name": name,
-        },
-    )
+    identity = {
+        "service_id": sid,
+        "agent_id": aid,
+        "skill_name": name,
+    }
+    existing = await handler.get(TABLE, identity)
 
     row_data: dict[str, Any] = {
-        "jiuwenclaw_id": jid,
         "service_id": sid,
         "agent_id": aid,
         "skill_name": name,
@@ -273,24 +247,14 @@ async def upsert_installed_skill(
     if existing is not None:
         existing_map = _row_to_dict(existing)
         installed_at = existing_map.get("installed_at") or now
-        # 预制项 user_id 可空：更新时若未传则保留原值（抬升时清空）
+        # 预置项 user_id 可空：更新时若未传则保留原值（抬升时清空）
         if user_id is None and st == SOURCE_USER:
             row_data["user_id"] = existing_map.get("user_id")
         update_payload = dict(row_data)
-        update_payload.pop("jiuwenclaw_id", None)
         update_payload.pop("service_id", None)
         update_payload.pop("agent_id", None)
         update_payload.pop("skill_name", None)
-        result = await handler.update(
-            TABLE,
-            {
-                "jiuwenclaw_id": jid,
-                "service_id": sid,
-                "agent_id": aid,
-                "skill_name": name,
-            },
-            update_payload,
-        )
+        result = await handler.update(TABLE, identity, update_payload)
         if result is None:
             raise RuntimeError(f"failed to update installed_skill: {name}")
         out = dict(row_data)
@@ -315,13 +279,11 @@ async def delete_installed_skill(
     name = str(skill_name or "").strip()
     if not sid or not aid or not name:
         return False
-    jid = _require_jiuwenclaw_id()
     handler = await _handler()
     return bool(
         await handler.delete(
             TABLE,
             {
-                "jiuwenclaw_id": jid,
                 "service_id": sid,
                 "agent_id": aid,
                 "skill_name": name,

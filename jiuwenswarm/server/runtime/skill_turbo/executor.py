@@ -56,6 +56,10 @@ from jiuwenswarm.server.runtime.skill_turbo.permission_bridge import (
 )
 from jiuwenswarm.server.utils.stream_utils import parse_stream_chunk
 from jiuwenswarm.server.runtime.skill_turbo.json_utils import extract_llm_json
+from jiuwenswarm.server.runtime.skill_turbo.markdown_stream import (
+    markdown_stream_incoming,
+    terminate_dangling_markdown_fence,
+)
 from jiuwenswarm.server.runtime.skill_turbo.fallback_handler import FallbackContractError
 from jiuwenswarm.server.runtime.skill_turbo.interactive_ask import (
     resolve_interactive_ask_from_inputs,
@@ -123,6 +127,60 @@ logger = logging.getLogger(__name__)
 # LLM 最大输出 token 数；可通过 LLM_MAX_TOKENS 环境变量覆盖，默认 65536
 _DEFAULT_LLM_MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS", "65536"))
 
+
+def resolve_skill_turbo_thinking_kwargs(
+    thinking: str | None,
+    model_client: Any,
+) -> dict[str, Any]:
+    """Optional thinking inject for SkillTurbo LLM calls.
+
+    ``thinking is None`` → empty dict (no adapt, identical to legacy invoke/stream).
+    Unsupported / degraded → empty dict (never abort).
+    """
+    if thinking is None:
+        return {}
+    from jiuwenswarm.common.thinking.adapter import adapt_thinking
+    from jiuwenswarm.common.thinking.types import kwargs_digest, thaw_llm_call_kwargs
+
+    profile = adapt_thinking(thinking, model_client)
+    if not profile.injected or not profile.llm_call_kwargs:
+        if profile.degraded:
+            logger.info(
+                "[SkillTurboExecutor] thinking not injected thinking=%s model=%r reason=%s",
+                profile.thinking,
+                profile.model_name,
+                profile.reason,
+            )
+        return {}
+    kwargs = thaw_llm_call_kwargs(profile.llm_call_kwargs)
+    logger.info(
+        "[SkillTurboExecutor] thinking inject thinking=%s model=%r digest=%s",
+        profile.thinking,
+        profile.model_name,
+        kwargs_digest(kwargs),
+    )
+    return kwargs
+
+
+def is_skill_turbo_thinking_param_error(exc: BaseException) -> bool:
+    """Heuristic: API/client rejected thinking-related call kwargs."""
+    if isinstance(exc, TypeError):
+        return True
+    msg = str(exc).lower()
+    needles = (
+        "extra_body",
+        "thinking",
+        "enable_thinking",
+        "reasoning_effort",
+        "unexpected keyword",
+        "invalid_request",
+        "bad request",
+        "validation error",
+        "unrecognized",
+    )
+    return any(n in msg for n in needles)
+
+
 # ──────────────────────── 全局上下文变量 ────────────────────────
 # Session管理（用于发送事件）
 _session_var: ContextVar[Session | None] = ContextVar("skill_turbo_session", default=None)
@@ -134,6 +192,9 @@ _SKILL_TURBO_STREAM_FLUSH_INTERVAL_SECONDS: float = 3.0
 
 # 需要缓冲的事件类型
 _BUFFERABLE_EVENT_TYPES: frozenset[str] = frozenset({"chat.delta", "chat.reasoning"})
+# 主回答气泡进度横幅：由 PPT root 标记，经过 Executor 时立即发送；
+# 父会话包装层识别后会移除该内部字段。
+_BUBBLE_PROGRESS_FIELD = "_bubble_progress"
 
 # Request上下文
 _request_id_var: ContextVar[str] = ContextVar("skill_turbo_request_id", default="")
@@ -314,6 +375,9 @@ class _StreamBufferState:
     """
 
     buckets: dict[tuple[str | None, str], _StreamBufferBucket] = field(default_factory=dict)
+    # Survives bucket pop/flush so the next chat.delta can be separated from a
+    # fence that already went out (frontend concatenates adjacent streamText).
+    last_emitted: dict[tuple[str | None, str], str] = field(default_factory=dict)
 
     def get_bucket(
         self, source_id: str | None, event_type: str
@@ -448,6 +512,11 @@ class SkillTurboExecutor:
         # 当前任务状态（用于跨协程共享当前 task_id，解决 asyncio.create_task 复制 ContextVar 的问题）
         self._current_task_id_holder: dict[str, str | None] = {"task_id": None}
         self._task_states_holder: dict[str, dict[str, Any]] = {}
+        # PPT 开始横幅必须先于 task.start 进入输出流。before_subplan 先把
+        # start/update 暂存于此，等 start 横幅入队后再 flush，避免
+        # produce_node_output 与 drain_session_stream 双排空时 start 反超横幅。
+        self._deferred_task_lifecycle_events: list[dict[str, Any]] = []
+        self._task_event_drain_lock = asyncio.Lock()
 
         # 节点产物记录 holder：plan_name → 产物 dict。
         # 运行期在 _after_subplan_execute 中累积，仅在中断前/流末 finally 落盘，
@@ -708,6 +777,20 @@ class SkillTurboExecutor:
                     plan_failed = True
                     plan_error = str(payload.get("error") or "") or None
 
+                # PPT stage 的开始/完成横幅属于主回答气泡。它们必须保持在
+                # task.start 之前 / task.complete 之后立即发送，不能进入通用
+                # chat.delta 缓冲桶，否则跨阶段 flush 时会被当前 task 栈误归组，
+                # 或在右侧 task_progress 已推进后仍滞留旧 Stage。
+                if event_type == "chat.delta" and payload.get(
+                    _BUBBLE_PROGRESS_FIELD, False
+                ):
+                    async for flushed in self._flush_all_buffer_chunks(
+                        buffer_state, request_id, channel_id
+                    ):
+                        yield flushed
+                    yield chunk
+                    continue
+
                 # 非缓冲事件类型：先 flush 所有缓冲，再透传当前事件
                 if event_type not in _BUFFERABLE_EVENT_TYPES:
                     async for flushed in self._flush_all_buffer_chunks(
@@ -737,20 +820,30 @@ class SkillTurboExecutor:
                         yield flushed
 
                 bucket = buffer_state.get_bucket(source_id, event_type)
+                bucket_key = (source_id, event_type)
+                piece = markdown_stream_incoming(
+                    buffer_state.last_emitted.get(bucket_key, ""),
+                    str(content),
+                )
+                buffer_state.last_emitted[bucket_key] = piece
 
                 # 首个 chunk 立即发送，保证低首字延迟（与 subagent_executor 一致）
                 if not bucket.first_chunk_sent:
                     bucket.first_chunk_sent = True
+                    if piece != str(content) and isinstance(chunk.payload, dict):
+                        chunk.payload = {**chunk.payload, "content": piece}
+                    if bucket.plan_name is None:
+                        bucket.plan_name = payload.get("plan_name")
                     yield chunk
                     continue
 
                 # 累加到缓冲桶
-                bucket.parts.append(str(content))
+                bucket.parts.append(piece)
                 bucket.since = bucket.since or time.monotonic()
                 if bucket.plan_name is None:
                     bucket.plan_name = payload.get("plan_name")
 
-                # 60s 到期 flush
+                # 到期 flush
                 if time.monotonic() - bucket.since >= _SKILL_TURBO_STREAM_FLUSH_INTERVAL_SECONDS:
                     async for flushed in self._flush_bucket_chunks(
                         buffer_state, (source_id, event_type), request_id, channel_id
@@ -1735,6 +1828,7 @@ class SkillTurboExecutor:
         *,
         node_name: str = "unknown",
         concurrent: bool = False,
+        thinking: str | None = None,
     ) -> str:
         """
         调用 LLM（使用Rail机制）。
@@ -1746,6 +1840,7 @@ class SkillTurboExecutor:
             concurrent: 是否处于并发上下文中。True 时 Executor 自动生成
                 stream_source_id，并注入到本次产生的 llm_reasoning / llm_usage
                 事件，方便前端按调用分桶。
+            thinking: 可选语义 thinking；None 时不调用 adapt、请求体与改前一致。
 
         Returns:
             LLM 响应文本
@@ -1781,6 +1876,8 @@ class SkillTurboExecutor:
             messages.append({"role": "system", "content": system_prompt})
         messages.append({"role": "user", "content": prompt})
 
+        thinking_kwargs = resolve_skill_turbo_thinking_kwargs(thinking, client)
+
         trace_session_token = self._set_llm_interface_log_session()
         try:
             await self._run_rail_hook('before_model_call', ctx)
@@ -1788,7 +1885,24 @@ class SkillTurboExecutor:
             # 使用 Model.invoke() 调用 LLM（受实例级 Semaphore 限流保护）
             logger.debug("[SkillTurboExecutor] call_llm max_tokens=%s node=%s", _DEFAULT_LLM_MAX_TOKENS, node_name)
             async with self._llm_concurrency_guard():
-                response = await client.invoke(messages, max_tokens=_DEFAULT_LLM_MAX_TOKENS)
+                try:
+                    response = await client.invoke(
+                        messages,
+                        max_tokens=_DEFAULT_LLM_MAX_TOKENS,
+                        **thinking_kwargs,
+                    )
+                except Exception as inv_exc:
+                    if thinking_kwargs and is_skill_turbo_thinking_param_error(inv_exc):
+                        logger.warning(
+                            "[SkillTurboExecutor] thinking params rejected, bare retry once: %s",
+                            inv_exc,
+                        )
+                        response = await client.invoke(
+                            messages,
+                            max_tokens=_DEFAULT_LLM_MAX_TOKENS,
+                        )
+                    else:
+                        raise
 
             # llm_usage 事件注入 source_id
             await self._emit_llm_usage(
@@ -1860,6 +1974,7 @@ class SkillTurboExecutor:
         system_prompt: str = "",
         node_name: str = "unknown",
         concurrent: bool = False,
+        thinking: str | None = None,
     ) -> AsyncIterator[str]:
         """
         流式调用 LLM（使用Rail机制）。
@@ -1873,6 +1988,7 @@ class SkillTurboExecutor:
             concurrent: 是否处于并发上下文中。True 时 Executor 自动生成
                 stream_source_id，并注入到本次产生的 llm_reasoning / llm_usage
                 事件，方便前端按调用分桶。
+            thinking: 可选语义 thinking；None 时不调用 adapt、请求体与改前一致。
 
         Yields:
             str: 流式文本片段（普通文本内容）
@@ -1909,6 +2025,8 @@ class SkillTurboExecutor:
             messages.append({"role": "system", "content": system_prompt})
         messages.append({"role": "user", "content": prompt})
 
+        thinking_kwargs = resolve_skill_turbo_thinking_kwargs(thinking, client)
+
         accumulated_message = ""
         trace_session_token = self._set_llm_interface_log_session()
         try:
@@ -1917,7 +2035,30 @@ class SkillTurboExecutor:
             # 使用 Model.stream() 流式调用 LLM
             # 流式调用整个生命周期都占用一个 LLM "槽位"，因此用 Semaphore 包裹整个流。
             async with self._llm_concurrency_guard():
-                async for chunk in client.stream(messages, max_tokens=_DEFAULT_LLM_MAX_TOKENS):
+                async def _iter_chunks():
+                    try:
+                        async for chunk in client.stream(
+                            messages,
+                            max_tokens=_DEFAULT_LLM_MAX_TOKENS,
+                            **thinking_kwargs,
+                        ):
+                            yield chunk
+                    except Exception as stream_exc:
+                        if thinking_kwargs and is_skill_turbo_thinking_param_error(stream_exc):
+                            logger.warning(
+                                "[SkillTurboExecutor] thinking params rejected, "
+                                "bare retry once: %s",
+                                stream_exc,
+                            )
+                            async for chunk in client.stream(
+                                messages,
+                                max_tokens=_DEFAULT_LLM_MAX_TOKENS,
+                            ):
+                                yield chunk
+                        else:
+                            raise
+
+                async for chunk in _iter_chunks():
                     # usage_metadata 通常只在最后一个 chunk 有值，避免对每个 chunk 都调用
                     chunk_usage = getattr(chunk, "usage_metadata", None)
                     if chunk_usage:
@@ -2108,33 +2249,65 @@ class SkillTurboExecutor:
         session = _session_var.get()
 
         async def enqueue_chunk(chunk: Any) -> None:
-            async for task_chunk in self._drain_task_event_chunks():
-                await output_queue.put(task_chunk)
-            current_task_id = self._current_task_id()
+            is_bubble = isinstance(chunk, dict) and bool(
+                chunk.get(_BUBBLE_PROGRESS_FIELD)
+            )
+            bubble_done = bool(chunk.get("_bubble_progress_done")) if is_bubble else False
 
-            # 处理 fallback_stream 返回的 dict 格式（包含 event_type）
-            if isinstance(chunk, dict) and "event_type" in chunk:
-                await output_queue.put(
-                    self._make_event_chunk(request_id, channel_id, chunk, current_task_id)
+            async with self._task_event_drain_lock:
+                if is_bubble and not bubble_done:
+                    # 先排空上一阶段残留的 complete/update，再发开始横幅。
+                    # 本阶段的 task.start 仍由 before_subplan 延期，等横幅入队后再 flush。
+                    self._flush_deferred_task_lifecycle_events()
+                    async for task_chunk in self._drain_task_event_chunks():
+                        await output_queue.put(task_chunk)
+                    await output_queue.put(
+                        self._make_node_delta_chunk(
+                            request_id, channel_id, node, chunk, None
+                        )
+                    )
+                    return
+
+                self._flush_deferred_task_lifecycle_events()
+                async for task_chunk in self._drain_task_event_chunks():
+                    await output_queue.put(task_chunk)
+
+                current_task_id = (
+                    None if is_bubble else self._current_task_id()
                 )
-            else:
-                await output_queue.put(
-                    self._make_node_delta_chunk(request_id, channel_id, node, chunk, current_task_id)
-                )
+                if isinstance(chunk, dict) and "event_type" in chunk:
+                    await output_queue.put(
+                        self._make_event_chunk(
+                            request_id, channel_id, chunk, current_task_id
+                        )
+                    )
+                else:
+                    await output_queue.put(
+                        self._make_node_delta_chunk(
+                            request_id, channel_id, node, chunk, current_task_id
+                        )
+                    )
 
         async def drain_session_stream() -> None:
             if session is None:
                 return
             async for stream_chunk in session.stream_iterator():
                 # 先发送 task 事件（确保 task.start 在 chat 事件之前）
-                async for task_chunk in self._drain_task_event_chunks():
-                    await output_queue.put(task_chunk)
-                payload = parse_stream_chunk(stream_chunk)
-                if payload is None:
-                    continue
-                await output_queue.put(
-                    self._make_session_event_chunk(request_id, channel_id, payload, self._current_task_id())
-                )
+                async with self._task_event_drain_lock:
+                    self._flush_deferred_task_lifecycle_events()
+                    async for task_chunk in self._drain_task_event_chunks():
+                        await output_queue.put(task_chunk)
+                    payload = parse_stream_chunk(stream_chunk)
+                    if payload is None:
+                        continue
+                    await output_queue.put(
+                        self._make_session_event_chunk(
+                            request_id,
+                            channel_id,
+                            payload,
+                            self._current_task_id(),
+                        )
+                    )
 
         async def produce_node_output() -> None:
             try:
@@ -2143,8 +2316,10 @@ class SkillTurboExecutor:
                 ))
                 async for chunk in node.run_stream(inputs):
                     await enqueue_chunk(chunk)
-                async for task_chunk in self._drain_task_event_chunks():
-                    await output_queue.put(task_chunk)
+                async with self._task_event_drain_lock:
+                    self._flush_deferred_task_lifecycle_events()
+                    async for task_chunk in self._drain_task_event_chunks():
+                        await output_queue.put(task_chunk)
                 await output_queue.put(self._make_node_finished_chunk(
                     request_id, channel_id, node, self._current_task_id()
                 ))
@@ -2167,6 +2342,7 @@ class SkillTurboExecutor:
                         "[SkillTurboExecutor] _execute_node_stream FallbackLimitExceededError: %s",
                         item,
                     )
+                    self._flush_deferred_task_lifecycle_events()
                     async for task_chunk in self._drain_task_event_chunks():
                         yield task_chunk
                     raise item
@@ -2198,10 +2374,12 @@ class SkillTurboExecutor:
                             "[SkillTurboExecutor] _execute_node_stream propagate HITL AbortError: %s",
                             item,
                         )
+                        self._flush_deferred_task_lifecycle_events()
                         async for task_chunk in self._drain_task_event_chunks():
                             yield task_chunk
                         raise item
                     logger.error("[SkillTurboExecutor] _execute_node_stream error: %s", item)
+                    self._flush_deferred_task_lifecycle_events()
                     async for task_chunk in self._drain_task_event_chunks():
                         yield task_chunk
                     yield self._make_node_error_chunk(
@@ -2239,9 +2417,10 @@ class SkillTurboExecutor:
         if bucket is None or not bucket.parts:
             return
 
-        merged_content = "".join(bucket.parts)
+        merged_content = terminate_dangling_markdown_fence("".join(bucket.parts))
         if not merged_content:
             return
+        buffer_state.last_emitted[bucket_key] = merged_content
 
         payload: dict[str, Any] = {
             "event_type": event_type,
@@ -2436,7 +2615,14 @@ class SkillTurboExecutor:
         # 提取实际内容和正确的 plan_name
         actual_content = content
         plan_name = node.plan_name  # 默认使用传入的 node
-        data_payload = content if isinstance(content, dict) else None
+        data_payload = dict(content) if isinstance(content, dict) else None
+        bubble_progress = bool(
+            data_payload.pop(_BUBBLE_PROGRESS_FIELD, False)
+            if data_payload is not None
+            else False
+        )
+        if data_payload is not None:
+            data_payload.pop("_bubble_progress_done", None)
         
         if isinstance(content, dict):
             # 从 chunk 中提取正确的 plan_name（如果存在），并转为显示名
@@ -2458,9 +2644,8 @@ class SkillTurboExecutor:
             if chunk_status in ("progress", "ok") and actual_content:
                 actual_content = actual_content.rstrip("\n") + "\n"
 
-            # 将 data_payload 中的 current_node 转为显示名（浅拷贝避免修改原始 chunk）
+            # 将 data_payload 中的 current_node 转为显示名（已浅拷贝，避免修改原始 chunk）
             if data_payload is not None and "current_node" in data_payload:
-                data_payload = dict(data_payload)
                 data_payload["current_node"] = self._display_name(data_payload["current_node"])
         
         payload = {
@@ -2470,7 +2655,10 @@ class SkillTurboExecutor:
         }
         if data_payload is not None:
             payload["data"] = data_payload
-        if task_id:
+        if bubble_progress:
+            payload[_BUBBLE_PROGRESS_FIELD] = True
+        # 气泡进度横幅绝不能带 task_id，否则可能被归入左上 taskRuns。
+        if task_id and not bubble_progress:
             payload["task_id"] = task_id
         return self._make_chunk(request_id, channel_id, payload)
 
@@ -2525,6 +2713,17 @@ class SkillTurboExecutor:
             self._normalize_task_event_type(task_event)
             yield self._make_task_event_chunk(task_event)
 
+    def _flush_deferred_task_lifecycle_events(self) -> None:
+        """将延期的 task.start/update 追加到 FIFO，供下一次 drain 发送。"""
+        if not self._deferred_task_lifecycle_events:
+            return
+        events_queue = _task_events_queue_var.get()
+        if events_queue is None:
+            self._deferred_task_lifecycle_events.clear()
+            return
+        events_queue.extend(self._deferred_task_lifecycle_events)
+        self._deferred_task_lifecycle_events.clear()
+
     @staticmethod
     def _normalize_task_event_type(task_event: dict[str, Any]) -> None:
         payload = task_event.get("payload", {})
@@ -2545,6 +2744,7 @@ class SkillTurboExecutor:
 
         # 清空实例属性（新请求开始）
         self._task_states_holder.clear()
+        self._deferred_task_lifecycle_events.clear()
         self._current_task_id_holder["task_id"] = None
 
         saved = self._take_resume_task_states()
@@ -2650,6 +2850,13 @@ class SkillTurboExecutor:
             )
             return
 
+        events_queue.append(self._build_task_update_event(task_states))
+
+    @staticmethod
+    def _build_task_update_event(
+        task_states: dict[str, dict[str, Any]]
+    ) -> dict[str, Any]:
+        """构建 task.update 事件（不入队）。"""
         # 深拷贝任务状态（避免后续修改影响已发送的事件）；按 index 排序保证前端稳定
         all_tasks = sorted(
             (copy.deepcopy(state) for state in task_states.values()),
@@ -2694,14 +2901,12 @@ class SkillTurboExecutor:
             status_preview,
         )
 
-        # 添加到事件队列
-        task_update_event = {
+        return {
             "request_id": _request_id_var.get(),
             "channel_id": _channel_id_var.get(),
             "payload": payload,
             "is_complete": False,
         }
-        events_queue.append(task_update_event)
 
     async def _should_skip_subplan_execute(
         self,
@@ -2841,10 +3046,13 @@ class SkillTurboExecutor:
             subplan.depth,
         )
 
-        events_queue.append(
+        # 延期到开始横幅入队后再写入 FIFO，避免双协程排空时 start 抢在横幅前。
+        self._deferred_task_lifecycle_events.append(
             self._build_task_start_event(subplan, task_id, task_state, task_states, timestamp)
         )
-        await self._emit_task_update_event()
+        self._deferred_task_lifecycle_events.append(
+            self._build_task_update_event(task_states)
+        )
 
     async def _after_subplan_execute(
         self,
@@ -2931,6 +3139,10 @@ class SkillTurboExecutor:
                 result_or_error if is_error else None,
             )
 
+        # 子节点若未 yield 任何 chunk 就结束，enqueue_chunk 不会触发 flush；
+        # 必须先释放延期的 task.start，再入队 complete，避免 complete 抢在 start 前。
+        self._flush_deferred_task_lifecycle_events()
+
         events_queue.append(
             self._build_task_complete_event(
                 TaskCompleteEventData(
@@ -2986,13 +3198,17 @@ class SkillTurboExecutor:
             node_status = "completed"
             info = artifact.get("info") if isinstance(artifact.get("info"), dict) else {}
             files = artifact.get("files") if isinstance(artifact.get("files"), list) else []
-        self._node_artifacts_holder[subplan.plan_name] = {
+        artifact_entry: dict[str, Any] = {
             "task_id": task_id,
             "status": node_status,
             "info": info,
             "files": files,
             "finished_at": timestamp,
         }
+        delivery_summary = artifact.get("delivery_summary")
+        if isinstance(delivery_summary, str) and delivery_summary.strip():
+            artifact_entry["delivery_summary"] = delivery_summary.strip()
+        self._node_artifacts_holder[subplan.plan_name] = artifact_entry
         logger.debug(
             "[SkillTurboExecutor] node_artifact collected: plan_name=%s status=%s has_artifact=%s",
             subplan.plan_name,

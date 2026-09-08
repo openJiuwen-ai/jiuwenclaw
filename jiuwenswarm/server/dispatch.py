@@ -17,6 +17,7 @@ from jiuwenswarm.server.handlers import bootstrap as bootstrap_handlers
 from jiuwenswarm.server.handlers import chat as chat_handlers
 from jiuwenswarm.server.handlers import commands as commands_handlers
 from jiuwenswarm.server.handlers import extensions as extensions_handlers
+from jiuwenswarm.server.handlers import file_transfer as file_transfer_handlers
 from jiuwenswarm.server.handlers import mcp as mcp_handlers
 from jiuwenswarm.server.handlers import ops as ops_handlers
 from jiuwenswarm.server.handlers import permissions as permissions_handlers
@@ -95,6 +96,10 @@ HANDLERS: dict[ReqMethod, HandlerSpec] = {
     # --- 中断 ---
     # 实现在 handlers/chat.py。chat.send / chat.resume 走默认路径，不在表内。
     ReqMethod.CHAT_CANCEL: HandlerSpec(fn=chat_handlers.handle_chat_cancel_dispatch),
+    # Gateway ↔ Agent 分块文件传输（默认跟随 is_enterprise；YAML 可显式覆盖）
+    ReqMethod.FILE_TRANSFER_START: HandlerSpec(fn=file_transfer_handlers.handle_file_transfer),
+    ReqMethod.FILE_TRANSFER_CHUNK: HandlerSpec(fn=file_transfer_handlers.handle_file_transfer),
+    ReqMethod.FILE_TRANSFER_COMPLETE: HandlerSpec(fn=file_transfer_handlers.handle_file_transfer),
     # --- 团队 ---
     # 整域实现在 handlers/team.py。
     ReqMethod.TEAM_TEMPLATES_LIST: HandlerSpec(fn=team_handlers.handle_team_templates_list),
@@ -104,6 +109,7 @@ HANDLERS: dict[ReqMethod, HandlerSpec] = {
     ReqMethod.TEAM_SESSION_BIND: HandlerSpec(fn=team_handlers.handle_team_session_bind),
     ReqMethod.TEAM_DELETE: HandlerSpec(fn=team_handlers.handle_team_delete),
     ReqMethod.TEAM_SESSION_RESET: HandlerSpec(fn=team_handlers.handle_team_session_reset),
+    ReqMethod.TEAM_RUNTIME_DISSOLVE: HandlerSpec(fn=team_handlers.handle_team_runtime_dissolve),
     ReqMethod.TEAM_SNAPSHOT: HandlerSpec(fn=team_handlers.handle_team_snapshot),
     ReqMethod.TEAM_MQ_PUBLISH: HandlerSpec(fn=team_handlers.handle_team_mq_publish),
     ReqMethod.TEAM_HISTORY_GET: HandlerSpec(fn=team_handlers.handle_team_history_get),

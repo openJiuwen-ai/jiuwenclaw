@@ -77,6 +77,37 @@ def test_perf_usage_fallback_does_not_duplicate_complete_stream_usage() -> None:
     assert stream_usage["total_tokens"] == 1_100
 
 
+def test_external_token_usage_hook_routes_sdk_snapshot_to_collector(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from jiuwenswarm.perf import interface_hooks
+
+    calls: list[tuple[tuple, dict]] = []
+    collector = SimpleNamespace(
+        record_external_token_usage=lambda *args, **kwargs: calls.append((args, kwargs))
+    )
+    monkeypatch.setattr(interface_hooks, "get_perf_collector", lambda: collector)
+
+    interface_hooks.record_deepresearch_sdk_token_usage(
+        "request-1",
+        "conversation-1",
+        {"input_tokens": 500, "output_tokens": 80, "total_tokens": 580},
+    )
+
+    assert calls == [
+        (
+            ("request-1",),
+            {
+                "source": "deepresearch_sdk",
+                "usage_id": "conversation-1",
+                "input_tokens": 500,
+                "output_tokens": 80,
+                "total_tokens": 580,
+            },
+        )
+    ]
+
+
 def test_request_summary_rail_imports_required_symbols() -> None:
     """Regression: ensure request_summary_rail imports all runtime dependencies."""
     import ast
@@ -174,6 +205,54 @@ def test_accumulator_finalize_schema() -> None:
     assert "llm_call_id" not in summary["bottleneck"]["llm"][0]
     assert summary["bottleneck"]["tool"][0]["name"] == "WebSearch"
     assert "errors" not in summary
+
+
+def test_accumulator_adds_external_token_usage_once_without_fake_llm_call() -> None:
+    acc = RequestSummaryAccumulator(
+        meta=RequestMeta(
+            session_id="sess-1",
+            request_id="req-1",
+            channel_id="web",
+            mode="plan",
+            trace_id=None,
+            started_at=1000.0,
+        )
+    )
+    acc.record_llm(
+        LlmPerfEvent(
+            llm_call_id="llm-1",
+            duration_ms=1000.0,
+            model="deepseek-chat",
+            iteration=1,
+            input_tokens=100,
+            output_tokens=50,
+            status="ok",
+        )
+    )
+
+    assert acc.record_external_token_usage(
+        source="deepresearch_sdk",
+        usage_id="conversation-1",
+        input_tokens=500,
+        output_tokens=80,
+        total_tokens=580,
+    ) is True
+    assert acc.record_external_token_usage(
+        source="deepresearch_sdk",
+        usage_id="conversation-1",
+        input_tokens=500,
+        output_tokens=80,
+        total_tokens=580,
+    ) is False
+
+    summary = acc.finalize(status="ok", ended_at=1002.0)
+    assert summary["summary"]["tokens"] == {
+        "input": 600,
+        "output": 130,
+        "total": 730,
+        "cache_read": 0,
+    }
+    assert summary["summary"]["stats"]["llm"]["count"] == 1
 
 
 def test_accumulator_include_by_agent_when_enabled() -> None:

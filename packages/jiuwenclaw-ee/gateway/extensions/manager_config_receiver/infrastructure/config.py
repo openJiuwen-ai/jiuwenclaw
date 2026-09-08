@@ -9,6 +9,8 @@ from typing import Optional
 from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from openjiuwen_runtime.foundation.db.utils import is_sqlite
+
 
 def _resolve_env_files() -> tuple[str | Path, ...]:
     """解析可用的 .env 路径（优先 cwd，兼容 venv 安装布局）。"""
@@ -26,8 +28,10 @@ def load_env() -> None:
     except ImportError:
         return
 
+    # override=False：进程环境变量优先（例如 AgentServer 启动前设
+    # GATEWAY_CONFIG_RECEIVER_ENABLED=false），避免被仓库 .env 盖掉。
     for env_path in _resolve_env_files():
-        load_dotenv(env_path, override=True)
+        load_dotenv(env_path, override=False)
 
 
 class Settings(BaseSettings):
@@ -68,6 +72,11 @@ class Settings(BaseSettings):
         default="",
         validation_alias="GATEWAY_CONFIG_PUBLIC_HOST",
     )
+    # Gateway 管理面 REST Base（可选；身份绑定后一般不再主动调用 Manager）
+    gateway_manager_http_url: str = Field(
+        default="",
+        validation_alias="GATEWAY_MANAGER_HTTP_URL",
+    )
 
     # ========== 配置下发字段级解密（信封解密，私钥本机自持） ==========
     gateway_config_dec_enabled: bool = Field(
@@ -107,7 +116,7 @@ class Settings(BaseSettings):
     @model_validator(mode="after")
     def validate_db_fields(self) -> "Settings":
         # 如果是 SQLite，不需要校验连接参数
-        if self.gateway_db_type == "sqlite":
+        if is_sqlite(self.gateway_db_type):
             # 如果没传路径，自动设置默认值
             if self.gateway_sqlite_path is None or self.gateway_sqlite_path.strip() == "":
                 self.gateway_sqlite_path = "gateway.db"

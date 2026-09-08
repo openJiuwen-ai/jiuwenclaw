@@ -9,8 +9,6 @@ from typing import Any
 
 from jiuwenswarm.gateway.storage.errors import StorageUnavailableError
 
-_SQLITE_TYPES = frozenset({"sqlite", "aiosqlite"})
-
 
 def resolve_gateway_replicas() -> int:
     """解析 ``GATEWAY_REPLICAS``；缺省为 1。"""
@@ -34,9 +32,11 @@ def resolve_gateway_db_type() -> str:
 
 def assert_replicas_db_compat() -> None:
     """``GATEWAY_REPLICAS > 1`` 时禁止 sqlite。"""
+    from openjiuwen_runtime.foundation.db.utils import is_sqlite
+
     replicas = resolve_gateway_replicas()
     db_type = resolve_gateway_db_type()
-    if replicas > 1 and db_type in _SQLITE_TYPES:
+    if replicas > 1 and is_sqlite(db_type):
         raise StorageUnavailableError(
             f"GATEWAY_REPLICAS={replicas} forbids sqlite; "
             "set GATEWAY_DB_TYPE to mysql or postgresql"
@@ -44,7 +44,7 @@ def assert_replicas_db_compat() -> None:
 
 
 class GatewayDbConnection:
-    """绑定 EE GatewayDb；不注入 ``jiuwenclaw_id``。建表只在首次 ``ensure_ready`` 执行。"""
+    """绑定 ``Database`` 进程内单例。建表只在首次 ``ensure_ready`` 执行。"""
 
     def __init__(self) -> None:
         self._db_obj: Any | None = None
@@ -52,10 +52,9 @@ class GatewayDbConnection:
         self._lock = asyncio.Lock()
 
     def _bind_database(self) -> Any:
-        from jiuwenswarm.infrastructure.module_importer import import_manager_config_receiver_module
+        from jiuwenswarm.infrastructure.db.database import Database
 
-        gateway_db_mod = import_manager_config_receiver_module("core.enterprise_config.gateway_db")
-        db = gateway_db_mod.GatewayDb.bind(None)
+        db = Database.current()
         self._db_obj = db
         return db
 

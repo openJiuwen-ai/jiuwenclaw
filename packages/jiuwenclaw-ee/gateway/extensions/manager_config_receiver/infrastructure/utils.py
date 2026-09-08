@@ -39,7 +39,7 @@ def get_pod_name() -> str | None:
 
 
 def get_gateway_register_identity() -> dict[str, str]:
-    """采集 Gateway 注册时上报 Manager 的运行时身份（命名空间、Pod 名）。"""
+    """采集 Gateway 运行时身份（命名空间、Pod 名）。"""
     if not is_running_in_k8s():
         return {}
     out: dict[str, str] = {}
@@ -50,51 +50,6 @@ def get_gateway_register_identity() -> dict[str, str]:
     if pod:
         out["jiuwenclaw_name"] = pod
     return out
-
-
-KNOWN_SLOT_KEYS = frozenset({
-    "default_model",
-    "video_model",
-    "audio_model",
-    "vision_model",
-    "embedding_model",
-    "skill_whitelist",
-    "extension_config",
-    "service_config",
-})
-
-
-def set_jiuwenclaw_id(jiuwenclaw_id: str | None) -> None:
-    """写入 ``JIUWENCLAW_ID`` 环境变量。"""
-    if jiuwenclaw_id is None:
-        os.environ.pop("JIUWENCLAW_ID", None)
-        return
-    normalized = str(jiuwenclaw_id).strip()
-    if normalized:
-        os.environ["JIUWENCLAW_ID"] = normalized
-    else:
-        os.environ.pop("JIUWENCLAW_ID", None)
-
-
-def get_jiuwenclaw_id() -> str | None:
-    """从 ``JIUWENCLAW_ID`` 环境变量读取当前实例 id。"""
-    val = os.getenv("JIUWENCLAW_ID", "").strip()
-    return val or None
-
-
-def assert_jiuwenclaw_id_matches(jiuwenclaw_id: str) -> str:
-    """校验 config.push 顶层 ``jiuwenclaw_id`` 与已注册实例一致，并返回有效 id。"""
-    if not jiuwenclaw_id:
-        raise ValueError("config.push payload requires jiuwenclaw_id")
-    registered = get_jiuwenclaw_id()
-    if registered and jiuwenclaw_id != registered:
-        raise ValueError(
-            f"jiuwenclaw_id mismatch: push={jiuwenclaw_id!r} registered={registered!r}"
-        )
-    jid = registered or jiuwenclaw_id
-    if not jid:
-        raise ValueError("jiuwenclaw_id is not set; set JIUWENCLAW_ID or use /register")
-    return jid
 
 
 def utc_now() -> datetime:
@@ -125,7 +80,7 @@ def parse_iso_datetime(value: Any) -> Any:
 
 
 def normalize_template_ref(value: Any) -> dict[str, list[str]]:
-    """将 ``template_ref`` 规范为 ``{slot: [ref_string, ...]}``；空值键省略。"""
+    """将 ``template_ref`` 规范为 ``{slot: [ref_string, ...]}``；空值键省略，同槽位去重保序。"""
     if value is None:
         return {}
     if not isinstance(value, dict):
@@ -137,11 +92,16 @@ def normalize_template_ref(value: Any) -> dict[str, list[str]]:
             continue
         if not isinstance(raw, list):
             raise ValueError(f"template_ref[{slot!r}] must be a list")
-        refs = [
-            str(item).strip()
-            for item in raw
-            if item is not None and str(item).strip()
-        ]
+        refs: list[str] = []
+        seen: set[str] = set()
+        for item in raw:
+            if item is None:
+                continue
+            text = str(item).strip()
+            if not text or text in seen:
+                continue
+            seen.add(text)
+            refs.append(text)
         if refs:
             out[slot] = refs
     return out

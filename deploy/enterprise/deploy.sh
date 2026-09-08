@@ -18,11 +18,13 @@ source "rabbitmq_handler.sh"
 source "redis_handler.sh"
 source "log_handler.sh"
 source "jina_handler.sh"
+source "proxy_handler.sh"
 source "configmap_secret_handler.sh"
 source "gateway_handler.sh"
 source "manager_handler.sh"
 source "web_handler.sh"
 source "runtime_handler.sh"
+source "patch_handler.sh"
 
 process_up() {
     # MODULES是ALL_MODULES的子集，启动顺序正着来

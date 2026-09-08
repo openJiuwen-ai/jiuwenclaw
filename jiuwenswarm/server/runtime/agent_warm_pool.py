@@ -20,6 +20,7 @@ from jiuwenswarm.common.work_mode import (
     DEFAULT_PROJECT_ID_CODE,
     DEFAULT_PROJECT_ID_WORK,
 )
+from jiuwenswarm.edition import is_enterprise
 from jiuwenswarm.server.runtime.session import project_store
 
 if TYPE_CHECKING:
@@ -43,7 +44,13 @@ def _prewarm_enabled_by_env() -> bool:
     Returns:
         The explicit environment choice, or True when the switch is unset or
         carries an unrecognized value.
+
+    企业版模型依赖请求 ``metadata.routing``（含 ``bot_id``）。预热路径没有
+    identity，会落到空 ``config.yaml`` 并打 ERROR；因此企业版强制关闭会话预热，
+    会话在首个真实请求时懒初始化。
     """
+    if is_enterprise():
+        return False
     raw = str(os.environ.get(_PREWARM_ENABLED_ENV_KEY, "") or "").strip().lower()
     if raw in _PREWARM_OFF_VALUES:
         return False
@@ -206,7 +213,9 @@ class AgentWarmPool:
 
     @staticmethod
     def _new_session_id(channel_id: str) -> str:
-        prefix = str(channel_id or "default").strip() or "default"
+        from jiuwenswarm.server.runtime.agent_manager import _session_id_prefix_for_channel
+
+        prefix = _session_id_prefix_for_channel(channel_id)
         return f"{prefix}_{int(time.time() * 1000):x}_{secrets.token_hex(6)}"
 
     def _marker_path(self, session_id: str) -> Path:

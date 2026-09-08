@@ -31,6 +31,7 @@ import sys
 from collections.abc import Iterable, Iterator, Mapping, MutableMapping
 from contextvars import ContextVar, Token
 from typing import Any
+from jiuwenswarm.edition import is_enterprise
 
 DEFAULT_HEADERS_ENV_KEY = "default_headers"
 _DEFAULT_HEADERS_ALIASES = (
@@ -75,10 +76,12 @@ SPAWN_ENV_KEYS: frozenset[str] = frozenset(
         "OTEL_SERVICE_NAME",
         "OTEL_LOG_MESSAGES",
         "PATH",
-        "AGENT_RUNTIME",
+        "JIUWENSWARM_EDITION",
         # Unified tool switch (blacklist); config.yaml references ${DISABLED_TOOLS-...}.
         # Defaults to disabling search_skill / install_skill / uninstall_skill.
         "DISABLED_TOOLS",
+        # Code-mode generated-code co-author header switch; process shared.
+        "JIUWENSWARM_CODE_COAUTHOR_HEADER_ENABLED",
         # launchEnv / config.yaml ${EXTENSION_DIRS}; process-shared (relay RELAYCLAW_SHARED_ENV_KEYS TBD).
         "EXTENSION_DIRS",
     }
@@ -669,6 +672,7 @@ def build_effective_env_overlay(
 
 
 def bind_agent_env_ns(service_id: str, agent_id: str) -> Token:
+    """Bind tip env ns ``(service_id, agent_id)`` for this task."""
     key = resolve_env_ns(service_id, agent_id)
     return _agent_env_ns.set(key)
 
@@ -928,8 +932,8 @@ def hydrate_default_tip_from_baseline() -> None:
 
 
 def should_hydrate_default_tip() -> bool:
-    """True for local processes; False when relay sets ``AGENT_RUNTIME``."""
-    return not str(os.environ.get("AGENT_RUNTIME", "") or "").strip()
+    """True for local processes; False when enterprise edition."""
+    return not is_enterprise()
 
 
 _LEGACY_OFFICE_CLAW_DISABLE_TOOL_CALLING = "OFFICE_CLAW_DISABLE_TOOL_CALLING"

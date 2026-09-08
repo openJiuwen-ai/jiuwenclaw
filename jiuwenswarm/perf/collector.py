@@ -98,6 +98,27 @@ class PerfCollector:
             return
         acc.record_llm(event)
 
+    def record_external_token_usage(
+        self,
+        request_id: str,
+        *,
+        source: str,
+        usage_id: str,
+        input_tokens: int,
+        output_tokens: int,
+        total_tokens: int,
+    ) -> bool:
+        acc = self.get_accumulator(request_id)
+        if acc is None:
+            return False
+        return acc.record_external_token_usage(
+            source=source,
+            usage_id=usage_id,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            total_tokens=total_tokens,
+        )
+
     def record_tool(self, request_id: str, event: ToolPerfEvent) -> None:
         acc = self.get_accumulator(request_id)
         if acc is None:

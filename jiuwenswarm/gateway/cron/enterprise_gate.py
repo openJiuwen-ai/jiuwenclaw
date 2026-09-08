@@ -6,35 +6,17 @@ from __future__ import annotations
 
 import logging
 import os
+from collections.abc import Mapping
 from typing import Any
 
+from jiuwenswarm.edition import is_enterprise
 from jiuwenswarm.deployment_mode import MODE_DISTRIBUTED, normalize_deployment_mode
 
 logger = logging.getLogger(__name__)
 
 STICKY_IDENTITY_FIELDS = frozenset(
-    {"group_id", "bot_id", "user_id", "jiuwenclaw_id", "job_id", "created_at"}
+    {"group_id", "bot_id", "user_id", "job_id", "created_at"}
 )
-
-
-def is_enterprise_edition() -> bool:
-    """产品形态：``AGENT_RUNTIME`` 非空。不单独决定企业 cron 开门。"""
-    return bool(os.getenv("AGENT_RUNTIME", "").strip())
-
-
-def get_bound_jiuwenclaw_id() -> str | None:
-    """读取当前绑定的实例 id。"""
-    try:
-        from jiuwenswarm.server.runtime.enterprise_config import gateway_db
-
-        return gateway_db.resolve_jiuwenclaw_id()
-    except Exception:
-        logger.debug("Failed to read jiuwenclaw_id from gateway_db", exc_info=True)
-    env = (
-        os.getenv("JIUWENCLAW_ID", "").strip()
-        or os.getenv("JIUWENSWARM_ID", "").strip()
-    )
-    return env or None
 
 
 def _resolve_deployment_mode() -> str:
@@ -50,11 +32,19 @@ def _resolve_deployment_mode() -> str:
 
 
 def enterprise_cron_enabled(*, deployment_mode: str | None = None) -> bool:
-    """企业 cron 真正开门：实例 id 已绑定，且非 distributed。"""
-    if not get_bound_jiuwenclaw_id():
+    """企业 cron 开门：企业版启用。
+
+    standalone / active-standby：保持历史行为。
+    distributed：多副本时需 ``GATEWAY_DB_HOST``，由库表认领避免重复调度。
+    """
+    if not is_enterprise():
         return False
-    mode = deployment_mode if deployment_mode is not None else _resolve_deployment_mode()
-    return normalize_deployment_mode(mode) != MODE_DISTRIBUTED
+    mode = normalize_deployment_mode(
+        deployment_mode if deployment_mode is not None else _resolve_deployment_mode()
+    )
+    if mode == MODE_DISTRIBUTED:
+        return bool(os.getenv("GATEWAY_DB_HOST", "").strip())
+    return True
 
 
 def coerce_routing_id(value: Any) -> str | None:
@@ -69,7 +59,13 @@ def coerce_routing_id(value: Any) -> str | None:
 
 
 def extract_routing_triple(*sources: Any) -> tuple[str | None, str | None, str | None]:
-    """从若干 dict / 对象按优先级解析 group_id / bot_id / user_id。"""
+    """从若干 dict / 对象按优先级解析 group_id / bot_id / user_id。
+
+    优先顶层 ``user_id`` + ``metadata.routing``；其次已 merge 过的 params
+    （Gateway 本地 cron handler）。
+    """
+    from jiuwenswarm.common.request_identity import web_routing_identity
+
     group_id: str | None = None
     bot_id: str | None = None
     user_id: str | None = None
@@ -87,20 +83,22 @@ def extract_routing_triple(*sources: Any) -> tuple[str | None, str | None, str |
         if source is None:
             continue
         if isinstance(source, dict):
-            _merge_from_mapping(source)
+            identity = web_routing_identity(source)
+            if identity:
+                _merge_from_mapping(identity)
+            # 本地 handler 的扁平 params（merge_routing_into_params 副本 / UT）：
+            # 无 routing 键时继续从顶层补 group/bot/user。
+            if not isinstance(source.get("routing"), Mapping):
+                _merge_from_mapping(source)
             continue
+        metadata = getattr(source, "metadata", None)
+        if isinstance(metadata, dict):
+            identity = web_routing_identity(metadata)
+            if identity:
+                _merge_from_mapping(identity)
         params = getattr(source, "params", None)
         if isinstance(params, dict):
             _merge_from_mapping(params)
-        metadata = getattr(source, "metadata", None)
-        if isinstance(metadata, dict):
-            _merge_from_mapping(metadata)
-            query = metadata.get("query")
-            if isinstance(query, dict):
-                _merge_from_mapping(query)
-        chat_id = coerce_routing_id(getattr(source, "chat_id", None))
-        if group_id is None and chat_id:
-            group_id = chat_id
 
     return group_id, bot_id, user_id
 
@@ -163,8 +161,6 @@ __all__ = (
     "coerce_routing_id",
     "enterprise_cron_enabled",
     "extract_routing_triple",
-    "get_bound_jiuwenclaw_id",
-    "is_enterprise_edition",
     "job_matches_routing",
     "routing_triple_complete",
     "strip_sticky_identity_fields",

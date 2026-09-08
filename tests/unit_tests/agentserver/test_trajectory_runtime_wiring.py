@@ -15,18 +15,22 @@ def reset_observability_demands():
     observability_runtime.reset_observability_demands()
     agent_observability._agent_observability_active = False
     agent_observability._force_ever_enabled = False
+    agent_observability._runtime_managed_agent_observability = False
     root_spans = getattr(agent_observability, "_ROOT_SPANS", None)
     if root_spans is not None:
         root_spans.clear()
     team_manager._observability_active = False
+    team_manager._runtime_managed_observability = False
     yield
     observability_runtime.reset_observability_demands()
     agent_observability._agent_observability_active = False
     agent_observability._force_ever_enabled = False
+    agent_observability._runtime_managed_agent_observability = False
     root_spans = getattr(agent_observability, "_ROOT_SPANS", None)
     if root_spans is not None:
         root_spans.clear()
     team_manager._observability_active = False
+    team_manager._runtime_managed_observability = False
 
 
 def test_trajectory_processor_is_shared_across_runtimes(monkeypatch):
@@ -282,3 +286,83 @@ def test_shared_observability_demand_does_not_shutdown_external_provider(monkeyp
     observability_runtime.release_observability_demand("agent")
 
     assert shutdowns == []
+
+
+def test_unified_agent_path_attaches_trajectory_processor(monkeypatch):
+    attaches = []
+    monkeypatch.setattr(
+        agent_observability,
+        "_get_unified_runtime",
+        lambda: type("R", (), {"is_unified_active": staticmethod(lambda: True)})(),
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.harness.observability_runtime.ensure_trajectory_span_processor_attached",
+        lambda: attaches.append("agent") or True,
+    )
+
+    agent_observability.sync_agent_observability()
+
+    assert attaches == ["agent"]
+    assert agent_observability._agent_observability_active is True
+    assert agent_observability._runtime_managed_agent_observability is True
+
+
+def test_unified_team_path_attaches_trajectory_processor(monkeypatch):
+    attaches = []
+    monkeypatch.setattr(
+        team_manager,
+        "_get_unified_runtime",
+        lambda: type("R", (), {"is_unified_active": staticmethod(lambda: True)})(),
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.harness.observability_runtime.ensure_trajectory_span_processor_attached",
+        lambda: attaches.append("team") or True,
+    )
+
+    team_manager.sync_team_observability()
+
+    assert attaches == ["team"]
+    assert team_manager._observability_active is True
+    assert team_manager._runtime_managed_observability is True
+
+
+def test_ensure_trajectory_attaches_via_init_observability(monkeypatch):
+    processor = object()
+    calls = []
+    config = object()
+    monkeypatch.setattr(
+        observability_runtime, "_TRAJECTORY_SPAN_PROCESSOR", processor
+    )
+    monkeypatch.setattr(observability_runtime, "_TRAJECTORY_UNAVAILABLE", False)
+
+    import openjiuwen.agent_teams.observability.setup as obs_setup
+
+    monkeypatch.setattr(obs_setup, "is_initialized", lambda: True)
+    monkeypatch.setattr(obs_setup, "get_config", lambda: config)
+    monkeypatch.setattr(
+        obs_setup,
+        "init_observability",
+        lambda cfg, **kwargs: calls.append((cfg, kwargs)),
+    )
+
+    assert observability_runtime.ensure_trajectory_span_processor_attached() is True
+    assert calls == [(config, {"additional_span_processors": (processor,)})]
+
+
+def test_acquire_reattaches_trajectory_when_runtime_already_active(monkeypatch):
+    attaches = []
+    monkeypatch.setattr(observability, "is_initialized", lambda: True)
+    monkeypatch.setattr(
+        observability_runtime,
+        "ensure_trajectory_span_processor_attached",
+        lambda: attaches.append(True) or True,
+    )
+    observability_runtime._ACTIVE_RUNTIMES.add("agent")
+
+    result = observability_runtime.acquire_observability_demand(
+        "agent",
+        observability_config=object(),
+    )
+
+    assert result is True
+    assert attaches == [True]

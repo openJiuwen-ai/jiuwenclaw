@@ -35,6 +35,7 @@ from jiuwenswarm.common.e2a.agent_compat import e2a_to_agent_request
 from jiuwenswarm.common.e2a.constants import (
     E2A_CANCEL_SOURCE_CLIENT_DISCONNECT,
     E2A_INTERNAL_CANCEL_SOURCE_KEY,
+    E2A_RESPONSE_KIND_ACP_OUTPUT_REQUEST,
     E2A_WIRE_INTERNAL_METADATA_KEYS,
 )
 from jiuwenswarm.common.e2a.gateway_normalize import (
@@ -85,7 +86,7 @@ from jiuwenswarm.server.utils.utils import is_team_params
 from jiuwenswarm.server.context import AgentServerServices, RequestContext
 from jiuwenswarm.server.dispatch import dispatch_to_handler
 from jiuwenswarm.server.transports.push_registry import (
-    WS_PUSH_SUBSCRIBER_ID,
+    make_ws_push_subscriber_id,
     get_push_registry,
 )
 from jiuwenswarm.server.transports.sink import WSSink
@@ -156,9 +157,7 @@ from jiuwenswarm.common.security.ws_origin import (
 logger = logging.getLogger(__name__)
 
 _INTERFACE_DEEP_MODULE = "jiuwenswarm.server.runtime.agent_adapter.interface_deep"
-_skill_index_warmup_task: asyncio.Task[None] | None = None
-_skill_index_warmup_roots_cache: list[str] = []
-_skill_index_warmup_enabled_cache: str | None = None
+_startup_warmup_task: asyncio.Task[None] | None = None
 
 
 def _import_interface_deep_blocking() -> None:
@@ -180,371 +179,25 @@ async def _warm_interface_deep_module() -> None:
     )
 
 
-async def _startup_warmup_chain() -> None:
-    """Background after WS listen: interface_deep import then checkpointer warmup."""
-    try:
-        await _warm_interface_deep_module()
-    except Exception:
-        logger.warning(
-            "[AgentWebSocketServer] interface_deep_warmup failed",
-            exc_info=True,
-        )
-        return
-    try:
-        from jiuwenswarm.server.runtime.agent_adapter.interface_deep import (
-            ensure_persistent_checkpointer,
-        )
+async def ensure_interface_deep_and_checkpointer() -> None:
+    """Make interface_deep importable without a synchronous import on this task.
 
-        await ensure_persistent_checkpointer()
-    except Exception as exc:  # noqa: BLE001
-        logger.warning(
-            "[AgentWebSocketServer] checkpointer 预热失败 (首请求将兜底重试): %s", exc
-        )
-
-
-def _parse_shared_skills_dirs_from_env_dict(env: dict) -> list[str]:
-    """Extract shared skill roots from a sync/reload env object."""
-    from jiuwenswarm.common.local_env_config import canonical_product_env_key
-    from jiuwenswarm.common.utils import (
-        JIUWENSWARM_SHARED_SKILLS_DIRS_ENV,
-        parse_shared_skills_dirs_raw,
-    )
-
-    for key, value in env.items():
-        if canonical_product_env_key(str(key)) != JIUWENSWARM_SHARED_SKILLS_DIRS_ENV:
-            continue
-        if value is None:
-            continue
-        text = str(value).strip()
-        if not text:
-            continue
-        return [str(path) for path in parse_shared_skills_dirs_raw(text)]
-    return []
-
-
-def _parse_enabled_skills_from_env_dict(env: dict) -> str | None:
-    from jiuwenswarm.common.local_env_config import canonical_product_env_key
-    from jiuwenswarm.server.runtime.skill.skill_manager import ENABLED_SKILLS_ENV
-
-    for key, value in env.items():
-        if canonical_product_env_key(str(key)) != ENABLED_SKILLS_ENV:
-            continue
-        if value is None:
-            continue
-        text = str(value).strip()
-        if text:
-            return text
-    return None
-
-
-def _shared_skills_dirs_from_sync_params(params: dict) -> list[str]:
-    agents = params.get("agents")
-    if not isinstance(agents, list):
-        return []
-    seen: set[str] = set()
-    roots: list[str] = []
-    for entry in agents:
-        if not isinstance(entry, dict):
-            continue
-        env = entry.get("env")
-        if not isinstance(env, dict):
-            continue
-        for path in _parse_shared_skills_dirs_from_env_dict(env):
-            if path not in seen:
-                seen.add(path)
-                roots.append(path)
-    return roots
-
-
-def _split_enabled_skills_csv(raw: str) -> list[str]:
-    return [
-        item.strip()
-        for item in str(raw).replace(";", ",").split(",")
-        if item.strip()
-    ]
-
-
-def _merge_enabled_skills_from_agents(agents: list) -> str | None:
-    """Union allowlists from all sync agents (stable order)."""
-    seen: set[str] = set()
-    merged: list[str] = []
-    for entry in agents:
-        if not isinstance(entry, dict):
-            continue
-        env = entry.get("env")
-        if not isinstance(env, dict):
-            continue
-        enabled = _parse_enabled_skills_from_env_dict(env)
-        if enabled is None:
-            continue
-        for name in _split_enabled_skills_csv(enabled):
-            if name in seen:
-                continue
-            seen.add(name)
-            merged.append(name)
-    return ",".join(merged) if merged else None
-
-
-def _enabled_skills_from_sync_params(params: dict) -> str | None:
-    """Resolve ENABLED_SKILLS for process-index warmup.
-
-    OfficeAce stamps ``JIUWENSWARM_SHARED_SKILLS_DIRS`` onto every catalog
-    agent, each with its own short allowlist. Process warmup for the default
-    chat path only needs the general assistant (``agent_id=office``).
+    Chat/bootstrap used to ``from interface_deep import ...`` on the asyncio
+    thread. If listen-after ``to_thread(import)`` was still running, that
+    blocked the event loop on the import lock (WS recv + Creating starved).
+    Await the background chain first; only then import (cache hit).
     """
-    agents = params.get("agents")
-    if not isinstance(agents, list):
-        return None
-    for entry in agents:
-        if not isinstance(entry, dict):
-            continue
-        if str(entry.get("agent_id", "")).strip().lower() != "office":
-            continue
-        env = entry.get("env")
-        if not isinstance(env, dict):
-            continue
-        return _parse_enabled_skills_from_env_dict(env)
-    return None
-
-
-def _enabled_skills_from_tip_namespaces() -> str | None:
-    """Read ENABLED_SKILLS from synced agent tip bags (prefer default/office)."""
-    from jiuwenswarm.common.local_env_config import effective_tip
-
-    candidates: list[tuple[str | None, str | None]] = [
-        ("default", "office"),
-        ("default", "default"),
-        (None, None),
-    ]
-    try:
-        from jiuwenswarm.server.runtime.tenant_catalog_registry import (
-            TenantCatalogRegistry,
-        )
-
-        registry = TenantCatalogRegistry.get_instance()
-        for service_id, agent_id in registry.list_pairs():
-            candidates.append((service_id, agent_id))
-    except Exception as exc:  # noqa: BLE001 - tip 枚举失败时退回固定候选
-        logger.debug(
-            "[AgentWebSocketServer] tip catalog list_pairs failed; "
-            "fall back to default tip candidates: %s",
-            exc,
-            exc_info=True,
-        )
-
-    for service_id, agent_id in candidates:
-        tip = None
-        try:
-            tip = effective_tip(service_id, agent_id)
-        except Exception as tip_exc:  # noqa: BLE001 - 单个 tip 失败则跳过
-            logger.debug(
-                "[AgentWebSocketServer] effective_tip failed for "
-                "service_id=%r agent_id=%r: %s",
-                service_id,
-                agent_id,
-                tip_exc,
-                exc_info=True,
-            )
-        if not isinstance(tip, dict):
-            continue
-        enabled = _parse_enabled_skills_from_env_dict(tip)
-        if enabled is not None:
-            return enabled
-    return None
-
-
-def _shared_skills_dirs_from_tip_namespaces() -> list[str]:
-    """Read SHARED_SKILLS_DIRS from synced agent tip bags (e.g. default/office)."""
-    from jiuwenswarm.common.local_env_config import effective_tip
-
-    seen: set[str] = set()
-    roots: list[str] = []
-    candidates: list[tuple[str | None, str | None]] = [
-        ("default", "office"),
-        ("default", "default"),
-        (None, None),
-    ]
-    try:
-        from jiuwenswarm.server.runtime.tenant_catalog_registry import (
-            TenantCatalogRegistry,
-        )
-
-        registry = TenantCatalogRegistry.get_instance()
-        for service_id, agent_id in registry.list_pairs():
-            candidates.append((service_id, agent_id))
-    except Exception as exc:  # noqa: BLE001 - tip 枚举失败时退回固定候选
-        logger.debug(
-            "[AgentWebSocketServer] tip catalog list_pairs failed; "
-            "fall back to default tip candidates: %s",
-            exc,
-            exc_info=True,
-        )
-
-    for service_id, agent_id in candidates:
-        tip = None
-        try:
-            tip = effective_tip(service_id, agent_id)
-        except Exception as tip_exc:  # noqa: BLE001 - 单个 tip 失败则跳过
-            logger.debug(
-                "[AgentWebSocketServer] effective_tip failed for "
-                "service_id=%r agent_id=%r: %s",
-                service_id,
-                agent_id,
-                tip_exc,
-                exc_info=True,
-            )
-        if not isinstance(tip, dict):
-            continue
-        paths = _parse_shared_skills_dirs_from_env_dict(tip)
-        for path in paths:
-            if path not in seen:
-                seen.add(path)
-                roots.append(path)
-    return roots
-
-
-def _skill_index_warmup_roots() -> list[str]:
-    """Resolve skill roots for process-index warmup (align with SkillUseRail)."""
-    if _skill_index_warmup_roots_cache:
-        return list(_skill_index_warmup_roots_cache)
-    try:
-        from jiuwenswarm.common.utils import (
-            get_agent_skills_dir,
-            get_shared_agent_skills_dirs,
-            resolve_agent_registered_skill_dirs,
-        )
-
-        seen: set[str] = set()
-        roots: list[str] = []
-        for source in (
-            [str(p) for p in get_shared_agent_skills_dirs()],
-            [str(p) for p in _shared_skills_dirs_from_tip_namespaces()],
-            [str(p) for p in resolve_agent_registered_skill_dirs()],
-        ):
-            for path in source:
-                if path in seen:
-                    continue
-                seen.add(path)
-                roots.append(path)
-        if roots:
-            return roots
-        return [str(get_agent_skills_dir())]
-    except Exception:
-        logger.debug(
-            "[AgentWebSocketServer] skill_index_warmup root resolve failed",
-            exc_info=True,
-        )
-        return []
-
-
-def _skill_index_warmup_enabled_skills() -> str | None:
-    """Optional ENABLED_SKILLS allowlist from tip/env (same as SkillUseRail)."""
-    if _skill_index_warmup_enabled_cache is not None:
-        return _skill_index_warmup_enabled_cache
-    try:
-        tip_enabled = _enabled_skills_from_tip_namespaces()
-        if tip_enabled is not None:
-            return tip_enabled
-        from jiuwenswarm.server.runtime.skill.skill_manager import (
-            enabled_skills_from_environ,
-        )
-
-        return enabled_skills_from_environ()
-    except Exception:
-        logger.debug(
-            "[AgentWebSocketServer] skill_index_warmup enabled_skills resolve failed",
-            exc_info=True,
-        )
-        return None
-
-
-async def _warm_skill_md_index() -> None:
-    """Background: frontmatter-only process skill index after WS listen."""
-    t0 = time.perf_counter()
-    roots = _skill_index_warmup_roots()
-    if not roots:
-        logger.info(
-            "[AgentWebSocketServer] skill_index_warmup skipped: no skill roots "
-            "elapsed_ms=%.1f",
-            (time.perf_counter() - t0) * 1000,
-        )
-        return
-    enabled = _skill_index_warmup_enabled_skills()
-    try:
-        from openjiuwen.harness.rails.skills import warmup_process_skill_index
-
-        stats = await asyncio.to_thread(
-            warmup_process_skill_index,
-            roots,
-            enabled_skills=enabled,
-        )
-    except Exception:
-        logger.warning(
-            "[AgentWebSocketServer] skill_index_warmup failed roots=%s elapsed_ms=%.1f",
-            roots,
-            (time.perf_counter() - t0) * 1000,
-            exc_info=True,
-        )
-        return
-    logger.info(
-        "[AgentWebSocketServer] skill_index_warmup ok roots=%s filled=%s hits=%s "
-        "entries=%s cost_ms=%s wall_ms=%.1f",
-        roots,
-        stats.get("filled"),
-        stats.get("hits"),
-        stats.get("entries"),
-        stats.get("cost_ms"),
-        (time.perf_counter() - t0) * 1000,
+    task = _startup_warmup_task
+    if task is not None and not task.done():
+        await task
+    if _INTERFACE_DEEP_MODULE not in sys.modules:
+        await _warm_interface_deep_module()
+    from jiuwenswarm.server.runtime.agent_adapter.interface_deep import (
+        ensure_persistent_checkpointer,
     )
 
+    await ensure_persistent_checkpointer()
 
-def _start_skill_index_warmup(*, force: bool = False) -> None:
-    global _skill_index_warmup_task
-    if _skill_index_warmup_task is not None and not _skill_index_warmup_task.done():
-        if not force:
-            return
-        _skill_index_warmup_task.cancel()
-    _skill_index_warmup_task = asyncio.get_running_loop().create_task(
-        _warm_skill_md_index()
-    )
-
-
-def schedule_skill_index_warmup_after_sync(
-    *,
-    sync_params: dict | None = None,
-    force: bool = False,
-) -> None:
-    """Re-warm skill index once sync_agents_configs has injected shared skill dirs."""
-    global _skill_index_warmup_roots_cache, _skill_index_warmup_enabled_cache
-
-    roots: list[str] = []
-    if isinstance(sync_params, dict):
-        roots = _shared_skills_dirs_from_sync_params(sync_params)
-        enabled = _enabled_skills_from_sync_params(sync_params)
-        if enabled is not None:
-            _skill_index_warmup_enabled_cache = enabled
-    if not roots:
-        roots = _shared_skills_dirs_from_tip_namespaces()
-    if not roots:
-        try:
-            from jiuwenswarm.common.utils import get_shared_agent_skills_dirs
-
-            roots = [str(path) for path in get_shared_agent_skills_dirs()]
-        except Exception as exc:  # noqa: BLE001
-            logger.debug(
-                "[AgentWebSocketServer] get_shared_agent_skills_dirs failed: %s",
-                exc,
-                exc_info=True,
-            )
-            roots = []
-    if not roots:
-        logger.info(
-            "[AgentWebSocketServer] schedule_skill_index_warmup_after_sync skipped: "
-            "no shared skill roots"
-        )
-        return
-    _skill_index_warmup_roots_cache = roots
-    _start_skill_index_warmup(force=force)
 
 
 from jiuwenswarm.server.wire_truncate import (  # noqa: F401  — re-exported for tests / handlers
@@ -663,11 +316,13 @@ class AgentWebSocketServer:
         self._ping_interval = ping_interval
         self._ping_timeout = ping_timeout
         self._server: Any = None
+        # 事件循环饥饿观测（非保活）：测量 sleep(1) 唤醒延迟，便于对齐 pong 超时。
+        self._loop_lag_task: asyncio.Task[None] | None = None
         # send_push的推送订阅者统一由PushRegistry持有，本类不持有当前连接；
-        # WS侧以固定id：`WS_PUSH_SUBSCRIBER_ID`注册。
+        # WS侧以每连接唯一id：``make_ws_push_subscriber_id(ws)``注册。
         # key是``_ws_capabilities_key``返回的str(id(ws))，与RequestContext.connection_id
         self._acp_client_capabilities_by_ws: dict[str, dict[str, Any]] = {}
-        # AgentManager 实例（企业多租户入口见 TenantAgentPool，按 AGENT_RUNTIME 使用）
+        # AgentManager 实例（企业多租户入口见 TenantAgentPool，按企业版使用）
         self._agent_manager = AgentManager()
         # skills.* 等无状态 RPC：AgentManager 未缓存 agent 时复用的轻量 JiuWenSwarm，
         # 避免每次 cache miss 都 new 导致 SkillNet 异步安装等实例态断裂。
@@ -684,12 +339,15 @@ class AgentWebSocketServer:
         self._default_model: Optional[Any] = None
         # 本地 jiuwenbox 子进程管理器 (lazy 启动, 在 /sandbox enable 时 ensure_running)
         self._jiuwenbox_runner = JiuwenBoxRunner.instance()
-        # checkpointer 后台预热任务 (start() 里 fire-and-forget, stop() 时 cancel)
-        self._checkpointer_warmup_task: Optional[asyncio.Task] = None
         # Proactive recommendation engine (set by app_agentserver for debug trigger)
         self._proactive_engine: Any = None
         get_acp_output_manager().set_send_push_callback(
             lambda msg: asyncio.create_task(self.send_push(msg))
+        )
+        get_push_registry().set_reverse_rpc_owner_lost_callback(
+            lambda: get_acp_output_manager().fail_pending_requests(
+                RuntimeError("Gateway reverse RPC connection lost")
+            )
         )
 
     def set_proactive_engine(self, engine: Any) -> None:
@@ -805,16 +463,98 @@ class AgentWebSocketServer:
         logger.info(
             "[AgentWebSocketServer] 已启动: ws://%s:%s", self._host, self._port
         )
-        _start_skill_index_warmup()
-        # 端口已 listen: interface_deep 在 thread pool import，再预热 checkpointer.
-        # _checkpointer_warmup_task 供 shutdown 时 cancel, 避免任务悬挂.
-        self._checkpointer_warmup_task = asyncio.create_task(
-            _startup_warmup_chain(), name="startup-warmup"
-        )
+        # 启动端到端预热：interface_deep import → checkpointer → 临时 DeepAgent → query。
+        # 拆成两个 task：
+        #   - _startup_warmup_task 承载阶段1/2（import+checkpointer），快速有界，
+        #     供 ensure_interface_deep_and_checkpointer 兜底 await。
+        #   - 阶段3（临时 DeepAgent+query）独立 fire-and-forget，慢速，不兜底 await，
+        #     避免首请求被预热 query（mock ~2-3s / 真实 LLM 最长 120s）阻塞。
+        global _startup_warmup_task
+
+        wm = (get_config().get("startup") or {}).get("warmup") or {}
+        if not wm.get("enabled", True):  # 默认开启；关闭时跳过预热
+            _startup_warmup_task = None
+        else:
+            async def _warmup_phase12() -> None:
+                from jiuwenswarm.server.runtime.prewarm import warmup_import_and_checkpointer
+
+                await warmup_import_and_checkpointer()
+
+            async def _warmup_phase3() -> None:
+                from jiuwenswarm.server.runtime.prewarm import warmup_deep_agent_query
+
+                await warmup_deep_agent_query(
+                    query=wm.get("query", "hello"),
+                    channel_id=wm.get("channel_id", "__prewarm__"),
+                    mode=wm.get("mode", "agent"),
+                    timeout_s=wm.get("timeout_s", 120),
+                    mock_model=wm.get("mock_model", True),  # 默认 mock，不消耗 token
+                )
+
+            _startup_warmup_task = asyncio.create_task(
+                _warmup_phase12(), name="startup-warmup"
+            )
+
+            # 阶段3 在阶段1/2 完成后启动（独立 task，不阻塞 listen，不被兜底 await）。
+            async def _phase3_after_phase12() -> None:
+                task12 = _startup_warmup_task
+                if task12 is not None:
+                    await task12  # 等阶段1/2 完成再起阶段3（checkpointer 是 DeepAgent 前置）
+                await _warmup_phase3()
+
+            asyncio.create_task(_phase3_after_phase12(), name="startup-warmup-query")
         # WS 监听已经开放, 现在按 config.yaml::sandbox 的 runtime.enabled +
         # startup_mode 决定要不要自动把 jiuwenbox 子进程也拉起来。失败不阻塞
         # 启动 (用户依然可以在 TUI 里跑 /sandbox enable 重试)。
         await self._bootstrap_internal_jiuwenbox()
+        await self._start_loop_lag_monitor()
+
+    async def _start_loop_lag_monitor(self) -> None:
+        """启动事件循环 lag 观测 task 与停摆探针（验收用，不主动断连/不发应用心跳）。"""
+        # 事件循环停摆探针 + 主线程栈采样器：用于定位「同步处理占住事件循环
+        # 数秒导致网关 ping/pong 超时、任务被一刀切取消」类问题（见
+        # ``jiuwenswarm/server/event_loop_monitor.py`` 模块 docstring）。
+        # 幂等挂载；失败仅告警，绝不影响服务启动。
+        try:
+            from jiuwenswarm.server.event_loop_monitor import (
+                ensure_event_loop_monitor,
+            )
+
+            await ensure_event_loop_monitor()
+        except Exception:
+            logger.exception(
+                "[AgentWebSocketServer] 事件循环监控装载失败（已忽略）"
+            )
+        if self._loop_lag_task is not None and not self._loop_lag_task.done():
+            return
+        self._loop_lag_task = asyncio.create_task(
+            self._loop_lag_monitor(),
+            name="ws-loop-lag-monitor",
+        )
+
+    async def _loop_lag_monitor(self) -> None:
+        """每隔约 1s 测量预期唤醒 vs 实际唤醒延迟。
+
+        lag > 1.0s → WARNING；lag > 5.0s → ERROR。仅观测，不干预连接。
+        """
+        interval_s = 1.0
+        while True:
+            started = time.monotonic()
+            await asyncio.sleep(interval_s)
+            lag_s = time.monotonic() - started - interval_s
+            if lag_s <= 1.0:
+                continue
+            lag_ms = lag_s * 1000.0
+            if lag_s > 5.0:
+                logger.error(
+                    "[AgentWebSocketServer] event loop lag high lag_ms=%.0f",
+                    lag_ms,
+                )
+            else:
+                logger.warning(
+                    "[AgentWebSocketServer] event loop lag elevated lag_ms=%.0f",
+                    lag_ms,
+                )
 
     async def _bootstrap_internal_jiuwenbox(self) -> None:
         """启动时按 ``config.yaml::sandbox`` 自动拉起 jiuwenbox 子进程。
@@ -1032,7 +772,7 @@ class AgentWebSocketServer:
 
     async def stop(self) -> None:
         """停止 WebSocket 服务端."""
-        global _skill_index_warmup_task
+        global _startup_warmup_task
 
         async def _cancel_warmup_task(task: asyncio.Task[None] | None, label: str) -> None:
             if task is None or task.done():
@@ -1046,12 +786,12 @@ class AgentWebSocketServer:
                 logger.warning("[AgentWebSocketServer] %s cancel failed: %s", label, exc)
 
         # 先取消后台预热, 避免在 server 关闭后仍在后台跑.
-        warmup = self._checkpointer_warmup_task
-        self._checkpointer_warmup_task = None
+        warmup = _startup_warmup_task
+        _startup_warmup_task = None
         await _cancel_warmup_task(warmup, "startup warmup")
-        skill_warmup = _skill_index_warmup_task
-        _skill_index_warmup_task = None
-        await _cancel_warmup_task(skill_warmup, "skill_index warmup")
+        lag_task = self._loop_lag_task
+        self._loop_lag_task = None
+        await _cancel_warmup_task(lag_task, "loop lag monitor")
         had_server = self._server is not None
         if had_server:
             self._server.close()
@@ -1083,13 +823,15 @@ class AgentWebSocketServer:
         logger.info("[AgentWebSocketServer] 新连接: %s", remote)
 
         send_lock = asyncio.Lock()
-        # WS连接注册为推送订阅者，同id重复注册即覆盖，
-        # drop_on_stall=False：与 _GatewayWSPushSink「发送失败/变慢都不注销」的契约一致 ——
-        # gateway-ws 是固定 id 的单槽位，被摘掉后长连接不会重新注册，只能重启服务恢复。
+        # 每连接唯一订阅 id：短连接断开只清自己，不得抹掉仍存活的长连接（旧固定
+        # gateway-ws 单槽曾导致 send_push 永久失败、chat.file 到不了前台）。
+        # drop_on_stall=False：与 _GatewayWSPushSink「发送失败/变慢都不注销」一致。
+        push_subscriber_id = make_ws_push_subscriber_id(ws)
         get_push_registry().register(
-            WS_PUSH_SUBSCRIBER_ID,
+            push_subscriber_id,
             _GatewayWSPushSink(ws, send_lock),
             drop_on_stall=False,
+            reverse_rpc_capable=True,
         )
 
         # 触发身份获取（写入当前连接 context；无 provider 时身份为 null，连接继续）。
@@ -1162,12 +904,8 @@ class AgentWebSocketServer:
                     IdentityStore.clear(identity_token)
                 except Exception:
                     logger.exception("[AgentWebSocketServer] identity clear failed")
-            # **无条件**注销：即使已有新连接接管，也照旧抹掉。
-            # 语义对齐重构前的 `self._current_ws = None` / `self._current_send_lock = None`，
-            # 是刻意保留的既有行为，**不要顺手改成「仅当仍是自己时才注销」** ——
-            # 它的失败方式是静默的（前端收不到推送但不报错），改动前请看
-            # `transports/push_registry.py` 模块 docstring 的单槽位语义一节。
-            get_push_registry().unregister(WS_PUSH_SUBSCRIBER_ID)
+            # 只注销本连接的唯一订阅 id，保留其他仍存活 WS 的推送订阅。
+            get_push_registry().unregister(push_subscriber_id)
             self._clear_ws_acp_client_capabilities(ws)
             connection_tasks = list(tasks)
             for task in connection_tasks:
@@ -1360,9 +1098,7 @@ class AgentWebSocketServer:
     ) -> AgentResponse | None:
         """Return an error response when persistent checkpoint storage is unavailable."""
         try:
-            from jiuwenswarm.server.runtime.agent_adapter.interface_deep import ensure_persistent_checkpointer
-
-            await ensure_persistent_checkpointer()
+            await ensure_interface_deep_and_checkpointer()
             return None
         except Exception as exc:
             logger.exception(
@@ -1436,7 +1172,7 @@ class AgentWebSocketServer:
     def _tenant_pool() -> TenantAgentPool:
         return TenantAgentPool.get_instance()
 
-    async def send_push(self, msg) -> None:
+    async def send_push(self, msg) -> int:
         """AgentServer 主动向 Gateway 推送消息。
 
         payload 格式与 AgentResponse.payload 一致，
@@ -1445,22 +1181,43 @@ class AgentWebSocketServer:
         扇出给 :class:`PushRegistry` 里的全部订阅者：Gateway WS 连接与经
         ``GET /api/v1/events/stream`` 订阅的 HTTP 客户端都在其中，推送只有这一条
         路径。有订阅者即送达，一个都没有则记 warning。
+
+        Returns:
+            成功送达的订阅者数量。``0`` 表示未投递（无订阅者 / 编码失败 /
+            过滤后无人匹配 / sink 全部失败）。调用方（如 ``send_file_to_user``）
+            应用此返回值判定成败，勿再把「仅打了 warning」当成发送成功。
         """
         registry = get_push_registry()
-        if registry.subscriber_count() == 0:
+        response_kind = str(msg.get("response_kind") or "").strip()
+        is_reverse_rpc = response_kind == E2A_RESPONSE_KIND_ACP_OUTPUT_REQUEST
+        if (
+            not registry.reverse_rpc_ready()
+            if is_reverse_rpc
+            else registry.subscriber_count() == 0
+        ):
             # 一个去处都没有：保持原有告警与早退（连 wire 都不构造）。
             logger.warning(
-                "[AgentWebSocketServer] send_push 失败: 无活跃 Gateway 连接"
+                "[AgentWebSocketServer] send_push 失败: 无活跃 Gateway 连接 "
+                "session_id=%s request_id=%s event_type=%s",
+                msg.get("session_id", ""),
+                msg.get("request_id", ""),
+                (msg.get("payload") or {}).get("event_type", "")
+                if isinstance(msg.get("payload"), dict)
+                else "",
             )
-            return
+            return 0
 
         try:
             wire = build_server_push_wire(msg)
         except Exception as e:
             logger.warning("[AgentWebSocketServer] send_push 失败: %s", e)
-            return
+            return 0
 
-        delivered = await registry.push(wire)
+        delivered = (
+            await registry.push_reverse_rpc(wire)
+            if is_reverse_rpc
+            else await registry.push(wire)
+        )
 
         if delivered == 0:
             # 两种情况都会落到这里：内容过大被降级成错误帧（sink 返回 False），
@@ -1470,9 +1227,8 @@ class AgentWebSocketServer:
                 "（内容过大降级为错误帧，或订阅者过滤后无人匹配）: channel_id=%s",
                 msg.get("channel_id", ""),
             )
-            return
+            return 0
 
-        response_kind = str(msg.get("response_kind") or "").strip()
         if response_kind:
             logger.info(
                 "[AgentWebSocketServer] send_push response_kind wire sent: "
@@ -1487,6 +1243,7 @@ class AgentWebSocketServer:
                 msg.get("channel_id", ""),
                 delivered,
             )
+        return delivered
 
     def get_agent(self):
         """获取 default agent 实例（向后兼容）."""

@@ -34,6 +34,7 @@ import {
 } from '../../features/workspace/projectDirectoryPicker';
 import { toDisplaySessionTitle } from '../../utils/documentMessage';
 import './ConversationSidebar.css';
+import { isEnterprise } from '../../edition';
 import '../dialogs/dialogs.css';
 import AddProjectIcon from '../../assets/work-mode/add-project.svg?react';
 import ArrowRightIcon from '../../assets/work-mode/arrow-right.svg?react';
@@ -709,6 +710,7 @@ export function ConversationSidebar({
   isCronActive,
 }: ConversationSidebarProps) {
   const { t } = useTranslation();
+  const enterpriseMode = isEnterprise();
   const runtimes = useChatStore((state) => state.runtimes);
   const [relativeTimeNow, setRelativeTimeNow] = useState(Date.now);
   const [unreadSessions, setUnreadSessions] = useState(loadUnreadSessions);
@@ -774,10 +776,16 @@ export function ConversationSidebar({
 
   const switchWorkMode = async (nextMode: 'work' | 'code') => {
     setWorkModeMenuOpen(false);
+    if (enterpriseMode && nextMode !== 'work') return;
     if (nextMode === workMode) return;
     await setWorkMode(nextMode);
     onNew();
   };
+
+  useEffect(() => {
+    if (!enterpriseMode || workMode === 'work') return;
+    void setWorkMode('work');
+  }, [enterpriseMode, workMode, setWorkMode]);
 
   const cronJobs = useCronStore((s) => s.jobs);
   const loadCronJobs = useCronStore((s) => s.loadJobs);
@@ -1201,14 +1209,20 @@ export function ConversationSidebar({
         <button
           type="button"
           className="conversation-sidebar__mode-trigger"
-          onClick={() => setWorkModeMenuOpen((open) => !open)}
-          aria-haspopup="menu"
-          aria-expanded={workModeMenuOpen}
+          onClick={() => {
+            if (enterpriseMode) return;
+            setWorkModeMenuOpen((open) => !open);
+          }}
+          aria-haspopup={enterpriseMode ? undefined : 'menu'}
+          aria-expanded={enterpriseMode ? undefined : workModeMenuOpen}
+          style={enterpriseMode ? { cursor: 'default' } : undefined}
         >
-          <span>{workMode === 'code' ? t('codeMode.code') : t('codeMode.work')}</span>
-          <ChevronDown size={15} className={workModeMenuOpen ? 'is-open' : ''} />
+          <span>{workMode === 'code' && !enterpriseMode ? t('codeMode.code') : t('codeMode.work')}</span>
+          {!enterpriseMode && (
+            <ChevronDown size={15} className={workModeMenuOpen ? 'is-open' : ''} />
+          )}
         </button>
-        {workModeMenuOpen ? (
+        {!enterpriseMode && workModeMenuOpen ? (
           <div className="conversation-sidebar__mode-menu" role="menu">
             <button
               type="button"
@@ -1272,7 +1286,7 @@ export function ConversationSidebar({
                   projectMenu: Boolean(project && !isDefaultProject(project)),
                 });
               })}
-              {pinnedProjects.map((project) => renderProject(project))}
+              {!enterpriseMode && pinnedProjects.map((project) => renderProject(project))}
             </div>
           </div>
         ) : null}
@@ -1288,6 +1302,7 @@ export function ConversationSidebar({
             </div>
           </div>
         ) : null}
+{!enterpriseMode ? (
         <div className="conversation-sidebar__group conversation-sidebar__project-add" ref={addMenuRef}>
           <div className="conversation-sidebar__section-heading">
             <span className="conversation-sidebar__label">{t('multiSession.project.projects')}</span>
@@ -1329,6 +1344,7 @@ export function ConversationSidebar({
             {regularProjects.map((project) => renderProject(project))}
           </div>
         </div>
+) : null}
         <div className="conversation-sidebar__group conversation-sidebar__group--conversations">
           <div className="conversation-sidebar__section-heading">
             <span className="conversation-sidebar__label">{t('multiSession.conversations')}</span>

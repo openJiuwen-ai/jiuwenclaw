@@ -877,6 +877,168 @@ async def handle_team_session_reset(ctx: RequestContext) -> None:
     await ctx.sink.send_wire(wire)
 
 
+async def handle_team_runtime_dissolve(ctx: RequestContext) -> None:
+    """Dissolve one session's team runtime after a template/config change.
+
+    Stops the in-memory runtime + clears the initialized flag + resets the
+    session task board (COLD_RECOVER: memory/history kept), so the next
+    chat.send rebuilds from the reconciled template snapshot.
+    """
+    request = ctx.request
+    from openjiuwen.core.runner import Runner
+    from jiuwenswarm.server.runtime.session.session_metadata import (
+        get_session_metadata,
+        resolve_session_runtime_team_name,
+    )
+    from jiuwenswarm.agents.harness.team import get_team_manager
+
+    params = request.params if isinstance(request.params, dict) else {}
+    team_name = str(params.get("team_name") or "").strip()
+    session_id = str(params.get("session_id") or "").strip()
+
+    if not session_id:
+        resp = AgentResponse(
+            request_id=request.request_id,
+            channel_id=request.channel_id,
+            ok=False,
+            payload={
+                "error": "team.runtime.dissolve requires session_id",
+                "code": "BAD_REQUEST",
+            },
+            metadata=request.metadata,
+        )
+    else:
+        sessions_root = _sessions_dir_for_request(request)
+        metadata = get_session_metadata(session_id, cache_bust=True, sessions_root=sessions_root)
+        runtime_team_name = resolve_session_runtime_team_name(metadata) or team_name
+        if not runtime_team_name:
+            # 会话未绑定运行时团队且请求未带 team_name：无可 dissolve 的
+            # 运行时。ok=True 与 relay resetTeamSession 接受 NOT_FOUND 的
+            # 语义对齐，避免 relay 侧 teamConfigDirty 标记被永久卡住。
+            resp = AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=True,
+                payload={
+                    "dissolved": True,
+                    "session_id": session_id,
+                    "team_name": "",
+                },
+                metadata=request.metadata,
+            )
+        else:
+            team_manager = get_team_manager(
+                str(metadata.get("channel_id") or request.channel_id or "")
+            )
+            # 1) 停 shell 侧运行时追踪 + 清 initialized 标记（stop_runner=False：
+            #    Runner 侧运行时由下方 reset_agent_team_session 统一处理）。
+            try:
+                await team_manager.stop_session_runtime(
+                    session_id,
+                    reason="team.runtime.dissolve",
+                    stop_runner=False,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "[AgentWebSocketServer] stop_session_runtime (dissolve) "
+                    "failed: session_id=%s error=%s",
+                    session_id,
+                    exc,
+                )
+            try:
+                team_manager.clear_session_initialized(session_id)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "[AgentWebSocketServer] clear_session_initialized (dissolve) "
+                    "failed: session_id=%s error=%s",
+                    session_id,
+                    exc,
+                )
+            # 1.5) 解析 keep-set：现跑 reconcile 对齐模板后取 leader + predefined
+            #      成员名（时序陷阱：dissolve 先于下一轮 chat.send，此刻冻结快照
+            #      仍含被删成员，故不读冻结原样，必经 reconcile）。None = 模板不可
+            #      得 → 跳过 prune（fail-open）。
+            from jiuwenswarm.server.runtime.team_snapshot_refresh import (
+                resolve_dissolve_keep_members,
+            )
+            keep_members = resolve_dissolve_keep_members(
+                session_id=session_id,
+                team_name=str(metadata.get("team_name") or "").strip(),
+                template_id=str(metadata.get("team_template_id") or "").strip(),
+                config_base=_effective_config_for_request(request),
+                sessions_root=sessions_root,
+                metadata=metadata,
+            )
+            # 2) 丢任务板行 + 清 pending_resume + 保 checkpoint bucket -> COLD_RECOVER。
+            try:
+                ok = await Runner.reset_agent_team_session(
+                    team_name=runtime_team_name,
+                    session_id=session_id,
+                    force=True,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "[AgentWebSocketServer] team.runtime.dissolve failed: "
+                    "team=%s session=%s error=%s",
+                    runtime_team_name,
+                    session_id,
+                    exc,
+                )
+                ok = False
+            # 3) prune roster：reset 保 roster（COLD_RECOVER 需要），但被删成员的行
+            #    会令下一轮 COLD_RECOVER 复活之。reset 成功且 keep-set 已知时删掉
+            #    它们；prune 失败置 ok=false 让 relay 退避重试（幂等）。agent-core
+            #    太老（无此方法）→ 跳过且 warning，ok 不变。
+            if ok and keep_members is not None:
+                if not hasattr(Runner, "prune_agent_team_roster"):
+                    logger.warning(
+                        "[AgentWebSocketServer] agent-core lacks "
+                        "prune_agent_team_roster; dissolve skips roster prune "
+                        "team=%s session=%s",
+                        runtime_team_name,
+                        session_id,
+                    )
+                else:
+                    try:
+                        pruned = await Runner.prune_agent_team_roster(
+                            team_name=runtime_team_name,
+                            session_id=session_id,
+                            keep_members=keep_members,
+                        )
+                        if pruned:
+                            logger.info(
+                                "[AgentWebSocketServer] dissolve pruned roster "
+                                "team=%s session=%s members=%s",
+                                runtime_team_name,
+                                session_id,
+                                pruned,
+                            )
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning(
+                            "[AgentWebSocketServer] dissolve prune failed "
+                            "(retryable): team=%s session=%s error=%s",
+                            runtime_team_name,
+                            session_id,
+                            exc,
+                        )
+                        ok = False
+            resp = AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=bool(ok),
+                payload={
+                    "dissolved": bool(ok),
+                    "session_id": session_id,
+                    # 回显解析后的权威运行时名（relay 可不传 team_name）。
+                    "team_name": runtime_team_name,
+                },
+                metadata=request.metadata,
+            )
+
+    wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
+    await ctx.sink.send_wire(wire)
+
+
 async def handle_team_snapshot(ctx: RequestContext) -> None:
     request = ctx.request
     from jiuwenswarm.agents.harness.team import get_team_manager

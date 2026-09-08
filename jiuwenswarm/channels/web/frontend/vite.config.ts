@@ -56,10 +56,9 @@ function setIntersect(a: Set<string>, b: Set<string>): boolean {
 
 /**
  * 凭证值形态：即便没有敏感键名上下文，值本身是已知前缀的凭证（OpenAI/Bearer/JWT/
- * GitHub/GitLab token）也要脱敏。与后端 _SENSITIVE_PATTERNS 对齐。
+ * GitHub/GitLab token）也要脱敏。
  *
- * Bearer 用后行断言只捕获令牌值本体（不含 "Bearer " 前缀），使指纹与后端
- * _BEARER_SENSITIVE_PATTERN 的 group(2)（token 本体）一致，跨端可关联。
+ * Bearer 用后行断言只捕获令牌值本体（不含 "Bearer " 前缀），便于跨端指纹关联。
  */
 const SENSITIVE_VALUE_PATTERNS: { re: RegExp }[] = [
   { re: /\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/g }, // JWT
@@ -71,11 +70,11 @@ const SENSITIVE_VALUE_PATTERNS: { re: RegExp }[] = [
 
 /**
  * 对单个敏感值做带指纹的脱敏：``******(fp:xxxxxxxx)``。
- * 指纹 = SHA256(值) 前 4 字节（8 位 hex），与后端 _fingerprint 算法一致，
+ * 指纹 = SHA256(值) 前 4 字节（8 位 hex），与后端 fingerprint 算法一致，
  * 同一 key 在前后端两套日志中指纹相同，便于跨端关联排查。不可逆。
  *
  * 若 value 本身已是脱敏产物（``******`` 或 ``******(fp:..)``），原样返回不重算，
- * 与后端 _masked_with_fp 的 _is_already_masked 判断一致——避免对"指纹值"再算
+ * 与后端 masked_with_fp / is_already_masked 判断一致——避免对"指纹值"再算
  * 指纹导致跨日志关联失效。
  */
 const ALREADY_MASKED_RE = new RegExp(
@@ -319,28 +318,121 @@ function resolveWebHttpPort(wsPort: number): number {
   return port
 }
 
+function parseLoginAuthSimulate(raw: string | undefined): boolean {
+  const value = (raw ?? '').trim().toLowerCase()
+  if (!value) return true
+  if (value === 'true') return true
+  if (value === 'false') return false
+  throw new Error(
+    `LOGIN_AUTH_SIMULATE 配置非法：仅支持 true 或 false，当前值为 ${JSON.stringify(raw)}`
+  )
+}
+
+/** Mirrors ``jiuwenswarm.common.local_env_config.is_enterprise`` for Vite startup checks. */
+function isEnterpriseEdition(): boolean {
+  const edition = (process.env.JIUWENSWARM_EDITION ?? process.env.VITE_JIUWENSWARM_EDITION ?? '')
+    .trim()
+    .toLowerCase()
+  return edition === 'enterprise'
+}
+
+function loginAuthStartupCheck(): Plugin {
+  const enterprise = isEnterpriseEdition()
+  const simulateRaw = process.env.LOGIN_AUTH_SIMULATE ?? process.env.VITE_LOGIN_AUTH_SIMULATE
+  const simulate = parseLoginAuthSimulate(simulateRaw)
+
+  return {
+    name: 'login-auth-startup-check',
+    async configureServer() {
+      if (simulateRaw === undefined || !simulateRaw.trim()) {
+        console.info(
+          '[jiuwenswarm-web] LOGIN_AUTH_SIMULATE 未配置，按默认值 true 启用登录认证模拟调试'
+        )
+      }
+      if (!enterprise) {
+        console.info('[jiuwenswarm-web] 单机版模式：跳过企业登录认证')
+        if (!simulate) {
+          console.warn(
+            '[jiuwenswarm-web] 配置冲突：personal 模式仍将跳过企业登录；' +
+            'LOGIN_AUTH_SIMULATE=false 不会启用正式身份认证'
+          )
+        }
+        return
+      }
+      if (simulate) {
+        console.info('[jiuwenswarm-web] 【登录认证模拟调试模式已开启】不调用客户侧 manager ID认证服务')
+        return
+      }
+
+      console.info('[jiuwenswarm-web] 【正式身份认证模式，依赖manager ID认证服务】')
+      const targets = [
+        { name: 'manager ID认证服务', env: 'USER_WEB_IDP_TARGET', target: process.env.USER_WEB_IDP_TARGET, path: '/v1/auth/me' },
+        { name: 'Manager业务接口', env: 'USER_WEB_MANAGER_TARGET', target: process.env.USER_WEB_MANAGER_TARGET, path: '/api/v1/user-console/gateways' },
+      ]
+      const missing = targets.filter(({ target }) => !target).map(({ env }) => env)
+      if (missing.length > 0) {
+        console.error(
+          `[jiuwenswarm-web] 正式登录模式下未配置 ${missing.join('、')}；` +
+          '请配置 manager 认证及业务接口地址'
+        )
+        return
+      }
+      for (const item of targets) {
+        const target = item.target!.replace(/\/$/, '')
+        try {
+          const response = await fetch(`${target}${item.path}`, {
+            signal: AbortSignal.timeout(3000),
+          })
+          if (response.status >= 500) throw new Error(`HTTP ${response.status}`)
+          console.info(`[jiuwenswarm-web] ${item.name}连通性检查通过：${target}`)
+        } catch (error) {
+          console.error(
+            `[jiuwenswarm-web] 当前为正式登录模式，${item.name}暂不可用；` +
+            `请检查 ${item.env}（${target}）：${error instanceof Error ? error.message : String(error)}`
+          )
+        }
+      }
+    },
+  }
+}
+
 const frontendPort = portFromEnv('FRONTEND_PORT', 5173)
 const webPort = portFromEnv('WEB_PORT', 19000)
-const webTarget = `http://127.0.0.1:${webPort}`
+const webTarget =
+  process.env.GATEWAY_WEB_WS_URL?.replace(/\/$/, '') ||
+  process.env.GATEWAY_URL?.replace(/\/$/, '') ||
+  `http://127.0.0.1:${webPort}`
 const webHttpPort = resolveWebHttpPort(webPort)
 const webHttpTarget =
   process.env.GATEWAY_WEB_HTTP_URL?.replace(/\/$/, '') ||
   `http://127.0.0.1:${webHttpPort}`
 
 export default defineConfig({
-  plugins: [suppressWsProxySocketErrors(), devWsTrafficLogger(), react(), svgr()],
+  // 相对资源路径同时支持独立根路径与 Manager Web 的 /chat/ 同源转发。
+  base: './',
+  plugins: [loginAuthStartupCheck(), suppressWsProxySocketErrors(), devWsTrafficLogger(), react(), svgr()],
   optimizeDeps: {
     include: ['exceljs', 'jszip', 'saxes', 'ssf'],
   },
   resolve: {
     alias: {
       '@': path.resolve(__dirname, './src'),
+      'virtual:login-auth-simulate-provider': path.resolve(
+        __dirname,
+        './src/auth/simulate/available.ts',
+      ),
     },
   },
   server: {
+    host: '0.0.0.0',
     port: frontendPort,
     strictPort: true,
+    // Manager Web 企业链路把 /chat 反代到 http://jiuwenclaw-web:5173，
+    // Vite 5.4+ 默认拒绝未登记 Host，会直接 403。
+    allowedHosts: true,
     proxy: {
+      '/idp': { target: process.env.USER_WEB_IDP_TARGET || 'http://127.0.0.1:8770', changeOrigin: true, rewrite: (p) => p.replace(/^\/idp/, '') },
+      '/manager-api': { target: process.env.USER_WEB_MANAGER_TARGET || 'http://127.0.0.1:8765', changeOrigin: true, rewrite: (p) => p.replace(/^\/manager-api/, '/api') },
       '/file-api': {
         target: webHttpTarget,
         changeOrigin: true,
@@ -353,6 +445,11 @@ export default defineConfig({
       '/api/v1': {
         target: webHttpTarget,
         changeOrigin: true,
+      },
+      '/gateway-api': {
+        target: webHttpTarget,
+        changeOrigin: true,
+        rewrite: (requestPath) => requestPath.replace(/^\/gateway-api/, '/api'),
       },
       '/api/sessions': {
         target: webHttpTarget,

@@ -171,3 +171,61 @@ async def test_reset_session_force_stops_active_runtime_first():
     mgr.stop_team.assert_awaited_once_with(
         team_name="oc_team_x__h", session_id="active_sess"
     )
+
+
+@pytest.mark.asyncio
+async def test_reset_session_force_clears_inprocess_member_inflight_round():
+    """reset_session(force=True) aborts each in-process member's in-flight
+    round BEFORE the stop_team/force_kill fallback, so the interrupted
+    round's incomplete tool_call is sanitized (dropped via the abort path's
+    ``_cleanup_context_on_cancel``) and COLD_RECOVER no longer resumes it.
+
+    Pins the contract: enumerate entry.agent.spawn_manager.spawned_handles;
+    per handle with agent_ref -> stream_controller.cancel_agent() (=
+    ``harness.abort(immediate=True)``); handles without agent_ref (subprocess
+    members) are skipped, not raised on. stop_team is still the fallback.
+    """
+    mgr = _make_mgr()
+    mgr._pool.has_active = AsyncMock(return_value=True)
+
+    # in-process member with a live handle + agent_ref
+    member_sc = MagicMock()
+    member_sc.cancel_agent = AsyncMock()
+    member_ref = MagicMock()
+    member_ref.stream_controller = member_sc
+    inproc_handle = MagicMock()
+    inproc_handle.agent_ref = member_ref
+
+    # subprocess member: handle without agent_ref -> must be skipped, not raise
+    subprocess_handle = MagicMock()
+    subprocess_handle.agent_ref = None
+
+    entry = MagicMock()
+    entry.current_session_id = "active_sess"
+    entry.agent.spawn_manager.spawned_handles = {
+        "client-engineer": inproc_handle,
+        "remote-cli": subprocess_handle,
+    }
+    mgr._pool.get = AsyncMock(return_value=entry)
+    mgr.stop_team = AsyncMock()
+    ckpt = MagicMock()
+    ckpt.session_exists = AsyncMock(return_value=False)  # short-circuit after stop
+    ckpt.release = AsyncMock()
+    db = _make_db()
+
+    p = _teardown_patchers(db)
+    with p[0] as CF, p[1], p[2]:
+        CF.get_checkpointer.return_value = ckpt
+        from openjiuwen.agent_teams.runtime.manager import TeamRuntimeManager
+
+        ok = await TeamRuntimeManager.reset_session(
+            mgr, "oc_team_x__h", "sess_1", force=True
+        )
+
+    assert ok is True
+    # member in-flight aborted BEFORE stop_team fallback
+    member_sc.cancel_agent.assert_awaited_once()
+    # stop_team still the fallback, once, with the active session id
+    mgr.stop_team.assert_awaited_once_with(
+        team_name="oc_team_x__h", session_id="active_sess"
+    )

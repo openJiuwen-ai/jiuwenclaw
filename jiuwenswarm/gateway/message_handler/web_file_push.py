@@ -2,12 +2,13 @@
 
 """Enterprise file push helpers — land on Gateway disk and sign download tokens.
 
-Historically POSTed to Web Pod ``/file-api/push``. Web is static-only now; files
-are written under ``web_received_files`` (or ``JIUWENSWARM_WEB_RECEIVED_FILES``)
-on the Gateway host and served via Gateway ``GET /file-api/download``.
+Used by chunked ``file_transfer`` / ``POST /file-api/push`` (escape hatch).
+Enterprise ``send_file`` OBS path does **not** land files here; Gateway
+proxies MinIO on ``GET /file-api/download?url=``.
 """
 
 from __future__ import annotations
+from jiuwenswarm.edition import is_enterprise
 
 import logging
 import os
@@ -22,7 +23,7 @@ async def push_file_to_web_and_get_token(
     session_id: str,
 ) -> dict[str, Any] | None:
     """Copy a local file into Gateway received dir and return download metadata."""
-    if not os.getenv("AGENT_RUNTIME", "").strip():
+    if not is_enterprise():
         return None
 
     try:

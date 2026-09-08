@@ -93,6 +93,27 @@ def _json_and_db(
     return StoreLayout(file=file, db=DbLayout(table=table))
 
 
+def _json_only(
+    rel: str,
+    *,
+    persistent_root: Path | None,
+    shape: Literal["map", "list"] = "map",
+    key_fields: tuple[str, ...] = (),
+) -> StoreLayout | None:
+    """形态：仅个人版独立 JSON；企业装配时不注册。"""
+    if persistent_root is None:
+        return None
+    return StoreLayout(
+        file=FileLayout(
+            path=str(persistent_root / rel),
+            format="json",
+            shape=shape,
+            key_fields=key_fields,
+        ),
+        db=None,
+    )
+
+
 def _json_and_db_at_path(
     table: str,
     path: Path,
@@ -123,16 +144,30 @@ def _db_table(table: str) -> StoreLayout:
 
 _YAML_AND_DB_SECTIONS: dict[str, _YamlSectionSpec] = {
     "channel_config": ("/channels", ("id",), ""),
-    "permissions_config": ("/permissions", (), ""),
     "logging_config": ("/logging", (), ""),
     "memory_config": ("/memory", (), ""),
 }
 
 _YAML_ONLY_SECTIONS: dict[str, _YamlSectionSpec] = {
+    # 企业策略走 permissions_template 槽位，不再落实例级 permissions_config 表
+    "permissions_config": ("/permissions", (), ""),
     "heartbeat_config": ("/heartbeat", (), ""),
     "browser_config": ("/browser", (), ""),
     "preferred_language_config": ("/preferred_language", (), "preferred_language"),
     "a2ui_config": ("/a2ui", (), ""),
+}
+
+_JSON_ONLY_STORES: dict[str, _JsonAndDbSpec] = {
+    "a2a_outbound_agent": (
+        "a2a_outbound_agents.json",
+        "map",
+        ("agent_id",),
+    ),
+    "a2a_outbound_dispatch": (
+        "a2a_outbound_dispatches.json",
+        "map",
+        ("dispatch_id",),
+    ),
 }
 
 _JSON_AND_DB_STORES: dict[str, _JsonAndDbSpec] = {
@@ -169,6 +204,16 @@ def _build_layouts(
     layouts: dict[str, StoreLayout] = {}
 
     layouts["cron_job"] = _legacy_gateway_cron_job_layout(cron_jobs_path_template)
+
+    for name, (rel, shape, key_fields) in _JSON_ONLY_STORES.items():
+        layout = _json_only(
+            rel,
+            persistent_root=persistent_root,
+            shape=shape,
+            key_fields=key_fields,
+        )
+        if layout is not None:
+            layouts[name] = layout
 
     for name, (rel, shape, key_fields) in _JSON_AND_DB_STORES.items():
         if name == "session_map":
@@ -217,6 +262,8 @@ def _build_layouts(
             layouts[name] = layout
 
     for table in ENTERPRISE_RECORD_STORE_NAMES:
+        if table == "cron_job":
+            continue
         layouts[table] = _db_table(table)
 
     return layouts

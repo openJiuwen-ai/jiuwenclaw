@@ -3587,9 +3587,37 @@ def test_parse_stream_chunk_emits_empty_final_marker_after_streamed_content(pars
         },
     )
 
-    parsed = parser(chunk, _has_streamed_content=True)
+    if parser is interface_deep_module.JiuWenSwarmDeepAdapter._parse_stream_chunk:
+        # Deep adapter needs the already-streamed text to decide trailer-only
+        # vs drain-rescue when has_streamed was set by tiny/blank deltas.
+        parsed = parser(
+            chunk,
+            _has_streamed_content=True,
+            _streamed_text="final answer",
+        )
+    else:
+        parsed = parser(chunk, _has_streamed_content=True)
 
     assert parsed == {"event_type": "chat.final", "content": ""}
+
+
+def test_deep_parse_keeps_final_body_when_stream_flag_lacks_visible_text():
+    """False has_streamed (no visible segment text) must keep answer for drain."""
+    chunk = types.SimpleNamespace(
+        type="answer",
+        payload={
+            "output": {
+                "output": "final answer",
+                "chunked": False,
+            }
+        },
+    )
+    parsed = interface_deep_module.JiuWenSwarmDeepAdapter._parse_stream_chunk(
+        chunk,
+        _has_streamed_content=True,
+        _streamed_text="",
+    )
+    assert parsed == {"event_type": "chat.final", "content": "final answer"}
 
 
 def test_parse_stream_chunk_maps_toolcall_progress_to_processing_status():

@@ -4,11 +4,7 @@ version: 0.2.0
 description: Gateway HTTP config receiver for Claw Manager sync (replaces manager_ws_client WebSocket client)
 author: openjiuwen
 min_jiuwenclaw_version: "0.1.0"
-dependencies:
-  pydantic-settings: ">=2.0"
-  python-dotenv: ">=1.0"
-  # DBHandler / link_auth；与 runtime_management_extension 同源
-  openjiuwen_runtime_foundation: " @ git+https://gitcode.com/openJiuwen/agent-runtime.git@develop#subdirectory=foundation"
+dependencies: {}
 config_schema:
   type: object
   properties:

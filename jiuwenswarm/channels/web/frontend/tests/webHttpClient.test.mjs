@@ -146,6 +146,16 @@ test('sse frames keep A1 event names', () => {
   const event = sseFrameToWsEvent(frames[0]);
   assert.equal(event?.event, 'chat.delta');
   assert.equal(event?.payload.content, 'a');
+  assert.equal(event?.request_id, 'req_1');
+});
+
+test('SSE frame id restores request_id when data omits it', () => {
+  const { frames } = consumeSseBuffer(
+    'id: chat-42\nevent: chat.tool_result\ndata: {\"tool_result\":{\"tool_call_id\":\"tool-1\"}}\n\n'
+  );
+  const event = sseFrameToWsEvent(frames[0]);
+  assert.equal(event?.request_id, 'chat-42');
+  assert.equal(event?.payload.tool_result.tool_call_id, 'tool-1');
 });
 
 test('history JSON page becomes history.message events plus done', () => {

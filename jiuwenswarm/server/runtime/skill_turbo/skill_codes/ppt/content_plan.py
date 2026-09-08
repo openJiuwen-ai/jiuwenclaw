@@ -52,17 +52,19 @@ _P41_SYSTEM_PROMPT = """你是 PPT 内容策划助手。根据主题、目标页
 必须只输出 JSON：
 {"material_richness":"empty","focus_areas":"..."}"""
 
-_P42A_SYSTEM_PROMPT = """你是 PPT 快速调研助手。根据主题、研究重点与用户素材，生成固定批次的网页搜索查询。
+_P42A_SYSTEM_PROMPT = """你是 PPT 快速调研助手。根据主题与研究重点生成网页搜索 query。
 
 规则：
-1. 查询应覆盖不同维度：领域现状、关键维度、最新动态、核心玩家、争议热点（可合并到单条 query 的 intent 中）。
-2. 中文主题建议中英双语 query 搭配；添加当前年份或 latest/report/statistics 等可信来源关键词。
-3. 有用户素材时，聚焦素材未覆盖的维度，避免重复已有信息。
-4. 不要编造已确认的事实；只输出搜索 query，不写结论。
+1. 覆盖不同维度（可合并进单条 intent）：领域现状、关键维度、最新动态、核心玩家、争议热点。
+2. 中文主题搭配中英 query；可加当前年份或 latest/report。
+3. 有用户素材时只补未覆盖维度；不编造事实。
+4. 只产出搜索 query：禁止分析、结论、结果摘要、逐步推理正文。
 
-必须只输出 JSON：
-{"entity":"主题核心实体名,无明确实体填 null","queries":[{"dimension":"领域现状","query":"..."}]}"""
+输出（唯一允许的全文）：一个 JSON 对象；无前言、无 Markdown 围栏、无结尾说明。
+{"entity":"主题核心实体名或 null","queries":[{"dimension":"领域现状","query":"..."}]}"""
 
+# 健康短 JSON（约 8 条 query）远小于此；基线级非 JSON 长散文（数万 token）必触发中途熔断。
+_P42A_RESPONSE_MAX_CHARS = 4096
 _P42_MAX_RETRIES = 2
 # 设计：R0 初始搜索用 _P42A_SYSTEM_PROMPT（广覆盖、中英双语、加年份/report 等可信词）；
 # 重搜用下方 _P42_RELEVANCE_SYSTEM_PROMPT 定向收窄/扩搜。重搜刻意不复用 _P42A_SYSTEM_PROMPT——
@@ -354,12 +356,8 @@ def _build_p42a_prompt(inputs: dict[str, Any], source_material: str) -> str:
     current_year = now.strftime("%Y")
     min_count, max_count = _query_count_bounds(bool(source_material))
     parts = [
-        f"# 当前日期\n\n"
-        f"- 当前日期：{now_str}\n"
-        f"- 当前年份：{current_year}\n"
-        '- 当用户询问"最新、当前、今年、本年、实时、近期"等信息并需要搜索时，'
-        '搜索 query 必须优先使用当前年份或日期\n',
-        f"请生成 {min_count}~{max_count} 条并行搜索 query。\n",
+        f"当前日期：{now_str}（年份 {current_year}）。涉及时效的 query 优先带当前年份。\n",
+        f"生成 {min_count}~{max_count} 条并行搜索 query。\n",
         f"- topic: {inputs.get('topic', '')}\n",
         f"- page_count: {inputs.get('page_count')}\n",
         f"- audience: {inputs.get('audience', '')}\n",
@@ -369,8 +367,36 @@ def _build_p42a_prompt(inputs: dict[str, Any], source_material: str) -> str:
     ]
     if source_material:
         parts.append(f"用户素材摘要：\n{source_material}\n")
-    parts.append('按 JSON 返回 {"entity":"主题核心实体名,无明确实体填 null","queries":[{"dimension":"...","query":"..."}]}。')
+    parts.append(
+        "只输出一个 JSON："
+        '{"entity":"...或 null","queries":[{"dimension":"...","query":"..."}]}'
+        "——无其它文字。"
+    )
     return "\n".join(parts)
+
+
+async def _stream_llm_collect_bounded(
+    node: PlanNode,
+    prompt: str,
+    *,
+    system_prompt: str,
+    max_chars: int,
+    error_prefix: str = "P4.2a",
+) -> str:
+    """流式收集 LLM 可见 content；超限立即失败以中止非 JSON 长正文空转。"""
+    chunks: list[str] = []
+    total = 0
+    async for chunk in node.stream_llm(prompt, system_prompt=system_prompt):
+        piece = chunk if isinstance(chunk, str) else str(chunk or "")
+        if not piece:
+            continue
+        total += len(piece)
+        if total > max_chars:
+            raise ContentPlanError(
+                f"{error_prefix} 响应过长（>{max_chars} 字符），疑似非 JSON 空转，已中止"
+            )
+        chunks.append(piece)
+    return "".join(chunks)
 
 
 def _format_search_results_for_p43(search_results: list[dict[str, str]]) -> str:
@@ -562,9 +588,12 @@ async def _run_p42_quick_research(node: PlanNode, inputs: dict[str, Any]) -> Non
     )
     has_source_material = bool(source_material)
 
-    response_a = await node.stream_llm_collect(
+    response_a = await _stream_llm_collect_bounded(
+        node,
         _build_p42a_prompt(inputs, source_material),
         system_prompt=_P42A_SYSTEM_PROMPT,
+        max_chars=_P42A_RESPONSE_MAX_CHARS,
+        error_prefix="P4.2a",
     )
     if not isinstance(response_a, str) or not response_a.strip():
         raise ContentPlanError("P4.2a 失败：LLM 返回为空")
@@ -839,6 +868,25 @@ def _validate_outline_markdown_basic(
                 f"实际 {content_count}"
             )
 
+    # 总页数校验：max(page_numbers) 应等于 page_count + 2(封面/结束) + 结构页数
+    # 防止 intent 阶段 page_count 算错导致总页数与用户要求不一致
+    if expected_content_pages is not None:
+        spr = str(structural_page_request or "none").strip().lower()
+        if isinstance(structural_page_count, int) and structural_page_count > 0:
+            structural_num = structural_page_count
+        elif spr != "none":
+            structural_num = 1
+        else:
+            structural_num = 0
+        expected_total = expected_content_pages + 2 + structural_num
+        actual_total = max(page_numbers) if page_numbers else 0
+        if actual_total != expected_total:
+            raise ContentPlanError(
+                f"P4.3 outline 总页数应为 {expected_total}"
+                f"（内容页{expected_content_pages} + 封面/结束2 + 结构页{structural_num}），"
+                f"实际最大页码为 {actual_total}"
+            )
+
     # 遵从 pptx-craft outline-planner Stage 3 产物验证：
     # 首页类型为 cover，末页类型为 ending（conclusion/transition 为别名）
     _struct_pages = _split_outline_pages(stripped)
@@ -1006,6 +1054,130 @@ def _validate_outline_markdown_full(
             )
 
 
+def _outline_validate_kwargs(inputs: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "topic": str(inputs.get("topic") or "").strip(),
+        "page_count": inputs.get("page_count"),
+        "include_searched_sources": _should_include_searched_sources(inputs),
+        "structural_page_request": str(inputs.get("structural_page_request") or "none"),
+        "structural_page_count": inputs.get("structural_page_count"),
+    }
+
+
+def _outline_full_error(text: str, inputs: dict[str, Any]) -> str | None:
+    try:
+        _validate_outline_markdown_full(text, **_outline_validate_kwargs(inputs))
+        return None
+    except ContentPlanError as exc:
+        return str(exc)
+
+
+_URL_IN_TEXT_PATTERN = re.compile(r"https?://[^\s\]\)\"'<>]+")
+_OUTLINE_TITLE_LINE_PATTERN = re.compile(r"(?m)^#\s*大纲\s*[：:].*$")
+
+
+def _fix_outline_title_line(text: str, topic: str) -> str:
+    topic = topic.strip()
+    if not topic or not _OUTLINE_TITLE_LINE_PATTERN.search(text):
+        return text
+    return _OUTLINE_TITLE_LINE_PATTERN.sub(f"# 大纲：{topic}", text, count=1)
+
+
+def _build_searched_sources_section(inputs: dict[str, Any]) -> str | None:
+    rows: list[str] = []
+    seen: set[str] = set()
+    for batch in inputs.get("search_results") or []:
+        if not isinstance(batch, dict):
+            continue
+        dim = str(batch.get("dimension") or "").strip() or "-"
+        result_text = str(batch.get("result") or "")
+        urls = _URL_IN_TEXT_PATTERN.findall(result_text)
+        if urls:
+            for url in urls:
+                key = url.rstrip(".,;）)")
+                if key in seen:
+                    continue
+                seen.add(key)
+                rows.append(f"| {key} | {dim} |")
+            continue
+        query = str(batch.get("query") or "").strip()
+        if query and query not in seen:
+            seen.add(query)
+            rows.append(f"| {query} | {dim} |")
+    if not rows:
+        return None
+    return (
+        "## 已搜索来源\n\n"
+        "| URL | 覆盖维度 |\n"
+        "| --- | --- |\n"
+        + "\n".join(rows)
+        + "\n"
+    )
+
+
+def _replace_outline_field_value(block: str, field: str, new_value: str) -> str:
+    pattern = re.compile(
+        rf"(^[ \t]*-?\s*\*\*{re.escape(field)}\*\*[：:][ \t]*)(.+)$",
+        re.MULTILINE,
+    )
+    return pattern.sub(lambda m: m.group(1) + new_value, block, count=1)
+
+
+def _fallback_queries_text(inputs: dict[str, Any]) -> str:
+    parts: list[str] = []
+    for item in inputs.get("p4_search_queries") or []:
+        if isinstance(item, dict):
+            q = str(item.get("query") or "").strip()
+        else:
+            q = str(item).strip()
+        if q:
+            parts.append(q)
+        if len(parts) >= 3:
+            break
+    return "；".join(parts)
+
+
+def _fix_placeholder_research_fields(text: str, inputs: dict[str, Any]) -> str:
+    queries_fallback = _fallback_queries_text(inputs)
+    pages = _split_outline_pages(text)
+    if not pages:
+        return text
+    pieces: list[str] = []
+    cursor = 0
+    for _page_num, block in pages:
+        start = text.find(block, cursor)
+        if start < 0:
+            continue
+        pieces.append(text[cursor:start])
+        new_block = block
+        if _is_research_required_page(block):
+            if _is_placeholder_field_value(_extract_outline_field(block, "研究查询")):
+                fill = queries_fallback or _extract_outline_field(block, "内容概要").strip()
+                if fill and not _is_placeholder_field_value(fill):
+                    new_block = _replace_outline_field_value(new_block, "研究查询", fill)
+            if _is_placeholder_field_value(_extract_outline_field(new_block, "数据需求")):
+                fill = _extract_outline_field(new_block, "内容概要").strip()
+                if fill and not _is_placeholder_field_value(fill):
+                    new_block = _replace_outline_field_value(new_block, "数据需求", fill)
+        pieces.append(new_block)
+        cursor = start + len(block)
+    pieces.append(text[cursor:])
+    return "".join(pieces)
+
+
+def _normalize_outline_contract(text: str, inputs: dict[str, Any]) -> str:
+    """写盘/校验前确定性规范化：标题对齐 topic、补已搜索来源、回填占位字段。不编造事实。"""
+    out = text
+    topic = str(inputs.get("topic") or "").strip()
+    if topic:
+        out = _fix_outline_title_line(out, topic)
+    if _should_include_searched_sources(inputs) and "## 已搜索来源" not in out:
+        section = _build_searched_sources_section(inputs)
+        if section and "## 页面规划" in out:
+            out = out.replace("## 页面规划", f"{section}\n## 页面规划", 1)
+    return _fix_placeholder_research_fields(out, inputs)
+
+
 def _resolve_outline_path(inputs: dict[str, Any]) -> Path:
     outline_path = inputs.get("outline_path")
     if outline_path:
@@ -1027,15 +1199,13 @@ async def _run_p44_validate(node: PlanNode, inputs: dict[str, Any]) -> None:
         error_type=ContentPlanError,
     )
 
-    topic = str(inputs.get("topic") or "").strip()
-    _validate_outline_markdown_full(
-        outline_text,
-        topic=topic,
-        page_count=inputs.get("page_count"),
-        include_searched_sources=_should_include_searched_sources(inputs),
-        structural_page_request=str(inputs.get("structural_page_request") or "none"),
-        structural_page_count=inputs.get("structural_page_count"),
-    )
+    normalized = _normalize_outline_contract(outline_text, inputs)
+    err = _outline_full_error(normalized, inputs)
+    if err:
+        raise ContentPlanError(err)
+    if normalized != outline_text:
+        await _write_outline(node, outline_path.parent, normalized)
+        logger.info("[P4.4] outline normalized before pass")
 
     inputs["outline_path"] = str(outline_path)
     inputs["p4_validate_status"] = "passed"
@@ -1100,25 +1270,32 @@ async def _run_p43_outline_gen(node: PlanNode, inputs: dict[str, Any]) -> None:
     if search_results:
         search_results_text = _format_search_results_for_p43(search_results)
 
-    response = await node.stream_llm_collect(
-        _build_p43_prompt(inputs, source_material, search_results_text),
-        system_prompt=_p43_system_prompt(source_type),
-    )
-    if not isinstance(response, str) or not response.strip():
-        raise ContentPlanError("P4.3 失败：LLM 返回为空")
+    async def _generate_once() -> str:
+        response = await node.stream_llm_collect(
+            _build_p43_prompt(inputs, source_material, search_results_text),
+            system_prompt=_p43_system_prompt(source_type),
+        )
+        if not isinstance(response, str) or not response.strip():
+            raise ContentPlanError("P4.3 失败：LLM 返回为空")
+        text = _strip_markdown_fence(response)
+        _check_insufficient_info(text, inputs)
+        return text
 
-    outline_text = _strip_markdown_fence(response)
-
-    _check_insufficient_info(outline_text, inputs)
-
-    topic = str(inputs.get("topic") or "").strip()
-    _validate_outline_markdown_basic(
-        outline_text,
-        topic=topic,
-        page_count=inputs.get("page_count"),
-        structural_page_request=str(inputs.get("structural_page_request") or "none"),
-        structural_page_count=inputs.get("structural_page_count"),
-    )
+    raw_outline = await _generate_once()
+    outline_text = _normalize_outline_contract(raw_outline, inputs)
+    err = _outline_full_error(outline_text, inputs)
+    if err:
+        # normalize 未改动 → 问题不在契约表面，再生成易白烧一轮；直接交 DeepAgent
+        if outline_text == raw_outline:
+            logger.info("[P4.3] give_up_to_fallback (normalize noop): %s", err[:120])
+            raise ContentPlanError(err)
+        logger.info("[P4.3] local_regen after normalize: %s", err[:120])
+        inputs["failure_reason"] = err
+        outline_text = _normalize_outline_contract(await _generate_once(), inputs)
+        err = _outline_full_error(outline_text, inputs)
+        if err:
+            logger.info("[P4.3] give_up_to_fallback: %s", err[:120])
+            raise ContentPlanError(err)
 
     _all_page_nums = [int(m.group(1)) for m in _PAGE_HEADING_PATTERN.finditer(outline_text)]
     inputs["total_pages"] = max(_all_page_nums) if _all_page_nums else 0

@@ -8,6 +8,8 @@ interface ImportMetaEnv {
   readonly VITE_TRANSPORT?: string;
   readonly VITE_GATEWAY_HTTP_BASE?: string;
   readonly VITE_WEB_HTTP_BASE?: string;
+  readonly VITE_JIUWENSWARM_EDITION?: string;
+  readonly VITE_LOGIN_AUTH_SIMULATE?: string;
 }
 
 interface ImportMeta {
@@ -44,4 +46,15 @@ interface Window {
   };
   /** Durable ingest hook invoked by desktop_app.py run_js on native file drops. */
   __JIUWEN_INGEST_LOCAL_FILES__?: (detail: unknown) => void;
+  /** Edition injected by the User Web server (mirrors JIUWENSWARM_EDITION). */
+  __JIUWENSWARM_EDITION__?: string;
+  /** Login simulation switch injected by the User Web server. */
+  __JIUWEN_LOGIN_AUTH_SIMULATE__?: boolean | string;
+  /** Web transport mode injected by the User Web server (websocket | http). */
+  __JIUWEN_WEB_TRANSPORT__?: string;
+}
+
+declare module 'virtual:login-auth-simulate-provider' {
+  import type { EnterpriseAuthProvider } from './auth/types';
+  export const simulatedAuthProvider: EnterpriseAuthProvider | null;
 }

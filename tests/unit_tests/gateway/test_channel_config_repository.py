@@ -296,11 +296,12 @@ async def test_file_backend_replace_subsection_writes_yaml(tmp_path: Path) -> No
 
 
 @pytest.mark.asyncio
-async def test_create_channel_config_repository_selects_codec() -> None:
+async def test_create_channel_config_repository_selects_codec(monkeypatch) -> None:
     from jiuwenswarm.gateway.storage_assembly import create_channel_config_repository
 
     store = InMemoryPersistentBackend()
-    personal = create_channel_config_repository(store, "personal")
+    monkeypatch.delenv("JIUWENSWARM_EDITION", raising=False)
+    personal = create_channel_config_repository(store)
     await personal.upsert(ChannelConfig(channel_id="web", body={"enabled": True}))
     yaml_row = await store.get("channel_config", {"id": "web"})
     assert yaml_row is not None
@@ -308,14 +309,13 @@ async def test_create_channel_config_repository_selects_codec() -> None:
     assert yaml_row["enabled"] is True
 
     db_store = InMemoryPersistentBackend()
+    monkeypatch.setenv("JIUWENSWARM_EDITION", "enterprise")
     enterprise = create_channel_config_repository(
-        db_store, "enterprise", instance_id="inst-1"
+        db_store, instance_id=""
     )
     await enterprise.upsert(ChannelConfig(channel_id="web", body={"enabled": True}))
-    db_row = await db_store.get(
-        "channel_config", {"channel_id": "web", "jiuwenclaw_id": "inst-1"}
-    )
+    db_row = await db_store.get("channel_config", {"channel_id": "web"})
     assert db_row is not None
     assert db_row["channel_id"] == "web"
-    assert db_row["jiuwenclaw_id"] == "inst-1"
+    assert "jiuwenclaw_id" not in db_row
     assert db_row["config"] == {"enabled": True}

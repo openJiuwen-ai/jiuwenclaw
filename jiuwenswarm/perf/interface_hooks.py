@@ -38,12 +38,40 @@ def snapshot_perf_summary_usage(request_id: str | None) -> dict[str, int] | None
     output_tokens = max(0, int(getattr(acc, "output_tokens", 0) or 0))
     if input_tokens <= 0 and output_tokens <= 0:
         return None
+    total_tokens = max(0, int(getattr(acc, "total_tokens", 0) or 0))
     return {
         "input_tokens": input_tokens,
         "output_tokens": output_tokens,
-        "total_tokens": input_tokens + output_tokens,
+        "total_tokens": total_tokens or input_tokens + output_tokens,
         "cache_tokens": max(0, int(getattr(acc, "cache_read_tokens", 0) or 0)),
     }
+
+
+def record_deepresearch_sdk_token_usage(
+    request_id: str | None,
+    usage_id: str,
+    usage: dict[str, Any],
+) -> None:
+    """Best-effort accounting for one terminal DeepResearch SDK usage snapshot."""
+    rid = (request_id or "").strip()
+    if not rid:
+        return
+
+    def _record() -> None:
+        get_perf_collector().record_external_token_usage(
+            rid,
+            source="deepresearch_sdk",
+            usage_id=usage_id,
+            input_tokens=int(usage["input_tokens"]),
+            output_tokens=int(usage["output_tokens"]),
+            total_tokens=int(usage["total_tokens"]),
+        )
+
+    run_perf_safe(
+        _COMPONENT,
+        f"external token usage request_id={rid} source=deepresearch_sdk",
+        _record,
+    )
 
 
 def merge_perf_summary_usage_fallback(

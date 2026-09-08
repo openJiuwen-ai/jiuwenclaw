@@ -9,35 +9,6 @@ check_cmd() {
     fi
 }
 
-check_boolean_value() {
-    local name="$1"
-    local value="${DEPLOY_VARS["${name}"]:-}"
-    if [[ "${value}" != "true" && "${value}" != "false" ]]; then
-        error "${name} must be true or false, current value: ${value}"
-    fi
-}
-
-check_user_web_embedding_config() {
-    check_boolean_value "ENABLE_USER_WEB_EMBEDDING"
-    check_boolean_value "IS_UP_MANAGER_WEB"
-
-    if [[ "${DEPLOY_VARS["ENABLE_USER_WEB_EMBEDDING"]}" == "true" \
-        && "${DEPLOY_VARS["IS_UP_MANAGER_WEB"]}" != "true" ]]; then
-        error "ENABLE_USER_WEB_EMBEDDING=true requires IS_UP_MANAGER_WEB=true"
-    fi
-}
-
-module_is_selected() {
-    local expected="$1"
-    local module=""
-    for module in "${MODULES[@]}"; do
-        if [ "${module}" == "${expected}" ]; then
-            return 0
-        fi
-    done
-    return 1
-}
-
 check_yq() {
     local YQ_VERSION=$(yq --version 2>&1)
 
@@ -144,6 +115,55 @@ check_if_nfs_sc_up() {
     DEPLOY_VARS["CLAW_PVC"]="jiuwenclaw-pvc"
 }
 
+# 变量规则一：
+# mysql: DB_NAME 拼为 <<MODULE>>_<<NAMESPACE>>（按 db 隔离各实例）
+# postgresql: PG_SCHEMA 取 NAMESPACE（按 schema 隔离各实例）
+# 变量规则二：
+# 支持分库独立账号配置：分别定义 <<MODULE>>_DB_USER / <<MODULE>>_DB_PASSWORD
+# 支持全局统一账号配置: 统一定义 DB_USER / DB_PASSWORD
+# 优先级规则：若两类变量同时配置，以分库专属账号为准，全局统一账号自动失效
+set_db_var() {
+    local module=$1
+    local db_type=$2
+    local name=$3
+    local namespace="${DEPLOY_VARS["NAMESPACE"]}"
+    local lmodule="${module,,}"
+    local full_name="${module}_${name}"
+
+    case "$name" in
+        DB_NAME)
+            if [[ -z "${DEPLOY_VARS["${full_name}"]:-}" ]]; then
+                if [ "${db_type}" == "mysql" ]; then
+                    DEPLOY_VARS["${full_name}"]="${lmodule}_${namespace}"
+                else
+                    DEPLOY_VARS["${full_name}"]="${lmodule}"
+                fi
+            fi
+            return
+            ;;
+        PG_SCHEMA)
+            if [[ -z "${DEPLOY_VARS["${full_name}"]:-}" ]]; then
+                if [ ${db_type} == "postgresql" ]; then
+                    DEPLOY_VARS["${full_name}"]="${namespace}"
+                fi
+            fi
+            return
+            ;;
+        DB_USER|DB_PASSWORD)
+            if [ -z "${DEPLOY_VARS["${full_name}"]:-}" ]; then
+                DEPLOY_VARS["${full_name}"]=${DEPLOY_VARS["${name}"]:-}
+            fi
+            ;;
+        *)
+            error "invaild var name"
+            ;;
+    esac
+
+    if [ -z "${DEPLOY_VARS["${full_name}"]:-}" ]; then
+        error "Please set up ${full_name} or ${name}."
+    fi
+}
+
 check_if_db_up() {
     # 已经执行过检查，直接返回，避免重复校验
     if [[ "${DEPLOY_VARS["DB_CHECKED"]:-}" == "true" ]]; then
@@ -151,14 +171,14 @@ check_if_db_up() {
     fi
 
     local db_type="${DEPLOY_VARS["DB_TYPE"]}"
-    local db_type_upper="${db_type^^}"
-    local name="${DEPLOY_VARS["${db_type_upper}_NAME"]}"
-
     info "DB_TYPE: ${db_type}"
     DEPLOY_VARS["DB_CHECKED"]="true"
-    if [ "${db_type}" == "sqlite" ]; then
-        return
+    if [ "${db_type}" != "mysql" ] && [ "${db_type}" != "postgresql" ]; then
+        error "DB_TYPE='${db_type}' is not supported in enterprise deploy; use 'mysql' or 'postgresql'"
     fi
+
+    local db_type_upper="${db_type^^}"
+    local name="${DEPLOY_VARS["${db_type_upper}_NAME"]}"
 
     # Build-In DB server
     if [[ -z "${DEPLOY_VARS["DB_HOST"]:-}" || "${DEPLOY_VARS["DB_HOST"]}" == "${name}-headless.default" ]]; then
@@ -175,6 +195,9 @@ check_if_db_up() {
                 do
                     DEPLOY_VARS["${module}_DB_USER"]="root"
                     DEPLOY_VARS["${module}_DB_PASSWORD"]=${DEPLOY_VARS["MYSQL_ROOT_PASSWORD"]}
+                    for name in DB_NAME PG_SCHEMA; do
+                        set_db_var "${module}" "${db_type}" "${name}"
+                    done
                 done
                 ;;
             postgresql)
@@ -184,6 +207,9 @@ check_if_db_up() {
                 do
                     DEPLOY_VARS["${module}_DB_USER"]="postgres"
                     DEPLOY_VARS["${module}_DB_PASSWORD"]=${DEPLOY_VARS["POSTGRESQL_PASSWORD"]}
+                    for name in DB_NAME PG_SCHEMA; do
+                        set_db_var "${module}" "${db_type}" "${name}"
+                    done
                 done
                 ;;
             *)
@@ -193,29 +219,16 @@ check_if_db_up() {
         return
     fi
 
-    info "Use external ${DB_TYPE} server"
+    info "Use external ${db_type} server"
 
     if [ -z "${DEPLOY_VARS["DB_PORT"]:-}" ]; then
         error "Please define DB_PORT in .env.custom"
     fi
 
-    for module in GATEWAY WEB MANAGER IDENTITY RUNTIME
-    do
-        if [ -z "${DEPLOY_VARS["${module}_DB_USER"]:-}" ]; then
-            DEPLOY_VARS["${module}_DB_USER"]=${DEPLOY_VARS["DB_USER"]}
-        fi
-
-        if [ -z "${DEPLOY_VARS["${module}_DB_USER"]:-}" ]; then
-            error "Please set up ${module}_DB_USER or DB_USER."
-        fi
-
-        if [ -z "${DEPLOY_VARS["${module}_DB_PASSWORD"]:-}" ]; then
-            DEPLOY_VARS["${module}_DB_PASSWORD"]=${DEPLOY_VARS["DB_PASSWORD"]}
-        fi
-
-        if [ -z "${DEPLOY_VARS["${module}_DB_PASSWORD"]:-}" ]; then
-            error "Please set up ${module}_DB_PASSWORD or DB_PASSWORD."
-        fi
+    for module in GATEWAY WEB MANAGER IDENTITY RUNTIME; do
+        for name in DB_USER DB_PASSWORD DB_NAME PG_SCHEMA; do
+            set_db_var "${module}" "${db_type}" "${name}"
+        done
     done
 }
 
@@ -235,32 +248,48 @@ check_if_obs_up() {
     fi
 
     info "Use built-in Minio server"
+    DEPLOY_VARS["OBS_URL"]="${name}-headless.default:9000"
 }
 
-check_if_redis_up() {
+ensure_redis_up() {
     # 已经执行过检查，直接返回，避免重复校验
     if [[ "${DEPLOY_VARS["REDIS_CHECKED"]:-}" == "true" ]]; then
         return
     fi
 
-    local mode="${DEPLOY_VARS["DEPLOYMENT_MODE"]}"
-    local name="${DEPLOY_VARS["REDIS_NAME"]}"
-
     DEPLOY_VARS["REDIS_CHECKED"]="true"
+
+    local namespace="${DEPLOY_VARS["NAMESPACE"]}"
+    local redis_name="${DEPLOY_VARS["REDIS_NAME"]}"
+
+    # 已设外挂 Redis，跳过
     if [ -n "${DEPLOY_VARS["REDIS_HOST"]:-}" ]; then
-        info "Use external Redis server"
+        info "Use external Redis server: ${DEPLOY_VARS["REDIS_HOST"]}"
         DEPLOY_VARS["ENABLE_EXTERNAL_REDIS"]="true"
         return
     fi
 
-    # No Build-In Redis server
-    if ! check_k8s_resource_exists "deployment" "${name}"; then
-        error "Redis is not deployed. Please deploy it first with: ./$(basename "$0") up redis"
+    DEPLOY_VARS["REDIS_HOST"]="${redis_name}.${namespace}"
+    DEPLOY_VARS["REDIS_PORT"]="6379"
+
+    # 同命名空间已有 redis，直接用
+    if check_k8s_resource_exists "deployment" "${redis_name}" "${namespace}"; then
+        info "Use built-in Redis server in namespace: ${namespace}"
+        return
     fi
 
-    info "Use built-in Redis server"
-    DEPLOY_VARS["REDIS_HOST"]="${name}.default"
-    DEPLOY_VARS["REDIS_PORT"]="6379"
+    render_redis_files
+
+    # 渲染模式不实际部署
+    if [ "${DEPLOY_VARS["RENDER_ONLY"]}" == "true" ]; then
+        info "rendering Redis files for namespace: ${namespace}"
+        return
+    fi
+
+    # 同命名空间没有 redis 且非外挂 → 自动启动一个
+    info "Redis not found in namespace '${namespace}', auto-deploying built-in Redis..."
+    deploy_redis
+    success "Deploy Redis in namespace '${namespace}'"
 }
 
 check_if_jina_up() {
@@ -376,10 +405,6 @@ check_minio_up_dependency(){
     fi
 }
 
-check_redis_up_dependency() {
-    info "Redis module has no dependencies"
-}
-
 check_rabbitmq_up_dependency(){
     local rabbit_path="${DEPLOY_VARS["NFS_POD_PATH"]}/${DEPLOY_VARS["RABBITMQ_NAME"]}"
     local nfs_dname=${DEPLOY_VARS["NFS_NAME"]}
@@ -418,6 +443,10 @@ check_jina_up_dependency() {
     info "JINA module has no dependencies"
 }
 
+check_proxy_up_dependency() {
+    info "PROXY module has no dependencies"
+}
+
 check_gateway_up_dependency(){
     local jiuwenclaw_path="${DEPLOY_VARS["NFS_POD_PATH"]}/jiuwenclaw"
     local nfs_dname=${DEPLOY_VARS["NFS_NAME"]}
@@ -437,19 +466,12 @@ check_gateway_up_dependency(){
     fi
 
     check_if_db_up
-    check_if_redis_up
     check_if_jina_up
+    ensure_redis_up
+    check_if_obs_up
 }
 
 check_web_up_dependency(){
-    check_user_web_embedding_config
-    if [ "${DEPLOY_VARS["ENABLE_USER_WEB_EMBEDDING"]}" == "true" ] \
-        && ! module_is_selected "MANAGER"; then
-        if ! check_k8s_resource_exists \
-            "deployment" "${DEPLOY_VARS["MANAGER_WEB_NAME"]}" "${DEPLOY_VARS["NAMESPACE"]}"; then
-            error "Embedded User Web requires the Manager Web module to be deployed"
-        fi
-    fi
     check_if_db_up
     check_if_obs_up
 
@@ -459,19 +481,10 @@ check_web_up_dependency(){
 }
 
 check_manager_up_dependency(){
-    check_user_web_embedding_config
-    if [ "${DEPLOY_VARS["ENABLE_USER_WEB_EMBEDDING"]}" == "true" ] \
-        && ! module_is_selected "WEB"; then
-        if ! check_k8s_resource_exists \
-            "deployment" "${DEPLOY_VARS["WEB_NAME"]}" "${DEPLOY_VARS["NAMESPACE"]}"; then
-            error "Embedded User Web requires the Web module to be deployed"
-        fi
-    fi
-    #check_if_rabbitmq_up
     check_if_db_up
 }
 
 check_runtime_up_dependency(){
     check_if_db_up
-    check_if_redis_up
+    ensure_redis_up
 }

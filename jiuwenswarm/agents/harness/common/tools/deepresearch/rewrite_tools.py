@@ -398,6 +398,9 @@ async def _deliver_report(
 async def _deliver_html(
     html_path: Path,
     route: dict[str, object],
+    html_style_status: str | None = None,
+    html_style_phase: str | None = None,
+    html_style_reason_code: str | None = None,
 ) -> bool:
     if not route.get("session_id") or not route.get("channel_id"):
         return False
@@ -406,14 +409,29 @@ async def _deliver_html(
     )
 
     transport = WebSocketGatewayPushTransport()
+    payload: dict[str, object] = {
+        "event_type": "chat.file",
+        "files": [{"path": str(html_path), "name": html_path.name}],
+    }
+    metadata: dict[str, object] = {}
+    if html_style_status in {"applied", "fallback"}:
+        metadata["htmlStyleStatus"] = html_style_status
+    if (
+        html_style_status == "fallback"
+        and isinstance(html_style_phase, str)
+        and isinstance(html_style_reason_code, str)
+    ):
+        metadata.update({
+            "htmlStylePhase": html_style_phase,
+            "htmlStyleReasonCode": html_style_reason_code,
+        })
+    if metadata:
+        payload["metadata"] = metadata
     await transport.send_push({
         "request_id": route.get("request_id", ""),
         "channel_id": route["channel_id"],
         "session_id": route["session_id"],
-        "payload": {
-            "event_type": "chat.file",
-            "files": [{"path": str(html_path), "name": html_path.name}],
-        },
+        "payload": payload,
         "is_complete": False,
     })
     return True
@@ -548,7 +566,7 @@ async def deepresearch_generate_rewrite_html(
         })
 
     try:
-        html_path = await _generate_report_html(
+        generated_html = await _generate_report_html(
             export["final_result"],
             Path(export["report_path"]),
             export["final_result"]["response_content"],
@@ -558,7 +576,22 @@ async def deepresearch_generate_rewrite_html(
             "deepresearch rewrite HTML generation failed: type=%s",
             type(exc).__name__,
         )
-        html_path = None
+        generated_html = None
+    html_style_status = None
+    html_style_phase = None
+    html_style_reason_code = None
+    if isinstance(generated_html, tuple) and len(generated_html) == 4:
+        (
+            html_path,
+            html_style_status,
+            html_style_phase,
+            html_style_reason_code,
+        ) = generated_html
+    elif isinstance(generated_html, tuple):
+        html_path, html_style_status = generated_html
+    else:
+        # Preserve compatibility with older private callers and test doubles.
+        html_path = generated_html
     if html_path is None:
         return json.dumps({
             "status": "error",
@@ -569,7 +602,13 @@ async def deepresearch_generate_rewrite_html(
         })
 
     try:
-        delivered = await _deliver_html(html_path, route)
+        delivered = await _deliver_html(
+            html_path,
+            route,
+            html_style_status,
+            html_style_phase,
+            html_style_reason_code,
+        )
     except Exception as exc:  # pylint: disable=broad-exception-caught
         logger.error(
             "deepresearch rewrite HTML delivery failed: type=%s",
@@ -583,11 +622,21 @@ async def deepresearch_generate_rewrite_html(
             "error": "HTML delivery failed; the Markdown rewrite remains available",
         })
 
-    return json.dumps({
+    result = {
         "status": "completed",
         "html_delivered": True,
         "delivery_status": "delivered",
-    })
+    }
+    if html_style_status in {"applied", "fallback"}:
+        result["html_style_status"] = html_style_status
+    if (
+        html_style_status == "fallback"
+        and isinstance(html_style_phase, str)
+        and isinstance(html_style_reason_code, str)
+    ):
+        result["html_style_phase"] = html_style_phase
+        result["html_style_reason_code"] = html_style_reason_code
+    return json.dumps(result)
 
 
 __all__ = [

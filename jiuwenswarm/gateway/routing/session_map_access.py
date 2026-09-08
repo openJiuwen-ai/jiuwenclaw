@@ -7,6 +7,7 @@ import os
 import threading
 from typing import TYPE_CHECKING, Any
 
+from jiuwenswarm.edition import is_enterprise
 from jiuwenswarm.gateway.routing.session_map_repository import SessionMapRepository
 from jiuwenswarm.gateway.routing.session_storage import SessionStorage
 from jiuwenswarm.gateway.storage.async_bridge import run_awaitable
@@ -19,9 +20,7 @@ _repo: SessionMapRepository | None = None
 
 def session_map_read_through_enabled(cfg: dict[str, Any] | None = None) -> bool:
     """Enterprise / multi-replica need read-through; personal single-node keeps local cache."""
-    from jiuwenswarm.gateway.edition import EDITION_ENTERPRISE, resolve_gateway_edition
-
-    if resolve_gateway_edition(cfg) == EDITION_ENTERPRISE:
+    if is_enterprise():
         return True
     try:
         replicas = int(os.getenv("GATEWAY_REPLICAS", "1") or "1")

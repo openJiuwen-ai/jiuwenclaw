@@ -28,7 +28,7 @@ def checkpoint_tmp(monkeypatch, tmp_path):
         return session_storage_mod.LocalSessionStorage(store_path=store_path)
 
     monkeypatch.setattr(SessionMap, "_resolve_storage", staticmethod(_resolve_storage))
-    monkeypatch.delenv("AGENT_RUNTIME", raising=False)
+    monkeypatch.delenv("JIUWENSWARM_EDITION", raising=False)
     return tmp_path
 
 
@@ -107,7 +107,7 @@ def test_message_to_e2a_lifts_service_id(monkeypatch) -> None:
     from jiuwenswarm.common.e2a.gateway_normalize import message_to_e2a
     from jiuwenswarm.common.schema.message import Message, ReqMethod
 
-    monkeypatch.setenv("AGENT_RUNTIME", "1")
+    monkeypatch.setenv("JIUWENSWARM_EDITION", "enterprise")
     msg = Message(
         id="req1",
         type="req",

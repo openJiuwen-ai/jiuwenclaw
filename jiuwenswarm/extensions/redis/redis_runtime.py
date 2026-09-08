@@ -15,6 +15,7 @@ import uuid
 from importlib.metadata import entry_points
 from typing import Any
 
+from jiuwenswarm.edition import is_enterprise
 from jiuwenswarm.extensions.redis.redis_client import RedisConfig
 
 logger = logging.getLogger(__name__)
@@ -143,24 +144,31 @@ async def init_gateway_redis_from_config(full_cfg: dict[str, Any] | None) -> Non
     gw = cfg_in.get("gateway")
     gw = gw if isinstance(gw, dict) else {}
     declared = str(gw.get("deployment_mode") or "standalone").strip().lower()
-    _declared_deployment_mode = declared if declared in ("standalone", "active-standby") else "standalone"
+    _declared_deployment_mode = (
+        declared
+        if declared in ("standalone", "active-standby", "distributed")
+        else "standalone"
+    )
 
     iid = str(gw.get("instance_id") or "").strip()
-    if _declared_deployment_mode == "active-standby":
+    # active-standby / distributed 都需要 instance_id 标识（主备选主 / 多副本区分）
+    if _declared_deployment_mode in ("active-standby", "distributed"):
         _gateway_instance_id = iid or uuid.uuid4().hex
         if not iid:
             logger.info("[GatewayRedis] gateway.instance_id unset; generated %s", _gateway_instance_id)
     else:
         _gateway_instance_id = iid if iid else None
 
-    if _declared_deployment_mode != "active-standby":
+    # 仅 standalone 跳过 Redis init；active-standby / distributed 都需要连 Redis
+    if _declared_deployment_mode == "standalone":
         logger.debug("[GatewayRedis] deployment_mode=standalone; skip Redis init (§3.3.4)")
         return
 
-    # 企业版特性：仅 AGENT_RUNTIME 开启时启用主备 Redis
-    if not os.getenv("AGENT_RUNTIME", "").strip():
+    # 企业版特性：仅企业版开启时启用主备 Redis
+    if not is_enterprise():
         logger.debug(
-            "[GatewayRedis] deployment_mode=active-standby but AGENT_RUNTIME unset; skip Redis init"
+            "[GatewayRedis] deployment_mode=%s but not enterprise edition; skip Redis init",
+            _declared_deployment_mode,
         )
         return
 

@@ -13,6 +13,7 @@ from jiuwenswarm.server.runtime.reload_result import (
     log_agent_config_hot_reload,
     log_reload_config_changes,
 )
+from jiuwenswarm.edition import is_enterprise
 from jiuwenswarm.common.local_env_config import (
     EnvNsIdError,
     apply_env_removals,
@@ -485,19 +486,16 @@ class TenantAgentPool:
             )
 
             try:
-                # 工作目录按 service_id/agent_id 隔离：service_{sid}/agent_{aid}/
+                # 个人版: service_{sid}/agent_{aid}/；企业版: workspace_{key}/
                 agent_dir_path = get_multi_tenant_user_workspace_dir(
-                    request_service_id, request_agent_id
+                    request_workspace_key,
+                    service_id=request_service_id,
+                    agent_id=request_agent_id,
                 )
-                if agent_dir_path is None:
-                    raise ValueError(
-                        f"invalid tenant workspace: agent_id={agent_id!r}, "
-                        f"service_id={service_id!r}"
-                    )
 
                 import os
-                # AGENT_RUNTIME: stable string instance id (legacy "aid_sid" form).
-                agent_runtime = os.getenv("AGENT_RUNTIME", "").strip()
+                # 企业版：stable string instance id (legacy "aid_sid" form).
+                agent_runtime = is_enterprise()
                 manager_agent_id = (
                     f"{agent_id}_{service_id}" if agent_runtime else request_agent_id
                 )
@@ -512,6 +510,7 @@ class TenantAgentPool:
                     last_reload_trace_id=self._last_reload_trace_id,
                     env_agent_id=request_agent_id,
                     env_service_id=request_service_id,
+                    workspace_key=request_workspace_key,
                 )
 
                 if resolved_config is not None or resolved_env:
@@ -1083,7 +1082,7 @@ class TenantAgentPool:
         """从请求中提取 agent_id、service_id 与 workspace_key."""
         agent_id = getattr(request, "agent_id", None)
         service_id = getattr(request, "service_id", None)
-        workspace_key = getattr(request, "workspace_dir", None)
+        workspace_key = getattr(request, "workspace_key", None)
 
         if request.channel_id == "acp":
             return "acp", "global_acp", "workspace_acp"

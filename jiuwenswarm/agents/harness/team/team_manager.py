@@ -148,6 +148,20 @@ def sync_team_observability() -> None:
     if unified_active:
         _observability_active = True
         _runtime_managed_observability = True
+        # Same gap as single-agent: unified runtime must still host the
+        # shared TrajectorySpanProcessor for skill / team evolution rails.
+        try:
+            from jiuwenswarm.agents.harness.observability_runtime import (
+                ensure_trajectory_span_processor_attached,
+            )
+
+            ensure_trajectory_span_processor_attached()
+        except Exception as exc:
+            logger.warning(
+                "[TeamObservability] failed to attach trajectory processor "
+                "on unified path: %s",
+                exc,
+            )
         return
     if _runtime_managed_observability:
         _observability_active = False
@@ -309,6 +323,11 @@ class TeamManager:
         # is received.  When True, chat.final is no longer suppressed
         # even if seen_team_events is True.
         self._workflow_completed: dict[str, bool] = {}
+        # session_id → True once the is_complete frame for the current round
+        # has been claimed.  Lets both the edge path and the poll path
+        # (team.completed) dedup to exactly one processing_status(is_complete)
+        # broadcast per round.  Reset at round start.
+        self._round_complete_emitted: dict[str, bool] = {}
 
     def has_stream_task(self, session_id: str) -> bool:
         return session_id in self._stream_tasks
@@ -375,6 +394,22 @@ class TeamManager:
     def reset_seen_team_events(self, session_id: str) -> None:
         """Reset the flag at the start of a new conversation round."""
         self._seen_team_events.pop(session_id, None)
+
+    def claim_round_complete(self, session_id: str) -> bool:
+        """Check-and-set per-round completion.
+
+        True if this call is the first to claim completion for the round
+        (caller broadcasts the is_complete frame). False if already
+        claimed (idempotent: skip the broadcast). Reset by
+        ``reset_round_complete`` at round start.
+        """
+        if self._round_complete_emitted.get(session_id):
+            return False
+        self._round_complete_emitted[session_id] = True
+        return True
+
+    def reset_round_complete(self, session_id: str) -> None:
+        self._round_complete_emitted.pop(session_id, None)
 
     def mark_workflow_completed(self, session_id: str) -> None:
         """Mark that the workflow has reached a terminal status."""
@@ -686,6 +721,23 @@ class TeamManager:
             if template_snapshot is None and entity is not None:
                 template_id = entity.template_id
                 template_snapshot = copy.deepcopy(entity.template_snapshot)
+        # 模板漂移自愈：live 模板 vs 冻结快照指纹比对，漂移则刷新两处冻结副本。
+        # fail-open：reconcile 任何异常都原样返回 frozen，不阻断 chat。
+        # runtime_config 已在上方 :701 解析（仅当 team_name 真值时定义，与下方
+        # 守卫同前置条件，故此处引用安全）。
+        if team_name and template_id and isinstance(template_snapshot, dict):
+            from jiuwenswarm.server.runtime.team_snapshot_refresh import (
+                reconcile_session_team_snapshot,
+            )
+
+            template_snapshot = reconcile_session_team_snapshot(
+                session_id=session_id,
+                team_name=team_name,
+                template_id=template_id,
+                frozen_snapshot=template_snapshot,
+                config_base=runtime_config,
+                sessions_root=sessions_root,
+            )
         return (
             team_name or None,
             runtime_team_name or None,

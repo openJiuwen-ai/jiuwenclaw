@@ -128,13 +128,10 @@ class TestEnvNsKeyHelpers:
             normalize_env_ns_id(value)
 
     @staticmethod
-    @pytest.mark.parametrize(
-        ("service_id", "agent_id"),
-        [("../escape", "agent"), ("service", "..\\escape")],
-    )
-    def test_tenant_sessions_dir_rejects_path_syntax(service_id: str, agent_id: str):
-        with pytest.raises(EnvNsIdError, match="path"):
-            resolve_tenant_sessions_dir(service_id, agent_id)
+    @pytest.mark.parametrize("workspace_key", ["../escape", "..\\escape", "bad__id"])
+    def test_tenant_sessions_dir_rejects_path_syntax(workspace_key: str):
+        with pytest.raises(EnvNsIdError, match="path|__"):
+            resolve_tenant_sessions_dir(workspace_key)
 
     @staticmethod
     def test_logical_key_with_double_underscore_raises():
@@ -368,25 +365,25 @@ class TestExportAgentEnviron:
             service_id="default",
             agent_id="office",
         )
-        os.environ["AGENT_RUNTIME"] = "1"
+        os.environ["JIUWENSWARM_EDITION"] = "enterprise"
         os.environ["PATH"] = "/usr/bin"
 
         exported = export_agent_environ("default", "office")
         assert exported["MODEL_NAME"] == "export-model"
         assert exported["API_KEY"] == "k"
-        assert exported["AGENT_RUNTIME"] == "1"
+        assert exported["JIUWENSWARM_EDITION"] == "enterprise"
         assert exported["PATH"] == "/usr/bin"
 
 
 # ---------------------------------------------------------------------------
-# 8. AGENT_RUNTIME rewrite vs env ns ids
+# 8. enterprise rewrite vs env ns ids
 # ---------------------------------------------------------------------------
 
 
 class TestAgentRuntimeEnvNs:
     @staticmethod
     def test_manager_writes_default_office_not_office_default():
-        os.environ["AGENT_RUNTIME"] = "1"
+        os.environ["JIUWENSWARM_EDITION"] = "enterprise"
         manager = AgentManager(
             agent_id="office_default",
             service_id="default",
@@ -455,6 +452,41 @@ async def test_sync_same_revision_fast_path_unchanged(mock_warmup):
     second = await pool.sync_agents_configs(payload)
     assert second["agents"][0]["action"] == "unchanged"
     assert mock_warmup.await_count == warmup_calls_after_first
+
+
+@pytest.mark.asyncio
+async def test_sync_skills_revision_forces_live_agent_update(mock_warmup):
+    pool = TenantAgentPool.get_instance()
+
+    first = await pool.sync_agents_configs(_sync_payload(revision="r1", agents=[
+        {
+            "agent_id": "office",
+            "config": {},
+            "env": _full_env(ENABLED_SKILLS="same-skill"),
+            "runtime": {"skills_revision": 0},
+        }
+    ]))
+    assert first["agents"][0]["action"] in {"added", "updated"}
+
+    unchanged = await pool.sync_agents_configs(_sync_payload(revision="r2", agents=[
+        {
+            "agent_id": "office",
+            "config": {},
+            "env": _full_env(ENABLED_SKILLS="same-skill"),
+            "runtime": {"skills_revision": 0},
+        }
+    ]))
+    assert unchanged["agents"][0]["action"] == "unchanged"
+
+    changed = await pool.sync_agents_configs(_sync_payload(revision="r3", agents=[
+        {
+            "agent_id": "office",
+            "config": {},
+            "env": _full_env(ENABLED_SKILLS="same-skill"),
+            "runtime": {"skills_revision": 1},
+        }
+    ]))
+    assert changed["agents"][0]["action"] == "updated"
 
 
 @pytest.mark.asyncio
@@ -789,38 +821,35 @@ def test_build_agent_spec_hash_stable():
     assert a.content_hash == b.content_hash
 
 
-def test_compute_content_hash_reflects_shared_skill_disk_changes(tmp_path):
-    """装/卸共享目录里的 skill 应让 content_hash 变化（office allow-all agent 的有效 skill 集 = 磁盘内容）。
-
-    回归根因：office 的 ENABLED_SKILLS 被 suppress 成 ''（恒定）、共享目录路径也恒定，
-    故装 skill 不改 env 本身。content_hash 必须纳入磁盘 skill 名清单，否则 sidecar
-    判 "unchanged" → 跳过 reload → 运行中会话的 SkillUseRail 永不重建（调不到新 skill）。
-    """
+def test_compute_content_hash_does_not_scan_shared_skill_directories(tmp_path, monkeypatch):
+    """Catalog hash must stay metadata-only; Relay already sends effective skill/config state."""
     shared_dir = tmp_path / "skills"
     shared_dir.mkdir()
     env = _full_env(JIUWENSWARM_SHARED_SKILLS_DIRS=str(shared_dir))
 
-    base_hash = compute_content_hash(config={}, env=env, runtime={})
-
-    # 装一个含 SKILL.md 的子目录 → hash 应变
     smart = shared_dir / "smart-charts"
     smart.mkdir()
     (smart / "SKILL.md").write_text("# smart-charts")
-    installed_hash = compute_content_hash(config={}, env=env, runtime={})
-    assert installed_hash != base_hash, "安装 skill 后 content_hash 必须变化"
 
-    # 不含 SKILL.md 的杂目录（含 _ 前缀）不应影响 hash
-    junk = shared_dir / "_draft"
-    junk.mkdir()
-    (junk / "note.txt").write_text("noise")
-    assert compute_content_hash(config={}, env=env, runtime={}) == installed_hash
+    def fail_if_scanned(*_args, **_kwargs):
+        raise AssertionError("content hash must not scan shared skill directories")
 
-    # 卸载 smart-charts → hash 应回到装前
-    import shutil
+    monkeypatch.setattr(os, "scandir", fail_if_scanned)
+    first = compute_content_hash(config={}, env=env, runtime={})
 
-    shutil.rmtree(smart)
-    removed_hash = compute_content_hash(config={}, env=env, runtime={})
-    assert removed_hash == base_hash, "卸载 skill 后 content_hash 必须回到原值"
+    another = shared_dir / "another-skill"
+    another.mkdir()
+    (another / "SKILL.md").write_text("# another-skill")
+    second = compute_content_hash(config={}, env=env, runtime={})
+    assert first == second
+
+    assert first != compute_content_hash(config={"prompt": "changed"}, env=env, runtime={})
+    assert first != compute_content_hash(
+        config={}, env={**env, "ENABLED_SKILLS": "another-skill"}, runtime={}
+    )
+    assert first != compute_content_hash(
+        config={}, env=env, runtime={"skills": ["another-skill"]}
+    )
 
 
 def test_compute_content_hash_no_shared_dirs_is_stable():

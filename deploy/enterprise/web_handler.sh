@@ -4,58 +4,45 @@ set -euo >/dev/null 2>&1
 gen_web_file() {
     local template_file="${CONFIG["WEB_TEMPLATE_FILE"]}"
     local file="${CONFIG["WEB_FILE"]}"
-    local enable_external_obs="${DEPLOY_VARS["ENABLE_EXTERNAL_OBS"]}"
-    local obs_url="${DEPLOY_VARS["MINIO_NAME"]}-headless.default:9000"
 
     render_config_template "${template_file}" "${file}" "DEPLOY_VARS"
 
-    if [ "${DEPLOY_VARS["ENABLE_USER_WEB_EMBEDDING"]}" == "true" ]; then
-        local nodeport_name="${DEPLOY_VARS["WEB_NAME"]}-nodeport"
-        yq eval 'select(.metadata.name != "'"${nodeport_name}"'")' -i "${file}"
+    if [ "${DEPLOY_VARS["DB_TYPE"]}" == "postgresql" ]; then
+        yq eval '
+        select(.kind == "Deployment").spec.template.spec.containers[0].env += [
+            {
+                "name": "WEB_PG_SCHEMA",
+                "value": "'"${DEPLOY_VARS["WEB_PG_SCHEMA"]}"'"
+            }
+        ]' -i "${file}"
     fi
 
-    if [ "${DEPLOY_VARS["ENABLE_EXTERNAL_OBS"]}" == "true" ]; then
-        obs_url="${DEPLOY_VARS["OBS_URL"]}"
+    if [[ "${DEPLOY_VARS["APPLY_PATCH"]}" == "false" ]]; then
+        yq eval '
+        select(.kind == "Deployment").spec.template.spec.containers[0].env += [
+            {
+                "name": "USER_WEB_IDP_TARGET",
+                "value": "'"${DEPLOY_VARS["USER_WEB_IDP_TARGET"]}"'"
+            },
+            {
+                "name": "USER_WEB_MANAGER_TARGET",
+                "value": "'"${DEPLOY_VARS["USER_WEB_MANAGER_TARGET"]}"'"
+            }
+        ]' -i "${file}"
     fi
-
-    yq eval '
-    select(.kind == "Deployment").spec.template.spec.containers[0].env += [
-        {
-            "name": "JIUWENCLAW_MINIO_ENDPOINT",
-            "value": "'"${obs_url}"'"
-        },
-        {
-            "name": "JIUWENCLAW_MINIO_ACCESS_KEY",
-            "value": "'"${DEPLOY_VARS["OBS_ACCESS_KEY"]}"'"
-        },
-        {
-            "name": "JIUWENCLAW_MINIO_BUCKET",
-            "value": "'"${DEPLOY_VARS["OBS_BUCKET"]}"'"
-        },
-        {
-            "name": "JIUWENCLAW_MINIO_SECURE",
-            "value": "'"${DEPLOY_VARS["OBS_SECURE"]}"'"
-        },
-        {
-            "name": "JIUWENCLAW_MINIO_PUBLIC_BASE_URL",
-            "value": "'"${DEPLOY_VARS["OBS_PUBLIC_BASE_URL"]}"'"
-        },
-        {
-            "name": "JIUWENCLAW_MINIO_REGION",
-            "value": "'"${DEPLOY_VARS["OBS_REGION"]}"'"
-        }
-    ]' -i "${file}"
 
     add_resource_if_set "WEB" "${file}"
+
+    # yq 追加资源配置时可能重复 env；Deployment strategic merge patch 不接受重复键，
+    # 这里按名称去重，保留最后一次生成的值。
+    yq eval 'select(.kind == "Deployment").spec.template.spec.containers[0].env |= unique_by(.name)' -i "${file}"
 
     enable_dev_mode_if_needed ${file} web
 }
 
 render_web_files() {
     render_secret_configmap
-    if [ "${DEPLOY_VARS["ENABLE_USER_WEB_EMBEDDING"]}" != "true" ]; then
-        ensure_available_port "WEB_NODE_PORT"
-    fi
+    ensure_available_port "WEB_NODE_PORT"
     gen_web_file
 }
 
@@ -67,12 +54,7 @@ deploy_web() {
     ensure_secret_configmap
     exec_cmd kubectl apply -f ${file}
     wait_k8s_resource_ready "deployment" "${name}" "${namespace}"
-    if [ "${DEPLOY_VARS["ENABLE_USER_WEB_EMBEDDING"]}" == "true" ]; then
-        delete_k8s_resource "service" "${name}-nodeport" "${namespace}"
-        success "User Web is available through Manager Web; standalone NodePort is disabled"
-    else
-        success "WEB_NODE_PORT: ${DEPLOY_VARS["WEB_NODE_PORT"]}"
-    fi
+    success "WEB_NODE_PORT: ${DEPLOY_VARS["WEB_NODE_PORT"]}"
 }
 
 uninstall_web() {

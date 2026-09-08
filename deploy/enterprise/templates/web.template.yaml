@@ -34,18 +34,26 @@ spec:
               value: "0.0.0.0"
             - name: FRONTEND_HOST
               value: "0.0.0.0"
+            - name: JIUWENSWARM_EDITION
+              value: "enterprise"
+            - name: LOGIN_AUTH_SIMULATE
+              value: "<<APPLY_PATCH>>"
             - name: FRONTEND_PORT
               value: "<<WEB_HTTP_PORT>>"
+            - name: WEB_TRANSPORT
+              value: "http"
             - name: ENTERPRISE_WEB_WS_HOST
               value: "0.0.0.0"
             - name: ENTERPRISE_WEB_WS_PORT
               value: "<<WEB_WS_PORT>>"
+            - name: GATEWAY_URL
+              value: "http://<<GATEWAY_NAME>>:<<WEB_PORT>>"
+            - name: GATEWAY_WEB_HTTP_URL
+              value: "http://<<GATEWAY_NAME>>:<<GATEWAY_WEB_HTTP_PORT>>"
             - name: WS_ORIGIN_CHECK_ENABLED
               value: "<<WS_ORIGIN_CHECK_ENABLED>>"
             - name: WS_ALLOWED_ORIGINS
               value: "<<WS_ALLOWED_ORIGINS>>"
-            - name: TZ
-              value: "<<TIMEZONE>>"
             - name: WEB_DB_TYPE
               value: "<<DB_TYPE>>"
             - name: WEB_DB_HOST
@@ -56,6 +64,20 @@ spec:
               value: "<<WEB_DB_USER>>"
             - name: WEB_DB_NAME
               value: "<<WEB_DB_NAME>>"
+            - name: TZ
+              value: "<<TIMEZONE>>"
+            - name: OBS_URL
+              value: "<<OBS_URL>>"
+            - name: OBS_ACCESS_KEY
+              value: "<<OBS_ACCESS_KEY>>"
+            - name: OBS_BUCKET
+              value: "<<OBS_BUCKET>>"
+            - name: OBS_SECURE
+              value: "<<OBS_SECURE>>"
+            - name: OBS_PUBLIC_BASE_URL
+              value: "<<OBS_PUBLIC_BASE_URL>>"
+            - name: OBS_REGION
+              value: "<<OBS_REGION>>"
 
 ---
 # 集群内部访问： 提供稳定 DNS 域名
@@ -68,6 +90,9 @@ spec:
   selector:
     app: <<WEB_NAME>>
   ports:
+    - name: http
+      port: <<WEB_HTTP_PORT>>
+      targetPort: <<WEB_HTTP_PORT>>
     - name: websocket
       port: <<WEB_WS_PORT>>         # Service 端口
       targetPort: <<WEB_WS_PORT>>   # 容器端口

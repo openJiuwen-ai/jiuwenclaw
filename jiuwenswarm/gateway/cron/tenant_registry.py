@@ -28,9 +28,11 @@ class CronTenantRegistry:
         *,
         agent_client: Any,
         message_handler: Any,
+        cron_run_ephemeral: Any | None = None,
     ) -> None:
         self._agent_client = agent_client
         self._message_handler = message_handler
+        self._cron_run_ephemeral = cron_run_ephemeral
         self._controllers: dict[tuple[str, str], CronController] = {}
         self._controller_locks: dict[tuple[str, str], asyncio.Lock] = {}
         self._meta_lock = asyncio.Lock()
@@ -42,6 +44,7 @@ class CronTenantRegistry:
         *,
         agent_client: Any | None = None,
         message_handler: Any | None = None,
+        cron_run_ephemeral: Any | None = None,
     ) -> CronTenantRegistry:
         if cls._instance is not None:
             return cls._instance
@@ -52,6 +55,7 @@ class CronTenantRegistry:
         cls._instance = cls(
             agent_client=agent_client,
             message_handler=message_handler,
+            cron_run_ephemeral=cron_run_ephemeral,
         )
         return cls._instance
 
@@ -115,7 +119,9 @@ class CronTenantRegistry:
                 message_handler=self._message_handler,
                 service_id=sid,
                 agent_id=aid,
+                run_ephemeral=self._cron_run_ephemeral,
             )
+            await scheduler.hydrate_runs_from_ephemeral()
             await scheduler.start()
             controller = CronController(
                 store=store,
@@ -244,19 +250,43 @@ class CronTenantRegistry:
         return data
 
     async def web_update_job(
-        self, job_id: str, patch: dict[str, Any], service_id: str, agent_id: str
+        self,
+        job_id: str,
+        patch: dict[str, Any],
+        service_id: str,
+        agent_id: str,
+        *,
+        group_id: str | None = None,
+        bot_id: str | None = None,
+        user_id: str | None = None,
     ) -> dict[str, Any]:
         data = await (await self.get_controller(service_id, agent_id)).update_job(
-            job_id, patch
+            job_id,
+            patch,
+            group_id=group_id,
+            bot_id=bot_id,
+            user_id=user_id,
         )
         await self._mirror_after_mutation(
             service_id=service_id, agent_id=agent_id, job=data
         )
         return data
 
-    async def web_delete_job(self, job_id: str, service_id: str, agent_id: str) -> bool:
+    async def web_delete_job(
+        self,
+        job_id: str,
+        service_id: str,
+        agent_id: str,
+        *,
+        group_id: str | None = None,
+        bot_id: str | None = None,
+        user_id: str | None = None,
+    ) -> bool:
         deleted = await (await self.get_controller(service_id, agent_id)).delete_job(
-            job_id
+            job_id,
+            group_id=group_id,
+            bot_id=bot_id,
+            user_id=user_id,
         )
         if deleted:
             await self._mirror_after_mutation(
@@ -265,10 +295,22 @@ class CronTenantRegistry:
         return deleted
 
     async def web_toggle_job(
-        self, job_id: str, enabled: bool, service_id: str, agent_id: str
+        self,
+        job_id: str,
+        enabled: bool,
+        service_id: str,
+        agent_id: str,
+        *,
+        group_id: str | None = None,
+        bot_id: str | None = None,
+        user_id: str | None = None,
     ) -> dict[str, Any]:
         data = await (await self.get_controller(service_id, agent_id)).toggle_job(
-            job_id, enabled
+            job_id,
+            enabled,
+            group_id=group_id,
+            bot_id=bot_id,
+            user_id=user_id,
         )
         await self._mirror_after_mutation(
             service_id=service_id, agent_id=agent_id, job=data

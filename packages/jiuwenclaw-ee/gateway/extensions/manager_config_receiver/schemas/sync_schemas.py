@@ -1,29 +1,31 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-"""Manager → Gateway 同步请求信封（仅 revision）与业务 Body 组合。"""
+"""Manager → Gateway 同步请求 Body 组合（无信封字段）。"""
 
 from __future__ import annotations
 
 from typing import TypeVar
 
-from pydantic import BaseModel, ConfigDict, Field, create_model
+from pydantic import BaseModel, ConfigDict
 
 T = TypeVar("T", bound=BaseModel)
 
 
-class SyncEnvelopeBase(BaseModel):
-    """所有写同步接口公共信封字段（与业务字段同级合并）。"""
+class EmptySyncBody(BaseModel):
+    """DELETE 等无业务字段的写接口 Body（允许空对象；忽略历史信封字段）。"""
 
     model_config = ConfigDict(extra="ignore")
 
-    revision: str = Field(..., min_length=1, description="配置版本号，单调递增")
-
 
 def make_sync_body(name: str, business: type[BaseModel] | None = None) -> type[BaseModel]:
-    """生成 ``SyncEnvelope + 业务模型``，供 FastAPI / OpenAPI 展示完整 request body。"""
+    """返回写接口 request body 模型；无业务字段时用空模型。
+
+    ``name`` 保留以兼容旧调用方（OpenAPI 名由业务模型自身决定）。
+    """
+    _ = name
     if business is None:
-        return create_model(name, __base__=SyncEnvelopeBase)
-    return create_model(name, __base__=(SyncEnvelopeBase, business))
+        return EmptySyncBody
+    return business
 
 
-# 仅信封（DELETE 等无业务字段）
-SyncEnvelopeOnlyBody = make_sync_body("SyncEnvelopeOnlyBody")
+# DELETE / 无业务字段写接口常用（历史名保留）
+SyncEnvelopeOnlyBody = EmptySyncBody

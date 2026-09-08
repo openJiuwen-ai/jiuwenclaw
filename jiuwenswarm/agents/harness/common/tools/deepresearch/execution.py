@@ -18,11 +18,13 @@ from openjiuwen.core.foundation.tool import tool
 from jiuwenswarm.common.schema.ask_user import (
     AskUserResponse,
     AskUserResponseError,
+    decode_user_input,
     parse_ask_user_response,
 )
 
 from .stream_router import _format_outline_card_markdown
 from .tools import _call_deepresearch_stream_impl
+from .usage import normalize_workflow_llm_token_usage
 
 logger = logging.getLogger(__name__)
 
@@ -243,23 +245,8 @@ def _append_timing_window(
     return next_state
 
 
-def _decode_user_input(value: Any) -> Any:
-    if isinstance(value, str):
-        try:
-            return json.loads(value)
-        except (TypeError, ValueError):
-            return value
-    model_dump = getattr(value, "model_dump", None)
-    if callable(model_dump):
-        try:
-            return model_dump(mode="json")
-        except TypeError:
-            return model_dump()
-    return value
-
-
 def _parse_response(value: Any) -> AskUserResponse:
-    decoded = _decode_user_input(value)
+    decoded = decode_user_input(value)
     if not isinstance(decoded, Mapping):
         raise AskUserResponseError("AskUser response must be an object")
     if decoded.get("status") in {"error", "cancelled"}:
@@ -268,7 +255,7 @@ def _parse_response(value: Any) -> AskUserResponse:
 
 
 def _terminal_interaction_status(value: Any) -> str:
-    decoded = _decode_user_input(value)
+    decoded = decode_user_input(value)
     if not isinstance(decoded, Mapping):
         return ""
     status = str(decoded.get("status") or "").strip().lower()
@@ -542,7 +529,7 @@ def _marker_prompt(outcome: Mapping[str, Any]) -> str:
 
 
 def _interaction_json(value: Any) -> str:
-    decoded = _decode_user_input(value)
+    decoded = decode_user_input(value)
     if isinstance(decoded, Mapping):
         return json.dumps(dict(decoded), ensure_ascii=False, separators=(",", ":"))
     return ""
@@ -637,7 +624,9 @@ def _outline_sections(outline_text: str) -> list[str]:
     ]
 
 
-def _completion_content(state: Mapping[str, Any], report_chars: Any) -> str:
+def _completion_content(
+    state: Mapping[str, Any], report_chars: Any, html_style_status: Any = None
+) -> str:
     file_name = str(state.get("file_name") or "研究报告").strip()
     title = re.sub(r"\.(?:md|markdown)$", "", file_name, flags=re.IGNORECASE)
     lines = [
@@ -662,6 +651,14 @@ def _completion_content(state: Mapping[str, Any], report_chars: Any) -> str:
         lines.extend(
             f"  {index}. {section}"
             for index, section in enumerate(normalized_sections, start=1)
+        )
+    if html_style_status == "fallback":
+        lines.extend(
+            [
+                "",
+                "⚠️ HTML 已交付内置基础视觉模板，但 AI 生成的增强样式未应用；"
+                "Markdown 报告内容不受影响。",
+            ]
         )
     lines.extend(
         [
@@ -822,9 +819,38 @@ async def _handle_outcome(
         )
     if status == "completed" and outcome.get("report_delivered") is True:
         report_chars = outcome.get("report_chars")
-        content = _completion_content(state, report_chars)
-        state = _persist(context, state, "completed", conversation_id=conversation_id)
-        return _result("completed", state, content=content)
+        html_style_status = outcome.get("html_style_status")
+        if html_style_status not in {"applied", "fallback"}:
+            html_style_status = None
+        html_style_phase = outcome.get("html_style_phase")
+        html_style_reason_code = outcome.get("html_style_reason_code")
+        if (
+            html_style_status != "fallback"
+            or not isinstance(html_style_phase, str)
+            or not isinstance(html_style_reason_code, str)
+        ):
+            html_style_phase = None
+            html_style_reason_code = None
+        content = _completion_content(state, report_chars, html_style_status)
+        completed_updates: dict[str, Any] = {"conversation_id": conversation_id}
+        if html_style_status is not None:
+            completed_updates["html_style_status"] = html_style_status
+        if html_style_phase is not None:
+            completed_updates["html_style_phase"] = html_style_phase
+            completed_updates["html_style_reason_code"] = html_style_reason_code
+        state = _persist(context, state, "completed", **completed_updates)
+        result_fields: dict[str, Any] = {"content": content}
+        if html_style_status is not None:
+            result_fields["html_style_status"] = html_style_status
+        if html_style_phase is not None:
+            result_fields["html_style_phase"] = html_style_phase
+            result_fields["html_style_reason_code"] = html_style_reason_code
+        workflow_usage = normalize_workflow_llm_token_usage(
+            outcome.get("workflow_llm_token_usage")
+        )
+        if workflow_usage is not None:
+            result_fields["workflow_llm_token_usage"] = workflow_usage
+        return _result("completed", state, **result_fields)
     if status == "cancelled":
         state = _persist(context, state, "cancelled", conversation_id=conversation_id)
         return _result("cancelled", state, content="DeepResearch 任务已取消。")

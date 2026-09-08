@@ -84,6 +84,7 @@ from jiuwenswarm.common.coding_memory_paths import (
     resolve_project_coding_memory_workspace_path,
 )
 from jiuwenswarm.common.config import get_config
+from jiuwenswarm.server.runtime.agent_adapter import interface_deep
 
 logger = logging.getLogger(__name__)
 
@@ -96,6 +97,58 @@ def test_member_runtime_prompt_rail_binds_request_identity(mode: str) -> None:
 
     assert rail._session_id == "session-123"
     assert rail._mode == mode
+
+
+@pytest.mark.parametrize("mode", ["team", "code.team", "team.plan"])
+def test_team_a2a_outbound_rail_binds_request_route(mode: str, monkeypatch) -> None:
+    monkeypatch.delenv("AGENT_RUNTIME", raising=False)
+    monkeypatch.setattr(interface_deep, "get_runtime_tool_session_id", lambda: None)
+    monkeypatch.setattr(interface_deep, "get_runtime_tool_channel_id", lambda: "default")
+    context = SwarmBuildContext(
+        session_id="session-a2a",
+        channel="web",
+        mode=mode,
+    )
+
+    rail = RailSpec(type=registry.A2A_OUTBOUND_TOOLKIT).build(
+        language="cn",
+        context=context,
+    )
+
+    assert rail is not None
+    assert rail._runtime_route() == ("session-a2a", "web")
+
+
+def test_team_a2a_outbound_rail_uses_live_route_when_context_session_is_empty(
+    monkeypatch,
+) -> None:
+    monkeypatch.delenv("AGENT_RUNTIME", raising=False)
+    monkeypatch.setattr(
+        interface_deep,
+        "get_runtime_tool_session_id",
+        lambda: "live-session",
+    )
+    monkeypatch.setattr(
+        interface_deep,
+        "get_runtime_tool_channel_id",
+        lambda: "live-channel",
+    )
+    context = SwarmBuildContext(session_id="", channel="web", mode="team")
+
+    rail = RailSpec(type=registry.A2A_OUTBOUND_TOOLKIT).build(
+        language="cn",
+        context=context,
+    )
+
+    assert rail is not None
+    assert rail._runtime_route() == ("live-session", "live-channel")
+
+
+def test_team_a2a_outbound_rail_is_excluded_from_enterprise_runtime(monkeypatch) -> None:
+    monkeypatch.setenv("JIUWENSWARM_EDITION", "enterprise")
+    context = SwarmBuildContext(session_id="session-a2a", channel="web")
+
+    assert member_rails._build_a2a_outbound_toolkit_rail({}, context) is None
 
 # Rail provider names shared by both roles (no role-specific evolution rails).
 # Harness todo planning is teammate-only; leaders use the team task board instead.
@@ -116,6 +169,7 @@ _TEAM_SHARED_RAIL_NAMES: frozenset[str] = frozenset(
         registry.PLUGIN_RAILS,
         registry.SKILL_RETRIEVAL_PROMPT,
         registry.SYMPHONY_ORCHESTRATION_PROMPT,
+        registry.A2A_OUTBOUND_TOOLKIT,
         registry.MEMBER_SKILL_TOOLKIT,
         registry.DISABLED_TOOLS,
     }
@@ -284,7 +338,7 @@ async def test_team_skill_storage_policy_rail_resolves_and_injects_paths(tmp_pat
     its identity, so this rail must not carry it in any lane.
     """
     register_swarm_providers()
-    global_skills_dir = str(tmp_path / "agent" / "workspace" / "skills")
+    global_skills_dir = str(tmp_path / "agent" / "jiuwenclaw_workspace" / "skills")
     team_ws_root = str(tmp_path / ".agent_teams" / "unit" / "team-workspace")
     team_skills_dir = str(tmp_path / ".agent_teams" / "unit" / "team-workspace" / "skills")
     member_workspace_root = str(
@@ -331,7 +385,7 @@ async def test_team_shared_skill_link_refresh_rail_resolves_and_refreshes(
 ) -> None:
     """The shared skill link refresh rail should refresh after global skill writes."""
     register_swarm_providers()
-    global_skills_dir = tmp_path / "agent" / "workspace" / "skills"
+    global_skills_dir = tmp_path / "agent" / "jiuwenclaw_workspace" / "skills"
     skill_dir = global_skills_dir / "new-skill"
     skill_dir.mkdir(parents=True)
     skill_file = skill_dir / "SKILL.md"
@@ -432,7 +486,7 @@ def test_build_member_capability_specs_rail_names(
 
     assert _TEAM_SHARED_RAIL_NAMES <= rail_names
     assert extra_rails <= rail_names
-    assert len(_TEAM_SHARED_RAIL_NAMES) == 16
+    assert len(_TEAM_SHARED_RAIL_NAMES) == 17
     assert rail_names == expected
     disabled_tools = next(
         spec for spec in rails_specs if spec.type == registry.DISABLED_TOOLS
@@ -1686,6 +1740,7 @@ _EXPECTED_CODE_RAIL_NAMES_LEADER: frozenset[str] = frozenset(
         registry.CODE_SKILL_USE,
         registry.SKILL_RETRIEVAL_PROMPT,
         registry.SYMPHONY_ORCHESTRATION_PROMPT,
+        registry.A2A_OUTBOUND_TOOLKIT,
         registry.CODE_CONFIRM_INTERRUPT,
         registry.MEMBER_SKILL_TOOLKIT,
         registry.TEAM_WORKSPACE_REPORT_PATH,

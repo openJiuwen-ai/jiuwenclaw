@@ -137,3 +137,96 @@ def test_resume_usage_loop_accumulates_and_keeps_other_events() -> None:
         None,
     ]
     assert out[-1].is_complete is True
+
+
+def test_deepresearch_sdk_usage_is_accounted_once_from_terminal_tool_result(
+    monkeypatch,
+) -> None:
+    usage = {
+        "input_tokens": 500,
+        "output_tokens": 80,
+        "total_tokens": 580,
+        "llm_call_count": 4,
+        "agent_name_token_usage": [
+            {
+                "agent_name": "reporter",
+                "input_tokens": 500,
+                "output_tokens": 80,
+                "total_tokens": 580,
+                "llm_call_count": 4,
+            }
+        ],
+    }
+    payload = {
+        "tool_result": {
+            "tool_name": "deepresearch_execute",
+            "tool_call_id": "call-1",
+            "raw_output": {
+                "schema_version": "openjiuwen.deepresearch.execute.v1",
+                "kind": "completed",
+                "state": {"conversation_id": "conversation-1"},
+                "workflow_llm_token_usage": usage,
+            },
+        }
+    }
+    recorded: list[tuple[str, str, dict]] = []
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.agent_adapter.interface_deep."
+        "record_deepresearch_sdk_token_usage",
+        lambda request_id, usage_id, value: recorded.append(
+            (request_id, usage_id, value)
+        ),
+    )
+    accumulator = JiuWenSwarmDeepAdapter._new_usage_accumulator()
+    accounted: set[str] = set()
+
+    first = JiuWenSwarmDeepAdapter._account_deepresearch_sdk_usage(
+        payload,
+        request_id="request-1",
+        usage_accumulator=accumulator,
+        accounted_usage_ids=accounted,
+    )
+    second = JiuWenSwarmDeepAdapter._account_deepresearch_sdk_usage(
+        payload,
+        request_id="request-1",
+        usage_accumulator=accumulator,
+        accounted_usage_ids=accounted,
+    )
+
+    assert first is True
+    assert second is False
+    assert accumulator["input_tokens"] == 500
+    assert accumulator["output_tokens"] == 80
+    assert accumulator["total_tokens"] == 580
+    assert recorded == [("request-1", "conversation-1", usage)]
+
+
+def test_deepresearch_sdk_usage_rejects_invalid_or_nonterminal_payloads() -> None:
+    invalid_usage = {
+        "input_tokens": -1,
+        "output_tokens": 2,
+        "total_tokens": 1,
+        "llm_call_count": 1,
+        "agent_name_token_usage": [],
+    }
+
+    for kind, tool_name in (
+        ("completed", "other_tool"),
+        ("interaction", "deepresearch_execute"),
+        ("completed", "deepresearch_execute"),
+    ):
+        usage = invalid_usage if tool_name == "deepresearch_execute" else {
+            **invalid_usage,
+            "input_tokens": 1,
+        }
+        payload = {
+            "tool_result": {
+                "tool_name": tool_name,
+                "tool_call_id": "call-1",
+                "raw_output": {
+                    "kind": kind,
+                    "workflow_llm_token_usage": usage,
+                },
+            }
+        }
+        assert JiuWenSwarmDeepAdapter._extract_deepresearch_sdk_usage(payload) is None

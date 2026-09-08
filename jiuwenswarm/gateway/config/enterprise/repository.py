@@ -18,7 +18,7 @@ class EnterpriseRecordRepository:
     """企业配置 / 模板 / 密钥等表的通用 CRUD。
 
     record 即业务 dict（与 EE ``DBHandler`` 行形状对齐）；不引入领域 dataclass。
-    实例作用域由 ``instance_id`` + ``spec.scope_field`` 注入，调用方不必每次传。
+    ``instance_id`` / ``scope_field`` 保留兼容；默认无 scope（每网关独立 DB）。
     """
 
     def __init__(
@@ -31,6 +31,7 @@ class EnterpriseRecordRepository:
     ) -> None:
         self._store = store
         self._store_name = store_name
+        # 保留构造参数以兼容旧调用方；scope_field 为 None 时不参与读写。
         self._instance_id = str(instance_id or "").strip()
         self._spec = spec if spec is not None else get_enterprise_record_spec(store_name)
 
@@ -41,6 +42,20 @@ class EnterpriseRecordRepository:
     @property
     def key_fields(self) -> tuple[str, ...]:
         return self._spec.key_fields
+
+    def for_table(
+        self,
+        store_name: str,
+        *,
+        spec: EnterpriseRecordSpec | None = None,
+    ) -> EnterpriseRecordRepository:
+        """复用同一 ``PersistentStore`` 与实例 scope，访问另一张企业表。"""
+        return EnterpriseRecordRepository(
+            self._store,
+            store_name,
+            instance_id=self._instance_id,
+            spec=spec,
+        )
 
     def _scope_filters(self) -> dict[str, Any]:
         field = self._spec.scope_field
@@ -145,13 +160,42 @@ class EnterpriseRecordRepository:
         parts.update(kwargs)
         return await self._store.delete(self._store_name, self.identity(parts))
 
+    async def get_by_row_id(self, row_id: int) -> dict[str, Any] | None:
+        """按自增 ``id`` 取行（若有 scope_field 则校验，默认无）。"""
+        row = await self._store.get(self._store_name, {"id": int(row_id)})
+        if row is None:
+            return None
+        scope = self._scope_filters()
+        for key, value in scope.items():
+            if row.get(key) != value:
+                return None
+        return row
+
+    async def update_by_row_id(
+        self,
+        row_id: int,
+        updates: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        if await self.get_by_row_id(row_id) is None:
+            return None
+        return await self._store.update(
+            self._store_name,
+            {"id": int(row_id)},
+            dict(updates),
+        )
+
+    async def delete_by_row_id(self, row_id: int) -> bool:
+        if await self.get_by_row_id(row_id) is None:
+            return False
+        return await self._store.delete(self._store_name, {"id": int(row_id)})
+
     async def sync_by_business_key(
         self,
         records: list[dict[str, Any]],
         *,
         key_field: str | None = None,
     ) -> dict[str, int]:
-        """按业务主键 upsert，并删除本实例下不在 incoming 集合中的行。
+        """按业务主键 upsert，并删除不在 incoming 集合中的行。
 
         默认 ``key_field`` 取 ``spec.key_fields[0]``（如 ``policy_id`` / ``template_id``）。
         无业务主键（单文档表）时只支持 0～1 条：有则 upsert，空列表则 delete。

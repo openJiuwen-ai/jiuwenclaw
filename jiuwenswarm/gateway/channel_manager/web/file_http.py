@@ -4,11 +4,12 @@
 
 Enterprise list/preview of remote Agent workspace is **not** guaranteed (1-A):
 handlers read Gateway-local disks. Share uses disk history personally and
-``ChatHistoryStore`` under ``AGENT_RUNTIME`` (2-A). Push lands on Gateway disk
+``ChatHistoryStore`` under enterprise edition (2-A). Push lands on Gateway disk
 and signs a download token (3-A); no POST to Web Pod.
 """
 
 from __future__ import annotations
+from jiuwenswarm.edition import is_enterprise
 
 import json
 import logging
@@ -145,9 +146,9 @@ def _normalize_lang_suffix(name: str) -> str:
 
 
 def generate_agent_data(project_root: Path) -> None:
-    """Generate agent/workspace/agent-data.json from agent tree."""
+    """Generate agent/jiuwenclaw_workspace/agent-data.json from agent tree."""
     agent_root = (project_root / "agent").resolve()
-    workspace_root = (agent_root / "workspace").resolve()
+    workspace_root = (agent_root / "jiuwenclaw_workspace").resolve()
     output_path = (workspace_root / "agent-data.json").resolve()
     root_folder_key = "__root__"
 
@@ -288,11 +289,22 @@ def read_file_text(
     if not is_path_under_allowed_root(roots, full_path):
         return 403, {"error": "forbidden_path"}, None, None
     if not full_path.exists():
-        if file_arg.replace("\\", "/") == "agent/workspace/agent-data.json":
+        normalized_arg = file_arg.replace("\\", "/")
+        if normalized_arg in (
+            "agent/jiuwenclaw_workspace/agent-data.json",
+            # legacy pre-rename path (old frontend caches / bookmarks)
+            "agent/workspace/agent-data.json",
+        ):
             try:
                 generate_agent_data(roots.project_root)
             except Exception as exc:  # noqa: BLE001
                 return 500, {"error": "generate_failed", "detail": str(exc)}, None, None
+            # generate_agent_data only writes to the new path; rewrite legacy
+            # requests to it so the caller actually receives the data.
+            if normalized_arg == "agent/workspace/agent-data.json":
+                full_path = (
+                    roots.project_root / "agent" / "jiuwenclaw_workspace" / "agent-data.json"
+                ).resolve()
         if not full_path.exists():
             return (
                 404,
@@ -464,13 +476,13 @@ def build_share_snapshot(
 ) -> tuple[dict[str, Any], str]:
     """Build share payload.
 
-    Personal: disk session history. Enterprise (``AGENT_RUNTIME``): ChatHistoryStore (2-A).
+    Personal: disk session history. Enterprise: ChatHistoryStore (2-A).
     """
     exported_at = time.strftime("%Y-%m-%dT%H:%M:%S%z")
     timestamp = time.strftime("%Y%m%d-%H%M%S")
     filename = f"jiuwenswarm-share-{timestamp}.png"
 
-    if os.getenv("AGENT_RUNTIME", "").strip():
+    if is_enterprise():
         from jiuwenswarm.channels.web.history_store import get_session_detail_sync
 
         detail = get_session_detail_sync(session_id, user=user)

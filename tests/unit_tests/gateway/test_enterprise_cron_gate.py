@@ -1,10 +1,7 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-"""Enterprise cron gate / identity sticky unit tests."""
+"""Enterprise cron gate / sticky identity unit tests."""
 
 from __future__ import annotations
-
-import os
-from unittest.mock import patch
 
 import pytest
 
@@ -67,14 +64,57 @@ def test_strip_sticky_identity_fields() -> None:
     assert out == {"name": "x"}
 
 
+def test_extract_routing_triple_prefers_metadata_routing() -> None:
+    class _Req:
+        params = {"group_id": "from_params", "bot_id": "bp"}
+        metadata = {
+            "user_id": "ur",
+            "routing": {
+                "group_id": "from_routing",
+                "bot_id": "br",
+            },
+            "query": {"bot_id": ["bq"]},
+        }
+
+    g, b, u = extract_routing_triple(_Req())
+    assert g == "from_routing"
+    assert b == "br"
+    assert u == "ur"
+
+
 def test_extract_routing_triple_priority() -> None:
+    # 无 routing 的 dict 视为本地 handler params 副本
     g, b, u = extract_routing_triple(
         {"group_id": "from_params", "bot_id": "bp"},
-        {"group_id": "from_meta", "user_id": "um", "query": {"bot_id": "bq", "user_id": "uq"}},
+        {"group_id": "from_meta", "user_id": "um"},
     )
     assert g == "from_params"
     assert b == "bp"
     assert u == "um"
+
+
+def test_extract_routing_triple_ignores_top_level_routing_fields_when_routing_key_present() -> None:
+    g, b, u = extract_routing_triple(
+        {
+            "routing": {},
+            "group_id": "top-g",
+            "bot_id": "top-b",
+            "user_id": "top-u",
+        },
+    )
+    # user_id 顶层权威；group/bot 有 routing 键时不读顶层
+    assert g is None
+    assert b is None
+    assert u == "top-u"
+
+
+def test_extract_routing_triple_ignores_query_when_routing_absent() -> None:
+    g, b, u = extract_routing_triple(
+        {"query": {"bot_id": ["bq"], "user_id": ["uq"], "group_id": ["gq"]}},
+    )
+    assert g is None
+    assert b is None
+    assert u is None
 
 
 def test_job_matches_routing_and() -> None:
@@ -107,21 +147,23 @@ def test_job_matches_routing_and() -> None:
     )
 
 
-def test_enterprise_cron_enabled_requires_jiuwenclaw_id(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("AGENT_RUNTIME", "1")
-    monkeypatch.delenv("JIUWENCLAW_ID", raising=False)
-    with patch(
-        "jiuwenswarm.gateway.cron.enterprise_gate.get_bound_jiuwenclaw_id",
-        return_value=None,
-    ):
-        assert enterprise_cron_enabled(deployment_mode="standalone") is False
+def test_enterprise_cron_enabled_by_deployment_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("JIUWENSWARM_EDITION", "enterprise")
+    assert enterprise_cron_enabled(deployment_mode="standalone") is True
+    monkeypatch.delenv("GATEWAY_DB_HOST", raising=False)
+    assert enterprise_cron_enabled(deployment_mode="distributed") is False
+    monkeypatch.setenv("GATEWAY_DB_HOST", "mysql-headless.default")
+    assert enterprise_cron_enabled(deployment_mode="distributed") is True
 
-    with patch(
-        "jiuwenswarm.gateway.cron.enterprise_gate.get_bound_jiuwenclaw_id",
-        return_value="jid-1",
-    ):
-        assert enterprise_cron_enabled(deployment_mode="standalone") is True
-        assert enterprise_cron_enabled(deployment_mode="distributed") is False
+
+def test_enterprise_cron_disabled_for_personal_edition(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("JIUWENSWARM_EDITION", raising=False)
+    monkeypatch.setenv("JIUWENSWARM_EDITION", "personal")
+    assert enterprise_cron_enabled(deployment_mode="standalone") is False
 
 
 def test_routing_triple_complete() -> None:

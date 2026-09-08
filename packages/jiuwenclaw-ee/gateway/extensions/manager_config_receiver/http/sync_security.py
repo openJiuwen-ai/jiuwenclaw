@@ -1,19 +1,14 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-"""Manager → Gateway 同步请求信封解析（仅 revision，无签密）。"""
+"""Manager → Gateway 同步请求解析（剥离历史信封字段，无签密）。"""
 
 from __future__ import annotations
 
 from typing import Any
 
-from fastapi import HTTPException
+# 历史信封 / 兼容字段，不进入业务落库
+_LEGACY_KEYS = frozenset({"revision", "sig", "enc"})
 
-_ENVELOPE_KEYS = frozenset({"revision", "sig", "enc"})
 
-
-def split_envelope(body: dict[str, Any]) -> tuple[str, dict[str, Any]]:
-    """拆出 revision 与业务字段；忽略历史 ``sig`` / ``enc``（若仍被传入）。"""
-    revision = str(body.get("revision") or "")
-    if not revision:
-        raise HTTPException(status_code=400, detail="revision is required")
-    business = {k: v for k, v in body.items() if k not in _ENVELOPE_KEYS}
-    return revision, business
+def split_business(body: dict[str, Any]) -> dict[str, Any]:
+    """返回业务字段；忽略历史 ``revision`` / ``sig`` / ``enc``。"""
+    return {k: v for k, v in body.items() if k not in _LEGACY_KEYS}

@@ -77,14 +77,18 @@ spec:
             httpGet:
               path: /healthz
               port: rest
-            initialDelaySeconds: 5
+            initialDelaySeconds: 10
             periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 3
           livenessProbe:
             httpGet:
               path: /healthz
               port: rest
-            initialDelaySeconds: 10
+            initialDelaySeconds: 60
             periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 6
           envFrom:
             - secretRef:
                 name: <<SECRET_CM_NAME>>
@@ -96,7 +100,9 @@ spec:
             - name: OPENJIUWEN_SERVICE_PORT
               value: "<<AGENT_RUNTIME_PORT>>"
             - name: OPENJIUWEN_SERVICE_REDIS_URL
-              value: "redis://<<REDIS_HOST>>:<<REDIS_PORT>>/<<AGENT_RUNTIME_REDIS_DB>>"
+              # AgentServer checkpointer 用此 URL 连接 Redis（与 gateway 的 redis client 独立）
+              # 由 runtime_handler.sh 按 REDIS_MODE 计算：cluster -> redis+cluster://host:port / standalone -> redis://host:port/db
+              value: "<<OPENJIUWEN_SERVICE_REDIS_URL>>"
             - name: OPENJIUWEN_SERVICE_REQUEST_TIMEOUT_SECONDS
               value: "<<AGENT_RUNTIME_REQUEST_TIMEOUT>>"
             - name: OPENJIUWEN_SERVICE_DB_TYPE
@@ -106,7 +112,7 @@ spec:
             - name: OPENJIUWEN_SERVICE_DB_PORT
               value: "<<DB_PORT>>"
             - name: OPENJIUWEN_SERVICE_DB_NAME
-              value: "<<AGENT_RUNTIME_DB_NAME>>"
+              value: "<<RUNTIME_DB_NAME>>"
             - name: OPENJIUWEN_SERVICE_DB_USER
               value: "<<RUNTIME_DB_USER>>"
             - name: OPENJIUWEN_SERVICE_DEPLOY_REPLICAS
@@ -119,11 +125,13 @@ spec:
               value: "<<AGENT_RUNTIME_SCOPE_FULL_TIMEOUT>>"
             - name: AGENT_RUNTIME_LOG_LEVEL
               value: "<<AGENT_RUNTIME_LOG_LEVEL>>"
+            - name: JIUWENSWARM_EDITION
+              value: "enterprise"
             - name: TZ
               value: "<<TIMEZONE>>"
 
 ---
-# Service：ClusterIP（gateway / 其它服务经此访问 agent-runtime）
+# 集群内部访问： 提供稳定 DNS 域名
 apiVersion: v1
 kind: Service
 metadata:
@@ -137,3 +145,19 @@ spec:
       port: <<AGENT_RUNTIME_PORT>>
       targetPort: <<AGENT_RUNTIME_PORT>>
   type: ClusterIP
+
+---
+# NodePort Service：供外连接
+apiVersion: v1
+kind: Service
+metadata:
+  name: <<AGENT_RUNTIME_NAME>>-nodeport
+  namespace: <<NAMESPACE>>
+spec:
+  type: NodePort
+  ports:
+    - port: <<AGENT_RUNTIME_PORT>>
+      targetPort: <<AGENT_RUNTIME_PORT>>
+      nodePort: <<AGENT_RUNTIME_NODE_PORT>>
+  selector:
+    app: <<AGENT_RUNTIME_NAME>>
