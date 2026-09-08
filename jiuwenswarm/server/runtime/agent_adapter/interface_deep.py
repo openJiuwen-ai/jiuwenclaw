@@ -197,6 +197,7 @@ from jiuwenswarm.agents.harness.common.rails.interrupt.interrupt_helpers import 
     build_permission_rail,
     convert_interactions_to_ask_user_question,
 )
+from jiuwenswarm.common.cron_session import is_cron_execution_session
 from jiuwenswarm.agents.harness.common.tools.todo_compat import (
     CompatibleTodoModifyTool,
     install_todo_modify_compat_patch,
@@ -7321,18 +7322,7 @@ class JiuWenSwarmDeepAdapter:
                 self._build_subagent_rail,
                 {"config_base": config_base},
             ),
-            _RailBuildInfo(
-                "_permission_rail",
-                build_permission_rail,
-                {
-                    "config": config_base,
-                    "llm": self._model,
-                    "model_name": config_base.get("models", {})
-                    .get("default", {})
-                    .get("model_client_config", {})
-                    .get("model_name", "gpt-4"),
-                },
-            ),
+            *self._permission_interrupt_rail_infos(config_base),
             _RailBuildInfo(
                 "_context_processor_rail",
                 _build_context_processor_rail,
@@ -7501,8 +7491,40 @@ class JiuWenSwarmDeepAdapter:
             completion_timeout=resolve_task_loop_completion_timeout(config),
         )
 
+    def _permission_interrupt_rail_infos(
+        self, config_base: dict[str, Any]
+    ) -> list[_RailBuildInfo]:
+        """PermissionInterruptRail recipe, omitted for unattended cron sessions."""
+        if is_cron_execution_session(self._parent_session_id):
+            logger.info(
+                "[JiuWenSwarmDeepAdapter] skip PermissionInterruptRail for cron session %s",
+                self._parent_session_id,
+            )
+            return []
+        return [
+            _RailBuildInfo(
+                "_permission_rail",
+                build_permission_rail,
+                {
+                    "config": config_base,
+                    "llm": self._model,
+                    "model_name": config_base.get("models", {})
+                    .get("default", {})
+                    .get("model_client_config", {})
+                    .get("model_name", "gpt-4"),
+                },
+            )
+        ]
+
     def _update_permission_rail(self, config_base: dict[str, Any] | None) -> None:
         """原地更新已有 PermissionRail 配置，或在首次启用时新建。"""
+        if is_cron_execution_session(self._parent_session_id):
+            logger.info(
+                "[JiuWenSwarmDeepAdapter] skip PermissionInterruptRail hot-update "
+                "for cron session %s",
+                self._parent_session_id,
+            )
+            return
         permission_config = config_base.get("permissions", {}) if config_base else {}
         if self._permission_rail is not None:
             self._permission_rail.update_config(permission_config)
