@@ -103,6 +103,8 @@ ERROR_SKILLHUB_DETAIL_FAILED = "SKILLHUB_DETAIL_FAILED"
 
 _DETAIL_KEY_SKILLHUB_DETAIL_NOT_FOUND = "skills.swarmskillshub.errors.detailNotFound"
 _DETAIL_KEY_SKILLHUB_DETAIL_FAILED = "skills.swarmskillshub.errors.detailFailed"
+# 广场详情从产物回填 detail_desc 时的正文长度上限（字符）
+_SKILLHUB_DETAIL_DESC_MAX_CHARS = 200 * 1024
 
 # ZIP 解包配额（防 zip bomb）
 _SKILL_ZIP_MAX_UPLOAD_BYTES = 50 * 1024 * 1024
@@ -3771,8 +3773,12 @@ class SkillManager:
                 token=auth.get("token"),
                 system_token=auth.get("system_token"),
             )
-            public_latest_version = str(plugin_item.get("public_latest_version") or "").strip()
-            if not public_latest_version:
+            # 广场搜索可能返回尚无 public_latest_version 的资产（官网仍用 latest_version 展示）。
+            resolved_version = (
+                str(plugin_item.get("public_latest_version") or "").strip()
+                or str(plugin_item.get("latest_version") or "").strip()
+            )
+            if not resolved_version:
                 return {
                     "success": False,
                     "detail": "SkillHub 资产无公开版本",
@@ -3782,14 +3788,14 @@ class SkillManager:
 
             version_detail = await self._team_skills_hub_get_version_detail(
                 asset_id,
-                public_latest_version,
+                resolved_version,
                 base_url=base_url,
                 token=auth.get("token"),
                 system_token=auth.get("system_token"),
             )
             resp_asset_id = str(version_detail.get("asset_id") or "").strip()
             resp_version = str(version_detail.get("version") or "").strip()
-            if resp_asset_id != asset_id or resp_version != public_latest_version:
+            if resp_asset_id != asset_id or resp_version != resolved_version:
                 return {
                     "success": False,
                     "detail": "SkillHub 版本详情与解析结果不一致",
@@ -3798,10 +3804,20 @@ class SkillManager:
                 }
 
             data = self._merge_skillhub_public_detail(plugin_item, version_detail)
+            if not str(data.get("detail_desc") or "").strip():
+                hydrated = await self._hydrate_skillhub_detail_desc_from_artifact(
+                    asset_id,
+                    resolved_version,
+                    base_url=base_url,
+                    token=auth.get("token"),
+                    system_token=auth.get("system_token"),
+                )
+                if hydrated:
+                    data["detail_desc"] = hydrated
             return {
                 "success": True,
                 "asset_id": asset_id,
-                "version": public_latest_version,
+                "version": resolved_version,
                 "data": data,
             }
         except SkillRpcError as exc:
@@ -3824,6 +3840,114 @@ class SkillManager:
                 "detail_key": _DETAIL_KEY_SKILLHUB_DETAIL_FAILED,
                 "code": ERROR_SKILLHUB_DETAIL_FAILED,
             }
+
+    async def _hydrate_skillhub_detail_desc_from_artifact(
+        self,
+        asset_id: str,
+        version: str,
+        *,
+        base_url: str | None = None,
+        token: str | None = None,
+        system_token: str | None = None,
+    ) -> str:
+        """detail_desc 为空时，从公开版产物包提取 README/SKILL.md 正文（仅展示，不安装）.
+
+        临时目录在 with 结束时自动删除。失败返回空串，不抬升为 detail 失败。
+        """
+        version_str = str(version or "").strip()
+        try:
+            artifact_data = await self._team_skills_hub_http_get_data(
+                f"/api/v1/artifacts/{asset_id}",
+                params={"version": version_str} if version_str else None,
+                timeout=_TEAM_SKILLS_HUB_MARKET_TIMEOUT,
+                base_url=base_url,
+                token=token,
+                system_token=system_token,
+            )
+            if not isinstance(artifact_data, dict):
+                return ""
+            download_url = str(artifact_data.get("download_url", "")).strip()
+            if not download_url:
+                return ""
+            self._assert_team_skills_hub_download_url_allowed(download_url)
+            checksum_sha256 = str(artifact_data.get("checksum_sha256", "")).strip()
+            artifact_bytes = await self._download_zip_and_verify(
+                download_url, checksum_sha256=checksum_sha256
+            )
+            with tempfile.TemporaryDirectory(prefix="jiuwenswarm_skillhub_detail_") as tmpdir:
+                tmp_path = Path(tmpdir)
+                self._safe_extract_zip_bytes_to_dir(artifact_bytes, tmp_path)
+                skill_dir = self._locate_skill_dir(tmp_path)
+                text = self._extract_skillhub_detail_desc_from_package(
+                    tmp_path, skill_dir=skill_dir
+                )
+                if not text:
+                    return ""
+                if len(text) > _SKILLHUB_DETAIL_DESC_MAX_CHARS:
+                    return text[:_SKILLHUB_DETAIL_DESC_MAX_CHARS]
+                return text
+        except Exception as exc:
+            logger.warning(
+                "SkillHub 详情从产物回填 detail_desc 失败: asset_id=%s version=%s error=%s",
+                asset_id,
+                version_str,
+                exc,
+            )
+            return ""
+
+    @classmethod
+    def _read_text_file_limited(cls, path: Path) -> str:
+        try:
+            return path.read_text(encoding="utf-8").strip()
+        except OSError:
+            return ""
+
+    @classmethod
+    def _find_readme_files(cls, root: Path) -> list[Path]:
+        """在解压根下查找 README.md（大小写不敏感），浅路径优先."""
+        if not root.is_dir():
+            return []
+        found: list[Path] = []
+        for path in root.rglob("*"):
+            if path.is_file() and path.name.lower() == "readme.md":
+                found.append(path)
+        found.sort(key=lambda p: (len(p.relative_to(root).parts), str(p).lower()))
+        return found
+
+    @classmethod
+    def _extract_skillhub_detail_desc_from_package(
+        cls,
+        package_root: Path,
+        *,
+        skill_dir: Path | None,
+    ) -> str:
+        """优先包内 README，否则 SKILL.md body；不回退 short_desc."""
+        # 1) skill 目录内 README
+        if skill_dir is not None and skill_dir.is_dir():
+            for path in cls._find_readme_files(skill_dir):
+                text = cls._read_text_file_limited(path)
+                if text:
+                    return text
+        # 2) 整个解压树内 README（官网常见放在包根）
+        for path in cls._find_readme_files(package_root):
+            text = cls._read_text_file_limited(path)
+            if text:
+                return text
+        # 3) SKILL.md 正文（去掉 frontmatter）
+        if skill_dir is None:
+            return ""
+        skill_md = skill_dir / "SKILL.md"
+        if not skill_md.is_file():
+            for md in skill_dir.glob("*.md"):
+                if md.name.lower() == "skill.md":
+                    skill_md = md
+                    break
+            else:
+                return ""
+        parsed = cls._parse_skill_md(skill_md)
+        if not parsed:
+            return ""
+        return str(parsed.get("body") or "").strip()
 
     async def _skillnet_install_background(
         self,
