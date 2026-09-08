@@ -24,14 +24,16 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# ── 停止提示：追加到工具返回值，引导 LLM 总结并结束 ──
-_SKILL_TURBO_STOP_HINT = (
-    "\n\n[SYSTEM] The skill_acceleration_exec task is complete and the artifact has already been "
-    "generated. The file(s) have ALREADY been sent to the user by the internal "
-    "delivery pipeline - do NOT call send_file_to_user again. You should now "
-    "summarize this result to the user and finish your turn. Do NOT call "
-    "skill_acceleration_exec, skill_tool, or send_file_to_user again for this task - the "
-    "work is already done; calling any of them again would duplicate the work."
+# 中立收尾
+_SKILL_TURBO_STOP_HINT_NEUTRAL = (
+    "\n\n[SYSTEM] The skill_acceleration_exec task has finished, but the internal "
+    "delivery pipeline did NOT confirm that the file(s) were generated and sent "
+    "to the user. You should now summarize this result to the user HONESTLY "
+    "based on the artifact summary above: clearly state which parts are "
+    "incomplete or failed and that the file has NOT been delivered. Do NOT "
+    "claim the file was sent. Do NOT call skill_acceleration_exec or skill_tool "
+    "again for this task unless the user asks for a retry. Do NOT call "
+    "send_file_to_user either; file delivery is handled by the internal pipeline."
 )
 
 _PPT_DELIVERY_SUMMARY_POST_TOOL_HINT = (
@@ -42,7 +44,11 @@ _PPT_DELIVERY_SUMMARY_POST_TOOL_HINT = (
 
 # HITL 续跑没有外层 tool_result / DeliverySummaryRail；可见终稿用骨架或安全短句，
 # 禁止把产物摘要账本发给用户。
-PPT_TURBO_SAFE_DELIVERY_SUMMARY = "PPT 已生成并交付。"
+# HITL 续跑无 P10 骨架（交付未确认）时的用户可见终稿。
+PPT_TURBO_UNCONFIRMED_FINISH_TEXT = (
+    "PPT 任务已结束，但未能确认文件已生成并发送，部分环节可能未完成。"
+    "请查看上方过程信息，或让我重试补齐。"
+)
 _SKILL_TURBO_ARTIFACT_SUMMARY_MARKER = "[SkillAccelerationExec 产物摘要]"
 
 # 工具返回值会先被 AbilityManager 收成 ToolMessage。after_tool_call 再用
@@ -425,7 +431,7 @@ def visible_ppt_turbo_finish_text(
 ) -> str:
     """HITL 续跑的用户可见终稿（无外层 skill_acceleration_exec 工具循环）。
 
-    成功时优先发 P10 已填好的交付骨架；没有骨架则用安全短句。
+    成功时优先发 P10 已填好的交付骨架；没有骨架则用交付未确认的中立短句。
     失败只回可读错误。产物账本不得出现在返回值里。
     """
     from jiuwenswarm.server.runtime.skill_turbo.skill_codes.ppt.delivery_summary import (
@@ -436,7 +442,7 @@ def visible_ppt_turbo_finish_text(
         skeleton = _ppt_delivery_summary(holder)
         if skeleton.startswith(DELIVERY_SUMMARY_START):
             return skeleton
-        return PPT_TURBO_SAFE_DELIVERY_SUMMARY
+        return PPT_TURBO_UNCONFIRMED_FINISH_TEXT
     text = str(detail or "").strip() or "任务未完成"
     if _SKILL_TURBO_ARTIFACT_SUMMARY_MARKER in text:
         return "任务未完成"
@@ -465,7 +471,8 @@ def _wrap_skill_turbo_result(
             parts.append(_PPT_DELIVERY_SUMMARY_POST_TOOL_HINT)
         else:
             clear_pending_ppt_delivery_summary()
-            parts.append(_SKILL_TURBO_STOP_HINT)
+            # 无 P10 骨架 = 交付未确认，不宣称文件已发送。
+            parts.append(_SKILL_TURBO_STOP_HINT_NEUTRAL)
         result_dict["result"] = "\n\n".join(p for p in parts if p)
     else:
         clear_pending_ppt_delivery_summary()

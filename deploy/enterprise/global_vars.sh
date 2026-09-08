@@ -217,7 +217,6 @@ declare -A DEPLOY_VARS=(
     ["REDIS_NAME"]="jiuwenclaw-redis"
     ["REDIS_PASSWORD"]=""
     ["REDIS_PORT"]="6379"
-    ["REDIS_MODE"]="standalone"
     ["RENDER_ONLY"]="false"
     ["SECRET_CM_NAME"]="jiuwenclaw-secret-configmap"
     ["SKILL_AUTHORIZATION_ENABLED"]="false"
