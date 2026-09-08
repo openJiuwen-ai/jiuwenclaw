@@ -1800,8 +1800,11 @@
       "all": "All",
       "enabled": "Enabled",
       "disabled": "Disabled",
-      "builtin": "Builtin",
-      "other": "Other Skills"
+      "builtin": "Builtin"
+    },
+    "mySkillsGroups": {
+      "added": "Added Skills",
+      "builtin": "Built-in Skills"
     },
     "publishFilter": {
       "all": "All",
