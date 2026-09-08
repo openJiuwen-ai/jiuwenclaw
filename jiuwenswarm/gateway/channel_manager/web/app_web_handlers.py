@@ -220,6 +220,7 @@ _CODEX_DEPENDENCY_INSTALL_LOCK = threading.Lock()
 _CODEX_DEPENDENCY_INSTALL_STATUS: dict[str, Any] = {
     "status": "idle",
     "phase": "idle",
+    "progress_kind": "",
     "error": "",
     "last_log": "",
     "log_tail": [],
@@ -751,6 +752,7 @@ _FORWARD_REQ_METHODS = frozenset({
     "personal_context.fetch.stop_service",
     "personal_context.fetch.run_all",
     "personal_context.fetch.run_one",
+    "personal_context.fetch.stop_run",
     "personal_context.fetch.get_run_status",
     "personal_context.fetch.get_authorization_status",
     "personal_context.fetch.authorize_provider",
@@ -922,6 +924,7 @@ _FORWARD_NO_LOCAL_HANDLER_METHODS = frozenset({
     "personal_context.fetch.stop_service",
     "personal_context.fetch.run_all",
     "personal_context.fetch.run_one",
+    "personal_context.fetch.stop_run",
     "personal_context.fetch.get_run_status",
     "personal_context.fetch.get_authorization_status",
     "personal_context.fetch.authorize_provider",
@@ -1770,11 +1773,12 @@ def _ensure_claude_dependency_available_or_start_install() -> dict[str, Any] | N
         return _ensure_managed_external_cli_runtime_or_start_install("claude")
     with _CLAUDE_DEPENDENCY_INSTALL_LOCK:
         if _CLAUDE_DEPENDENCY_INSTALL_STATUS.get("status") == "running":
-            return _snapshot_claude_dependency_install_status()
+            return _snapshot_external_cli_dependency_install_status_unlocked("claude")
         _CLAUDE_DEPENDENCY_INSTALL_STATUS.update(
             {
                 "status": "running",
                 "phase": "installing",
+                "progress_kind": "installer_activity",
                 "error": "",
                 "last_log": "",
                 "log_tail": [],
@@ -1838,6 +1842,7 @@ def _ensure_managed_external_cli_runtime_or_start_install(cli_agent: str) -> dic
         status.update({
             "status": "running",
             "phase": "preparing",
+            "progress_kind": "download_metrics",
             "error": "",
             "last_log": "",
             "log_tail": [],
@@ -1933,6 +1938,7 @@ def _ensure_codex_dependency_available_or_start_install() -> dict[str, Any] | No
             _CODEX_DEPENDENCY_INSTALL_STATUS.update({
                 "status": "running",
                 "phase": "preparing",
+                "progress_kind": "installer_activity",
                 "error": "",
                 "last_log": "",
                 "log_tail": [],

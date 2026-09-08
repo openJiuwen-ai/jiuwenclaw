@@ -829,6 +829,7 @@ class WebChannel(BaseWsChannel):
             or event_name.startswith("team.")
             or event_name.startswith("macro.")
             or event_name.startswith("harness.")
+            or event_name.startswith("personal_context.context.")
         )
 
     @staticmethod

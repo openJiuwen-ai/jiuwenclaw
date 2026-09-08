@@ -57,7 +57,13 @@ from jiuwenswarm.agents.harness.common.plugins.rail_manager import get_rail_mana
 from jiuwenswarm.agents.harness.common.rails.permissions.permissions_persist import persist_cli_trusted_directory
 from jiuwenswarm.extensions.hooks_context import AgentServerChatHookContext
 from jiuwenswarm.server.runtime.agent_manager import AgentManager, ACP_DEFAULT_CAPABILITIES
-from jiuwenswarm.runtime import AgentRuntime
+from jiuwenswarm.runtime import (
+    AgentRuntime,
+    SessionForkInput,
+    SessionProvisionCommitTiming,
+    SessionProvisionError,
+    SessionProvisionState,
+)
 from jiuwenswarm.server.runtime.agent_warm_pool import WarmClaim
 from jiuwenswarm.server.runtime.tokenizer_service import TokenizerService
 from jiuwenswarm.server.runtime.session.session_metadata import get_all_sessions_metadata, remove_session_metadata_cache
@@ -362,9 +368,10 @@ def _renew_server_plan_controller() -> PlanModeController:
 
 # ``plan_entry_source`` 的合法取值，表示"用户这一条消息明确要求进入 plan"。
 # 一次性字段：TUI 的 ``/plan`` 命令、Web 用户手动打开 Plan 开关后的第一条消息。
-# ── 流式处理心跳间隔：当 Agent 处理时间超过此阈值时，发送心跳 chunk 保持 WebSocket 连接活跃 --
+# ── 流式连接保活间隔：当 Agent 处理时间超过此阈值时，发送 keepalive chunk --
 # 避免 ping_timeout 导致连接关闭。默认 10 秒，小于服务端 ping_timeout=20s。
-_STREAM_HEARTBEAT_INTERVAL_SECONDS = 10.0
+_STREAM_KEEPALIVE_INTERVAL_SECONDS = 10.0
+_STREAM_KEEPALIVE_STOP_TIMEOUT_SECONDS = 1.0
 from jiuwenswarm.server.wire_truncate import (  # noqa: F401  — re-exported for tests / handlers
     _HISTORY_PAGE_SIZE,
     _HISTORY_WIRE_STRING_LIMIT,
@@ -409,6 +416,174 @@ from jiuwenswarm.server.wire_truncate import (  # noqa: F401  — re-exported fo
     _build_agent_detail,
 )
 
+
+def _consume_keepalive_task_result(
+    keepalive_task: asyncio.Task,
+    request_id: str,
+) -> None:
+    """Observe an auxiliary keepalive result without replacing stream errors."""
+    try:
+        keepalive_task.result()
+    except asyncio.CancelledError:
+        return
+    except WebSocketConnectionClosed:
+        logger.info(
+            "[AgentWebSocketServer] keepalive task stopped after connection closed: "
+            "request_id=%s",
+            request_id,
+        )
+    except Exception:  # pylint: disable=broad-exception-caught
+        logger.exception(
+            "[AgentWebSocketServer] keepalive task failed: request_id=%s",
+            request_id,
+        )
+
+
+async def _stop_stream_keepalive(
+    keepalive_task: asyncio.Task,
+    keepalive_stop_event: asyncio.Event,
+    stream_activity_event: asyncio.Event,
+    request_id: str,
+) -> None:
+    """Stop an owned stream keepalive without blocking its owner indefinitely."""
+    keepalive_stop_event.set()
+    stream_activity_event.set()
+    phase_timeout = _STREAM_KEEPALIVE_STOP_TIMEOUT_SECONDS / 2.0
+    try:
+        done, _ = await asyncio.wait(
+            {keepalive_task},
+            timeout=phase_timeout,
+        )
+        if keepalive_task not in done:
+            logger.warning(
+                "[AgentWebSocketServer] keepalive task did not stop cooperatively; "
+                "cancelling: request_id=%s",
+                request_id,
+            )
+            keepalive_task.cancel()
+            done, _ = await asyncio.wait(
+                {keepalive_task},
+                timeout=phase_timeout,
+            )
+    except asyncio.CancelledError:
+        if keepalive_task.done():
+            _consume_keepalive_task_result(keepalive_task, request_id)
+        else:
+            keepalive_task.add_done_callback(
+                lambda finished: _consume_keepalive_task_result(
+                    finished,
+                    request_id,
+                )
+            )
+            keepalive_task.cancel()
+        raise
+    if keepalive_task not in done:
+        logger.error(
+            "[AgentWebSocketServer] keepalive task did not stop after bounded cleanup: "
+            "request_id=%s timeout=%.3fs",
+            request_id,
+            _STREAM_KEEPALIVE_STOP_TIMEOUT_SECONDS,
+        )
+        keepalive_task.add_done_callback(
+            lambda finished: _consume_keepalive_task_result(
+                finished,
+                request_id,
+            )
+        )
+        return
+    _consume_keepalive_task_result(keepalive_task, request_id)
+
+
+class _StreamKeepalive:
+    """Own the transport keepalive task for one streaming request."""
+
+    def __init__(
+        self,
+        ws: Any,
+        request: AgentRequest,
+        send_lock: asyncio.Lock,
+    ) -> None:
+        self._ws = ws
+        self._request = request
+        self._send_lock = send_lock
+        self._channel_id = request.channel_id or "default"
+        self._stop_event = asyncio.Event()
+        self._activity_event = asyncio.Event()
+        self._task: asyncio.Task[None] | None = None
+
+    def start(self) -> None:
+        """Start sending keepalives while the stream is idle."""
+        self._task = asyncio.create_task(
+            self._run(),
+            name=f"stream-keepalive:{self._request.request_id}",
+        )
+
+    def notify_activity(self, *, terminal: bool = False) -> None:
+        """Restart the idle timer and optionally prevent future keepalives."""
+        self._activity_event.set()
+        if terminal:
+            self._stop_event.set()
+
+    def signal_stop(self) -> None:
+        """Prevent new sends and wake an idle keepalive immediately."""
+        self._stop_event.set()
+        self._activity_event.set()
+
+    async def stop(self) -> None:
+        """Join the owned task within the configured total time budget."""
+        self.signal_stop()
+        if self._task is None:
+            return
+        await _stop_stream_keepalive(
+            self._task,
+            self._stop_event,
+            self._activity_event,
+            self._request.request_id,
+        )
+
+    async def _run(self) -> None:
+        try:
+            while not self._stop_event.is_set():
+                try:
+                    await asyncio.wait_for(
+                        self._activity_event.wait(),
+                        timeout=_STREAM_KEEPALIVE_INTERVAL_SECONDS,
+                    )
+                    self._activity_event.clear()
+                except asyncio.TimeoutError:
+                    if self._stop_event.is_set():
+                        break
+                    if self._activity_event.is_set():
+                        continue
+                    keepalive_chunk = AgentResponseChunk(
+                        request_id=self._request.request_id,
+                        channel_id=self._channel_id,
+                        payload={"event_type": "keepalive"},
+                        is_complete=False,
+                    )
+                    if keepalive_chunk.agent_ref is None:
+                        keepalive_chunk.agent_ref = self._request.agent_ref
+                    wire = encode_agent_chunk_for_wire(
+                        keepalive_chunk,
+                        response_id=self._request.request_id,
+                        sequence=-1,
+                    )
+                    async with self._send_lock:
+                        if self._stop_event.is_set():
+                            break
+                        if self._activity_event.is_set():
+                            continue
+                        await send_wire_payload(self._ws, wire)
+                    logger.info(
+                        "[AgentWebSocketServer] keepalive chunk 发送: request_id=%s",
+                        self._request.request_id,
+                    )
+        except WebSocketConnectionClosed:
+            logger.info(
+                "[AgentWebSocketServer] keepalive 停止，WebSocket 已关闭: "
+                "request_id=%s",
+                self._request.request_id,
+            )
 
 
 def _request_query_text(request: AgentRequest) -> str:
@@ -1430,7 +1605,10 @@ class AgentWebSocketServer:
         The current Runtime is permanently closed. After shutdown this server
         owns a new Runtime/AgentManager pair, so a later start() restores the
         established Gateway/WebSocket service contract. Callers must not retain
-        the pre-stop Runtime instance.
+        the pre-stop Runtime instance. If Runtime close is rejected before any
+        resources are released, the original Runtime is retained and the error
+        is propagated so its unfinished operation can be finalized before a
+        retry.
         """
         try:
             await self._stop_main_services()
@@ -1500,36 +1678,55 @@ class AgentWebSocketServer:
 
         await close_kv_cache_runtime()
 
+        closing_runtime = self._runtime
+        runtime_close_completed = False
+        runtime_close_error: BaseException | None = None
         try:
-            await self._runtime.close()
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("[AgentWebSocketServer] runtime.close failed: %s", exc)
+            await closing_runtime.close()
+            runtime_close_completed = True
+        except BaseException as exc:  # preserve cancellation until host cleanup
+            runtime_close_error = exc
+            if isinstance(exc, Exception):
+                logger.warning(
+                    "[AgentWebSocketServer] runtime.close failed: %s",
+                    exc,
+                )
         finally:
-            # AgentRuntime is intentionally one-shot for process-style CLI
-            # commands. AgentServer historically supports start after stop, so
-            # prepare a fresh Runtime, manager and plan-state owner for its next
-            # lifecycle. Plan state is process-local and must not cross a
-            # stop/start boundary.
-            plan_controller = _renew_server_plan_controller()
-            self._runtime = AgentRuntime(
-                plan_controller=plan_controller,
-                enable_kvc_tracking=True,
-            )
-            self._agent_manager = self._runtime.agent_manager
-            self._heartbeat_runtime = HeartbeatRailRuntime(self)
-            self._runtime.set_admission_controller(self._heartbeat_runtime.admission)
-            self._runtime.set_session_delete_lifecycle(self._heartbeat_runtime)
-            self._agent_manager.set_heartbeat_service(self._heartbeat_runtime)
-            self._adapter_registry = AdapterRegistry()
-            for adapter in (
-                SessionAdapter(),
-                WorkspaceFileAdapter(),
-                MemoryAdapter(),
-                ProjectAdapter(),
-                HarmonyOSAdapter(),
-                ConfigAdapter(),
-            ):
-                self._adapter_registry.register(adapter)
+            # Do not discard an open Runtime after a fail-fast close.  An
+            # unfinished two-phase provision still needs its original owner to
+            # commit or abort it before shutdown can be retried.
+            if runtime_close_completed or closing_runtime.closed:
+                # AgentRuntime is intentionally one-shot for process-style CLI
+                # commands. AgentServer historically supports start after stop,
+                # so prepare a fresh Runtime, manager and plan-state owner for
+                # its next lifecycle. Plan state is process-local and must not
+                # cross a completed stop/start boundary.
+                plan_controller = _renew_server_plan_controller()
+                self._runtime = AgentRuntime(
+                    plan_controller=plan_controller,
+                    enable_kvc_tracking=True,
+                )
+                self._agent_manager = self._runtime.agent_manager
+                self._heartbeat_runtime = HeartbeatRailRuntime(self)
+                self._runtime.set_admission_controller(
+                    self._heartbeat_runtime.admission
+                )
+                self._runtime.set_session_delete_lifecycle(
+                    self._heartbeat_runtime
+                )
+                self._agent_manager.set_heartbeat_service(
+                    self._heartbeat_runtime
+                )
+                self._adapter_registry = AdapterRegistry()
+                for adapter in (
+                    SessionAdapter(),
+                    WorkspaceFileAdapter(),
+                    MemoryAdapter(),
+                    ProjectAdapter(),
+                    HarmonyOSAdapter(),
+                    ConfigAdapter(),
+                ):
+                    self._adapter_registry.register(adapter)
 
         runtime_push_handler = getattr(self, "_runtime_push_handler", None)
         if runtime_push_handler is not None:
@@ -1540,11 +1737,21 @@ class AgentWebSocketServer:
             self._runtime_push_handler = None
 
         if not had_server:
+            if runtime_close_error is not None and (
+                not isinstance(runtime_close_error, Exception)
+                or not closing_runtime.closed
+            ):
+                raise runtime_close_error
             return
         try:
             await self._jiuwenbox_runner.stop()
         except Exception as exc:  # noqa: BLE001
             logger.warning("[AgentWebSocketServer] jiuwenbox_runner.stop failed: %s", exc)
+        if runtime_close_error is not None and (
+            not isinstance(runtime_close_error, Exception)
+            or not closing_runtime.closed
+        ):
+            raise runtime_close_error
         logger.info("[AgentWebSocketServer] 已停止")
 
     # ---------- 连接处理 ----------
@@ -3025,7 +3232,6 @@ class AgentWebSocketServer:
         self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock
     ) -> None:
         """流式处理：调用 process_message_stream，逐条发送 E2AResponse 线 JSON。"""
-        channel_id = request.channel_id or "default"
         session_id = request.session_id or "default"
         current_task = asyncio.current_task()
         stream_stop_event = asyncio.Event()
@@ -3033,55 +3239,12 @@ class AgentWebSocketServer:
             self._session_stream_tasks.setdefault(session_id, {})[current_task] = stream_stop_event
 
         chunk_count = 0
-        # 心跳控制：当有真实 chunk 发送时重置，空闲时发送心跳
-        heartbeat_event = asyncio.Event()
-        heartbeat_task: asyncio.Task | None = None
-
-        async def _heartbeat_loop() -> None:
-            """后台心跳任务：在空闲期间定期发送 keepalive chunk."""
-            try:
-                while True:
-                    # 等待心跳间隔，如果期间有真实 chunk 发送则 heartbeat_event 被设置，重置等待
-                    try:
-                        await asyncio.wait_for(
-                            heartbeat_event.wait(),
-                            timeout=_STREAM_HEARTBEAT_INTERVAL_SECONDS,
-                        )
-                        # 有真实 chunk 发送，重置 event 继续等待
-                        heartbeat_event.clear()
-                    except asyncio.TimeoutError:
-                        # 超时：空闲超过心跳间隔，发送 keepalive chunk
-                        heartbeat_chunk = AgentResponseChunk(
-                            request_id=request.request_id,
-                            channel_id=channel_id,
-                            payload={"event_type": "keepalive"},
-                            is_complete=False,
-                        )
-                        # V2: 心跳 chunk 也回带 agent_ref，避免切换 mode 后
-                        # 旧 session 心跳错路由到新 agent 窗口（设计 §5.2 场景 2）。
-                        if heartbeat_chunk.agent_ref is None:
-                            heartbeat_chunk.agent_ref = request.agent_ref
-                        wire = encode_agent_chunk_for_wire(
-                            heartbeat_chunk,
-                            response_id=request.request_id,
-                            sequence=-1,  # 心跳使用特殊序列号 -1
-                        )
-                        async with send_lock:
-                            await send_wire_payload(ws, wire)
-                        logger.info(
-                            "[AgentWebSocketServer] keepalive chunk 发送: request_id=%s",
-                            request.request_id,
-                        )
-            except asyncio.CancelledError:
-                pass
-            except WebSocketConnectionClosed:
-                logger.info(
-                    "[AgentWebSocketServer] keepalive 停止，WebSocket 已关闭: request_id=%s",
-                    request.request_id,
-                )
-
-        # 启动心跳任务
-        heartbeat_task = asyncio.create_task(_heartbeat_loop())
+        keepalive = _StreamKeepalive(
+            ws,
+            request,
+            send_lock,
+        )
+        runtime_stream: Any | None = None
 
         async def _send_control_event(event: RuntimeEvent) -> None:
             await self._send_runtime_event(
@@ -3092,22 +3255,23 @@ class AgentWebSocketServer:
                 sequence=chunk_count,
             )
 
-        runtime_stream = self._execution_runtime().stream(
-            request,
-            trigger_hook=False,
-            on_control_event=_send_control_event,
-        )
         try:
+            runtime_stream = self._execution_runtime().stream(
+                request,
+                trigger_hook=False,
+                on_control_event=_send_control_event,
+            )
+            keepalive.start()
             async for event in runtime_stream:
                 # Runtime control events normally use the callback above. Keep
                 # compatibility with custom Runtime implementations without
-                # consuming a wire sequence number or resetting heartbeats.
+                # consuming a wire sequence number or resetting the keepalive timer.
                 if event.event_type == PLAN_MODE_EXITED_EVENT_TYPE:
                     await _send_control_event(event)
                     continue
                 chunk_count += 1
-                # 通知心跳任务有真实 chunk 发送，重置心跳计时
-                heartbeat_event.set()
+                # 通知 keepalive 有真实 chunk 发送，重置空闲计时。
+                keepalive.notify_activity(terminal=event.is_complete)
                 try:
                     sent_original = await self._send_runtime_event(
                         ws,
@@ -3130,43 +3294,25 @@ class AgentWebSocketServer:
                         request.request_id,
                     )
                     return
-                # 清除 event，让心跳任务重新开始计时
-                heartbeat_event.clear()
         finally:
-            close_stream = getattr(runtime_stream, "aclose", None)
-            if callable(close_stream):
-                await close_stream()
-            # 停止心跳任务
-            if heartbeat_task is not None:
-                logger.info(
-                    "[AgentWebSocketServer] cancelling heartbeat_task: request_id=%s",
-                    request.request_id,
-                )
-                heartbeat_task.cancel()
+            # 尽早阻止新的 keepalive；Runtime 清理仍先完成，以尽快释放其资源。
+            keepalive.signal_stop()
+            try:
+                if runtime_stream is not None:
+                    close_stream = getattr(runtime_stream, "aclose", None)
+                    if callable(close_stream):
+                        await close_stream()
+            finally:
                 try:
-                    await heartbeat_task
-                    logger.info(
-                        "[AgentWebSocketServer] heartbeat_task cancelled cleanly: request_id=%s",
-                        request.request_id,
-                    )
-                except asyncio.CancelledError:
-                    logger.info(
-                        "[AgentWebSocketServer] heartbeat_task cancelled (CancelledError): request_id=%s",
-                        request.request_id,
-                    )
-                    pass
-                except WebSocketConnectionClosed:
-                    logger.info(
-                        "[AgentWebSocketServer] heartbeat_task cancelled (ConnectionClosed): request_id=%s",
-                        request.request_id,
-                    )
-                    pass
-            # 清除自身的宿主生命周期记录；同 session 的其它请求不受影响。
-            entries = self._session_stream_tasks.get(session_id)
-            if entries is not None and current_task is not None:
-                entries.pop(current_task, None)
-                if not entries:
-                    self._session_stream_tasks.pop(session_id, None)
+                    # 显式停止并唤醒 keepalive；Task.cancel 只作为有界的兜底。
+                    await keepalive.stop()
+                finally:
+                    # 清除自身的宿主生命周期记录；同 session 的其它请求不受影响。
+                    entries = self._session_stream_tasks.get(session_id)
+                    if entries is not None and current_task is not None:
+                        entries.pop(current_task, None)
+                        if not entries:
+                            self._session_stream_tasks.pop(session_id, None)
         logger.info(
             "[AgentWebSocketServer] 流式响应已发送: request_id=%s 共 %s 个 chunk",
             request.request_id,
@@ -10186,23 +10332,19 @@ class AgentWebSocketServer:
     async def _handle_session_fork(
             self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock
     ) -> None:
-        """Handle session.fork: filesystem copy + in-memory context copy.
+        """Translate ``session.fork`` between WebSocket wire and Runtime.
 
         Args:
             ws: WebSocket connection.
             request: AgentRequest with source_session_id, target_session_id, title.
             send_lock: Send lock.
         """
-        from jiuwenswarm.agents.harness.common.session_ops_service import (
-            copy_session_context,
-            copy_session_state,
-            fork_session,
-        )
-
         logger.info(
             "[AgentServer] session.fork: request_id=%s", request.request_id
         )
 
+        runtime = None
+        prepared = None
         try:
             params = request.params if isinstance(request.params, dict) else {}
             source = str(params.get("source_session_id") or "").strip()
@@ -10211,55 +10353,35 @@ class AgentWebSocketServer:
             channel_id = request.channel_id or "default"
 
             if not source:
-                raise ValueError("source_session_id is required")
+                raise SessionProvisionError(
+                    "source_session_id is required",
+                    code="BAD_REQUEST",
+                )
 
-            # session.fork reads and writes persistent checkpoint state.  Wait
-            # for the shared Runtime startup barrier before either the caller's
-            # explicit target or a Runtime-allocated target is used.
             runtime = self._execution_runtime()
             await runtime.start()
-            if not target:
-                target = await runtime.create_or_resume_session(
+            prepared = await runtime.prepare_session_fork(
+                SessionForkInput(
                     channel_id=channel_id,
-                    session_id=None,
+                    source_session_id=source,
+                    target_session_id=target or None,
+                    title=fork_title,
                 )
-
-            # 1. Filesystem fork (copies history.json, writes metadata)
-            result = fork_session(
-                source_session_id=source,
-                target_session_id=target,
-                title=fork_title,
-                channel_id=channel_id,
             )
-
-            # 2. Copy in-memory context (LLM conversation history)
-            agent = self._agent_manager.get_agent_nowait(channel_id)
-            deep_agent = None
-            if agent is not None:
-                deep_agent = await agent.ensure_instance()
-                await copy_session_context(deep_agent, source, target)
-            else:
-                logger.warning(
-                    "[AgentServer] session.fork: no agent for channel %s, "
-                    "in-memory context copy skipped",
-                    channel_id,
-                )
-
-            # 3. Copy DeepAgentState (task_plan, plan_mode, etc.)
-            from openjiuwen.core.single_agent.schema.agent_card import AgentCard
-
-            await copy_session_state(
-                source_session_id=source,
-                target_session_id=target,
-                card=deep_agent.card if deep_agent is not None else AgentCard(id="jiuwenswarm", name="jiuwenswarm"),
-                deep_agent=deep_agent,
+            result = await runtime.commit_session_provision(
+                prepared,
+                timing=SessionProvisionCommitTiming.BEFORE_RESULT_DELIVERY,
             )
 
             resp = AgentResponse(
                 request_id=request.request_id,
                 channel_id=request.channel_id,
                 ok=True,
-                payload=result,
+                payload={
+                    "session_id": result.session_id,
+                    "source_session_id": result.source_session_id,
+                    "title": result.title,
+                },
             )
             wire = encode_agent_response_for_wire(
                 resp, response_id=request.request_id
@@ -10269,9 +10391,27 @@ class AgentWebSocketServer:
 
             logger.info(
                 "[AgentServer] session.fork completed: source=%s target=%s title=%s",
-                source, target, result.get("title", ""),
+                source,
+                result.session_id,
+                result.title,
             )
 
+        except SessionProvisionError as e:
+            logger.warning("[AgentServer] session.fork rejected: %s", e)
+            payload = {"error": str(e)}
+            if e.code is not None:
+                payload["code"] = e.code
+            resp = AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=False,
+                payload=payload,
+            )
+            wire = encode_agent_response_for_wire(
+                resp, response_id=request.request_id
+            )
+            async with send_lock:
+                await send_wire_payload(ws, wire)
         except ValueError as e:
             logger.warning("[AgentServer] session.fork ValueError: %s", e)
             code = (
@@ -10303,6 +10443,28 @@ class AgentWebSocketServer:
             )
             async with send_lock:
                 await send_wire_payload(ws, wire)
+        finally:
+            if (
+                runtime is not None
+                and prepared is not None
+                and prepared.state is SessionProvisionState.PREPARED
+            ):
+                primary_error = sys.exception()
+                try:
+                    await runtime.abort_session_provision(prepared)
+                except asyncio.CancelledError:
+                    if primary_error is None:
+                        raise
+                    logger.warning(
+                        "[AgentServer] session.fork abort was cancelled while "
+                        "preserving %s",
+                        type(primary_error).__name__,
+                    )
+                except Exception as abort_exc:  # noqa: BLE001
+                    logger.warning(
+                        "[AgentServer] session.fork abort failed: %s",
+                        abort_exc,
+                    )
 
     async def _handle_acp_tool_response(
             self,
