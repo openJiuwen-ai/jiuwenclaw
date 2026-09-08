@@ -111,13 +111,6 @@ class VendorPreset:
 # Anthropic 格式可用的充要条件:该预设的 anthropic_base 非空。
 ANTHROPIC_CLIENT_PROVIDER = "Anthropic"
 
-# MiniMax video generation (Hailuo H3) uses POST /v2/video_generation.
-# These IDs are not returned by GET /v1/models (chat / M-series only).
-MINIMAX_VIDEO_GEN_MODELS: tuple[str, ...] = ("MiniMax-H3", "MiniMax-H3-Max")
-
-# MiniMax image generation. Chat /v1/models does not list these IDs.
-MINIMAX_IMAGE_GEN_MODELS: tuple[str, ...] = ("image-01", "image-01-live")
-
 # DashScope video generation.
 DASHSCOPE_VIDEO_GEN_API_BASE = "https://dashscope.aliyuncs.com/api/v1"
 DASHSCOPE_VIDEO_GEN_MODELS: tuple[str, ...] = (
@@ -203,10 +196,6 @@ _PRESETS: list[VendorPreset] = [
         models_endpoint="https://api.minimaxi.com/v1/models",
         models_needs_key=True,
         anthropic_base="https://api.minimaxi.com/anthropic",
-        video_gen_default_model="MiniMax-H3-Max",
-        video_gen_model_options=MINIMAX_VIDEO_GEN_MODELS,
-        image_gen_default_model="image-01",
-        image_gen_model_options=MINIMAX_IMAGE_GEN_MODELS,
     ),
     VendorPreset(
         vendor_key="maas",
@@ -467,10 +456,6 @@ _PRESETS: list[VendorPreset] = [
         models_endpoint="https://api.minimaxi.com/v1/models",
         models_needs_key=True,
         anthropic_base="https://api.minimaxi.com/anthropic",
-        video_gen_default_model="MiniMax-H3-Max",
-        video_gen_model_options=MINIMAX_VIDEO_GEN_MODELS,
-        image_gen_default_model="image-01",
-        image_gen_model_options=MINIMAX_IMAGE_GEN_MODELS,
     ),
     VendorPreset(
         vendor_key="maas",

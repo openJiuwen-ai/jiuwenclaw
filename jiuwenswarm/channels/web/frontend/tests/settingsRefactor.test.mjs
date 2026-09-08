@@ -1439,16 +1439,10 @@ test('video generation reuses dedicated vendor presets instead of the chat model
     supports_anthropic: true,
     anthropic_base: 'https://api.minimaxi.com/anthropic',
     anthropic_client_provider: 'Anthropic',
-    video_gen_default_model: 'MiniMax-H3-Max',
-    video_gen_model_options: ['MiniMax-H3', 'MiniMax-H3-Max'],
-    image_gen_default_model: 'image-01',
-    image_gen_model_options: ['image-01', 'image-01-live'],
   };
-  assert.deepEqual(mediaModelOptionsForPreset(minimax, 'video_gen'), ['MiniMax-H3', 'MiniMax-H3-Max']);
-  assert.equal(mediaDefaultModelForPreset(minimax, 'video_gen'), 'MiniMax-H3-Max');
+  assert.deepEqual(mediaModelOptionsForPreset(minimax, 'video_gen'), []);
   assert.equal(shouldFetchRemoteMediaModels(minimax, 'video_gen'), false);
-  assert.deepEqual(mediaModelOptionsForPreset(minimax, 'image_gen'), ['image-01', 'image-01-live']);
-  assert.equal(mediaDefaultModelForPreset(minimax, 'image_gen'), 'image-01');
+  assert.deepEqual(mediaModelOptionsForPreset(minimax, 'image_gen'), []);
   assert.equal(shouldFetchRemoteMediaModels(minimax, 'image_gen'), false);
   assert.deepEqual(mediaModelOptionsForPreset(minimax, 'vision'), ['MiniMax-M3', 'MiniMax-M2']);
   assert.equal(shouldFetchRemoteMediaModels(minimax, 'vision'), true);
@@ -1464,7 +1458,7 @@ test('video generation reuses dedicated vendor presets instead of the chat model
   );
   assert.deepEqual(
     filtered.custom_api.map((preset) => preset.vendor_key),
-    ['alibaba', 'minimax'],
+    ['alibaba'],
   );
   assert.deepEqual(
     filterVendorCatalogForModality(
@@ -1476,7 +1470,7 @@ test('video generation reuses dedicated vendor presets instead of the chat model
       },
       'video_gen',
     ).custom_api.map((preset) => preset.vendor_key),
-    ['alibaba', 'minimax'],
+    ['alibaba'],
   );
 });
 

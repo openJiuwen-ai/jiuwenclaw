@@ -1715,12 +1715,16 @@ def test_image_gen_tool_gated_by_env(monkeypatch: pytest.MonkeyPatch) -> None:
     )
     monkeypatch.delenv("IMAGE_GEN_API_KEY", raising=False)
     monkeypatch.delenv("VIDEO_GEN_API_KEY", raising=False)
+    monkeypatch.delenv("IMAGE_GEN_ENABLED", raising=False)
     assert tools._build_image_gen_tools(ctx) == []
 
     monkeypatch.setenv("IMAGE_GEN_API_KEY", "k")
     monkeypatch.setenv("VIDEO_GEN_API_KEY", "vk")
     built = tools._build_image_gen_tools(ctx)
     assert [tool.card.name for tool in built] == ["generate_image"]
+
+    monkeypatch.setenv("IMAGE_GEN_ENABLED", "false")
+    assert tools._build_image_gen_tools(ctx) == []
 
 
 def test_video_gen_tool_gated_by_env(monkeypatch: pytest.MonkeyPatch) -> None:
