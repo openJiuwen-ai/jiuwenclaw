@@ -30,10 +30,17 @@ from jiuwenswarm.agents.harness.common.rsi.models import TaskStatus
 logger = logging.getLogger(__name__)
 
 _QUEUE_MAXSIZE = 128
+_DEFAULT_POLL_TIMEOUT = object()
 _PROVIDER_IN_PROGRESS = frozenset({"CREATED", "QUEUED", "RUNNING"})
+# The generic Provider watchdog remains bounded, but PAPER is deliberately
+# excluded from it below.  A paper iteration contains several model-backed
+# modules and network retrieval; there is no reliable per-iteration wall-clock
+# bound that can be multiplied by ``max_iterations`` without killing a healthy
+# run.  PAPER is stopped by its Provider's explicit terminate path instead.
 _PROVIDER_POLL_TIMEOUT_SECONDS = 30 * 60
 _PROVIDER_POLL_INTERVAL_SECONDS = 0.1
 _PROVIDER_HANDOFF_RETRY_SECONDS = 0.05
+_PROVIDER_TERMINATE_TIMEOUT_SECONDS = 5.0
 
 
 class RsiWorker:
@@ -257,7 +264,12 @@ class RsiWorker:
             # otherwise the generic result handler would mark it failed as
             # soon as it saw the initial running result.
             if _provider_status(result) in _PROVIDER_IN_PROGRESS:
-                result = await self._wait_for_provider_terminal(task_id, adapter, result)
+                result = await self._wait_for_provider_terminal(
+                    task_id,
+                    adapter,
+                    result,
+                    timeout=self._provider_poll_timeout_for(task_view),
+                )
             self._apply_result_status(task_id, result)
         except Exception as exc:  # noqa: BLE001
             logger.exception("[RSI] 任务执行失败 task=%s: %s", task_id, exc)
@@ -295,6 +307,21 @@ class RsiWorker:
                 return adapter
         return None
 
+    def _provider_poll_timeout_for(self, task_view: Any) -> float | None:
+        """Return the polling budget for a task.
+
+        Harness and program Providers retain the generic watchdog.  Paper
+        runs are intentionally unbounded here: their six model-backed modules
+        include web retrieval and compilation, so deriving a total deadline
+        from the number of tree iterations is only a guess and can terminate
+        a healthy run.  The paper Provider exposes ``terminate`` for explicit
+        user cancellation, and a terminal Provider snapshot still ends the
+        polling loop immediately.
+        """
+        if str(getattr(task_view, "artifact_type", "")).upper() == "PAPER":
+            return None
+        return self.provider_poll_timeout
+
     def _apply_result_status(self, task_id: str, result: Any) -> None:
         status = _provider_status(result, default="COMPLETED")
         if status in _PROVIDER_IN_PROGRESS:
@@ -328,6 +355,8 @@ class RsiWorker:
         task_id: str,
         adapter: Any,
         initial_result: Any,
+        *,
+        timeout: float | None | object = _DEFAULT_POLL_TIMEOUT,
     ) -> Any:
         """Wait for Providers whose ``run`` returns before execution ends.
 
@@ -345,21 +374,29 @@ class RsiWorker:
             )
             return initial_result
 
-        deadline = time.monotonic() + self.provider_poll_timeout
+        if timeout is _DEFAULT_POLL_TIMEOUT:
+            poll_timeout: float | None = self.provider_poll_timeout
+        elif timeout is None:
+            poll_timeout = None
+        else:
+            poll_timeout = max(0.1, float(timeout))
+        deadline = time.monotonic() + poll_timeout if poll_timeout is not None else None
         last_status = _provider_status(initial_result, default="RUNNING")
         last_error: Exception | None = None
         while True:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
+            remaining = None if deadline is None else deadline - time.monotonic()
+            if remaining is not None and remaining <= 0:
                 break
             try:
-                state = await asyncio.wait_for(
-                    asyncio.to_thread(read_state, task_id),
-                    timeout=remaining,
-                )
+                read_state_task = asyncio.to_thread(read_state, task_id)
+                if remaining is None:
+                    state = await read_state_task
+                else:
+                    state = await asyncio.wait_for(read_state_task, timeout=remaining)
             except asyncio.TimeoutError:
+                assert poll_timeout is not None
                 last_error = asyncio.TimeoutError(
-                    f"Provider.read_state exceeded {self.provider_poll_timeout:.1f}s"
+                    f"Provider.read_state exceeded {poll_timeout:.1f}s"
                 )
                 break
             except (FileNotFoundError, KeyError, OSError) as exc:
@@ -367,7 +404,9 @@ class RsiWorker:
                 # after returning from run.  A short retry handles that small
                 # hand-off without blocking event consumption.
                 last_error = exc
-                sleep_for = min(_PROVIDER_HANDOFF_RETRY_SECONDS, remaining)
+                sleep_for = _PROVIDER_HANDOFF_RETRY_SECONDS
+                if remaining is not None:
+                    sleep_for = min(sleep_for, remaining)
                 if sleep_for > 0:
                     await asyncio.sleep(sleep_for)
                 continue
@@ -380,11 +419,15 @@ class RsiWorker:
                     error_message=getattr(state, "error_message", None),
                 )
             last_status = status
-            sleep_for = min(_PROVIDER_POLL_INTERVAL_SECONDS, deadline - time.monotonic())
+            sleep_for = _PROVIDER_POLL_INTERVAL_SECONDS
+            if deadline is not None:
+                sleep_for = min(sleep_for, deadline - time.monotonic())
             if sleep_for > 0:
                 await asyncio.sleep(sleep_for)
 
-        elapsed = self.provider_poll_timeout - max(0.0, deadline - time.monotonic())
+        assert poll_timeout is not None
+        assert deadline is not None
+        elapsed = poll_timeout - max(0.0, deadline - time.monotonic())
         logger.error(
             "[RSI] Provider 未在 %.1f 秒内进入终态，task=%s status=%s error=%s",
             elapsed,
@@ -392,12 +435,49 @@ class RsiWorker:
             last_status,
             last_error,
         )
+        await self._terminate_provider_after_timeout(task_id, adapter)
         return SimpleNamespace(
             task_id=task_id,
             status="failed",
             final_node_id=getattr(initial_result, "final_node_id", None),
             error_code="PROVIDER_TIMEOUT",
             error_message="Provider 超时未进入终态",
+        )
+
+    async def _terminate_provider_after_timeout(self, task_id: str, adapter: Any) -> None:
+        """Best-effort cleanup for a Provider that missed its terminal deadline.
+
+        ``run()`` may return a live Provider task before its durable snapshot
+        becomes terminal.  If polling times out, simply marking the public RSI
+        task failed leaves that internal task running; a later queued task can
+        then share process-global resources with it.  Ask the Provider to
+        terminate, but keep a short bound so cleanup cannot wedge the worker.
+        """
+        terminate = getattr(adapter, "terminate", None)
+        if not callable(terminate):
+            logger.warning(
+                "[RSI] Provider 超时但不支持 terminate，task=%s",
+                task_id,
+            )
+            return
+        try:
+            result = await asyncio.wait_for(
+                terminate(task_id),
+                timeout=_PROVIDER_TERMINATE_TIMEOUT_SECONDS,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - timeout cleanup is best effort
+            logger.warning(
+                "[RSI] Provider 超时清理失败，task=%s error=%s",
+                task_id,
+                exc,
+            )
+            return
+        logger.warning(
+            "[RSI] Provider 超时后已请求 terminate，task=%s status=%s",
+            task_id,
+            _provider_status(result, default="UNKNOWN"),
         )
 
     def _mark_failed_if_running(self, task_id: str, cause: str) -> None:

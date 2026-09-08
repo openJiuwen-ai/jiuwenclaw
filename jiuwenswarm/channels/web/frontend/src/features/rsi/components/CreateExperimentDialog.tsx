@@ -101,6 +101,7 @@ interface FormState {
   maxIterations: number;
   optimizationInstruction: string;
   artifactPath: string;
+  webProxy: string;
 }
 
 function defaultForm(): FormState {
@@ -115,6 +116,7 @@ function defaultForm(): FormState {
     maxIterations: 2,
     optimizationInstruction: '',
     artifactPath: '',
+    webProxy: '',
   };
 }
 
@@ -191,6 +193,7 @@ export function CreateExperimentDialog({ open, onClose, onCreated }: CreateExper
           artifactType: 'PAPER',
           artifactPath: '',
           optimizationInstruction: '',
+          webProxy: '',
         };
       // 产物优化默认选论文
       return { ...f, scenario: 'ARTIFACT', artifactType: 'PAPER', tester: '' };
@@ -207,6 +210,7 @@ export function CreateExperimentDialog({ open, onClose, onCreated }: CreateExper
         artifactType: 'PROGRAM',
         artifactPath: '',
         optimizationInstruction: '',
+        webProxy: '',
         maxIterations: 3,
       };
     });
@@ -291,6 +295,7 @@ export function CreateExperimentDialog({ open, onClose, onCreated }: CreateExper
               ...(branch !== 'PROGRAM' ? { max_iterations: form.maxIterations } : {}),
               ...(form.optimizationInstruction ? { optimization_instruction: form.optimizationInstruction } : {}),
               ...(form.artifactPath ? { artifact_path: form.artifactPath } : {}),
+              ...(branch === 'PAPER' && form.webProxy.trim() ? { web_proxy: form.webProxy.trim() } : {}),
             };
       const res = await rsiTaskCreate(createParams);
       let nextStatus: RsiTaskStatus = res.status;
@@ -478,7 +483,6 @@ export function CreateExperimentDialog({ open, onClose, onCreated }: CreateExper
               <textarea
                 className="rsi-input"
                 rows={4}
-                maxLength={1000}
                 value={form.optimizationInstruction}
                 onChange={(e) => update('optimizationInstruction', e.target.value)}
                 placeholder={t('rsi.createDialog.optimizationInstructionPlaceholder')}
@@ -491,6 +495,22 @@ export function CreateExperimentDialog({ open, onClose, onCreated }: CreateExper
                 onPick={() => pickPath('artifact')}
               />
               {errors.paper && <Err text={errors.paper} />}
+            </Field>
+            <Field
+              label={t('rsi.createDialog.webProxyLabel')}
+              tip={t('rsi.createDialog.webProxyTip')}
+            >
+              <input
+                className="rsi-input"
+                value={form.webProxy}
+                onChange={(e) => update('webProxy', e.target.value)}
+                placeholder={t('rsi.createDialog.webProxyPlaceholder')}
+                inputMode="url"
+                autoComplete="off"
+              />
+              <div style={{ fontSize: 12, lineHeight: 1.5, marginTop: 5, color: 'var(--color-text-secondary)' }}>
+                {t('rsi.createDialog.webProxyHint')}
+              </div>
             </Field>
           </>
         )}
