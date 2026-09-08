@@ -266,6 +266,71 @@ class TestProviderControl:
 
         assert ctx.store.get(task_id).status == TaskStatus.PAUSED.value
 
+    async def test_pause_frees_the_queue_before_the_provider_confirms(self, ctx):
+        """暂停一提出，排在后面的任务就该开始，而不是等收尾做完。
+
+        pause 不会让引擎就地停下：Provider 先把在飞的那次扩展做完（一次模型调用
+        加一次评测）。实测一次真实运行里这段花了 2 分 34 秒，期间执行位一直被占，
+        第二个任务在队列里干等——等的是一件谁都不再要其结果的工作。
+        """
+
+        class BlockingAdapter:
+            supports_pause = True
+            supports_resume = True
+
+            def __init__(self) -> None:
+                self.started: list[str] = []
+                self.release = asyncio.Event()
+
+            def build_request(self, task_view, *, resume: bool = False):
+                del resume
+                return task_view
+
+            async def run(self, request, *, on_event=None):
+                del on_event
+                self.started.append(request.task_id)
+                await self.release.wait()
+                return SimpleNamespace(status="completed")
+
+            def read_state(self, task_id: str):
+                del task_id
+                return SimpleNamespace(status="completed")
+
+            async def pause(self, task_id: str):
+                del task_id
+                return SimpleNamespace(status="PAUSED")
+
+        adapter = BlockingAdapter()
+        ctx.register_adapters({"HARNESS": adapter})
+        first = _create(ctx, "pausing")
+        second = _create(ctx, "waiting")
+
+        ctx.worker.enqueue(first)
+        ctx.worker.enqueue(second)
+        for _ in range(100):                      # 第一个进入 run 并停住
+            await asyncio.sleep(0)
+            if adapter.started:
+                break
+        assert adapter.started == [first]
+
+        assert ctx.worker.cancel(first, "pause") == TaskStatus.RUNNING.value
+        for _ in range(100):                      # 收尾还没结束，第二个已经开跑
+            await asyncio.sleep(0)
+            if len(adapter.started) > 1:
+                break
+
+        assert adapter.started == [first, second], "暂停中的任务仍占着执行位"
+        assert not adapter.release.is_set(), "第一个任务其实还没跑完"
+        assert ctx.store.get(second).status == TaskStatus.RUNNING.value
+
+        adapter.release.set()
+        await asyncio.wait_for(ctx.worker._queue.join(), timeout=1)  # noqa: SLF001
+        runner = ctx.worker._run_task                                # noqa: SLF001
+        assert runner is not None
+        runner.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await runner
+
     async def test_failed_provider_control_keeps_public_state(self, ctx):
         class FailingAdapter(_ControlAdapter):
             async def pause(self, task_id: str):
