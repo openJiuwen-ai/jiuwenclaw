@@ -13,25 +13,21 @@
 
 from __future__ import annotations
 
-import hashlib
 import inspect
 import json
 import logging
+import hashlib
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 import yaml
+
 from openjiuwen.rsi import (
     AutoCoordinatingHarnessConfig,
     IterativeSingleHarnessRequest,
     SingleHarnessIterativeOptimizationOrchestrator,
-)
-from openjiuwen.rsi.harness_rsi.single_harness.events_translate import (
-    active_epoch_node_event,
-    epoch_node_event,
-    root_node_event,
 )
 from openjiuwen.rsi.schema import (
     ArtifactRef,
@@ -41,13 +37,18 @@ from openjiuwen.rsi.schema import (
     RsiTreeNode,
     TreeResponse,
 )
+from openjiuwen.rsi.harness_rsi.single_harness.events_translate import (
+    active_epoch_node_event,
+    epoch_node_event,
+    root_node_event,
+)
 
 from jiuwenswarm.agents.harness.common.rsi.errors import (
     RsiBadRequest,
     RsiDatasetInvalid,
+    RsiPathNotAllowed,
     RsiNotReady,
     RsiPathInvalid,
-    RsiPathNotAllowed,
     RsiResumeInputChanged,
     RsiResumeMismatch,
 )

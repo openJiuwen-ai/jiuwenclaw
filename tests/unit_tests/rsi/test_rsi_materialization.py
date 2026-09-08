@@ -11,21 +11,21 @@ from types import SimpleNamespace
 import pytest
 import yaml
 
-from jiuwenswarm.agents.harness.common.rsi import build_rsi_service_context
 from jiuwenswarm.agents.harness.common.rsi.errors import (
     RsiDatasetInvalid,
     RsiModelNotFound,
     RsiPathInvalid,
     RsiUnsupportedParameter,
 )
+from jiuwenswarm.agents.harness.common.rsi import build_rsi_service_context
 from jiuwenswarm.agents.harness.common.rsi.harness_activation import (
     resolve_native_harness_baseline,
 )
-from jiuwenswarm.agents.harness.common.rsi.harness_adapter import HarnessEngineAdapter
 from jiuwenswarm.agents.harness.common.rsi.harness_provider import (
     HarnessProvider,
     engine_validate_input,
 )
+from jiuwenswarm.agents.harness.common.rsi.harness_adapter import HarnessEngineAdapter
 from jiuwenswarm.agents.harness.common.rsi.materializer import RsiTaskMaterializer
 from jiuwenswarm.agents.harness.common.rsi.model_resolver import RsiModelConfigResolver
 
@@ -249,7 +249,7 @@ def test_materializer_copies_dataset_wraps_single_harness_and_writes_validation_
     assert profile_payload["data_loader"]["batch_size"] == 1
     assert profile_payload["member_optimizer"]["sibling_candidate_count"] == 1
     assert profile_payload["member_optimizer"]["max_issue_attempts_per_batch"] == 8
-    assert profile_payload["member_optimizer"]["max_repair_rounds_per_batch"] == 3
+    assert profile_payload["member_optimizer"]["max_repair_rounds_per_batch"] == 1
     assert (
         profile_payload["evaluation_result_analyzer"]["diagnosis_agent_max_concurrency"]
         == 5

@@ -2127,7 +2127,7 @@ def _commit_imported_package(
                 package_id, installed=False, source="local"
             )
     except Exception:
-        if kind in (_AGENT_GROUP_KIND, _PLUGIN_PACKAGE_KIND):
+        if kind == _AGENT_GROUP_KIND:
             shutil.rmtree(dest, ignore_errors=True)
         raise
     return {"id": package_id}
