@@ -440,6 +440,67 @@ async def test_emit_skill_turbo_hitl_keeps_pending_tool_call_request_id(monkeypa
     assert ask.request_id == http_rid
 
 
+@pytest.mark.asyncio
+async def test_emit_skill_turbo_hitl_overwrites_request_id_with_outer_call_id(monkeypatch):
+    """resume 内二次中断的 ask_user 卡片 request_id 对齐外层 call id。
+
+    首个 ask_user 经 StreamEventRail TIE 重写后用外层 skill_acceleration_exec
+    call id 作卡片 request_id；resume 内的二次中断走 _emit_skill_turbo_hitl_chunks，
+    必须传入并使用同一 outer_call_id，否则前端/relay-claw 按 request_id 路由
+    作答时找不到第二张卡 → 答案丢失 → 会话卡死。
+    """
+    pending_tcid = "skill_turbo-tc-ask_user-9"
+    outer_call_id = "call_7780745b931647ae956a2125"
+    http_rid = "http-req-abc"
+    tool_call = SimpleNamespace(
+        id=pending_tcid,
+        name="ask_user",
+        arguments={"questions": [{"question": "风格"}]},
+    )
+    tic = SimpleNamespace(tool_call=tool_call, request=SimpleNamespace())
+
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.agent_adapter.interface_deep._skill_turbo_extract_tool_interrupt",
+        lambda _exc: tic,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.agent_adapter.interface_deep._skill_turbo_build_interaction_output",
+        lambda _exc: SimpleNamespace(payload={"id": pending_tcid}),
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.agent_adapter.interface_deep.convert_interactions_to_ask_user_question",
+        lambda _items: {
+            "event_type": "chat.ask_user_question",
+            "request_id": pending_tcid,
+            "questions": [{"question": "风格"}],
+            "source": "ask_user_interrupt",
+        },
+    )
+
+    request = AgentRequest(
+        request_id=http_rid,
+        channel_id="officeclaw",
+        session_id="sess-1",
+        req_method=ReqMethod.CHAT_SEND,
+        params={},
+    )
+    chunks = [
+        chunk
+        async for chunk in JiuWenSwarmDeepAdapter._emit_skill_turbo_hitl_chunks(
+            request, RuntimeError("abort"), outer_call_id
+        )
+    ]
+    ask = next(
+        c
+        for c in chunks
+        if isinstance(c.payload, dict)
+        and c.payload.get("event_type") == "chat.ask_user_question"
+    )
+    # 卡片 request_id 被外层 call id 覆盖，与首个 ask_user 一致
+    assert ask.payload["request_id"] == outer_call_id
+    assert ask.request_id == http_rid
+
+
 def test_resume_user_input_from_interactive_input():
     interactive = InteractiveInput()
     payload = {
