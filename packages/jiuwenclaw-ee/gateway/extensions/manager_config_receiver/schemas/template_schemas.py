@@ -9,6 +9,7 @@ from pydantic import (
     AfterValidator,
     AliasChoices,
     BaseModel,
+    BeforeValidator,
     ConfigDict,
     Field,
     model_validator,
@@ -54,10 +55,26 @@ def _validate_http_url(value: str) -> str:
     return value
 
 
+def _optional_skill_source_url(value: Any) -> str | None:
+    """空字符串视为未填；有值则按 http(s) URL 校验。"""
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    if len(text) > 2048:
+        raise ValueError("package_url must be at most 2048 characters")
+    return _validate_http_url(text)
+
+
 SkillSourceUrl = Annotated[
     str,
     Field(min_length=1, max_length=2048),
     AfterValidator(_validate_http_url),
+]
+OptionalSkillSourceUrl = Annotated[
+    str | None,
+    BeforeValidator(_optional_skill_source_url),
 ]
 
 
@@ -151,7 +168,7 @@ class SkillPrebuiltTemplateUpdateRequest(SafeTextMixin):
     template_name: str | None = Field(default=None, max_length=128)
     description: str | None = Field(default=None, max_length=512)
     skill_id: str | None = Field(default=None, max_length=512)
-    package_url: SkillSourceUrl | None = None
+    package_url: OptionalSkillSourceUrl = None
     source_id: str | None = Field(default=None, max_length=64)
     version_id: str | None = Field(default=None, max_length=128)
     enabled: bool | None = None
