@@ -255,6 +255,17 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
         # Store cancelled tool info for interrupt response (per-session to avoid
         # cross-session leakage in concurrent collect→get→clear sequences).
         self._cancelled_tool_results: dict[str, list[dict[str, Any]]] = {}
+        # tool_call_id -> sid of calls whose tool_call/tool_update chunks were
+        # already emitted.  Resume replays the full rail cycle for the same
+        # tool_call_id; without this latch history.jsonl gets a duplicate
+        # tool_call + tool_update pair (#3785).  Lifecycle: set on first emit,
+        # popped in after_tool_call on normal completion — the latch must hold
+        # across the interrupt → user answer → resume window (so
+        # reset_for_new_task never touches it), but must not outlive the call:
+        # some providers reset tool_call ids per response (call_0, call_1...),
+        # and a stale latch would swallow the next round's legitimate call.
+        # cleanup_session drops leftovers when the session is destroyed.
+        self._emitted_tool_call_ids: dict[str, str] = {}
         self._symphony_stream_handler = SymphonyToolStreamHandler()
 
     def init(self, agent: Any) -> None:
@@ -498,6 +509,14 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
         self._conversation_ids.pop(sid, None)
         self._main_sessions.pop(sid, None)
         self._cancelled_tool_results.pop(sid, None)
+        # Drop this session's leftover latch entries (interrupted calls that
+        # never completed).  Other sessions' entries must stay: shared adapters
+        # serve many sessions concurrently.
+        self._emitted_tool_call_ids = {
+            tc_id: owner_sid
+            for tc_id, owner_sid in self._emitted_tool_call_ids.items()
+            if owner_sid != sid
+        }
 
     def get_cancelled_tool_results(self, session_id: str = "") -> list[dict[str, Any]]:
         """Get cancelled tool results collected during interrupt.
@@ -708,11 +727,17 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
                         exc,
                     )
                 ctx.inputs.tool_args = cleaned_args
-            await self._emit_tool_call(session, tc, model_display_name=model_display)
-            await self._emit_tool_update(session, tc, status="in_progress")
+            # 同一 tool_call_id 只向会话发射一次 tool_call/tool_update：resume 重放
+            # rail 周期时会带着相同 id 再进这里，重复发射会在 history.jsonl 留下
+            # 重复记录（#3785）。
+            tc_id = getattr(tc, "id", "")
+            if not (tc_id and self._emitted_tool_call_ids.get(tc_id) == sid):
+                await self._emit_tool_call(session, tc, model_display_name=model_display)
+                await self._emit_tool_update(session, tc, status="in_progress")
+                if tc_id:
+                    self._emitted_tool_call_ids[tc_id] = sid
             self._symphony_stream_handler.bind_progress(ctx, session, tc)
             # Track in-flight tool call for cancellation
-            tc_id = getattr(tc, "id", "")
             if tc_id:
                 self._inflight_tool_calls[tc_id] = {
                     "tool_call": tc,
@@ -736,7 +761,21 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
         if tc_id:
             self._inflight_tool_calls.pop(tc_id, None)
 
-        await self._emit_tool_result(session, tc, ctx.inputs.tool_result)
+        # before_tool_call 被 interrupt rail（AbortError 包 ToolInterruptException）
+        # 中断时，agent-core 的 rail 装饰器仍会触发 after_tool_call；此时工具没有
+        # 真实结果，无条件发射会往 history.jsonl 写一条空 tool_result（#3785）。
+        # 中断态的前端展示由 chat.ask_user_question / 取消补记路径负责。
+        interrupt = (
+            _extract_tool_interrupt(ctx.inputs.tool_result)
+            or _extract_tool_interrupt(ctx.exception)
+        )
+        if interrupt is None:
+            await self._emit_tool_result(session, tc, ctx.inputs.tool_result)
+            # 正常完成即释放去重 latch：latch 生命周期 = 首次发射 → 完成。
+            # 中断态必须保留（resume 重放还要靠它抑制重复发射），但完成后不能留——
+            # 部分提供商的 tool_call_id 是每响应重置的序列号（call_0...），
+            # 残留 latch 会把下一轮同 id 的合法调用错误吞掉。
+            self._emitted_tool_call_ids.pop(tc_id, None)
         await self._emit_ask_user_question_if_interrupted(
             session,
             tc,
