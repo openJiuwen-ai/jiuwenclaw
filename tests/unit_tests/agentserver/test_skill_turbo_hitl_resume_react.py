@@ -26,13 +26,25 @@ from jiuwenswarm.server.runtime.skill_turbo.permission_bridge import (
 )
 from jiuwenswarm.server.runtime.skill_turbo.skill_turbo_tools import (
     _SKILL_TURBO_HITL_PLACEHOLDER,
-    _SKILL_TURBO_STOP_HINT,
+    _SKILL_TURBO_STOP_HINT_NEUTRAL,
     _resolve_skill_turbo_resume_session_id,
     _resume_user_input_from_raw,
     get_skill_turbo_resume_answers,
     reset_skill_turbo_resume_answers,
     set_skill_turbo_hitl_tic,
     set_skill_turbo_resume_answers,
+)
+
+# 旧版停止提示文案（宣称文件已发送），生产代码已删除常量；保留字符串仅用于
+# 验证存量会话历史（tool_result 嵌旧文案）重放时被 _fix_incomplete_tool_context
+# 原样保留——该修复逻辑按 tool_call_id 结构匹配，不依赖常量存在。
+_LEGACY_STOP_HINT_TEXT = (
+    "\n\n[SYSTEM] The skill_acceleration_exec task is complete and the artifact has already been "
+    "generated. The file(s) have ALREADY been sent to the user by the internal "
+    "delivery pipeline - do NOT call send_file_to_user again. You should now "
+    "summarize this result to the user and finish your turn. Do NOT call "
+    "skill_acceleration_exec, skill_tool, or send_file_to_user again for this task - the "
+    "work is already done; calling any of them again would duplicate the work."
 )
 
 
@@ -617,7 +629,7 @@ async def test_fix_incomplete_tool_context_keeps_stop_hint_over_hitl_placeholder
     rail = JiuSwarmStreamEventRail()
     tool_call_id = "call_982c"
     stop_hint_msg = ToolMessage(
-        content="任务已完成" + _SKILL_TURBO_STOP_HINT,
+        content="任务已完成" + _LEGACY_STOP_HINT_TEXT,
         tool_call_id=tool_call_id,
     )
     ctx = SimpleNamespace(
@@ -659,3 +671,49 @@ async def test_fix_incomplete_tool_context_keeps_stop_hint_over_hitl_placeholder
     assert _SKILL_TURBO_HITL_PLACEHOLDER not in tool_msgs[0].content
     assert "The skill_acceleration_exec task is complete" in tool_msgs[0].content
     assert "skill_tool" in tool_msgs[0].content
+
+
+@pytest.mark.asyncio
+async def test_fix_incomplete_tool_context_keeps_neutral_stop_hint_over_hitl_placeholder():
+    # 新版中立收尾与旧版停止提示走同一保留路径：
+    # 中断 placeholder 被真实 tool_result（含中立收尾）原位替换。
+    rail = JiuSwarmStreamEventRail()
+    tool_call_id = "call_982d"
+    neutral_msg = ToolMessage(
+        content="任务已完成" + _SKILL_TURBO_STOP_HINT_NEUTRAL,
+        tool_call_id=tool_call_id,
+    )
+    ctx = SimpleNamespace(
+        context=_ModelContext([
+            UserMessage(content="生成一页PPT"),
+            AssistantMessage(
+                content="",
+                tool_calls=[{
+                    "type": "function",
+                    "id": tool_call_id,
+                    "function": {
+                        "name": "skill_acceleration_exec",
+                        "arguments": "{\"query\":\"生成PPT\"}",
+                    },
+                }],
+            ),
+            ToolMessage(
+                content=_SKILL_TURBO_HITL_PLACEHOLDER,
+                tool_call_id=tool_call_id,
+            ),
+            neutral_msg,
+        ]),
+        inputs=SimpleNamespace(tools=[]),
+        session=None,
+        extra={},
+    )
+
+    await rail._fix_incomplete_tool_context(ctx)
+
+    messages = ctx.context.get_messages()
+    tool_msgs = [m for m in messages if isinstance(m, ToolMessage)]
+    assert len(tool_msgs) == 1
+    assert tool_msgs[0].tool_call_id == tool_call_id
+    assert _SKILL_TURBO_HITL_PLACEHOLDER not in tool_msgs[0].content
+    assert "did NOT confirm" in tool_msgs[0].content
+    assert "send_file_to_user" in tool_msgs[0].content
