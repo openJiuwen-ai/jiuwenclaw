@@ -2411,9 +2411,16 @@ class SkillManager:
             )
         entity_dir = str((existing_ref or {}).get("entity_dir") or existing_name or skill_name).strip()
         dest = _safe_child_path(self._skills_dir, entity_dir, "skill")
-        if dest.exists() and existing_ref is None:
+        orphan_untracked = dest.exists() and existing_ref is None
+        if orphan_untracked and normalized_source_type != "prebuilt":
             raise SourceRegistryError(
                 "skill_name_conflict", f"skill directory already exists: {skill_name}"
+            )
+        if orphan_untracked:
+            logger.info(
+                "[SkillManager] prebuilt overwrite untracked skill dir: name=%s dest=%s",
+                skill_name,
+                dest,
             )
         staging = _safe_child_path(
             self._skills_dir,
@@ -2459,6 +2466,8 @@ class SkillManager:
                 _safe_rmtree(staging)
         if backup.exists():
             _safe_rmtree(backup)
+        if normalized_source_type == "prebuilt":
+            self._remove_local_skill(skill_name)
         self._refresh_agent_data_indexes()
         return self._skill_installation_dto(record)
 

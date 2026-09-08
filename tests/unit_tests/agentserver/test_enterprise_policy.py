@@ -40,6 +40,18 @@ def test_normalize_template_ref_rejects_string_slot_value() -> None:
         )
 
 
+def test_normalize_template_ref_keeps_unknown_slots() -> None:
+    """无槽位特判：旧名 skill_whitelist 等未知键与 skill_prebuilt 一并透传。"""
+    out = normalize_template_ref(
+        {
+            "skill_whitelist": ["old-1", "old-1", ""],
+            "skill_prebuilt": ["new-1"],
+        }
+    )
+    assert out["skill_prebuilt"] == ["new-1"]
+    assert out["skill_whitelist"] == ["old-1"]
+
+
 @pytest.mark.asyncio
 async def test_load_effective_config_by_instance_agent_resource(
     monkeypatch: pytest.MonkeyPatch,
