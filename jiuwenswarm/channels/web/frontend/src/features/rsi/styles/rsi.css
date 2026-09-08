@@ -1097,21 +1097,6 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.rsi-selected-info__download-btn {
-  flex-shrink: 0;
-  height: 28px;
-  padding: 0 10px;
-  border: 1px solid var(--color-border-default);
-  border-radius: 999px;
-  background: var(--color-rsi-page-bg);
-  color: var(--color-text-primary);
-  font-size: 12px;
-  cursor: pointer;
-}
-.rsi-selected-info__download-btn:disabled {
-  cursor: wait;
-  opacity: 0.55;
-}
 .rsi-selected-info__technical {
   border-top: 1px solid var(--color-rsi-divider);
   padding-top: 10px;
@@ -1135,13 +1120,6 @@
   text-overflow: ellipsis;
   white-space: nowrap;
   color: var(--color-text-primary);
-}
-.rsi-selected-info__download-error {
-  margin-top: 6px;
-  color: var(--color-conversation-error);
-  font-size: 12px;
-  line-height: 18px;
-  word-break: break-word;
 }
 .rsi-selected-info__footer {
   display: flex;
