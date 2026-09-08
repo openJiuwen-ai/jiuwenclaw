@@ -96,7 +96,9 @@ async def test_mock_harness_provider_closes_service_loop(harness_context, tmp_pa
     report = handlers.handle(FakeRequest(ReqMethod.RSI_REPORT_GET, {"task_id": task_id}))
     assert report["payload"]["status"] == "COMPLETED"
     tree = handlers.handle(FakeRequest(ReqMethod.RSI_TREE_GET, {"task_id": task_id}))
-    assert len(tree["payload"]["nodes"]) == 5
+    # search_width is deprecated and ignored by the service; the mock provider
+    # now sees the engine default (1), so 2 iterations produce root + 2 nodes.
+    assert len(tree["payload"]["nodes"]) == 3
     assert tree["payload"]["nodes"][1]["type"] == "ADOPTED"
     iteration_nodes = [node for node in tree["payload"]["nodes"] if node["iteration"] > 0]
     assert all(node["extra"]["content"]["kind"] == "mock_harness_candidate" for node in iteration_nodes)

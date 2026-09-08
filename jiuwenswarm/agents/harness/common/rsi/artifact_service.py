@@ -30,7 +30,7 @@ class RsiArtifactService:
     """产物/快照服务。
 
     Args:
-        tasks_root: ``.jiuwenswarm/workspace/rsi``（与 TaskStore 同根）；快照落在
+        tasks_root: ``.jiuwenswarm/rsi/tasks``（与 TaskStore 同根）；快照落在
             ``<task_dir>/snapshots/A<node_id>.zip``。
     """
 
@@ -55,12 +55,22 @@ class RsiArtifactService:
         snapshots_dir.mkdir(parents=True, exist_ok=True)
         artifact_id = f"A{node_id}"
         zip_path = snapshots_dir / f"{artifact_id}.zip"
+        if zip_path.is_file():
+            return artifact_id
         written: list[Path] = []
         with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
             for role, src in usable:
                 arcname = f"{role}_{src.name}" if len(usable) > 1 else src.name
-                zf.write(src, arcname=arcname)
-                written.append(src)
+                files = sorted(src.rglob("*")) if src.is_dir() else [src]
+                for source in files:
+                    if not source.is_file():
+                        continue
+                    # A plugin link must not pull unrelated host files into a download.
+                    if src.is_dir() and not source.resolve().is_relative_to(src.resolve()):
+                        continue
+                    name = f"{arcname}/{source.relative_to(src).as_posix()}" if src.is_dir() else arcname
+                    zf.write(source, arcname=name)
+                    written.append(source)
         logger.info("[RSI] make_snapshot: task=%s node=%s artifact_id=%s files=%d", task_id, node_id, artifact_id, len(written))
         return artifact_id
 
@@ -105,7 +115,7 @@ class RsiArtifactService:
             p = Path(raw).expanduser()
             if not p.is_absolute():
                 p = task_dir / p
-            if p.is_file():
+            if p.is_file() or (art.format == "dir" and p.is_dir()):
                 usable.append((art.role, p))
             else:
                 logger.warning("[RSI] artifact 路径无效跳过: role=%s path=%s", art.role, raw)

@@ -110,9 +110,29 @@ class RsiEventConsumer:
         if provider_event_type == "node":
             node = self.projector.on_provider_node(self.task_id, getattr(event, "node", None))
             if node is not None:
+                artifacts = [
+                    self._to_artifact_path(item) for item in getattr(event, "artifacts", [])
+                    if isinstance(item, dict) and item.get("path")
+                ]
+                if node.adopted and artifacts:
+                    artifact_id = self.artifact_service.make_snapshot(
+                        self.task_id, str(event.node.node_id), node.node_id, artifacts
+                    )
+                    if artifact_id:
+                        node.snapshot_artifact_id = artifact_id
+                        self.projector.persist_node_update(self.task_id, node)
                 self._last_pushed_node_ids.add(node.node_id)
                 if self._on_tree_delta is not None:
                     await self._on_tree_delta(self.task_id, {"nodes": [node.to_dict()]})
+            return
+        if provider_event_type == "progress.usage":
+            self.usage_recorder.record_engine_event(
+                self.task_id,
+                {
+                    "node_ref": getattr(event, "node_ref", None),
+                    "model_call": getattr(event, "model_call", None),
+                },
+            )
             return
         if getattr(event, "is_progress_metric", False):
             self.projector.on_progress_metric(self.task_id, event.payload)

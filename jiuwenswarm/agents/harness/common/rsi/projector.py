@@ -140,6 +140,9 @@ class RsiProjector:
         from jiuwenswarm.agents.harness.common.rsi.artifact_adapter import provider_tree_to_web
 
         raw = provider_tree_to_web(tree)
+        epoch_projection = any(
+            (item.get("extra") or {}).get("iteration_unit") == "epoch" for item in raw.get("nodes", [])
+        )
         incoming_nodes: list[RsiTreeNode] = []
         for item in raw.get("nodes", []):
             node = self._tree_node_from_web(item, task_id=task_id)
@@ -149,6 +152,16 @@ class RsiProjector:
             nodes = self._nodes.setdefault(task_id, {})
             self._ensure_root_locked(task_id)
             ref_index = self._ref_index.setdefault(task_id, {})
+            if epoch_projection:
+                # Older Harness queries projected candidates as G* peers. Only
+                # canonical epoch snapshots are authoritative for these tasks.
+                incoming_ids = {node.node_id for node in incoming_nodes}
+                for node_id in list(nodes):
+                    if node_id != _ROOT and node_id not in incoming_ids:
+                        del nodes[node_id]
+                for ref, node_id in list(ref_index.items()):
+                    if node_id not in nodes:
+                        del ref_index[ref]
             for incoming in incoming_nodes:
                 if incoming.node_id == _ROOT:
                     root = nodes[_ROOT]
@@ -173,7 +186,7 @@ class RsiProjector:
                 ),
                 default=0,
             )
-            metric["iteration"] = max(
+            metric["iteration"] = _safe_int(raw.get("iteration")) if epoch_projection else max(
                 _safe_int(metric.get("iteration")),
                 _safe_int(raw.get("iteration")),
                 node_iteration,
@@ -213,11 +226,10 @@ class RsiProjector:
             if node is None:
                 return None
             if stage_name:
-                if (node.extra or {}).get("paper") is not None or (node.extra or {}).get("program") is not None:
-                    node.description = stage_name
-                else:
-                    base = node.description or ""
-                    node.description = f"{base} › {stage_name}" if base and not base.endswith(stage_name) else base or stage_name
+                # 统一动态阶段语义：description 反映「当前」阶段（覆盖而非追加），
+                # 阶段详情落在 extra.stage。终态由后续 EventNode/Provider 树快照
+                # 整体替换节点，避免中间态文案残留覆盖最终结果（web §9.2）。
+                node.description = stage_name
                 node.extra = {**(node.extra or {}), "stage": dict(stage)}
             self._persist_locked(task_id)
             return node
@@ -382,6 +394,12 @@ class RsiProjector:
 
     @classmethod
     def _merge_node(cls, local: RsiTreeNode, provider: RsiTreeNode) -> RsiTreeNode:
+        if (provider.extra or {}).get("iteration_unit") == "epoch":
+            provider.snapshot_artifact_id = local.snapshot_artifact_id or provider.snapshot_artifact_id
+            if provider.type == "PROVISIONAL":
+                provider.description = local.description or provider.description
+                provider.extra = {**(local.extra or {}), **(provider.extra or {})}
+            return cls._normalize_node(provider)
         adopted = bool(local.adopted or provider.adopted)
         extra = {**(local.extra or {}), **(provider.extra or {})}
         paper_extra = (provider.extra or {}).get("paper")
@@ -470,9 +488,12 @@ class RsiProjector:
 
 def _normalize_provider_node_id(task_id: str | None, node_id: str) -> str:
     """Use the service's stable ROOT ID for agent-core's provider root."""
+    if node_id == "h0":
+        return _ROOT
     if task_id and node_id in {
         f"artifact:{task_id}:root",
         f"artifact:{task_id}:node:0",
+        "h0",
     }:
         return _ROOT
     return node_id

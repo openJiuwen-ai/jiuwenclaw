@@ -4,7 +4,9 @@
  * 数据集路径复用 path.select_files（单文件），产物路径沿用 path.select_directory。
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import clsx from 'clsx';
+import { Check, Copy } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { rsiDatasetValidate, rsiTaskCreate, rsiTaskList, rsiTrainingStart } from '../rsiApi';
 import type { RsiArtifactType, RsiScenario, RsiTaskCreateParams, RsiTaskListItem, RsiTaskStatus } from '../types';
@@ -14,6 +16,71 @@ import { useSessionStore } from '../../../stores/sessionStore';
 import { ModelProviderIcon } from '../../../components/ModelProviderIcon';
 import TipIcon from '../../../assets/tip.svg?react';
 import type { ModelEntry } from '../../../types';
+import { pluginPackagesApi } from '../../../services/pluginPackagesApi';
+import { localizedText, type PluginPackageSummary } from '../../../types/pluginPackage';
+
+const RSI_DATASET_FIELD_SCHEMA = `{
+  "dataset_id": "string",
+  "source": "string",
+  "split": "string",
+  "cases": [
+    {
+      "case_id": "string",
+      "source": "string",
+      "task_type": "string",
+      "difficulty": "string",
+      "dimension": "string",
+      "input": "string",
+      "reference": {
+        "answer": "string | number | boolean | object | array | null",
+        "required_behaviors": [
+          {
+            "id": "string",
+            "description": "string",
+            "weight": "number"
+          }
+        ],
+        "forbidden_behaviors": [
+          {
+            "id": "string",
+            "description": "string",
+            "penalty": "number"
+          }
+        ]
+      }
+    }
+  ]
+}`;
+
+function DatasetFieldTipContent({ title, content }: { title: string; content: string }) {
+  const [copied, setCopied] = useState(false);
+  const handleCopy = useCallback(async () => {
+    try {
+      await navigator.clipboard.writeText(content);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1500);
+    } catch {
+      setCopied(false);
+    }
+  }, [content]);
+
+  return (
+    <>
+      <div className="rsi-create-dialog__rich-tip__title">
+        <span>{title}</span>
+        <button
+          type="button"
+          className={'rsi-create-dialog__rich-tip__copy' + (copied ? ' rsi-create-dialog__rich-tip__copy--copied' : '')}
+          onClick={handleCopy}
+          aria-label={copied ? '已复制' : '复制'}
+        >
+          {copied ? <Check size={14} aria-hidden /> : <Copy size={14} aria-hidden />}
+        </button>
+      </div>
+      <pre>{content}</pre>
+    </>
+  );
+}
 
 interface CreateExperimentDialogProps {
   open: boolean;
@@ -30,10 +97,11 @@ interface FormState {
   optimizer: string;
   tester: string;
   datasetFile: string;
+  packageId: string;
   maxIterations: number;
-  searchWidth: number;
   optimizationInstruction: string;
   artifactPath: string;
+  webProxy: string;
 }
 
 function defaultForm(): FormState {
@@ -44,15 +112,18 @@ function defaultForm(): FormState {
     optimizer: '',
     tester: '',
     datasetFile: '',
+    packageId: '',
     maxIterations: 2,
-    searchWidth: 2,
     optimizationInstruction: '',
     artifactPath: '',
+    webProxy: '',
   };
 }
 
 export function CreateExperimentDialog({ open, onClose, onCreated }: CreateExperimentDialogProps) {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
+  const [plugins, setPlugins] = useState<PluginPackageSummary[]>([]);
+  const [pluginError, setPluginError] = useState('');
   const [form, setForm] = useState<FormState>(defaultForm);
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [submitting, setSubmitting] = useState(false);
@@ -61,6 +132,23 @@ export function CreateExperimentDialog({ open, onClose, onCreated }: CreateExper
 
   const branch: Branch = form.scenario === 'HARNESS' ? 'HARNESS' : form.artifactType;
   const isArtifact = form.scenario === 'ARTIFACT';
+
+  useEffect(() => {
+    if (!open) return;
+    let cancelled = false;
+    setPluginError('');
+    void pluginPackagesApi
+      .list()
+      .then((items) => {
+        if (!cancelled) setPlugins(items.filter((item) => item.installed));
+      })
+      .catch((error: unknown) => {
+        if (!cancelled) setPluginError(error instanceof Error ? error.message : String(error));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [open]);
 
   // 选择数据集路径后自动校验
   useEffect(() => {
@@ -105,6 +193,7 @@ export function CreateExperimentDialog({ open, onClose, onCreated }: CreateExper
           artifactType: 'PAPER',
           artifactPath: '',
           optimizationInstruction: '',
+          webProxy: '',
         };
       // 产物优化默认选论文
       return { ...f, scenario: 'ARTIFACT', artifactType: 'PAPER', tester: '' };
@@ -121,6 +210,7 @@ export function CreateExperimentDialog({ open, onClose, onCreated }: CreateExper
         artifactType: 'PROGRAM',
         artifactPath: '',
         optimizationInstruction: '',
+        webProxy: '',
         maxIterations: 3,
       };
     });
@@ -187,13 +277,13 @@ export function CreateExperimentDialog({ open, onClose, onCreated }: CreateExper
           ? {
               scenario: 'HARNESS',
               input_file: form.datasetFile,
+              ...(form.packageId ? { package_id: form.packageId } : {}),
               name: form.name.trim(),
               model_refs: {
                 optimizer: form.optimizer,
                 tester: form.tester,
               },
               max_iterations: form.maxIterations,
-              search_width: form.searchWidth,
             }
           : {
               scenario: 'ARTIFACT',
@@ -205,6 +295,7 @@ export function CreateExperimentDialog({ open, onClose, onCreated }: CreateExper
               ...(branch !== 'PROGRAM' ? { max_iterations: form.maxIterations } : {}),
               ...(form.optimizationInstruction ? { optimization_instruction: form.optimizationInstruction } : {}),
               ...(form.artifactPath ? { artifact_path: form.artifactPath } : {}),
+              ...(branch === 'PAPER' && form.webProxy.trim() ? { web_proxy: form.webProxy.trim() } : {}),
             };
       const res = await rsiTaskCreate(createParams);
       let nextStatus: RsiTaskStatus = res.status;
@@ -268,20 +359,17 @@ export function CreateExperimentDialog({ open, onClose, onCreated }: CreateExper
           <h2 id="rsi-create-title" style={{ fontSize: 16, fontWeight: 600 }}>
             {t('rsi.createDialog.title')}
           </h2>
-          <button
-            type="button"
-            className="rsi-create-dialog__close"
-            onClick={onClose}
-            aria-label="close"
-          >
+          <button type="button" className="rsi-create-dialog__close" onClick={onClose} aria-label="close">
             ×
           </button>
         </div>
 
-        {form.artifactType === 'PROGRAM' && <div className="rsi-create-dialog__info-bar">
-          <TipIcon className="w-3.5 h-3.5 shrink-0" />
-          <span>{t('rsi.createDialog.infoBar')}</span>
-        </div>}
+        {form.artifactType === 'PROGRAM' && (
+          <div className="rsi-create-dialog__info-bar">
+            <TipIcon className="w-3.5 h-3.5 shrink-0" />
+            <span>{t('rsi.createDialog.infoBar')}</span>
+          </div>
+        )}
 
         {/* 基础字段 */}
         <Field label={t('rsi.createDialog.nameLabel')}>
@@ -332,6 +420,26 @@ export function CreateExperimentDialog({ open, onClose, onCreated }: CreateExper
         </Field>
 
         {branch === 'HARNESS' && (
+          <Field label={t('rsi.createDialog.pluginLabel')}>
+            <select
+              className="rsi-input"
+              aria-label={t('rsi.createDialog.pluginLabel')}
+              value={form.packageId}
+              onChange={(event) => update('packageId', event.target.value)}
+              disabled={submitting}
+            >
+              <option value="">{t('rsi.createDialog.pluginDefault')}</option>
+              {plugins.map((plugin) => (
+                <option key={plugin.id} value={plugin.id} disabled={plugin.connectionState !== 'connected'}>
+                  {localizedText(plugin.displayName, i18n.language)}
+                </option>
+              ))}
+            </select>
+            {pluginError && <Err text={pluginError} />}
+          </Field>
+        )}
+
+        {branch === 'HARNESS' && (
           <Field label={t('rsi.createDialog.testerModelLabel')}>
             <ModelSelect value={form.tester} onChange={(v) => update('tester', v)} />
             {errors.tester && <Err text={errors.tester} />}
@@ -342,6 +450,13 @@ export function CreateExperimentDialog({ open, onClose, onCreated }: CreateExper
           <Field
             label={t('rsi.createDialog.datasetLabel')}
             tip={t('rsi.createDialog.datasetTip')}
+            tipAriaLabel={t('rsi.createDialog.datasetFieldTipTitle')}
+            tipContent={
+              <DatasetFieldTipContent
+                title={t('rsi.createDialog.datasetFieldTipTitle')}
+                content={RSI_DATASET_FIELD_SCHEMA}
+              />
+            }
           >
             <PathInput
               value={form.datasetFile}
@@ -368,7 +483,6 @@ export function CreateExperimentDialog({ open, onClose, onCreated }: CreateExper
               <textarea
                 className="rsi-input"
                 rows={4}
-                maxLength={1000}
                 value={form.optimizationInstruction}
                 onChange={(e) => update('optimizationInstruction', e.target.value)}
                 placeholder={t('rsi.createDialog.optimizationInstructionPlaceholder')}
@@ -381,6 +495,22 @@ export function CreateExperimentDialog({ open, onClose, onCreated }: CreateExper
                 onPick={() => pickPath('artifact')}
               />
               {errors.paper && <Err text={errors.paper} />}
+            </Field>
+            <Field
+              label={t('rsi.createDialog.webProxyLabel')}
+              tip={t('rsi.createDialog.webProxyTip')}
+            >
+              <input
+                className="rsi-input"
+                value={form.webProxy}
+                onChange={(e) => update('webProxy', e.target.value)}
+                placeholder={t('rsi.createDialog.webProxyPlaceholder')}
+                inputMode="url"
+                autoComplete="off"
+              />
+              <div style={{ fontSize: 12, lineHeight: 1.5, marginTop: 5, color: 'var(--color-text-secondary)' }}>
+                {t('rsi.createDialog.webProxyHint')}
+              </div>
             </Field>
           </>
         )}
@@ -401,12 +531,6 @@ export function CreateExperimentDialog({ open, onClose, onCreated }: CreateExper
         {showMaxIterations && (
           <Field label={t('rsi.createDialog.maxIterationsLabel')}>
             <SegmentedSlider value={form.maxIterations} min={1} max={5} onChange={(v) => update('maxIterations', v)} />
-          </Field>
-        )}
-
-        {branch === 'HARNESS' && (
-          <Field label={t('rsi.createDialog.searchWidthLabel')}>
-            <SegmentedSlider value={form.searchWidth} min={1} max={5} onChange={(v) => update('searchWidth', v)} />
           </Field>
         )}
 
@@ -433,10 +557,14 @@ export function CreateExperimentDialog({ open, onClose, onCreated }: CreateExper
 function Field({
   label,
   tip,
+  tipAriaLabel,
+  tipContent,
   children,
 }: {
   label: string;
   tip?: string;
+  tipAriaLabel?: string;
+  tipContent?: React.ReactNode;
   children: React.ReactNode;
 }) {
   return (
@@ -444,15 +572,122 @@ function Field({
       <label style={{ display: 'block', fontSize: 13, marginBottom: 6, color: 'var(--color-text-primary)' }}>
         <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
           {label}
-          {tip && (
+          {tipContent ? (
+            <FieldTip ariaLabel={tipAriaLabel ?? label}>{tipContent}</FieldTip>
+          ) : tip ? (
             <span className="rsi-create-dialog__label-tip" title={tip} aria-label={tip}>
               <TipIcon className="w-3.5 h-3.5 shrink-0" />
             </span>
-          )}
+          ) : null}
         </span>
       </label>
       {children}
     </div>
+  );
+}
+
+function FieldTip({ ariaLabel, children }: { ariaLabel: string; children: React.ReactNode }) {
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const panelRef = useRef<HTMLDivElement>(null);
+  const closeTimerRef = useRef<number | null>(null);
+  const [open, setOpen] = useState(false);
+  const [position, setPosition] = useState<{ left: number; top: number } | null>(null);
+
+  const clearCloseTimer = useCallback(() => {
+    if (closeTimerRef.current !== null) {
+      window.clearTimeout(closeTimerRef.current);
+      closeTimerRef.current = null;
+    }
+  }, []);
+
+  const openTip = useCallback(() => {
+    clearCloseTimer();
+    const trigger = triggerRef.current;
+    if (!trigger) return;
+    const rect = trigger.getBoundingClientRect();
+    const panelWidth = 480;
+    const panelHeight = Math.min(400, window.innerHeight - 24);
+    const gap = 8;
+    const left = Math.max(12, Math.min(rect.left, window.innerWidth - panelWidth - 12));
+    const top =
+      rect.bottom + gap + panelHeight <= window.innerHeight - 12
+        ? rect.bottom + gap
+        : Math.max(12, rect.top - panelHeight - gap);
+    setPosition({ left, top });
+    setOpen(true);
+  }, [clearCloseTimer]);
+
+  const closeTip = useCallback(() => setOpen(false), []);
+
+  const scheduleClose = useCallback(() => {
+    clearCloseTimer();
+    closeTimerRef.current = window.setTimeout(closeTip, 160);
+  }, [clearCloseTimer, closeTip]);
+
+  useEffect(() => {
+    if (!open) return;
+    const handlePointerDown = (event: PointerEvent) => {
+      if (triggerRef.current?.contains(event.target as Node)) return;
+      if (panelRef.current?.contains(event.target as Node)) return;
+      closeTip();
+    };
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') closeTip();
+    };
+    const handleScroll = (event: Event) => {
+      // 滚动弹层内部的 JSON 代码块时保持展示；只有外部页面滚动才关闭。
+      if (panelRef.current?.contains(event.target as Node)) return;
+      closeTip();
+    };
+    document.addEventListener('pointerdown', handlePointerDown);
+    document.addEventListener('keydown', handleKeyDown);
+    window.addEventListener('scroll', handleScroll, true);
+    return () => {
+      document.removeEventListener('pointerdown', handlePointerDown);
+      document.removeEventListener('keydown', handleKeyDown);
+      window.removeEventListener('scroll', handleScroll, true);
+      clearCloseTimer();
+    };
+  }, [open, closeTip, clearCloseTimer]);
+
+  return (
+    <>
+      <span className="rsi-create-dialog__label-tip-wrap">
+        <button
+          ref={triggerRef}
+          type="button"
+          className="rsi-create-dialog__label-tip"
+          aria-label={ariaLabel}
+          aria-expanded={open}
+          onMouseEnter={openTip}
+          onMouseLeave={scheduleClose}
+          onFocus={openTip}
+          onBlur={scheduleClose}
+          onClick={(event) => {
+            event.preventDefault();
+            if (open) closeTip();
+            else openTip();
+          }}
+        >
+          <TipIcon className="w-3.5 h-3.5 shrink-0" />
+        </button>
+      </span>
+      {open && position
+        ? createPortal(
+            <div
+              ref={panelRef}
+              className="rsi-create-dialog__rich-tip"
+              role="tooltip"
+              style={{ left: position.left, top: position.top }}
+              onMouseEnter={clearCloseTimer}
+              onMouseLeave={scheduleClose}
+            >
+              {children}
+            </div>,
+            triggerRef.current?.closest('dialog') ?? document.body
+          )
+        : null}
+    </>
   );
 }
 

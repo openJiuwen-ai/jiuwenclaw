@@ -566,7 +566,7 @@
 .rsi-node__toggle {
   position: absolute;
   right: -30px;
-  top: 36px;
+  top: calc(50% - 1px);
   transform: translateY(-50%);
   width: 20px;
   height: 20px;
@@ -729,10 +729,10 @@
   overflow-y: auto;
 }
 .rsi-node__stage {
-  font-size: 12px;
-  line-height: 20px;
-  font-weight: 600;
-  color: var(--color-text-primary);
+  font-size: 11px;
+  line-height: 16px;
+  font-weight: 400;
+  color: var(--color-rsi-text-muted);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1101,9 +1101,9 @@
   flex-shrink: 0;
   height: 28px;
   padding: 0 10px;
-  border: 1px solid #595959;
+  border: 1px solid var(--color-border-default);
   border-radius: 999px;
-  background: #ffffff;
+  background: var(--color-rsi-page-bg);
   color: var(--color-text-primary);
   font-size: 12px;
   cursor: pointer;
@@ -1138,7 +1138,7 @@
 }
 .rsi-selected-info__download-error {
   margin-top: 6px;
-  color: var(--color-feedback-error, #b83d3d);
+  color: var(--color-conversation-error);
   font-size: 12px;
   line-height: 18px;
   word-break: break-word;
@@ -1933,6 +1933,75 @@ dialog.rsi-config-dialog.rsi-create-drawer::backdrop {
   color: var(--color-rsi-text-muted);
   line-height: 0;
   cursor: pointer;
+}
+
+.rsi-create-dialog__label-tip-wrap {
+  display: inline-flex;
+  align-items: center;
+}
+
+.rsi-create-dialog__rich-tip {
+  position: fixed;
+  z-index: 12000;
+  box-sizing: border-box;
+  width: 480px;
+  max-width: calc(100vw - 24px);
+  padding: 12px;
+  border: 1px solid var(--color-border-default);
+  border-radius: 8px;
+  background: var(--color-surface-popover);
+  box-shadow: var(--effect-shadow-lg);
+  color: var(--color-text-primary);
+}
+
+.rsi-create-dialog__rich-tip__title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 18px;
+  color: #191919;
+}
+
+.rsi-create-dialog__rich-tip__copy {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: #808080;
+  cursor: pointer;
+}
+
+.rsi-create-dialog__rich-tip__copy:hover {
+  background: #f0f0f0;
+  color: #191919;
+}
+
+.rsi-create-dialog__rich-tip__copy--copied,
+.rsi-create-dialog__rich-tip__copy--copied:hover {
+  background: #e5f6ef;
+  color: #099261;
+}
+
+.rsi-create-dialog__rich-tip pre {
+  margin: 0;
+  padding: 10px;
+  max-height: 320px;
+  overflow: auto;
+  border-radius: 6px;
+  background: #f7f8fa;
+  color: #333333;
+  font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
+  font-size: 11px;
+  line-height: 1.6;
+  white-space: pre;
 }
 
 /* 数据集校验结果 */

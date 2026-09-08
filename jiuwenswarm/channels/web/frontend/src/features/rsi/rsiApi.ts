@@ -7,6 +7,7 @@
  */
 
 import { webRequest } from '../../services/webClient';
+import { rsiMock } from './mockData';
 import type {
   RsiArtifactDownloadResult,
   RsiArtifactFileGetResult,
@@ -315,9 +316,9 @@ function normalizeTask(value: unknown): RsiTaskGetResult {
       },
       input_file: asNullableString(config.input_file),
       max_iterations: asNumber(config.max_iterations, 1),
-      search_width: asNumber(config.search_width, 1),
       optimization_instruction: asNullableString(config.optimization_instruction),
       artifact_path: asNullableString(config.artifact_path),
+      web_proxy_configured: config.web_proxy_configured === true,
     },
     progress,
     best_artifact: normalizeBestArtifact(raw.best_artifact),
@@ -595,14 +596,15 @@ export function rsiTaskCreate(params: RsiTaskCreateParams): Promise<RsiTaskCreat
   };
   const artifactType = toWireArtifactType(params.scenario === 'ARTIFACT' ? params.artifact_type : undefined);
   if (artifactType) wire.artifact_type = artifactType;
+  if (params.scenario === 'HARNESS' && params.package_id?.trim()) wire.package_id = params.package_id;
   if (params.input_file?.trim()) {
     // Harness 的公共契约字段是 input_file；Paper 也允许把数据集作为 input_file。
     wire.input_file = params.input_file;
   }
   if (params.artifact_path?.trim()) wire.artifact_path = params.artifact_path;
   if (params.max_iterations != null) wire.max_iterations = params.max_iterations;
-  if (params.search_width != null) wire.search_width = params.search_width;
   if (params.optimization_instruction?.trim()) wire.optimization_instruction = params.optimization_instruction;
+  if (params.web_proxy?.trim()) wire.web_proxy = params.web_proxy.trim();
   return webRequest<unknown>(METHOD.taskCreate, withRsiSession(wire)).then((value) => {
     const raw = asRecord(value) ?? {};
     return {

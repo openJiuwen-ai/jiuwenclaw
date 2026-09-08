@@ -91,12 +91,69 @@ class TestTaskCreate:
         result = ctx.task_service.create(params)
         assert result["status"] == TaskStatus.CREATED.value
 
+    def test_paper_instruction_is_preserved_without_truncation(self, ctx, tmp_path: Path):
+        ctx.install_mock_artifact_adapters()
+        paper = tmp_path / "paper"
+        paper.mkdir()
+        instruction = "联网检索并保留完整实验约束。" * 800
+        task_id = ctx.task_service.create({
+            "scenario": "ARTIFACT",
+            "artifact_type": "PAPER",
+            "name": "paper-long-instruction",
+            "model_refs": {"optimizer": "opt"},
+            "artifact_path": str(paper),
+            "optimization_instruction": instruction,
+        })["task_id"]
+
+        task = ctx.store.get(task_id)
+        assert task.optimization_instruction == instruction
+        assert task.config["optimization_instruction"] == instruction
+
     def test_paper_artifact_type_required(self, ctx):
         params = {
             "scenario": "ARTIFACT",
             "name": "paper-task",
             "model_refs": {"optimizer": "opt"},
             "artifact_path": "C:/missing/paper.zip",
+        }
+        with pytest.raises(RsiBadRequest):
+            ctx.task_service.create(params)
+
+    def test_paper_web_proxy_is_task_scoped_and_not_projected(self, ctx, tmp_path: Path):
+        paper_path = tmp_path / "paper"
+        paper_path.mkdir()
+        task_id = ctx.task_service.create({
+            "scenario": "ARTIFACT",
+            "artifact_type": "PAPER",
+            "name": "paper-proxy",
+            "model_refs": {"optimizer": "opt-model"},
+            "artifact_path": str(paper_path),
+            "web_proxy": "http://proxy.example.test:7890/",
+        })["task_id"]
+
+        task = ctx.store.get(task_id)
+        assert task.config["web_proxy"] == "http://proxy.example.test:7890"
+        projection = ctx.task_service.get(
+            {"task_id": task_id},
+            projector=ctx.projector,
+            usage_recorder=ctx.usage_recorder,
+            artifact_service=ctx.artifact_service,
+        )
+        assert projection["config"]["web_proxy_configured"] is True
+        assert "web_proxy" not in projection["config"]
+
+    def test_web_proxy_only_allowed_for_paper(self, ctx):
+        with pytest.raises(RsiBadRequest):
+            ctx.task_service.create(_harness_create_params(web_proxy="http://proxy.test:7890"))
+
+    def test_web_proxy_requires_http_url_and_port(self, ctx):
+        params = {
+            "scenario": "ARTIFACT",
+            "artifact_type": "PAPER",
+            "name": "paper-proxy",
+            "model_refs": {"optimizer": "opt-model"},
+            "optimization_instruction": "improve",
+            "web_proxy": "socks5://127.0.0.1:1080",
         }
         with pytest.raises(RsiBadRequest):
             ctx.task_service.create(params)
@@ -137,7 +194,7 @@ class TestTaskGet:
         assert data["config"]["model"]["tester"] == "tst-model"
         assert data["config"]["input_file"] == "C:/data/dataset.json"
         assert data["config"]["max_iterations"] == 3
-        assert data["config"]["search_width"] == 2
+        assert "search_width" not in data["config"]
         assert data["progress"]["iteration"] == 0
 
     def test_artifact_config_projection(self, ctx, tmp_path: Path):
@@ -182,7 +239,7 @@ class TestTaskGet:
         assert paper["config"]["artifact_path"] == str(paper_path)
         assert paper["config"]["optimization_instruction"] == "improve abstract"
         assert paper["config"]["max_iterations"] == 2
-        assert paper["config"]["search_width"] == 1
+        assert "search_width" not in paper["config"]
 
     def test_program_bundle_uses_manifest_max_iterations(self, ctx, tmp_path: Path):
         ctx.install_mock_artifact_adapters()

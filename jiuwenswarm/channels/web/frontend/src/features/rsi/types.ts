@@ -40,13 +40,15 @@ export interface RsiDatasetValidateResult {
 interface RsiTaskCreateBase {
   name: string;
   max_iterations?: number;
-  search_width?: number;
   optimization_instruction?: string;
+  /** Task-scoped proxy used by paper literature search/fetch/download. */
+  web_proxy?: string;
 }
 
 export interface RsiHarnessTaskCreateParams extends RsiTaskCreateBase {
   scenario: 'HARNESS';
   input_file: string;
+  package_id?: string;
   model_refs: {
     optimizer: string;
     tester: string;
@@ -109,9 +111,9 @@ export interface RsiTaskGetResult {
     model: { optimizer: string; tester: string | null };
     input_file: string | null;
     max_iterations: number;
-    search_width: number;
     optimization_instruction: string | null;
     artifact_path: string | null;
+    web_proxy_configured: boolean;
   };
   progress: {
     iteration: number;

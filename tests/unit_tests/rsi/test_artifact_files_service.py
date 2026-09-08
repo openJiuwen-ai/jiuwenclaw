@@ -34,8 +34,8 @@ def test_zip_artifact_is_browsable_and_jsonl_is_text(tmp_path: Path):
     service = RsiArtifactFilesService(SimpleNamespace(tasks_root=tmp_path))
     listed = service.list_files({"task_id": task_id, "path": str(package)})
 
-    assert "/.rsi_artifact_views/" in listed["root"]
-    assert listed["initial_path"].endswith("patched_paper/main.tex")
+    assert ".rsi_artifact_views" in Path(listed["root"]).parts
+    assert Path(listed["initial_path"]).as_posix().endswith("patched_paper/main.tex")
     trace = next(item for item in listed["files"] if item["name"] == "agent_trace.jsonl")
     assert trace["type"] == "application/x-ndjson"
 
@@ -51,7 +51,7 @@ def test_directory_artifact_is_browsable_and_files_are_readable(tmp_path: Path):
     (artifact_root / "paper" / "sections").mkdir(parents=True)
     (task_root / "task.json").write_text("{}", encoding="utf-8")
     (artifact_root / "paper" / "main.tex").write_text(
-        "\\section{Generated paper}\n", encoding="utf-8"
+        "\\section{Generated paper}\n", encoding="utf-8", newline="\n"
     )
     (artifact_root / "paper" / "sections" / "method.tex").write_text(
         "\\section{Method}\n", encoding="utf-8"

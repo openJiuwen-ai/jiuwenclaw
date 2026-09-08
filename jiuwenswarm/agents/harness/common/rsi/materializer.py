@@ -246,7 +246,7 @@ class RsiTaskMaterializer:
         profile_name: str = VALIDATION_PROFILE_NAME,
         options: Mapping[str, Any] | None = None,
         max_iterations: int = 1,
-        search_width: int = 2,
+        search_width: int = 1,
     ) -> dict[str, Any]:
         required_roles = {"evaluation", "analysis", "member_optimization"}
         missing = sorted(required_roles - set(model_paths))
@@ -272,7 +272,7 @@ class RsiTaskMaterializer:
         profile_options = dict(options or {})
         if max_iterations != 1 or "max_epochs" not in profile_options:
             profile_options["max_epochs"] = max_iterations
-        if search_width != 2 or "sibling_candidate_count" not in profile_options:
+        if search_width != 1 or "sibling_candidate_count" not in profile_options:
             profile_options["sibling_candidate_count"] = search_width
         profile_options = _profile_options(profile_options)
         payload = {
@@ -282,7 +282,7 @@ class RsiTaskMaterializer:
             "data_loader": {
                 "file_pattern": "*.json",
                 "batch_size": profile_options["batch_size"],
-                "batch_balance_keys": ["domain", "source", "task_type"],
+                "batch_balance_keys": ["difficulty", "dimension", "source", "task_type"],
             },
             "evaluator": {
                 "backend": "single_harness",
@@ -764,15 +764,19 @@ def _profile_options(options: Mapping[str, Any] | None) -> dict[str, Any]:
     raw = options or {}
     values = {
         "max_epochs": _profile_int(raw, "max_epochs", default=1, minimum=1),
-        "batch_size": _profile_int(raw, "batch_size", default=8, minimum=1),
+        "batch_size": _profile_int(raw, "batch_size", default=1, minimum=1),
         "max_issue_attempts": _profile_int(raw, "max_issue_attempts", default=8, minimum=0),
         "max_repair_rounds": _profile_int(raw, "max_repair_rounds", default=1, minimum=1),
         "sibling_candidate_count": _profile_int(
-            raw, "sibling_candidate_count", default=2, minimum=1
+            raw, "sibling_candidate_count", default=1, minimum=1
         ),
         "rollout_concurrency": _profile_int(raw, "rollout_concurrency", default=1, minimum=1),
         "improver_policy_ref": str(raw.get("improver_policy_ref") or "").strip(),
     }
+    if values["sibling_candidate_count"] != 1 or values["improver_policy_ref"]:
+        raise RsiPathInvalid(
+            "single-harness optimization requires one candidate and no improver evolution policy"
+        )
     runtime: dict[str, Any] = {}
     for key in ("domain", "execution_mode"):
         value = str(raw.get(key) or "").strip()

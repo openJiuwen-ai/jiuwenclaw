@@ -14,6 +14,7 @@ from dataclasses import asdict, is_dataclass
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from jiuwenswarm.agents.harness.common.tools.web_file_download import build_file_download_info
 from jiuwenswarm.agents.harness.common.rsi.adapter import validate_scenario
@@ -47,6 +48,39 @@ from jiuwenswarm.agents.harness.common.rsi.models import (
 
 
 logger = logging.getLogger(__name__)
+
+
+def _normalize_web_proxy(value: object) -> str | None:
+    """Validate and normalize a task-scoped HTTP(S) web proxy URL.
+
+    The proxy is intentionally kept in the task's private config rather than
+    exposed by the public task projection.  SOCKS proxies are not accepted
+    here because the web transport is aiohttp-based and the service does not
+    bundle a SOCKS connector dependency.
+    """
+
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise RsiBadRequest("web_proxy 必须是 http(s) 代理 URL")
+    raw = value.strip()
+    if not raw:
+        return None
+    if len(raw) > 512:
+        raise RsiBadRequest("web_proxy 至多 512 个字符")
+    try:
+        parsed = urlparse(raw)
+        hostname = parsed.hostname
+        port = parsed.port
+    except ValueError as exc:
+        raise RsiBadRequest("web_proxy URL 无效") from exc
+    if parsed.scheme.lower() not in {"http", "https"} or not hostname:
+        raise RsiBadRequest("web_proxy 仅支持带主机和端口的 http(s) URL")
+    if port is None or not 1 <= port <= 65535:
+        raise RsiBadRequest("web_proxy 必须包含 1–65535 的端口")
+    if parsed.path not in {"", "/"} or parsed.query or parsed.fragment:
+        raise RsiBadRequest("web_proxy 不应包含路径、查询参数或片段")
+    return raw.rstrip("/")
 
 
 def _remove_uncommitted_task_dir(tasks_root: Path, task_id: str) -> None:
@@ -109,15 +143,18 @@ class RsiTaskService:
             if not tester:
                 raise RsiBadRequest("harness 优化必填 model_refs.tester")
         requested_max_iterations = params.get("max_iterations")
-        search_width = _positive_int(params.get("search_width"), default=1, field="search_width")
+        # search_width is deprecated; retain the engine default.
+        search_width = 1
         harness_profile_options = (
             _harness_profile_options(params) if scenario is Scenario.HARNESS else {}
         )
         optimization_instruction = params.get("optimization_instruction")
         if optimization_instruction is not None:
             optimization_instruction = str(optimization_instruction).strip() or None
-            if optimization_instruction is not None and len(optimization_instruction) > 1000:
-                raise RsiBadRequest("optimization_instruction 至多 1000 字符")
+
+        web_proxy = _normalize_web_proxy(params.get("web_proxy"))
+        if web_proxy and not (scenario is Scenario.ARTIFACT and artifact_type is ArtifactType.PAPER):
+            raise RsiBadRequest("web_proxy 仅支持论文优化")
 
         # 场景字段校验（web §6.1 规则②③）
         input_file: str | None = None
@@ -236,6 +273,10 @@ class RsiTaskService:
             # boundary for all private model/config files).
             "active_ref_released": materialization is not None,
         }
+        if web_proxy:
+            # Keep the URL task-private.  The public ``task.get`` projection
+            # exposes only a boolean so credentials cannot leak to the UI.
+            config["web_proxy"] = web_proxy
         if materialization is not None:
             manifest = materialization.to_manifest()
             config.update(
@@ -816,21 +857,28 @@ def _harness_profile_options(params: Mapping[str, Any]) -> dict[str, Any]:
             "AgentServer Generic Harness 适配目前只支持 execution_mode=local"
         )
 
+    sibling_candidate_count = _positive_int(
+        value("sibling_candidate_count"), default=1, field="sibling_candidate_count"
+    )
+    improver_policy_ref = str(value("improver_policy_ref", "") or "").strip()
+    if sibling_candidate_count != 1 or improver_policy_ref:
+        raise RsiUnsupportedParameter(
+            "single-harness optimization requires one candidate and no improver evolution policy"
+        )
+
     return {
         "domain": domain_raw,
-        "improver_policy_ref": str(value("improver_policy_ref", "") or "").strip(),
+        "improver_policy_ref": improver_policy_ref,
         "execution_mode": execution_mode,
         "max_epochs": _positive_int(value("max_epochs"), default=1, field="max_epochs"),
-        "batch_size": _positive_int(value("batch_size"), default=8, field="batch_size"),
+        "batch_size": _positive_int(value("batch_size"), default=1, field="batch_size"),
         "max_issue_attempts": _non_negative_int(
             value("max_issue_attempts"), default=8, field="max_issue_attempts"
         ),
         "max_repair_rounds": _positive_int(
             value("max_repair_rounds"), default=1, field="max_repair_rounds"
         ),
-        "sibling_candidate_count": _positive_int(
-            value("sibling_candidate_count"), default=2, field="sibling_candidate_count"
-        ),
+        "sibling_candidate_count": sibling_candidate_count,
         "rollout_concurrency": _positive_int(
             value("rollout_concurrency"), default=1, field="rollout_concurrency"
         ),

@@ -46,6 +46,14 @@ export function ConfigInfoDialog({ open, task, onClose }: ConfigInfoDialogProps)
   if (isPaper && cfg.optimization_instruction) {
     rows.push({ label: t('rsi.createDialog.optimizationInstructionLabel'), value: cfg.optimization_instruction });
   }
+  if (isPaper) {
+    rows.push({
+      label: t('rsi.createDialog.webProxyLabel'),
+      value: cfg.web_proxy_configured
+        ? t('rsi.createDialog.webProxyConfigured')
+        : t('rsi.createDialog.webProxyNotConfigured'),
+    });
+  }
   if (isArtifact && cfg.artifact_path) {
     rows.push({
       label: task.artifact_type === 'PROGRAM' ? t('rsi.createDialog.programLabel') : t('rsi.createDialog.paperLabel'),
@@ -54,9 +62,6 @@ export function ConfigInfoDialog({ open, task, onClose }: ConfigInfoDialogProps)
   }
   if (!isProgram) {
     rows.push({ label: t('rsi.createDialog.maxIterationsLabel'), value: String(cfg.max_iterations) });
-  }
-  if (task.scenario === 'HARNESS') {
-    rows.push({ label: t('rsi.createDialog.searchWidthLabel'), value: String(cfg.search_width) });
   }
 
   return (

@@ -6,9 +6,7 @@
   并透传 ``on_event``（引擎在持久化后发 ``EventStatus/EventProgress/EventNode``）。
 - ``read_state/read_report`` → 解析引擎落盘的 ``single_harness_state.yaml`` /
   ``single_harness_report.yaml``，归一化为服务侧 ``EngineState`` / ``EngineReport``。
-- ``get_tree`` → v4 树搜索落地前，从 ``state.candidate_gates`` 派生
-  ``TreeResponse``（父子关系按 harness refs 反查，等价引擎侧
-  ``events_translate.parent_node_id`` 逻辑）。
+- ``get_tree`` → 复用引擎的 Epoch 节点投影；历史候选格式仅用于兼容旧状态。
 - ``pause/terminate`` → 引擎不支持中途取消，如实抛 ``RsiNotReady``。
 - ``validate_input`` → 引擎 ``load_cases`` 真校验（case 形状/case_id 空或重复）。
 """  # noqa: W291
@@ -38,6 +36,11 @@ from openjiuwen.rsi.schema import (
     EngineState,
     RsiTreeNode,
     TreeResponse,
+)
+from openjiuwen.rsi.harness_rsi.single_harness.events_translate import (
+    active_epoch_node_event,
+    epoch_node_event,
+    root_node_event,
 )
 
 from jiuwenswarm.agents.harness.common.rsi.errors import (
@@ -140,7 +143,7 @@ class HarnessProvider:
     """HarnessProviderContract 的生产实现（包装 agent-core 编排器）。
 
     Args:
-        tasks_root: ``.jiuwenswarm/workspace/rsi``，引擎 ``output_dir`` 与状态/报告读取根。
+        tasks_root: ``.jiuwenswarm/rsi/tasks``，引擎 ``output_dir`` 与状态/报告读取根。
         orchestrator_config: 顶层 ``AutoCoordinatingHarnessConfig`` dict（最小装配入口，
             经 ``from_dict`` 校验）。与 ``orchestrator_config_path`` 二选一。
         orchestrator_config_path: 编排器 YAML 配置路径（缺省引导内置模板）。
@@ -189,12 +192,19 @@ class HarnessProvider:
         self._validate_materialized_paths(request)
         self._verify_task_materials(request, resume=resume)
         orchestrator = self._resolve_orchestrator(request)
+        # New tasks measure H0 first; resumes retain their original protocol.
+        previous_state = self._read_state_dict(request.task_id) if resume else {}
+        auto_full_baseline = (
+            bool(previous_state.get("fingerprint", {}).get("auto_full_baseline", False))
+            if previous_state else True
+        )
         engine_request_kwargs: dict[str, Any] = {
             "dataset_files": [str(item) for item in request.dataset_files],
             "harness_refs_path": request.harness_refs_path,
             "output_dir": str(Path(request.output_dir).expanduser()),
             "dataset_id": request.dataset_id or "single_harness_benchmark",
             "resume": resume,
+            "auto_full_baseline": auto_full_baseline,
         }
         if "task_id" in inspect.signature(IterativeSingleHarnessRequest).parameters:
             engine_request_kwargs["task_id"] = request.task_id
@@ -224,16 +234,16 @@ class HarnessProvider:
     def read_state(self, task_id: str) -> EngineState:
         state = self._load_yaml(task_id, _STATE_FILE) or {}
         gates = _gates(state)
-        best = _best_gate(gates)
         status = str(state.get("status") or "created").lower()
-        iteration = len(gates)
+        iteration = len(state["epoch_checkpoints"]) if "epoch_checkpoints" in state else len(gates)
+        total_iterations = int(state.get("max_iteration") or max(1, iteration))
         baseline = self._baseline_score(task_id, state)
         return EngineState(
             task_id=task_id,
             status=status,
             iteration=iteration,
-            total_iterations=max(1, iteration),
-            best_node_id=_gate_node_id(best),
+            total_iterations=total_iterations,
+            best_node_id=_best_node_id(state),
             score=_number(state.get("best_score")),
             baseline=baseline,
             usage=None,
@@ -250,12 +260,10 @@ class HarnessProvider:
     def read_report(self, task_id: str) -> EngineReport:
         state = self._load_yaml(task_id, _STATE_FILE) or {}
         report = self._load_yaml(task_id, _REPORT_FILE) or {}
-        gates = _gates(report) or _gates(state)
-        best = _best_gate(gates)
         return EngineReport(
             task_id=task_id,
             status=str(report.get("status") or state.get("status") or "created").lower(),
-            best_node_id=_gate_node_id(best),
+            best_node_id=_best_node_id(state or report),
             usage=None,
             artifact_index=self._artifact_index(task_id, state or report),
             summary=_report_summary(report or state),
@@ -263,6 +271,15 @@ class HarnessProvider:
 
     def get_tree(self, task_id: str) -> TreeResponse:
         state = self._load_yaml(task_id, _STATE_FILE) or {}
+        if "epoch_checkpoints" in state:
+            events = _epoch_events(state)
+            nodes = [event.node for event in events]
+            depths = {"h0": 0}
+            for node in nodes[1:]:
+                depths[node.node_id] = depths.get(node.parent_id, 0) + 1
+            return TreeResponse(
+                nodes=nodes, depth=max(depths.values()), iteration=len(state["epoch_checkpoints"])
+            )
         gates = _gates(state)
         baseline = self._baseline_score(task_id, state)
         nodes: list[RsiTreeNode] = [
@@ -574,11 +591,10 @@ class HarnessProvider:
         if status not in {"completed", "failed"}:
             # 引擎 run() 正常返回即本轮执行结束。
             status = "completed"
-        gates = _gates(state)
         return EngineResult(
             task_id=task_id,
             status=status,
-            final_node_id=_gate_node_id(_best_gate(gates)),
+            final_node_id=_best_node_id(state),
             error_code=None if status == "completed" else "ENGINE_FAILED",
             error_message=None if status == "completed" else "harness 引擎状态异常结束",
         )
@@ -626,6 +642,15 @@ class HarnessProvider:
 
     def _artifact_index(self, task_id: str, state: dict[str, Any]) -> list[ArtifactRef]:
         refs: list[ArtifactRef] = []
+        if "epoch_checkpoints" in state:
+            for event in _epoch_events(state):
+                path = str(event.node.extra.get("artifact_path", "") or "")
+                if path:
+                    refs.append(ArtifactRef(
+                        artifact_id=event.node.node_id, node_id=event.node.node_id,
+                        name=Path(path).name, kind="harness_refs", path=path, sha256=None, download_url=None,
+                    ))
+            return refs
         for index, gate in enumerate(_gates(state), start=1):
             candidate_refs = str(gate.get("candidate_harness_refs_path", "") or "")
             if not candidate_refs:
@@ -643,6 +668,25 @@ class HarnessProvider:
                 )
             )
         return refs
+
+
+def _epoch_events(state: dict[str, Any]) -> list[Any]:
+    events = [root_node_event(state)]
+    events.extend(epoch_node_event(state, item) for item in state.get("epoch_checkpoints", []))
+    active = active_epoch_node_event(state)
+    if active is not None:
+        events.append(active)
+    return events
+
+
+def _best_node_id(state: dict[str, Any]) -> str | None:
+    if "epoch_checkpoints" not in state:
+        return _gate_node_id(_best_gate(_gates(state)))
+    best_refs = state.get("best_harness_refs_path")
+    for checkpoint in reversed(state["epoch_checkpoints"]):
+        if checkpoint.get("promotion_applied") and checkpoint.get("selected_harness_refs_path") == best_refs:
+            return f"epoch-{int(checkpoint['epoch']):03d}"
+    return "h0"
 
 
 def _gates(raw: dict[str, Any]) -> list[dict[str, Any]]:

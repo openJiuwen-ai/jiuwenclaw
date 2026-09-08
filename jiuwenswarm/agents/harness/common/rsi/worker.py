@@ -30,14 +30,14 @@ from jiuwenswarm.agents.harness.common.rsi.models import TaskStatus
 logger = logging.getLogger(__name__)
 
 _QUEUE_MAXSIZE = 128
+_DEFAULT_POLL_TIMEOUT = object()
 _PROVIDER_IN_PROGRESS = frozenset({"CREATED", "QUEUED", "RUNNING"})
-# A paper run can spend several minutes in each of its six modules.  The
-# previous 30-minute bound terminated healthy paper runs while the first
-# research pass was still collecting sources.  Keep the generic default at
-# 30 minutes, but allow paper tasks to scale the watchdog with their requested
-# number of tree iterations (see ``_provider_poll_timeout_for`` below).
+# The generic Provider watchdog remains bounded, but PAPER is deliberately
+# excluded from it below.  A paper iteration contains several model-backed
+# modules and network retrieval; there is no reliable per-iteration wall-clock
+# bound that can be multiplied by ``max_iterations`` without killing a healthy
+# run.  PAPER is stopped by its Provider's explicit terminate path instead.
 _PROVIDER_POLL_TIMEOUT_SECONDS = 30 * 60
-_PAPER_ITERATION_BUDGET_SECONDS = 30 * 60
 _PROVIDER_POLL_INTERVAL_SECONDS = 0.1
 _PROVIDER_HANDOFF_RETRY_SECONDS = 0.05
 _PROVIDER_TERMINATE_TIMEOUT_SECONDS = 5.0
@@ -307,22 +307,20 @@ class RsiWorker:
                 return adapter
         return None
 
-    def _provider_poll_timeout_for(self, task_view: Any) -> float:
-        """Return a watchdog long enough for the requested paper tree.
+    def _provider_poll_timeout_for(self, task_view: Any) -> float | None:
+        """Return the polling budget for a task.
 
-        The worker's generic timeout remains the safety bound for harness and
-        program providers.  Paper providers execute a full pipeline for every
-        requested tree iteration, so a fixed 30-minute timeout can kill a
-        healthy run during its first survey/design pass.
+        Harness and program Providers retain the generic watchdog.  Paper
+        runs are intentionally unbounded here: their six model-backed modules
+        include web retrieval and compilation, so deriving a total deadline
+        from the number of tree iterations is only a guess and can terminate
+        a healthy run.  The paper Provider exposes ``terminate`` for explicit
+        user cancellation, and a terminal Provider snapshot still ends the
+        polling loop immediately.
         """
-        timeout = self.provider_poll_timeout
-        if str(getattr(task_view, "artifact_type", "")).upper() != "PAPER":
-            return timeout
-        try:
-            iterations = max(1, int(getattr(task_view, "max_iterations", 1) or 1))
-        except (TypeError, ValueError):
-            iterations = 1
-        return max(timeout, iterations * _PAPER_ITERATION_BUDGET_SECONDS)
+        if str(getattr(task_view, "artifact_type", "")).upper() == "PAPER":
+            return None
+        return self.provider_poll_timeout
 
     def _apply_result_status(self, task_id: str, result: Any) -> None:
         status = _provider_status(result, default="COMPLETED")
@@ -358,7 +356,7 @@ class RsiWorker:
         adapter: Any,
         initial_result: Any,
         *,
-        timeout: float | None = None,
+        timeout: float | None | object = _DEFAULT_POLL_TIMEOUT,
     ) -> Any:
         """Wait for Providers whose ``run`` returns before execution ends.
 
@@ -376,20 +374,27 @@ class RsiWorker:
             )
             return initial_result
 
-        poll_timeout = self.provider_poll_timeout if timeout is None else max(0.1, float(timeout))
-        deadline = time.monotonic() + poll_timeout
+        if timeout is _DEFAULT_POLL_TIMEOUT:
+            poll_timeout: float | None = self.provider_poll_timeout
+        elif timeout is None:
+            poll_timeout = None
+        else:
+            poll_timeout = max(0.1, float(timeout))
+        deadline = time.monotonic() + poll_timeout if poll_timeout is not None else None
         last_status = _provider_status(initial_result, default="RUNNING")
         last_error: Exception | None = None
         while True:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
+            remaining = None if deadline is None else deadline - time.monotonic()
+            if remaining is not None and remaining <= 0:
                 break
             try:
-                state = await asyncio.wait_for(
-                    asyncio.to_thread(read_state, task_id),
-                    timeout=remaining,
-                )
+                read_state_task = asyncio.to_thread(read_state, task_id)
+                if remaining is None:
+                    state = await read_state_task
+                else:
+                    state = await asyncio.wait_for(read_state_task, timeout=remaining)
             except asyncio.TimeoutError:
+                assert poll_timeout is not None
                 last_error = asyncio.TimeoutError(
                     f"Provider.read_state exceeded {poll_timeout:.1f}s"
                 )
@@ -399,7 +404,9 @@ class RsiWorker:
                 # after returning from run.  A short retry handles that small
                 # hand-off without blocking event consumption.
                 last_error = exc
-                sleep_for = min(_PROVIDER_HANDOFF_RETRY_SECONDS, remaining)
+                sleep_for = _PROVIDER_HANDOFF_RETRY_SECONDS
+                if remaining is not None:
+                    sleep_for = min(sleep_for, remaining)
                 if sleep_for > 0:
                     await asyncio.sleep(sleep_for)
                 continue
@@ -412,10 +419,14 @@ class RsiWorker:
                     error_message=getattr(state, "error_message", None),
                 )
             last_status = status
-            sleep_for = min(_PROVIDER_POLL_INTERVAL_SECONDS, deadline - time.monotonic())
+            sleep_for = _PROVIDER_POLL_INTERVAL_SECONDS
+            if deadline is not None:
+                sleep_for = min(sleep_for, deadline - time.monotonic())
             if sleep_for > 0:
                 await asyncio.sleep(sleep_for)
 
+        assert poll_timeout is not None
+        assert deadline is not None
         elapsed = poll_timeout - max(0.0, deadline - time.monotonic())
         logger.error(
             "[RSI] Provider 未在 %.1f 秒内进入终态，task=%s status=%s error=%s",

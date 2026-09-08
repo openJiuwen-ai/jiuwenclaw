@@ -8,7 +8,7 @@ import { useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import selectedInfoIcon from '../../../assets/rsi/rsi-icon.svg';
 import { useRsiStore } from '../rsiStore';
-import { formatGain, formatScore, nodeChangeDisplayLabel, nodeChangeGroup, presentRsiNode } from '../rsiPresentation';
+import { formatGain, formatScore, nodeChangeDisplayLabel, nodeChangeGroup, nodeStageLocalizedLabel, presentRsiNode } from '../rsiPresentation';
 import { resolveRsiArtifactSource } from '../rsiArtifactFiles';
 import { rsiArtifactDownload, rsiArtifactDownloadUrl } from '../rsiApi';
 import { executeDesktopSave, type DesktopSaveApiResult } from '../../../utils/desktopSave';
@@ -65,6 +65,7 @@ export function RsiSelectedInfo({ taskId }: RsiSelectedInfoProps) {
         taskRunning: task.status === 'RUNNING',
       })
     : null;
+  const stageLabel = nodeStageLocalizedLabel(selected, t) ?? presentation.stageLabel;
   const artifactSource = resolveRsiArtifactSource(selected, taskId);
   const canViewArtifact = artifactSource !== null;
 
@@ -161,10 +162,10 @@ export function RsiSelectedInfo({ taskId }: RsiSelectedInfoProps) {
             )}
           </div>
 
-          {presentation.stageLabel && (
+          {stageLabel && (
             <div className="rsi-selected-info__stage">
               <span className="rsi-selected-info__stage-dot" aria-hidden />
-              {presentation.stageLabel}
+              {stageLabel}
             </div>
           )}
 
@@ -201,7 +202,7 @@ export function RsiSelectedInfo({ taskId }: RsiSelectedInfoProps) {
             </div>
             <div className="rsi-selected-info__metrics">
               <div>
-                <span>{t('rsi.detail.score', { defaultValue: '得分' })}</span>
+                <span>{t('rsi.detail.score', { defaultValue: '分数' })}</span>
                 <strong>{formatScore(presentation.score)}</strong>
               </div>
               <div>
