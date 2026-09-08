@@ -448,7 +448,7 @@ function AgentNode({
           agent_name: agent.name,
         },
       };
-      useChatStore.getState().setPendingQuestion(sessionId, payload);
+      useChatStore.getState().enqueuePendingQuestion(sessionId, payload);
     })();
   }, [agent, runId, sessionId, ensureAgentDetail]);
 

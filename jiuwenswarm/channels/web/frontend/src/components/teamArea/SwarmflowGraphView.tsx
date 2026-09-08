@@ -669,7 +669,7 @@ export function SwarmflowGraphView({
           agent_name: agent.name,
         },
       };
-      useChatStore.getState().setPendingQuestion(sessionId, payload);
+      useChatStore.getState().enqueuePendingQuestion(sessionId, payload);
       return;
     }
 
