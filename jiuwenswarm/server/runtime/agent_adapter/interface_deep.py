@@ -7525,11 +7525,18 @@ class JiuWenSwarmDeepAdapter:
             compose_host_effective_permissions,
         )
         from jiuwenswarm.agents.harness.common.rails.permissions.permissions_layers import (
+            load_global_permissions,
             load_session_permissions,
             load_user_permissions,
         )
 
-        permission_config = config_base.get("permissions", {}) if config_base else {}
+        # 磁盘权限优先，避免依赖可能过期的 config_base：完全访问→默认权限 切换后 rail 需按最新 enabled=true 重建。
+        disk_global = load_global_permissions() or {}
+        permission_config = (
+            disk_global
+            if isinstance(disk_global, dict) and disk_global
+            else (config_base.get("permissions", {}) if config_base else {})
+        )
         session_id = str(getattr(self, "_parent_session_id", None) or "").strip() or None
         if self._permission_rail is not None:
             effective = compose_host_effective_permissions(
