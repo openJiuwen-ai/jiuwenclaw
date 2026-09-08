@@ -9,8 +9,11 @@ import json
 import pytest
 
 from jiuwenswarm.server.runtime.skill_turbo.skill_codes.ppt.ppt_page_gen import (
+    PageGenContext,
+    PageWorkerNode,
     _build_content_template_fill_prompt,
     _build_content_template_fill_system_prompt,
+    _count_agenda_items,
     _build_page_gen_rewrite_hint,
     _extract_chart_scaffold_region,
     _extract_designer_section,
@@ -168,6 +171,20 @@ def test_content_fill_prompt_non_chart_page_skips_chart_section():
     assert "OUTLINE_FULL_MARKER" not in prompt
 
 
+def test_content_fill_prompt_retry_uses_original_html_as_edit_base():
+    prompt = _minimal_fill_prompt(
+        style_id="business-classic",
+        outline_page="**类型**：data\n**标题**：数据页",
+        rewrite_hint="修复 chart 容器高度链",
+        original_html="<html><body><main><section>旧版本</section></main></body></html>",
+    )
+
+    assert "上次产物（原始 HTML，作为本轮定点修复基底）" in prompt
+    assert "<section>旧版本</section>" in prompt
+    assert "本轮必须以“上次产物（原始 HTML）”为编辑基底做定点修复" in prompt
+    assert "`seed_html` 仅用于约束骨架/Chrome/占位符边界；`original_html` 才是当前页面已形成状态的来源。" in prompt
+
+
 def test_content_fill_prompt_custom_vs_preset_page_content_rules():
     custom_prompt = _minimal_fill_prompt(style_id="custom")
     preset_prompt = _minimal_fill_prompt(style_id="business-classic")
@@ -214,6 +231,86 @@ def test_is_chart_candidate_structural_never_elevates():
         outline_page="**类型**：agenda\n**数据需求**：目录",
         research_page="图表趋势对比",
     )
+
+
+def test_count_agenda_items_accepts_custom_target_page_markers():
+    html = """
+    <div class="ppt-slide" type="agenda">
+      <main>
+        <section><span>P03</span><p>市场概览</p></section>
+        <section><span>P05</span><p>竞争格局</p></section>
+        <section><span>P07</span><p>落地路径</p></section>
+      </main>
+    </div>
+    """
+
+    assert _count_agenda_items(html) == 3
+
+
+def test_count_agenda_items_accepts_preset_roman_anchor_comments():
+    html = """
+    <div class="ppt-slide agenda-stage" type="agenda">
+      <div class="grid">
+        <!-- Ⅰ -->
+        <div><span>Ⅰ</span><p>背景</p></div>
+        <!-- Ⅱ -->
+        <div><span>Ⅱ</span><p>策略</p></div>
+        <!-- Ⅲ -->
+        <div><span>Ⅲ</span><p>执行</p></div>
+      </div>
+    </div>
+    """
+
+    assert _count_agenda_items(html) == 3
+
+
+def test_count_agenda_items_ignores_visible_page_marker_outside_main():
+    html = """
+    <div class="ppt-slide" type="agenda">
+      <main>
+        <section><span>P03</span><p>市场概览</p></section>
+        <section><span>P05</span><p>竞争格局</p></section>
+        <section><span>P07</span><p>落地路径</p></section>
+      </main>
+      <span data-skill-turbo-page-number="true">第 03 页 / 共 12 页</span>
+    </div>
+    """
+
+    assert _count_agenda_items(html) == 3
+
+
+def test_count_agenda_items_deduplicates_repeated_comment_anchors():
+    html = """
+    <div class="ppt-slide agenda-stage" type="agenda">
+      <div class="grid">
+        <!-- 01 -->
+        <div><span>01</span><p>背景</p></div>
+        <!-- 01 -->
+        <div><span>01</span><p>背景</p></div>
+        <!-- 02 -->
+        <div><span>02</span><p>策略</p></div>
+      </div>
+    </div>
+    """
+
+    assert _count_agenda_items(html) == 2
+
+
+def test_count_agenda_items_accepts_double_digit_comment_anchors():
+    html = """
+    <div class="ppt-slide agenda-stage" type="agenda">
+      <div class="grid">
+        <!-- 09 -->
+        <div><span>09</span><p>阶段一</p></div>
+        <!-- 10 -->
+        <div><span>10</span><p>阶段二</p></div>
+        <!-- 11 -->
+        <div><span>11</span><p>阶段三</p></div>
+      </div>
+    </div>
+    """
+
+    assert _count_agenda_items(html) == 3
 
 
 def test_content_fill_prompt_content_type_elevated_by_data_needs():
@@ -495,3 +592,48 @@ async def test_skill_turbo_template_path_bypass_hard_fails():
     error = str(result.get("error") or "")
     assert "自定义模板" in error or "模板包" in error
     assert "skill_tool" in error
+
+
+@pytest.mark.asyncio
+async def test_generate_one_passes_original_html_to_content_template_fill(monkeypatch):
+    node = object.__new__(PageWorkerNode)
+    captured: dict[str, str] = {}
+
+    async def fake_generate_content_template_fill(self, ctx, *, rewrite_hint="", original_html=""):
+        captured["rewrite_hint"] = rewrite_hint
+        captured["original_html"] = original_html
+        return "<html></html>", "", ""
+
+    monkeypatch.setattr(
+        PageWorkerNode,
+        "_generate_content_template_fill",
+        fake_generate_content_template_fill,
+    )
+
+    ctx = PageGenContext(
+        page_num=3,
+        style_id="business-classic",
+        style_text="style stub",
+        outline_page=_RESEARCH_OUTLINE,
+        research_page="research stub",
+        outline_is_full=False,
+        image_map_page="",
+        designer_md_text="",
+        user_query="",
+        total_pages=8,
+        pptx_root="D:/pptx-craft",
+        outline_full=_RESEARCH_OUTLINE,
+    )
+
+    html, raw_html, reason = await PageWorkerNode._generate_one(
+        node,
+        ctx,
+        rewrite_hint="仅修复 overflow",
+        original_html="<html><body><main>旧页</main></body></html>",
+    )
+
+    assert html == "<html></html>"
+    assert raw_html == ""
+    assert reason == ""
+    assert captured["rewrite_hint"] == "仅修复 overflow"
+    assert captured["original_html"] == "<html><body><main>旧页</main></body></html>"
