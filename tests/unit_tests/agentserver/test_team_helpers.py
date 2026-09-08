@@ -2148,7 +2148,11 @@ async def test_cancelled_heartbeat_followup_aborts_submitted_team_round(monkeypa
 
 
 @pytest.mark.anyio
-async def test_interactive_team_followup_uses_round_only_for_lifecycle(monkeypatch):
+@pytest.mark.parametrize("mode", ["team", "team.plan", "team.code.plan"])
+@pytest.mark.parametrize("completion_timing", ["after_ack", "final_before_ack", "terminal_before_ack"])
+async def test_interactive_team_followup_uses_round_only_for_lifecycle(
+    monkeypatch, mode, completion_timing,
+):
     from jiuwenswarm.agents.harness.code.rails.heartbeat.execution import (
         SessionRunAdmission,
     )
@@ -2162,10 +2166,25 @@ async def test_interactive_team_followup_uses_round_only_for_lifecycle(monkeypat
             return SimpleNamespace(team_name="unit-team")
 
         async def interact(self, session_id: str, query: str):
+            # Plan skip can finish without a model call, before interact returns.
+            if completion_timing != "after_ack":
+                await self.broadcast_event(
+                    session_id, {"event_type": "chat.final", "content": "continued"},
+                )
+            if completion_timing == "terminal_before_ack":
+                await self.broadcast_event(
+                    session_id,
+                    {
+                        "event_type": "chat.processing_status",
+                        "is_processing": False,
+                        "is_complete": True,
+                    },
+                )
             return True, None
 
     manager = _FakeManager()
-    manager.add_waiter("sess-team-user", "req-browser", asyncio.Queue())
+    browser_queue = asyncio.Queue()
+    manager.add_waiter("sess-team-user", "req-browser", browser_queue)
     monkeypatch.setattr(team_helpers, "get_team_manager", lambda channel_id: manager)
     monkeypatch.setattr(team_helpers, "_persist_team_file_monitor_roots", lambda *args: None)
     admission = SessionRunAdmission()
@@ -2174,7 +2193,7 @@ async def test_interactive_team_followup_uses_round_only_for_lifecycle(monkeypat
         request_id="req-user-followup",
         channel_id="web",
         metadata={},
-        params={"mode": "team"},
+        params={"mode": mode},
         user_id="owner",
     )
 
@@ -2194,6 +2213,13 @@ async def test_interactive_team_followup_uses_round_only_for_lifecycle(monkeypat
         team_helpers.reset_team_heartbeat_service(heartbeat_token)
 
     assert chunks[0].payload["event_type"] == "chat.processing_status_deferred"
+    if completion_timing == "terminal_before_ack":
+        # A late acknowledgement must not resurrect an already completed round.
+        assert manager.is_round_active("sess-team-user") is False
+        assert admission.is_user_active("sess-team-user") is False
+        assert browser_queue.get_nowait()["event_type"] == "chat.final"
+        assert browser_queue.get_nowait()["is_processing"] is False
+        return
     # The user admission is retained until the actual Team round terminates,
     # even though the short follow-up transport has already returned.
     assert admission.is_user_active("sess-team-user") is True
@@ -2203,11 +2229,12 @@ async def test_interactive_team_followup_uses_round_only_for_lifecycle(monkeypat
         SimpleNamespace(admission=admission)
     )
     try:
-        await team_helpers._broadcast_event(
-            "web",
-            "sess-team-user",
-            {"event_type": "chat.final", "content": "continued"},
-        )
+        if completion_timing == "after_ack":
+            await team_helpers._broadcast_event(
+                "web",
+                "sess-team-user",
+                {"event_type": "chat.final", "content": "continued"},
+            )
         await team_helpers._broadcast_event(
             "web",
             "sess-team-user",
@@ -2221,6 +2248,8 @@ async def test_interactive_team_followup_uses_round_only_for_lifecycle(monkeypat
         team_helpers.reset_team_heartbeat_service(terminal_token)
     assert manager.is_round_active("sess-team-user") is False
     assert admission.is_user_active("sess-team-user") is False
+    assert browser_queue.get_nowait()["event_type"] == "chat.final"
+    assert browser_queue.get_nowait()["is_processing"] is False
 
 
 @pytest.mark.anyio
