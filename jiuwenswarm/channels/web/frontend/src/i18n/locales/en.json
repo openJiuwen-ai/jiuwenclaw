@@ -3293,6 +3293,8 @@
       "pauseUnsupported": "The current Harness engine does not support pausing while running",
       "actionUnknownError": "Unknown error",
       "actionFailed": "Action failed: {{message}}",
+      "actionInstallSuccess": "{{taskName}} - {{snapshotName}} installed successfully!",
+      "actionClose": "Close",
       "actionResume": "Resume task",
       "actionStart": "Start training",
       "actionInstall": "Install plugin",

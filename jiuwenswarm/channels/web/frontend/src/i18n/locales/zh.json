@@ -3271,6 +3271,8 @@
       "pauseUnsupported": "当前 Harness 引擎暂不支持运行中暂停",
       "actionUnknownError": "未知错误",
       "actionFailed": "操作失败：{{message}}",
+      "actionInstallSuccess": "{{taskName}} - {{snapshotName}} 安装成功！",
+      "actionClose": "关闭",
       "actionResume": "继续任务",
       "actionStart": "开始训练",
       "actionInstall": "安装插件",
