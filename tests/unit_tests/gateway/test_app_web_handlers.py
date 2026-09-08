@@ -1971,8 +1971,44 @@ def test_codex_dependency_install_is_not_started_twice(monkeypatch):
     release_install.set()
 
     assert first and first["status"] == "running"
+    assert first["progress_kind"] == "installer_activity"
     assert second and second["status"] == "running"
     assert len(install_calls) == 1
+
+
+def test_claude_dependency_install_running_snapshot_does_not_reenter_lock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FailOnReentryLock:
+        def __init__(self) -> None:
+            self.locked = False
+
+        def __enter__(self) -> None:
+            if self.locked:
+                raise AssertionError("Claude dependency lock was re-entered")
+            self.locked = True
+
+        def __exit__(self, *_args: object) -> None:
+            self.locked = False
+
+    lock = FailOnReentryLock()
+    monkeypatch.setattr(app_web_handlers, "_CLAUDE_DEPENDENCY_INSTALL_LOCK", lock)
+    monkeypatch.setitem(app_web_handlers._EXTERNAL_CLI_DEPENDENCY_INSTALL_LOCKS, "claude", lock)
+    monkeypatch.setattr(app_web_handlers, "_activate_managed_external_cli_paths_if_needed", lambda: None)
+    monkeypatch.setattr(app_web_handlers.importlib.util, "find_spec", lambda _name: None)
+    monkeypatch.setattr(app_web_handlers, "_is_frozen_runtime", lambda: False)
+    app_web_handlers._CLAUDE_DEPENDENCY_INSTALL_STATUS.update({
+        "status": "running",
+        "phase": "downloading",
+        "error": "",
+        "log_tail": [],
+    })
+
+    snapshot = app_web_handlers._ensure_claude_dependency_available_or_start_install()
+
+    assert snapshot is not None
+    assert snapshot["status"] == "running"
+    assert snapshot["phase"] == "downloading"
 
 
 @pytest.mark.parametrize(
@@ -2037,6 +2073,7 @@ def test_external_cli_dependency_install_starts_managed_runtime_in_frozen_deskto
 
     assert first and first["status"] == "running"
     assert first["phase"] == "preparing"
+    assert first["progress_kind"] == "download_metrics"
     assert second and second["status"] == "running"
     assert len(created_threads) == 1
     assert created_threads[0].target is app_web_handlers._run_managed_external_cli_runtime_install
