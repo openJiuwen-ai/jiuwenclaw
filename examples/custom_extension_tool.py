@@ -6,7 +6,7 @@
     # 多模块分号分隔：examples.custom_extension_tool;my.pkg.other_tools
     # 然后启动 AgentServer；env 变更需重启进程生效
 
-部署契约（docs/zh/自定义Tool扩展设计.md §5.3）：
+部署契约：
     1. 本模块及其第三方依赖须预装在 AgentServer 运行时 Python 环境
        （与 AGENT_EXTRA_RAILS 扩展同一部署链路）；
     2. register_tools() 返回模块级 @tool 单例——工具实例进程级共享，
