@@ -3,19 +3,231 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-
-from jiuwenswarm.agents.harness.common.rails.interrupt.interrupt_helpers import (
-    apply_permission_trusted_dirs,
-    build_permission_rail,
-    convert_interactions_to_ask_user_question,
-    merge_permission_trusted_dirs,
+from openjiuwen.harness.rails.security.tool_security_rail import (
+    PermissionInterruptRail,
 )
+
+from jiuwenswarm.agents.harness.common.rails.interrupt.interrupt_helpers import apply_permission_trusted_dirs, build_permission_rail, convert_interactions_to_ask_user_question, merge_permission_trusted_dirs
 from jiuwenswarm.common.utils import (
     get_agent_workspace_dir,
     get_default_project_session_workspace_dir,
     get_default_project_workspace_dir,
     get_workspace_dir,
 )
+from jiuwenswarm.agents.harness.common.rails.permissions.auto_permission_rail import (
+    AutoPermissionInterruptRail,
+)
+from jiuwenswarm.agents.harness.common.rails.permissions.tool_decision_facts import (
+    build_tool_decision_facts,
+)
+from jiuwenswarm.agents.harness.common.rails.permissions.persistent_audit import (
+    PersistentAuditWriter,
+)
+from jiuwenswarm.server.runtime.agent_adapter.browser_runtime_security import (
+    BrowserRuntimeSecurityProfile,
+)
+
+
+def test_permission_builder_defaults_to_develop_manual_rail() -> None:
+    rail = build_permission_rail(
+        {"permissions": {"enabled": True, "mode": "auto"}},
+        llm=object(),
+    )
+
+    assert isinstance(rail, PermissionInterruptRail)
+    assert type(rail) is PermissionInterruptRail
+    assert not isinstance(rail, AutoPermissionInterruptRail)
+
+
+def test_explicit_auto_builder_uses_installed_config(tmp_path) -> None:
+    rail = build_permission_rail(
+        {"permissions": {"enabled": True, "mode": "auto"}},
+        enable_auto_permission=True,
+        workspace_root=tmp_path,
+    )
+
+    assert isinstance(rail, AutoPermissionInterruptRail)
+    assert rail.auto_reviewer is None
+    assert rail.persistent_audit_writer is None
+    assert rail.base_rail._host.get_permissions_snapshot() == rail.permission_config
+
+
+def test_explicit_auto_builder_preserves_host_browser_security_profile(
+    tmp_path,
+) -> None:
+    profile = BrowserRuntimeSecurityProfile(
+        network_guard_enforced=True,
+        guard_provider="test-guard",
+    )
+
+    rail = build_permission_rail(
+        {"permissions": {"enabled": True, "mode": "auto"}},
+        enable_auto_permission=True,
+        workspace_root=tmp_path,
+        browser_runtime_security_profile=profile,
+    )
+
+    assert isinstance(rail, AutoPermissionInterruptRail)
+    assert rail.browser_runtime_security_profile is profile
+
+
+def test_explicit_auto_builder_composes_enabled_persistent_audit(tmp_path) -> None:
+    audit_root = tmp_path / "audit-data"
+    rail = build_permission_rail(
+        {
+            "permissions": {
+                "enabled": True,
+                "mode": "auto",
+                "auto": {
+                    "persistent_audit_enabled": True,
+                    "persistent_audit_root": audit_root.as_posix(),
+                },
+            }
+        },
+        enable_auto_permission=True,
+        workspace_root=tmp_path,
+    )
+
+    assert isinstance(rail, AutoPermissionInterruptRail)
+    assert isinstance(rail.persistent_audit_writer, PersistentAuditWriter)
+    facts = build_tool_decision_facts(
+        "read_file",
+        {"path": (tmp_path / "secret-token.txt").as_posix()},
+        workspace_root=tmp_path,
+        original_args_were_valid_object=True,
+    )
+
+    result = rail._emit_audit(
+        facts,
+        decision="allow",
+        reason="reviewer_allow_once",
+        degraded=False,
+    )
+
+    assert result.persisted is True
+    content = result.path.read_text(encoding="utf-8")
+    assert "secret-token.txt" not in content
+    assert tmp_path.as_posix() not in content
+
+
+def test_explicit_auto_builder_degrades_when_audit_root_is_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    monkeypatch.delenv("JIUWENSWARM_DATA_DIR", raising=False)
+    rail = build_permission_rail(
+        {
+            "permissions": {
+                "enabled": True,
+                "mode": "auto",
+                "auto": {"persistent_audit_enabled": True},
+            }
+        },
+        enable_auto_permission=True,
+        workspace_root=tmp_path,
+    )
+
+    assert isinstance(rail, AutoPermissionInterruptRail)
+    facts = build_tool_decision_facts(
+        "read_file",
+        {"path": "README.md"},
+        workspace_root=tmp_path,
+        original_args_were_valid_object=True,
+    )
+
+    result = rail._emit_audit(
+        facts,
+        decision="allow",
+        reason="reviewer_allow_once",
+        degraded=False,
+    )
+
+    assert result.persisted is False
+    assert result.degraded is True
+    assert result.reason == "audit_root_unavailable"
+
+
+def test_explicit_auto_builder_wires_isolated_reviewer_from_llm(tmp_path) -> None:
+    class RebuildableModel:
+        def __init__(self, *, model_client_config, model_config) -> None:
+            self.model_client_config = model_client_config
+            self.model_config = model_config
+
+    model = RebuildableModel(
+        model_client_config={"model_name": "reviewer-test"},
+        model_config={"temperature": 0.5},
+    )
+    rail = build_permission_rail(
+        {
+            "permissions": {
+                "enabled": True,
+                "mode": "auto",
+                "auto": {
+                    "reviewer_timeout_ms": 4321,
+                    "reviewer_min_confidence": 0.0,
+                },
+            }
+        },
+        llm=model,
+        enable_auto_permission=True,
+        workspace_root=tmp_path,
+    )
+
+    assert isinstance(rail, AutoPermissionInterruptRail)
+    assert rail.auto_reviewer is not None
+    assert rail.auto_reviewer.client._model is not model
+    assert (
+        rail.auto_reviewer.client._model.model_client_config
+        == model.model_client_config
+    )
+    assert rail.auto_reviewer.client._model.model_config == model.model_config
+    assert rail.auto_reviewer.timeout_seconds == pytest.approx(4.321)
+    assert rail.auto_reviewer.min_confidence == 0.0
+
+
+def test_explicit_auto_builder_with_unrebuildable_model_fails_closed(
+    tmp_path,
+) -> None:
+    rail = build_permission_rail(
+        {"permissions": {"enabled": True, "mode": "auto"}},
+        llm=object(),
+        enable_auto_permission=True,
+        workspace_root=tmp_path,
+    )
+
+    assert isinstance(rail, AutoPermissionInterruptRail)
+    assert rail.auto_reviewer is None
+
+
+@pytest.mark.parametrize(
+    "permissions",
+    [
+        {"enabled": False, "mode": "auto"},
+        {"enabled": "true", "mode": "auto"},
+        {"enabled": True, "mode": "manual"},
+        {"mode": "auto"},
+    ],
+)
+def test_explicit_auto_builder_rejects_invalid_activation_snapshot(
+    permissions: dict[str, object],
+) -> None:
+    with pytest.raises(
+        ValueError,
+        match="auto_permission_activation_requires_enabled_auto_mode",
+    ):
+        build_permission_rail(
+            {"permissions": permissions},
+            enable_auto_permission=True,
+        )
+
+
+@pytest.mark.parametrize("enabled", [False, "true", 1, None])
+def test_manual_permission_builder_preserves_develop_enabled_semantics(enabled: object) -> None:
+    rail = build_permission_rail(
+        {"permissions": {"enabled": enabled, "mode": "manual"}},
+    )
+
+    assert (rail is not None) is bool(enabled)
 
 
 def _evolution_interrupt(
@@ -122,6 +334,44 @@ def test_legacy_skill_evolution_approval_metadata_is_classified():
     assert result["approval_kind"] == "evolve"
 
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 def _scene_hook_input(normalized_tool_name: str, user_input):
     from openjiuwen.harness.security import PermissionSceneHookInput
 
@@ -135,8 +385,10 @@ def _scene_hook_input(normalized_tool_name: str, user_input):
     )
 
 
-def _permission_scene_hook():
-    rail = build_permission_rail({"permissions": {"enabled": True}})
+def _permission_scene_hook(permission_config=None):
+    rail = build_permission_rail(
+        {"permissions": permission_config or {"enabled": True}}
+    )
     assert rail is not None
     hook = rail._host.permission_scene_hook
     assert hook is not None
@@ -532,3 +784,55 @@ def test_persist_session_allow_still_uses_bound_session_id(
     assert hook is not None
     assert hook({"allow_tools": ["bash"]}) is True
     assert layers.load_session_permissions("sess-bound")["allow_tools"] == ["bash"]
+
+@pytest.mark.parametrize(
+    ("owner_level", "expected"),
+    [
+        ("allow", ("approve",)),
+        (
+            "ask",
+            ("reject", "[PERMISSION_DENIED] 该工具未被授权 (owner_scopes: ask)"),
+        ),
+        (
+            "deny",
+            ("reject", "[PERMISSION_DENIED] 该工具未被授权 (owner_scopes: deny)"),
+        ),
+    ],
+)
+def test_scene_hook_applies_non_avatar_principal_owner_scope(
+    owner_level: str,
+    expected: tuple[str, ...],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from jiuwenswarm.agents.harness.common.rails.permissions.owner_scopes import (
+        cleanup_permission_context,
+        setup_permission_context,
+    )
+
+    installed_permissions = {
+        "enabled": True,
+        "owner_scopes": {
+            "web": {
+                "principal-42": {
+                    "tools": {"bash": owner_level},
+                }
+            }
+        },
+    }
+    monkeypatch.setattr("jiuwenswarm.common.config.get_config", lambda: {"permissions": installed_permissions})
+    token = setup_permission_context(
+        SimpleNamespace(
+            channel_id="web",
+            metadata={"principal_user_id": "principal-42"},
+        )
+    )
+    try:
+        outcome = asyncio.run(
+            _permission_scene_hook(installed_permissions)(
+                _scene_hook_input("bash", None)
+            )
+        )
+    finally:
+        cleanup_permission_context(token)
+
+    assert outcome == expected

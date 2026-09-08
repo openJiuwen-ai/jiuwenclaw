@@ -5,6 +5,7 @@
 Provides utilities for converting interrupt payloads to frontend format
 and building permission rails.
 """
+
 from __future__ import annotations
 
 import copy
@@ -12,6 +13,9 @@ import json
 import re
 from pathlib import Path
 from typing import Any, Mapping
+
+from collections.abc import Callable
+from copy import deepcopy
 
 from jiuwenswarm.agents.harness.code.prompt.plan_approval import (
     build_plan_approval_actions,
@@ -28,25 +32,53 @@ from jiuwenswarm.agents.harness.common.rails.interrupt.permission_options import
     REJECT,
     SESSION_ALLOW,
 )
+from jiuwenswarm.agents.harness.common.rails.permissions.tool_capabilities import (
+    install_permission_file_semantics,
+)
 from jiuwenswarm.common.utils import logger
 
 SKILL_EVOLUTION_APPROVAL_SCHEMA = "openjiuwen.skill_evolution_approval.v1"
 EVOLUTION_INTERRUPT_SOURCE = "evolution_interrupt"
 LEGACY_SKILL_EVOLUTION_APPROVAL_SOURCE = "skill_evolution_approval"
-INTERRUPT_RESUME_SOURCES = frozenset({
-    "permission_interrupt",
-    "confirm_interrupt",
-    "ask_user_interrupt",
-    EVOLUTION_INTERRUPT_SOURCE,
-})
-EVOLUTION_INTERRUPT_METADATA_SOURCES = frozenset({
-    EVOLUTION_INTERRUPT_SOURCE,
-    LEGACY_SKILL_EVOLUTION_APPROVAL_SOURCE,
-})
+INTERRUPT_RESUME_SOURCES = frozenset(
+    {
+        "permission_interrupt",
+        "confirm_interrupt",
+        "ask_user_interrupt",
+        EVOLUTION_INTERRUPT_SOURCE,
+    }
+)
+EVOLUTION_INTERRUPT_METADATA_SOURCES = frozenset(
+    {
+        EVOLUTION_INTERRUPT_SOURCE,
+        LEGACY_SKILL_EVOLUTION_APPROVAL_SOURCE,
+    }
+)
 SKILL_EVOLUTION_APPROVAL_TOOL_KINDS = {
     "evolve_skill_experiences": "evolve",
     "simplify_skill_experiences": "simplify",
 }
+
+_AUTO_REVIEWER_UI_METADATA_KEYS = (
+    "action_summary",
+    "contract_gate_missing_evidence",
+    "decision_source",
+    "evidence_summary",
+    "fallback_reason",
+    "final_reviewer_status",
+    "manual_reason_code",
+    "manual_reason_summary",
+    "remaining_forbidden_actions",
+    "reviewer_status",
+    "risk_level",
+    "user_authorization",
+    "user_review_hint",
+)
+_AUTO_REVIEWER_UI_LIST_METADATA_KEYS = frozenset(
+    {"contract_gate_missing_evidence", "remaining_forbidden_actions"}
+)
+_AUTO_REVIEWER_UI_MAX_LIST_ITEMS = 8
+_AUTO_REVIEWER_UI_MAX_TEXT_LENGTH = 512
 
 
 def resolve_permission_workspace_dir(session_id: str | None = None) -> Path:
@@ -127,6 +159,16 @@ def build_permission_rail(
     llm: Any = None,
     model_name: str | None = None,
     session_id: str | None = None,
+
+    *,
+    enable_auto_permission: bool = False,
+    installed_permissions: dict[str, Any] | None = None,
+    workspace_root: Any = None,
+    platform_trusted_root: Any = None,
+    sys_operation: Any = None,
+    permissions_changed_notifier: Callable[[], None] | None = None,
+    browser_runtime_security_profile: Any = None,
+    trusted_search_urls: Any = None,
 ) -> Any | None:
     """Build openjiuwen PermissionInterruptRail for tool permission checks.
 
@@ -135,6 +177,7 @@ def build_permission_rail(
         llm: LLM instance for risk assessment
         model_name: Model name for risk assessment
         session_id: Host identity for User/Session compose and persist
+        installed_permissions: Complete installed snapshot for explicit auto mode
 
     Returns:
         PermissionInterruptRail instance or None if disabled
@@ -150,6 +193,9 @@ def build_permission_rail(
     from jiuwenswarm.agents.harness.common.rails.permissions.permission_compose import (
         compose_host_effective_permissions,
     )
+    from jiuwenswarm.agents.harness.common.rails.permissions.permission_interrupt_rail import (
+        JiuwenSwarmPermissionInterruptRail,
+    )
     from jiuwenswarm.agents.harness.common.rails.permissions.permissions_layers import (
         load_session_permissions,
         load_user_permissions,
@@ -160,6 +206,10 @@ def build_permission_rail(
         SKILLS_REBUILD_SILENT,
         TOOL_PERMISSION_CHANNEL_ID,
     )
+    from jiuwenswarm.agents.harness.common.rails.permissions.auto_config import (
+        is_auto_permission_enabled,
+        normalize_permissions_for_runtime,
+    )
     from jiuwenswarm.common.config import get_config
     from jiuwenswarm.common.e2a.acp.acp_tool_updates import build_acp_tool_descriptor
     from jiuwenswarm.common.utils import get_config_file
@@ -167,6 +217,15 @@ def build_permission_rail(
     inline_permissions = config.get("permissions", {})
     if not isinstance(inline_permissions, dict):
         inline_permissions = {}
+    if installed_permissions is not None:
+        if not isinstance(installed_permissions, dict):
+            raise TypeError("installed_permissions_must_be_dict")
+        if not enable_auto_permission:
+            raise ValueError("installed_permissions_requires_auto_permission")
+        if not is_auto_permission_enabled(installed_permissions):
+            raise ValueError("installed_permissions_requires_enabled_auto_mode")
+    if enable_auto_permission and not is_auto_permission_enabled(inline_permissions):
+        raise ValueError("auto_permission_activation_requires_enabled_auto_mode")
     logger.info(
         "[InterruptHelpers] build_permission_rail called: enabled=%s session_id=%s",
         inline_permissions.get("enabled", False),
@@ -178,12 +237,18 @@ def build_permission_rail(
         return None
 
     bound_session_id = str(session_id).strip() if session_id else None
-    permission_config = compose_host_effective_permissions(
-        global_permissions=inline_permissions,
-        user_permissions=load_user_permissions(),
-        session_permissions=load_session_permissions(bound_session_id),
-        session_id=bound_session_id,
+    permission_config = (
+        normalize_permissions_for_runtime(deepcopy(installed_permissions))
+        if installed_permissions is not None
+        else compose_host_effective_permissions(
+            global_permissions=inline_permissions,
+            user_permissions=load_user_permissions(),
+            session_permissions=load_session_permissions(bound_session_id),
+            session_id=bound_session_id,
+        )
     )
+    if enable_auto_permission:
+        install_permission_file_semantics()
 
     def _collect_optional_tool_tags(cfg: dict[str, Any]) -> list[str]:
         # openjiuwen PermissionInterruptRail 会拦截所有工具；
@@ -219,7 +284,9 @@ def build_permission_rail(
     )
     logger.info(
         "[InterruptHelpers] Building PermissionInterruptRail with tool_names=%s llm=%s model_name=%s",
-        tool_names, llm is not None, model_name,
+        tool_names,
+        llm is not None,
+        model_name,
     )
     try:
         def _effective_session_id(session_id: str | None = None) -> str | None:
@@ -289,12 +356,18 @@ def build_permission_rail(
             if not session_id:
                 return None
 
-            from jiuwenswarm.agents.harness.common.tools.acp_output_tools import get_acp_output_manager
+            from jiuwenswarm.agents.harness.common.tools.acp_output_tools import (
+                get_acp_output_manager,
+            )
 
             tool_call = req.tool_call
             tool_name = getattr(tool_call, "name", "") if tool_call is not None else ""
-            tool_args_raw = getattr(tool_call, "arguments", None) if tool_call is not None else None
-            tool_call_id = str(getattr(tool_call, "id", "") or f"permission_{tool_name or 'tool'}").strip()
+            tool_args_raw = (
+                getattr(tool_call, "arguments", None) if tool_call is not None else None
+            )
+            tool_call_id = str(
+                getattr(tool_call, "id", "") or f"permission_{tool_name or 'tool'}"
+            ).strip()
             descriptor = build_acp_tool_descriptor(
                 tool_name,
                 tool_args_raw,
@@ -312,9 +385,21 @@ def build_permission_rail(
                     "title": title,
                 },
                 "options": [
-                    {"optionId": "allow-once", "name": "Allow once", "kind": "allow_once"},
-                    {"optionId": "allow-always", "name": "Always allow", "kind": "allow_always"},
-                    {"optionId": "reject-once", "name": "Reject", "kind": "reject_once"},
+                    {
+                        "optionId": "allow-once",
+                        "name": "Allow once",
+                        "kind": "allow_once",
+                    },
+                    {
+                        "optionId": "allow-always",
+                        "name": "Always allow",
+                        "kind": "allow_always",
+                    },
+                    {
+                        "optionId": "reject-once",
+                        "name": "Reject",
+                        "kind": "reject_once",
+                    },
                 ],
             }
 
@@ -325,29 +410,45 @@ def build_permission_rail(
                     session_id=session_id,
                 )
             except Exception as exc:
-                logger.warning("[InterruptHelpers] ACP permission request failed: %s", exc)
+                logger.warning(
+                    "[InterruptHelpers] ACP permission request failed: %s", exc
+                )
                 return None
 
             if not isinstance(response, dict):
                 return None
             if isinstance(response.get("error"), dict):
-                message = str(response["error"].get("message") or "Permission request failed")
+                message = str(
+                    response["error"].get("message") or "Permission request failed"
+                )
                 return PermissionConfirmResponse(
                     approved=False,
                     auto_confirm=False,
                     feedback=f"[PERMISSION_DENIED] {message}",
                 )
 
-            result_payload = response.get("result") if isinstance(response.get("result"), dict) else {}
-            outcome = result_payload.get("outcome") if isinstance(result_payload.get("outcome"), dict) else {}
+            result_payload = (
+                response.get("result")
+                if isinstance(response.get("result"), dict)
+                else {}
+            )
+            outcome = (
+                result_payload.get("outcome")
+                if isinstance(result_payload.get("outcome"), dict)
+                else {}
+            )
             outcome_kind = str(outcome.get("outcome") or "").strip().lower()
             option_id = str(outcome.get("optionId") or "").strip().lower()
 
             if outcome_kind == "selected":
                 if option_id == "allow-once":
-                    return PermissionConfirmResponse(approved=True, auto_confirm=False, feedback="")
+                    return PermissionConfirmResponse(
+                        approved=True, auto_confirm=False, feedback=""
+                    )
                 if option_id == "allow-always":
-                    return PermissionConfirmResponse(approved=True, auto_confirm=True, feedback="")
+                    return PermissionConfirmResponse(
+                        approved=True, auto_confirm=True, feedback=""
+                    )
                 return PermissionConfirmResponse(
                     approved=False,
                     auto_confirm=False,
@@ -380,14 +481,11 @@ def build_permission_rail(
 
             perm_ctx = TOOL_PERMISSION_CONTEXT.get()
 
-            # issue #1976: ask_user has its own dedicated interrupt rail. The
-            # permission rail intercepts *every* tool, so on resume it grabs the
-            # ask_user answer (keyed by tool_call_id) as its own user_input,
-            # fails to parse it as a ConfirmPayload, and re-raises a permission
-            # interrupt that swallows the answer — the option card then re-pops
-            # forever. Bypass the permission rail for ask_user so the ask_user
-            # rail's answer reaches the model. The digital-avatar scene below
-            # intentionally blocks interactive tools, so exclude it here.
+            # ask_user is an interactive control action owned by its dedicated
+            # rail, not a Permission decision. Non-Permission continuation
+            # routing is handled separately at the Host callback boundary; this
+            # branch only preserves the initial-call ownership contract. The
+            # digital-avatar scene below intentionally blocks interactive tools.
             if inp.normalized_tool_name == "ask_user" and (
                 perm_ctx is None
                 or getattr(perm_ctx, "scene", None) != "group_digital_avatar"
@@ -405,19 +503,30 @@ def build_permission_rail(
                     inp.tool_args,
                     channel_id=str(getattr(perm_ctx, "channel_id", "") or ""),
                     session_id=None,
+                    **({
+                        "permission_config": _get_installed_permissions(),
+                        "use_installed_permissions": True,
+                        "installed_engine": getattr(inp, "engine", None),
+                    } if enable_auto_permission else {}),
                 )
                 if level == "allow":
                     return ("approve",)
-                return ("reject", "[PERMISSION_DENIED] 该工具未被授权在数字分身场景下使用")
+                return (
+                    "reject",
+                    "[PERMISSION_DENIED] 该工具未被授权在数字分身场景下使用",
+                )
 
-            principal_user_id = str(getattr(perm_ctx, "principal_user_id", "") or "").strip()
+            principal_user_id = str(
+                getattr(perm_ctx, "principal_user_id", "") or ""
+            ).strip()
             channel_id = str(getattr(perm_ctx, "channel_id", "") or "").strip()
             if not principal_user_id or not channel_id:
                 return None
 
-            perm_cfg = get_config()
-            perm_all = perm_cfg.get("permissions") if isinstance(perm_cfg, dict) else {}
-            owner_scopes = perm_all.get("owner_scopes") if isinstance(perm_all, dict) else None
+            perm_all = _permission_scene_config()
+            owner_scopes = (
+                perm_all.get("owner_scopes") if isinstance(perm_all, dict) else None
+            )
             if not isinstance(owner_scopes, dict) or not owner_scopes:
                 return None
 
@@ -429,57 +538,174 @@ def build_permission_rail(
                 return None
             if owner_level == "allow":
                 return ("approve",)
-            return ("reject", f"[PERMISSION_DENIED] 该工具未被授权 (owner_scopes: {owner_level})")
+            return (
+                "reject",
+                f"[PERMISSION_DENIED] 该工具未被授权 (owner_scopes: {owner_level})",
+            )
 
-        def _get_permissions_snapshot(session_id: str | None = None):
-            # skills.rebuild 静默路径：返回 full_access，避免 ASK 中断。
+        installed_permission_rail: Any | None = None
+
+        def _get_installed_permissions(session_id: str | None = None) -> dict[str, Any]:
+            """Expose only the policy committed by the session adapter.
+
+            Disk persistence and runtime installation are deliberately separate:
+            config writes schedule a lazy reload, while a tool callback must keep
+            using the policy epoch installed for its current logical turn.
+            """
+
+            # skills.rebuild is an internal, control-silent follow-up with no UI
+            # approval surface. Preserve develop's full-access override while
+            # keeping ordinary calls pinned to the adapter-installed policy epoch.
             if SKILLS_REBUILD_SILENT.get():
                 return {
                     "enabled": True,
                     "defaults": {"*": "allow"},
                     "file_guard": {"enabled": False},
                 }
-            sid = _effective_session_id(session_id)
-            return compose_host_effective_permissions(
+            if not enable_auto_permission:
+                sid = _effective_session_id(session_id)
+                return compose_host_effective_permissions(
                     global_permissions=inline_permissions,
                     user_permissions=load_user_permissions(),
                     session_permissions=load_session_permissions(sid),
                     session_id=sid,
+                )
+            rail = installed_permission_rail
+            getter = getattr(rail, "installed_permission_config", None)
+            if callable(getter):
+                installed = getter()
+                return installed if isinstance(installed, dict) else {}
+            return deepcopy(permission_config)
+
+        def _permission_scene_config() -> dict[str, Any]:
+            if enable_auto_permission:
+                return _get_installed_permissions()
+            current_config = get_config()
+            return current_config.get("permissions", {}) if isinstance(current_config, dict) else {}
+
+        def _persist_exact_allow_rule(
+            normalized_name: str,
+            tool_args: dict[str, Any],
+            ask_accesses: tuple[tuple[str, str], ...],
+        ) -> bool:
+            from jiuwenswarm.agents.harness.common.rails.permissions.permissions_persist import (
+                persist_exact_permission_allow_rule,
             )
 
+            persisted = persist_exact_permission_allow_rule(
+                normalized_name,
+                tool_args,
+                ask_accesses,
+                session_id=bound_session_id,
+                workspace_root=effective_workspace_root,
+            )
+            if persisted and permissions_changed_notifier is not None:
+                try:
+                    permissions_changed_notifier()
+                except Exception:
+                    logger.exception(
+                        "[InterruptHelpers] permissions reload notification failed"
+                    )
+            return persisted
+
+        effective_workspace_root = (
+            workspace_root if enable_auto_permission and workspace_root is not None
+            else resolve_permission_workspace_dir(bound_session_id)
+        )
         host = ToolPermissionHost(
-            get_permissions_snapshot=_get_permissions_snapshot,
+            get_permissions_snapshot=_get_installed_permissions,
             persist_allow_rule=_persist_allow_rule,
             persist_session_allow_rule=_persist_session_allow_rule,
-            resolve_workspace_dir=lambda: resolve_permission_workspace_dir(
-                bound_session_id
-            ),
+            resolve_workspace_dir=lambda: effective_workspace_root,
             permission_yaml_path=get_config_file(),
             request_permission_confirmation=_request_permission_confirmation,
             permission_scene_hook=_permission_scene_hook,
         )
 
-        permission_rail = build_permission_interrupt_rail(
-            permissions=permission_config,
-            llm=llm,
-            model_name=model_name,
-            host=host,
-        )
-        if permission_rail is None:
-            logger.info(
-                "[InterruptHelpers] build_permission_interrupt_rail returned None tool_names=%s",
-                tool_names,
+        if enable_auto_permission:
+            permission_rail = JiuwenSwarmPermissionInterruptRail(
+                config=permission_config,
+                tool_names=tool_names,
+                llm=llm,
+                model_name=model_name,
+                host=host,
+                exact_persist_callback=_persist_exact_allow_rule,
             )
         else:
-            logger.info(
-                "[InterruptHelpers] PermissionInterruptRail created successfully with tool_names=%s",
-                tool_names,
+            permission_rail = build_permission_interrupt_rail(
+                permissions=permission_config,
+                llm=llm,
+                model_name=model_name,
+                host=host,
             )
-    except Exception as exc:
-        logger.warning("[InterruptHelpers] PermissionInterruptRail create failed: %s", exc)
-        permission_rail = None
-    return permission_rail
+        if enable_auto_permission:
+            from jiuwenswarm.agents.harness.common.rails.permissions.auto_config import (
+                normalize_auto_permission_options,
+            )
+            from jiuwenswarm.agents.harness.common.rails.permissions.auto_permission_rail import (
+                AutoPermissionInterruptRail,
+            )
+            from jiuwenswarm.agents.harness.common.rails.permissions.auto_reviewer import (
+                AutoReviewer,
+                IsolatedModelReviewerClient,
+                build_isolated_reviewer_model,
+            )
+            from jiuwenswarm.agents.harness.common.rails.permissions.persistent_audit import (
+                PersistentAuditWriter,
+                resolve_persistent_audit_root,
+            )
 
+            auto_options = normalize_auto_permission_options(
+                permission_config.get("auto")
+            )
+            auto_reviewer = None
+            if llm is not None:
+                reviewer_model = build_isolated_reviewer_model(llm)
+                if reviewer_model is not None:
+                    auto_reviewer = AutoReviewer(
+                        client=IsolatedModelReviewerClient(
+                            model=reviewer_model,
+                            display_language_getter=lambda: get_config().get(
+                                "preferred_language", "zh"
+                            ),
+                        ),
+                        timeout_ms=auto_options["reviewer_timeout_ms"],
+                        min_confidence=auto_options["reviewer_min_confidence"],
+                    )
+            persistent_audit_writer = None
+            if auto_options["persistent_audit_enabled"]:
+                persistent_audit_writer = PersistentAuditWriter(
+                    data_root=resolve_persistent_audit_root(permission_config)
+                )
+            permission_rail = AutoPermissionInterruptRail(
+                base_rail=permission_rail,
+                permission_config=permission_config,
+                workspace_root=effective_workspace_root,
+                platform_trusted_root=platform_trusted_root,
+                sys_operation=sys_operation,
+                auto_reviewer=auto_reviewer,
+                persistent_audit_writer=persistent_audit_writer,
+                exact_permission_persist_callback=_persist_exact_allow_rule,
+                browser_runtime_security_profile=browser_runtime_security_profile,
+                trusted_search_urls=trusted_search_urls,
+            )
+            permission_rail.set_trusted_dirs(None)
+
+        installed_permission_rail = permission_rail
+        logger.info(
+            "[InterruptHelpers] %s created successfully with tool_names=%s",
+            type(permission_rail).__name__,
+            tool_names,
+        )
+    except Exception as exc:
+        if not enable_auto_permission:
+            logger.warning("[InterruptHelpers] PermissionInterruptRail create failed: %s", exc)
+            return None
+        logger.exception(
+            "[InterruptHelpers] PermissionInterruptRail create failed: %s", exc
+        )
+        raise
+    return permission_rail
 
 
 def _read_value_field(value_obj: Any, field_name: str, default: Any = "") -> Any:
