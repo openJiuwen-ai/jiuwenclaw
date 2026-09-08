@@ -41,6 +41,17 @@ _MANUAL_GRAPH_BUILD_CONTENT = {
     ),
 }
 
+_GRAPH_PREPARING_CONTENT = {
+    "cn": (
+        "技能图谱正在构建，请等待页面构建完成后重新发送任务。"
+        "本轮不会重复调用图谱工具。"
+    ),
+    "en": (
+        "The Skill Graph is currently being built. Wait for the build to finish, "
+        "then resend your task. This round will not call the graph tools again."
+    ),
+}
+
 
 class SymphonyOrchestrationRail(DeepAgentRail):
     """Manage Symphony guidance, candidate injection, and viewed Skills."""
@@ -72,6 +83,7 @@ class SymphonyOrchestrationRail(DeepAgentRail):
         self._inject_shortlisted_candidates(ctx)
 
     async def after_tool_call(self, ctx: AgentCallbackContext) -> None:
+        self._terminate_structured_graph_preparing(ctx)
         self._terminate_structured_graph_build_timeout(ctx)
         self._remember_successful_skill_view(ctx)
 
@@ -141,6 +153,44 @@ class SymphonyOrchestrationRail(DeepAgentRail):
             return
         self._terminate_graph_build_timeout(ctx, result)
 
+    def _terminate_structured_graph_preparing(
+        self,
+        ctx: AgentCallbackContext,
+    ) -> None:
+        if not self._is_graph_tool_call(ctx):
+            return
+        inputs = ctx.inputs
+        if not isinstance(inputs, ToolCallInputs):
+            return
+        result = inputs.tool_result
+        if not isinstance(result, dict) or result.get("reason") != "graph_preparing":
+            return
+        if (
+            result.get("direct_display") is True
+            and result.get("followup_action") == "wait_graph_build"
+        ):
+            return
+
+        payload = dict(result)
+        payload.update(
+            {
+                "success": False,
+                "reason": "graph_preparing",
+                "retryable": False,
+                "build_status": "running",
+                "direct_display": True,
+                "continue_after_display": False,
+                "followup_action": "wait_graph_build",
+                "content": self._graph_preparing_content(),
+            }
+        )
+        inputs.tool_result = payload
+        # Reuse the existing invocation marker that removes both graph tools.
+        ctx.extra[_GRAPH_BUILD_TIMEOUT_EXTRA_KEY] = True
+        ctx.request_force_finish(
+            {"output": payload["content"], "result_type": "answer"}
+        )
+
     def _terminate_graph_build_timeout(
         self,
         ctx: AgentCallbackContext,
@@ -183,6 +233,10 @@ class SymphonyOrchestrationRail(DeepAgentRail):
     def _manual_graph_build_content(self) -> str:
         language = getattr(self.system_prompt_builder, "language", "cn") or "cn"
         return _MANUAL_GRAPH_BUILD_CONTENT["en" if language == "en" else "cn"]
+
+    def _graph_preparing_content(self) -> str:
+        language = getattr(self.system_prompt_builder, "language", "cn") or "cn"
+        return _GRAPH_PREPARING_CONTENT["en" if language == "en" else "cn"]
 
     @classmethod
     def _is_graph_tool_call(cls, ctx: AgentCallbackContext) -> bool:

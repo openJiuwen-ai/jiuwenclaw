@@ -243,12 +243,24 @@ class SwarmSymphonyService:
         if _graph_needs_build(status):
             graph_build = await self.refresh_graph(progress=progress)
             if not graph_build.get("success"):
-                return {
+                failure = {
                     "success": False,
                     "detail": "Skill Score build failed before planning",
                     "graph_status": status,
                     "graph_build": graph_build,
                 }
+                if graph_build.get("reason") == "graph_preparing":
+                    failure.update(
+                        {
+                            "reason": "graph_preparing",
+                            "retryable": False,
+                            "build_status": "running",
+                            "operation": "plan",
+                            "detail": graph_build.get("detail")
+                            or failure["detail"],
+                        }
+                    )
+                return failure
             graph_build["rebuilt"] = True
         else:
             graph_build = None
@@ -322,6 +334,9 @@ class SwarmSymphonyService:
                 payload = {
                     "success": False,
                     "graph_dir": str(graph_dir),
+                    "reason": "graph_preparing",
+                    "retryable": False,
+                    "build_status": "running",
                     "detail": "已有技能总谱构建正在运行，请等待完成或先取消当前构建。",
                 }
                 payload.update(_build_log_payload(graph_dir))
