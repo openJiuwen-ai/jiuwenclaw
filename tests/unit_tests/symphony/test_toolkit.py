@@ -256,6 +256,31 @@ async def test_plan_reports_service_failure():
 
 
 @pytest.mark.asyncio
+async def test_plan_preserves_graph_preparing_status():
+    async def handler(*args, **kwargs):
+        del args, kwargs
+        return {
+            "success": False,
+            "reason": "graph_preparing",
+            "retryable": False,
+            "build_status": "running",
+            "operation": "plan",
+            "detail": "技能总谱正在构建。",
+        }
+
+    result = await SymphonyToolkit(SimpleNamespace(plan=handler)).plan("compose")
+
+    assert result == {
+        "success": False,
+        "reason": "graph_preparing",
+        "retryable": False,
+        "build_status": "running",
+        "operation": "plan",
+        "detail": "技能总谱正在构建。",
+    }
+
+
+@pytest.mark.asyncio
 async def test_compose_timeout_is_compact_non_retryable_terminal_payload(monkeypatch):
     async def handler(*args, **kwargs):
         del args, kwargs

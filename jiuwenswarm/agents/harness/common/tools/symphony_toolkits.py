@@ -162,6 +162,7 @@ class SymphonyToolkit:
             "error",
             "timed_out",
             "retryable",
+            "build_status",
             "operation",
             "timeout_s",
         ):
