@@ -415,6 +415,36 @@ async def test_once_create_and_schedule_update_recompute_next_run(
     assert abs(updated["next_run_at"] - future) > 200
 
 
+async def test_create_rejects_expired_once_schedule(
+    ctrl: HeartbeatController,
+) -> None:
+    import time
+
+    with pytest.raises(ValueError, match="run_at must be in the future"):
+        await ctrl.create_job({
+            "name": "expired",
+            "channel_id": "web",
+            "session_id": "s1",
+            "prompt": "p",
+            "schedule": {"type": "once", "run_at": time.time() - 60},
+        })
+
+
+@pytest.mark.parametrize("run_at", [float("nan"), float("inf"), 1_788_091_200_000])
+async def test_create_rejects_non_second_once_timestamp(
+    ctrl: HeartbeatController,
+    run_at: float,
+) -> None:
+    with pytest.raises(ValueError, match="Unix timestamp in seconds"):
+        await ctrl.create_job({
+            "name": "invalid timestamp",
+            "channel_id": "web",
+            "session_id": "s1",
+            "prompt": "p",
+            "schedule": {"type": "once", "run_at": run_at},
+        })
+
+
 async def test_toggle_reactivates_disabled_and_expired_jobs(
     ctrl: HeartbeatController,
 ) -> None:
@@ -430,14 +460,19 @@ async def test_toggle_reactivates_disabled_and_expired_jobs(
     assert reenabled["status"] == "scheduled"
     assert reenabled["next_run_at"] is not None
 
-    expired = await ctrl.create_job({
-        "name": "expired", "channel_id": "web", "session_id": "s1", "prompt": "p",
-        "schedule": {"type": "once", "run_at": time.time() - 60},
-    })
-    assert expired["status"] == "expired"
+    expired = await ctrl._store.create_job(
+        name="expired",
+        channel_id="web",
+        session_id="s1",
+        prompt="p",
+        schedule=HeartbeatSchedule.from_dict(
+            {"type": "once", "run_at": time.time() - 60}
+        ),
+    )
+    assert expired.status == "expired"
     future = time.time() + 600
     reactivated = await ctrl.update_job(
-        expired["id"],
+        expired.id,
         {"enabled": True, "schedule": {"type": "once", "run_at": future}},
     )
     assert reactivated["status"] == "scheduled"

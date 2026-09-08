@@ -162,6 +162,20 @@ def test_job_roundtrip_preserves_unlimited_max_runs() -> None:
     assert restored.max_runs is None
 
 
+def test_job_from_dict_preserves_historical_millisecond_once() -> None:
+    data = _make_interval_job(
+        enabled=False,
+        status=STATUS_DISABLED,
+        next_run_at=None,
+    ).to_dict()
+    data["schedule"] = {"type": "once", "run_at": 1_788_091_200_000}
+
+    job = HeartbeatJob.from_dict(data)
+
+    assert job.schedule.run_at == 1_788_091_200_000
+    assert job.status == STATUS_DISABLED
+
+
 def test_job_from_dict_requires_mandatory_fields() -> None:
     with pytest.raises(ValueError, match="channel_id is required"):
         HeartbeatJob.from_dict(

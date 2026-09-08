@@ -4,7 +4,10 @@ from typing import Any, Protocol
 
 from openjiuwen.core.foundation.tool import LocalFunction, Tool, ToolCard
 
-from jiuwenswarm.agents.harness.code.rails.heartbeat.models import DEFAULT_MAX_RUNS
+from jiuwenswarm.agents.harness.code.rails.heartbeat.models import (
+    DEFAULT_MAX_RUNS,
+    MAX_UNIX_TIMESTAMP_SECONDS,
+)
 
 
 class HeartbeatJobService(Protocol):
@@ -157,7 +160,14 @@ class HeartbeatRuntimeBridge:
                 "interval_seconds": {"type": "integer"},
                 "cron_expr": {"type": "string"},
                 "timezone": {"type": "string"},
-                "run_at": {"type": "number"},
+                "run_at": {
+                    "type": "number",
+                    "maximum": MAX_UNIX_TIMESTAMP_SECONDS,
+                    "description": (
+                        "Execution time for a once schedule as a Unix timestamp "
+                        "in seconds. Milliseconds are not accepted."
+                    ),
+                },
             },
             "required": ["type"],
         }
