@@ -690,7 +690,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
   const { t } = useTranslation();
   const activeSessionId = useChatStore((s) => s.activeSessionId);
   const hasPendingQuestion = useChatStore(
-    (s) => Boolean(s.runtimes[activeSessionId ?? '']?.pendingQuestion),
+    (s) => Boolean(s.runtimes[activeSessionId ?? '']?.pendingQuestions[0]),
   );
   const isCompactRunning = Boolean(
     activeSessionId && compactingSessionIds.has(activeSessionId),
@@ -1015,7 +1015,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
         if (composerDisabled) return;
 
         setTimeout(() => {
-          if (sid && useChatStore.getState().runtimes[sid]?.pendingQuestion) return;
+          if (sid && useChatStore.getState().runtimes[sid]?.pendingQuestions[0]) return;
           if (isTeamMode) {
             onSubmit(finalText);
           } else if (isInterruptible) {
