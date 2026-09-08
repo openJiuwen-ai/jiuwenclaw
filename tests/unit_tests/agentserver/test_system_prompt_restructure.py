@@ -372,6 +372,76 @@ async def test_symphony_timeout_is_terminal_manual_build_result(
 
 
 @pytest.mark.asyncio
+async def test_symphony_graph_preparing_is_terminal_for_current_round():
+    builder = SystemPromptBuilder(language="cn")
+    agent = _FakeAgent(builder)
+    rail = SymphonyOrchestrationRail(
+        config_base={"symphony": {"enabled": True}},
+    )
+    rail.init(agent)
+    invocation_extra: dict = {}
+    tool_ctx = _tool_call_ctx(
+        "symphony_compose_graph",
+        {"query": "compose"},
+        extra=invocation_extra,
+        result={
+            "success": False,
+            "reason": "graph_preparing",
+            "retryable": False,
+            "build_status": "running",
+            "operation": "plan",
+        },
+    )
+
+    await rail.after_tool_call(tool_ctx)
+
+    result = tool_ctx.inputs.tool_result
+    assert result["direct_display"] is True
+    assert result["continue_after_display"] is False
+    assert result["followup_action"] == "wait_graph_build"
+    assert "正在构建" in result["content"]
+    assert tool_ctx.force_finished == [
+        {"output": result["content"], "result_type": "answer"}
+    ]
+
+    model_ctx = AgentCallbackContext(
+        agent=agent,
+        inputs=ModelCallInputs(
+            tools=[
+                SimpleNamespace(name="symphony_compose_graph"),
+                SimpleNamespace(name="symphony_refresh_graph"),
+                SimpleNamespace(name="other_tool"),
+            ]
+        ),
+        session=_FakeSession(),
+        extra=invocation_extra,
+    )
+    await rail.before_model_call(model_ctx)
+
+    assert [rail._model_tool_name(tool) for tool in model_ctx.inputs.tools] == [
+        "other_tool"
+    ]
+
+    next_model_ctx = AgentCallbackContext(
+        agent=agent,
+        inputs=ModelCallInputs(
+            tools=[
+                SimpleNamespace(name="symphony_compose_graph"),
+                SimpleNamespace(name="symphony_refresh_graph"),
+            ]
+        ),
+        session=_FakeSession(),
+        extra={},
+    )
+    await rail.before_model_call(next_model_ctx)
+
+    assert [rail._model_tool_name(tool) for tool in next_model_ctx.inputs.tools] == [
+        "symphony_compose_graph",
+        "symphony_refresh_graph",
+    ]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("tool_name", "operation", "timeout_s"),
     [
