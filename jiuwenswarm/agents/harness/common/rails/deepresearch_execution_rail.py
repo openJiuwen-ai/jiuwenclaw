@@ -10,6 +10,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+from openjiuwen.core.foundation.llm import ToolMessage
 from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
 from openjiuwen.core.single_agent.interrupt.exception import ToolInterruptException
 from openjiuwen.core.single_agent.interrupt.state import RESUME_USER_INPUT_KEY
@@ -22,6 +23,9 @@ from jiuwenswarm.agents.harness.common.tools.deepresearch.execution import (
     EXECUTION_SCHEMA,
     bind_deepresearch_execution_context,
     reset_deepresearch_execution_context,
+)
+from jiuwenswarm.agents.harness.common.rails.task_execution_rail import (
+    get_current_task_id,
 )
 from jiuwenswarm.agents.harness.common.tools.deepresearch.todo_progress import (
     deepresearch_todo_path,
@@ -48,12 +52,85 @@ def _todo_item_id(item: Mapping[str, Any]) -> str:
     return str(item.get("id") or item.get("task_id") or "").strip()
 
 
-def _is_current_research_todo(task_id: str) -> bool:
-    if task_id in _CURRENT_RESEARCH_TODO_IDS:
+def _normalize_todo_id(task_id: str) -> str:
+    return str(task_id or "").strip().removeprefix("todo:").strip()
+
+
+def _todo_status(item: Mapping[str, Any]) -> str:
+    return str(item.get("status") or "pending").strip().lower()
+
+
+def _active_todo_id() -> str:
+    """Outer todo bound by TaskExecutionRail while this tool call runs."""
+    try:
+        return _normalize_todo_id(str(get_current_task_id() or ""))
+    except (LookupError, RuntimeError, TypeError, ValueError):
+        return ""
+
+
+def _looks_like_research_todo(task_id: str) -> bool:
+    normalized = _normalize_todo_id(task_id)
+    if not normalized:
+        return False
+    if normalized in _CURRENT_RESEARCH_TODO_IDS or task_id in _CURRENT_RESEARCH_TODO_IDS:
         return True
-    if task_id.startswith("deepresearch_stage_"):
+    if normalized.startswith("deepresearch_stage_"):
         return True
-    return task_id.endswith(":deepresearch")
+    return normalized.endswith(":deepresearch")
+
+
+def _looks_like_research_todo_loose(task_id: str) -> bool:
+    """Model-chosen ids: deep_research / deep-research / research_banks / 深度研究."""
+    normalized = _normalize_todo_id(task_id)
+    compact = normalized.lower().replace("_", "").replace("-", "").replace(" ", "")
+    return bool(compact) and ("research" in compact or "研究" in compact)
+
+
+def _resolve_research_todo_id(
+    items: list[dict[str, Any]],
+    active_id: str = "",
+) -> str:
+    """Pick the single outer todo that represents this DeepResearch run.
+
+    Preference order: strict research id → loose research id (only when exactly
+    one todo matches) → the todo TaskExecutionRail bound to the tool call → the
+    single in_progress todo.
+
+    Name matching goes before the binding on purpose: the bound todo is
+    whatever the model was working on when it called the tool. If the model
+    (wrongly) re-runs deepresearch_execute while the PPT todo is active, the
+    bound id is the PPT todo and using it would force_finish the whole turn
+    with the research summary instead of letting the PPT step run.
+    """
+    ids = [_todo_item_id(item) for item in items]
+    normalized = [_normalize_todo_id(task_id) for task_id in ids]
+    for task_id in ids:
+        if _looks_like_research_todo(task_id):
+            return _normalize_todo_id(task_id)
+    loose = [
+        _normalize_todo_id(task_id)
+        for task_id in ids
+        if _looks_like_research_todo_loose(task_id)
+    ]
+    if len(loose) == 1:
+        return loose[0]
+    if active_id and active_id in normalized:
+        return active_id
+    in_progress = [
+        _normalize_todo_id(_todo_item_id(item))
+        for item in items
+        if _todo_status(item) == "in_progress"
+    ]
+    if len(in_progress) == 1:
+        return in_progress[0]
+    return ""
+
+
+def _is_current_research_todo(task_id: str, research_id: str = "") -> bool:
+    normalized = _normalize_todo_id(task_id)
+    if research_id:
+        return normalized == research_id or normalized.startswith("deepresearch_stage_")
+    return _looks_like_research_todo(task_id)
 
 
 def _session_id_from_ctx(ctx: AgentCallbackContext) -> str:
@@ -137,13 +214,15 @@ def _save_todo_items(ctx: AgentCallbackContext, items: list[dict[str, Any]]) -> 
         return False
 
 
-def _has_followup_todos(ctx: AgentCallbackContext) -> bool:
+def _has_followup_todos(
+    items: list[dict[str, Any]],
+    research_id: str = "",
+) -> bool:
     """True when the outer plan still has work after DeepResearch returns."""
-    for item in _load_todo_items(ctx):
-        status = str(item.get("status") or "pending").strip().lower()
-        if status in _TODO_DONE:
+    for item in items:
+        if _todo_status(item) in _TODO_DONE:
             continue
-        if _is_current_research_todo(_todo_item_id(item)):
+        if _is_current_research_todo(_todo_item_id(item), research_id):
             continue
         return True
     return False
@@ -161,6 +240,7 @@ def _followup_todo_label(item: Mapping[str, Any] | None) -> str:
 
 def _compact_followup_tool_content(
     next_followup: Mapping[str, Any] | None,
+    research_id: str = "",
 ) -> str:
     """Drop the report body and point the model at the next outer todo.
 
@@ -169,10 +249,20 @@ def _compact_followup_tool_content(
     continuing the remaining plan.
     """
     label = _followup_todo_label(next_followup)
+    next_id = _todo_item_id(next_followup) if next_followup else ""
+    if research_id and next_id:
+        todo_step = (
+            f"先调用 todo_modify 将「{research_id}」标记为 completed、"
+            f"「{next_id}」标记为 in_progress，然后"
+        )
+    elif next_id:
+        todo_step = f"先调用 todo_modify 将「{next_id}」标记为 in_progress，然后"
+    else:
+        todo_step = ""
     next_step = (
-        f"下一步立即执行外层待办「{label}」。"
+        f"{todo_step}立即执行外层待办「{label}」。"
         if label
-        else "下一步立即执行尚未完成的外层待办。"
+        else f"{todo_step}立即执行尚未完成的外层待办。"
     )
     return (
         f"{_FOLLOWUP_HANDOFF_BODY}\n\n"
@@ -185,26 +275,26 @@ def _compact_followup_tool_content(
 
 def _advance_outer_todo_items(
     items: list[dict[str, Any]],
+    research_id: str = "",
 ) -> tuple[list[dict[str, Any]], dict[str, Any] | None, bool]:
     changed = False
     next_followup: dict[str, Any] | None = None
     for item in items:
         task_id = _todo_item_id(item)
-        status = str(item.get("status") or "pending").strip().lower()
-        if _is_current_research_todo(task_id) and status not in _TODO_DONE:
+        status = _todo_status(item)
+        if _is_current_research_todo(task_id, research_id) and status not in _TODO_DONE:
             item["status"] = "completed"
             changed = True
             continue
         if (
             next_followup is None
             and status not in _TODO_DONE
-            and not _is_current_research_todo(task_id)
+            and not _is_current_research_todo(task_id, research_id)
         ):
             next_followup = item
 
     if next_followup is not None:
-        followup_status = str(next_followup.get("status") or "pending").strip().lower()
-        if followup_status != "in_progress":
+        if _todo_status(next_followup) != "in_progress":
             next_followup["status"] = "in_progress"
             changed = True
     return items, next_followup, changed
@@ -240,24 +330,26 @@ def _rewrite_followup_tool_result(
 def _apply_followup_handoff(
     ctx: AgentCallbackContext,
     payload: dict[str, Any],
+    items: list[dict[str, Any]],
+    research_id: str = "",
 ) -> None:
     """Mark research done, advance the next outer todo, compact the tool result."""
-    items = _load_todo_items(ctx)
     if not items:
         return
 
-    items, next_followup, changed = _advance_outer_todo_items(items)
+    items, next_followup, changed = _advance_outer_todo_items(items, research_id)
     if changed:
         _save_todo_items(ctx, items)
 
     content = str(payload.get("content") or "").rstrip()
     if not content:
         return
-    handoff_content = _compact_followup_tool_content(next_followup)
+    handoff_content = _compact_followup_tool_content(next_followup, research_id)
     _rewrite_followup_tool_result(ctx, payload, handoff_content)
     logger.info(
         "[DeepResearchExecutionRail] followup handoff applied; "
-        "next_todo=%s content_chars=%s",
+        "research_todo=%s next_todo=%s content_chars=%s",
+        research_id,
         _todo_item_id(next_followup) if next_followup else "",
         len(handoff_content),
     )
@@ -342,10 +434,78 @@ def _result_payload(value: Any) -> dict[str, Any] | None:
     return dict(value) if isinstance(value, Mapping) else None
 
 
+def _interaction_placeholder(payload: dict[str, Any]) -> str:
+    state = payload.get("state")
+    phase = str(state.get("phase") or "").strip() if isinstance(state, Mapping) else ""
+    stage = "大纲确认" if "outline" in phase.lower() else "研究方向澄清"
+    return (
+        f"[系统衔接] deepresearch_execute 正在等待用户通过原生交互卡完成「{stage}」。"
+        "该交互由系统直接呈现并恢复研究流程，Main Agent 无需转述问题、无需调用 ask_user，"
+        "也不要再次调用 deepresearch_execute。"
+    )
+
+
+def _sync_root_tool_message(
+    ctx: AgentCallbackContext,
+    root_id: str,
+    content: str,
+) -> bool:
+    """Rewrite the ToolMessage paired with the original deepresearch_execute call.
+
+    Interaction resumes execute under alias ids (``<root>_interaction_N``).
+    Their ToolMessages never pair with an assistant tool_call, so
+    ``LLMStabilityRail.sanitize_tool_pairing`` drops them before every model
+    call. The only DeepResearch tool result the model can ever see is the one
+    attached to the root call, which the framework filled with whatever the
+    first execution returned (``ability_manager`` falls back to the raw
+    tool_msg when a rail clears ``tool_msg``). Without this sync the model
+    keeps seeing the stale first interaction envelope after the research has
+    completed, re-presents the clarification questions via ask_user and
+    starts a second DeepResearch run.
+    """
+    context = getattr(ctx, "context", None)
+    get_messages = getattr(context, "get_messages", None)
+    if not root_id or not callable(get_messages):
+        return False
+    try:
+        messages = get_messages()
+    except Exception:  # noqa: BLE001 - never break the tool loop on context access
+        logger.debug(
+            "[DeepResearchExecutionRail] failed to read model context messages",
+            exc_info=True,
+        )
+        return False
+    updated = False
+    for message in messages or []:
+        if (
+            isinstance(message, ToolMessage)
+            and str(getattr(message, "tool_call_id", "") or "") == root_id
+        ):
+            message.content = content
+            updated = True
+    if updated:
+        logger.info(
+            "[DeepResearchExecutionRail] synced root tool message tool_call_id=%s "
+            "content_chars=%s",
+            root_id,
+            len(content),
+        )
+    return updated
+
+
+def _set_tool_message(ctx: AgentCallbackContext, tool_call_id: str, content: str) -> None:
+    tool_msg = getattr(ctx.inputs, "tool_msg", None)
+    if isinstance(tool_msg, ToolMessage):
+        tool_msg.content = content
+        return
+    ctx.inputs.tool_msg = ToolMessage(content=content, tool_call_id=tool_call_id)
+
+
 def _handle_interaction_payload(
     ctx: AgentCallbackContext,
     payload: dict[str, Any],
     workflow_id: str,
+    tool_call_id: str = "",
 ) -> bool:
     if payload.get("kind") != "interaction":
         return False
@@ -370,25 +530,61 @@ def _handle_interaction_payload(
         request=request,
         tool_call=_interaction_tool_call(ctx.inputs.tool_call, interaction_id),
     )
-    ctx.inputs.tool_msg = None
+    # Do NOT clear tool_msg: ability_manager falls back to the raw envelope
+    # message when a rail sets tool_msg=None, which is how the raw interaction
+    # payload used to reach the model context. Replace it with a compact
+    # placeholder instead, and keep the root call's message current on resumes.
+    placeholder = _interaction_placeholder(payload)
+    _set_tool_message(ctx, tool_call_id or workflow_id, placeholder)
+    if tool_call_id and tool_call_id != workflow_id:
+        _sync_root_tool_message(ctx, workflow_id, placeholder)
     return True
 
 
 def _handle_terminal_execute_result(
     ctx: AgentCallbackContext,
     payload: dict[str, Any],
+    workflow_id: str = "",
+    tool_call_id: str = "",
 ) -> None:
     content = payload.get("content")
     if not isinstance(content, str) or not content.strip():
         return
-    if _has_followup_todos(ctx):
-        if payload.get("kind") == "completed":
-            _apply_followup_handoff(ctx, payload)
+    items = _load_todo_items(ctx)
+    if not items:
+        logger.info(
+            "[DeepResearchExecutionRail] no outer todo items found "
+            "(path=%s); force_finish after deepresearch_execute",
+            _todo_json_path(ctx),
+        )
+    research_id = _resolve_research_todo_id(items, _active_todo_id())
+    resumed = bool(workflow_id) and bool(tool_call_id) and tool_call_id != workflow_id
+    kind = str(payload.get("kind") or "").strip()
+    # Only a *completed* research hands over to the remaining outer todos.
+    # error / cancelled end the turn right here (SKILL.md: 工具完成或失败后会直接
+    # 结束本轮): giving the failure text to the model makes it "retry once", i.e.
+    # another 15-20 min DeepResearch run the user never asked for (2026-09-08
+    # 14:49 rerun, SDK sub_reporter crash → second research).
+    if kind == "completed" and _has_followup_todos(items, research_id):
+        _apply_followup_handoff(ctx, payload, items, research_id)
+        if resumed:
+            _sync_root_tool_message(ctx, workflow_id, str(payload.get("content") or ""))
         logger.info(
             "[DeepResearchExecutionRail] skip force_finish; "
-            "outer todos still pending after deepresearch_execute"
+            "outer todos still pending after deepresearch_execute "
+            "research_todo=%s",
+            research_id,
         )
         return
+    if resumed:
+        _sync_root_tool_message(ctx, workflow_id, content.strip())
+    logger.info(
+        "[DeepResearchExecutionRail] force_finish after deepresearch_execute "
+        "kind=%s research_todo=%s error_code=%s",
+        kind,
+        research_id,
+        payload.get("error_code") or "",
+    )
     ctx.request_force_finish(
         {"output": content.strip(), "result_type": "answer"}
     )
@@ -459,7 +655,7 @@ class DeepResearchExecutionRail(DeepAgentRail):
                 states[workflow_id] = dict(state)
                 _save_states(ctx.session, states)
 
-            if _handle_interaction_payload(ctx, payload, workflow_id):
+            if _handle_interaction_payload(ctx, payload, workflow_id, tool_call_id):
                 return
 
             states.pop(workflow_id, None)
@@ -470,7 +666,7 @@ class DeepResearchExecutionRail(DeepAgentRail):
                 if target != workflow_id
             }
             _save_aliases(ctx.session, aliases)
-            _handle_terminal_execute_result(ctx, payload)
+            _handle_terminal_execute_result(ctx, payload, workflow_id, tool_call_id)
         finally:
             tool_call_id = _tool_call_id(ctx)
             tokens = ctx.extra.get(_TOKENS_KEY, {})
