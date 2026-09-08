@@ -171,14 +171,15 @@ def test_resolve_final_tenant_ids_uses_bot_bucket_fallback(
 ) -> None:
     """分桶开启时，fallback 默认 tenant 须与 Runtime 安装路径一致。"""
     monkeypatch.setenv("AGENT_BOT_ID_GROUP_NUM", "4")
-    routed_bot = installed_skill_mod._routing_bot_id("1")
+    routed_svc = installed_skill_mod._routing_bot_id("g_demo_sale1")
+    default_ag = "g_demo_sale112"
     svc, ag = resolve_final_tenant_ids(
         group_id="g_demo_sale",
         bot_id="1",
         user_id="12",
     )
-    assert svc == hashlib.md5(f"g_demo_sale{routed_bot}".encode()).hexdigest()
-    assert ag == hashlib.md5(f"g_demo_sale{routed_bot}12".encode()).hexdigest()
+    assert svc == hashlib.md5(routed_svc.encode()).hexdigest()
+    assert ag == hashlib.md5(default_ag.encode()).hexdigest()
     assert svc != hashlib.md5(b"g_demo_sale1").hexdigest()
 
 

@@ -277,7 +277,7 @@ def _env_bool(name: str, default: bool = False) -> bool:
 
 
 def _agent_bot_id_group_num() -> int:
-    """AGENT_BOT_ID_GROUP_NUM：>0 时对 bot_id 做稳定 hash 分桶后再拼默认 service_id/agent_id。"""
+    """AGENT_BOT_ID_GROUP_NUM：>0 时对已拼接的默认 service_id 做稳定 hash 分桶。"""
     raw = os.getenv("AGENT_BOT_ID_GROUP_NUM", "0").strip()
     try:
         n = int(raw)
@@ -290,26 +290,26 @@ def _agent_bot_id_group_num() -> int:
     return n if n > 0 else 0
 
 
-def _routing_bot_id(bot_id: str, group_num: int | None = None) -> str:
-    """Hash bot_id with SHA-256 and bucket; returns ``b{0..N-1}`` or raw bot_id when N<=0."""
+def _routing_bot_id(value: str, group_num: int | None = None) -> str:
+    """Hash value with SHA-256 and bucket; returns ``b{0..N-1}`` or raw value when N<=0."""
     n = _agent_bot_id_group_num() if group_num is None else group_num
     if n <= 0:
-        return bot_id
-    digest = hashlib.sha256(bot_id.encode("utf-8")).hexdigest()
+        return value
+    digest = hashlib.sha256(value.encode("utf-8")).hexdigest()
     bucket = int(digest, 16) % n
     return f"b{bucket}"
 
 
 def _default_invoke_ids(group_id: str, bot_id: str, user_id: str) -> tuple[str, str]:
-    """企业策略未配置 service_id/agent_id 时的默认拼接（bot_id 可按 env 分桶）。"""
-    routed_bot = _routing_bot_id(bot_id)
-    default_svc = f"{group_id}{routed_bot}"
-    default_ag = f"{group_id}{routed_bot}{user_id}"
+    """企业策略未配置 service_id/agent_id 时的默认拼接（service_id 可按 env 分桶）。"""
+    default_svc = f"{group_id}{bot_id}"
+    default_ag = f"{group_id}{bot_id}{user_id}"
+    routed_svc = _routing_bot_id(default_svc)
     logger.info(
-        "user_id=%s, group_id=%s, bot_id=%s, routed_bot=%s, default_svc=%s, default_ag=%s",
-        user_id, group_id, bot_id, routed_bot, default_svc, default_ag,
+        "user_id=%s, group_id=%s, bot_id=%s, default_svc=%s, default_ag=%s, routed_svc=%s",
+        user_id, group_id, bot_id, default_svc, default_ag, routed_svc,
     )
-    return default_svc, default_ag
+    return routed_svc, default_ag
 
 
 class _SessionRequest(ISessionRequest):
