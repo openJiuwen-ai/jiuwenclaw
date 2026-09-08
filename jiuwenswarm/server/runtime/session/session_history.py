@@ -748,7 +748,11 @@ def append_history_record(
             # 与 AgentServer 的 _sync_chat_request_metadata 互补,覆盖所有记录用户消息的路径)
             last_user_message_at=float(timestamp) if role_norm == "user" else None,
         )
-        if role_norm == "user":
+        # Child transcript entries are stored under the parent Session only as
+        # an ownership relationship.  Their internal ``subagent`` channel is
+        # not an external return route and must not replace the parent's
+        # delivery context.
+        if role_norm == "user" and not subagent_id:
             set_session_delivery_context(
                 session_id=sid,
                 channel_id=cid,
