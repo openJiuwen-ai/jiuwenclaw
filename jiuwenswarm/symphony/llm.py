@@ -91,6 +91,7 @@ class LLMConfig:
             model_config_obj=request_config,
         )
         for key in (
+            "reasoning",
             "reasoning_effort",
             "thinking",
             "enable_thinking",
@@ -100,7 +101,9 @@ class LLMConfig:
         ):
             request_config.pop(key, None)
         extra_body = request_config.get("extra_body")
-        if isinstance(extra_body, dict):
+        if not isinstance(extra_body, dict):
+            extra_body = {}
+        else:
             extra_body = deepcopy(extra_body)
             for key in (
                 "reasoning",
@@ -112,11 +115,8 @@ class LLMConfig:
                 "chat_template_kwargs",
             ):
                 extra_body.pop(key, None)
-            if extra_body:
-                request_config["extra_body"] = extra_body
-            else:
-                request_config.pop("extra_body", None)
-        request_config.update(thinking_disabled_request_overrides())
+        extra_body.update(thinking_disabled_request_overrides()["extra_body"])
+        request_config["extra_body"] = extra_body
         request_config["model"] = model
         return cls(
             model=model,
@@ -360,8 +360,14 @@ def create_model_response_observer(config: LLMConfig):
 
 
 def thinking_disabled_request_overrides() -> Dict[str, Any]:
-    """Return an isolated provider-neutral control that disables thinking."""
-    return {"reasoning": {"mode": "disabled"}}
+    """Return isolated provider-compatible controls that disable thinking."""
+    return {
+        "extra_body": {
+            "thinking": {"type": "disabled"},
+            "enable_thinking": False,
+            "chat_template_kwargs": {"enable_thinking": False},
+        }
+    }
 
 
 class JiuwenSwarmChatClient:
