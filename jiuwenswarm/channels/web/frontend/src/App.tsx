@@ -881,6 +881,8 @@ function AppContent({
     persistMedia,
     persistDocuments,
     sendMessage,
+    retryMessage,
+    canRetryMessage,
     sendStructuredChatContent,
     pause,
     cancel,
@@ -3093,6 +3095,8 @@ const showWorkspaceDivider = effectiveTeamAreaExpanded && !showConversationNotFo
                     chat={(
                       <ChatPanel
                         onSendMessage={handleSendMessage}
+                        onRetryMessage={retryMessage}
+                        canRetryMessage={canRetryMessage}
                         onInputIntent={kvCacheAffinityEnabled ? handleKVCInputIntent : undefined}
                         onPersistMedia={handlePersistMedia}
                         onPersistDocuments={handlePersistDocuments}

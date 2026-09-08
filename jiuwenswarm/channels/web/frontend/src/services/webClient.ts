@@ -268,6 +268,7 @@ class WebClient {
     }
 
     const id = this.generateRequestId();
+    options.onRequestId?.(id);
     const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     const message: WsRequest = {
       type: 'req',
