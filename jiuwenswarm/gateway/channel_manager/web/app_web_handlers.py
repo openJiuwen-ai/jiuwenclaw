@@ -7160,8 +7160,9 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             if job is None:
                 await channel.send_response(ws, req_id, ok=False, error="job not found", code="NOT_FOUND")
                 return
-            run_info = await cc.run_now_info(job_id)
-            await cc.run_now(job_id, group_id=g, bot_id=b, user_id=u)
+            run_info = await cc.run_now_with_session(
+                job_id, group_id=g, bot_id=b, user_id=u
+            )
             await channel.send_response(
                 ws, req_id, ok=True,
                 payload={
