@@ -7,7 +7,14 @@ from openjiuwen.harness.rails.security.tool_security_rail import (
     PermissionInterruptRail,
 )
 
-from jiuwenswarm.agents.harness.common.rails.interrupt.interrupt_helpers import apply_permission_trusted_dirs, build_permission_rail, convert_interactions_to_ask_user_question, merge_permission_trusted_dirs
+from jiuwenswarm.agents.harness.common.rails.interrupt.interrupt_helpers import (
+    apply_permission_trusted_dirs,
+
+    build_verified_permission_ask_user_question,
+    build_permission_rail,
+    convert_interactions_to_ask_user_question,
+    merge_permission_trusted_dirs,
+)
 from jiuwenswarm.common.utils import (
     get_agent_workspace_dir,
     get_default_project_session_workspace_dir,
@@ -17,11 +24,17 @@ from jiuwenswarm.common.utils import (
 from jiuwenswarm.agents.harness.common.rails.permissions.auto_permission_rail import (
     AutoPermissionInterruptRail,
 )
+from jiuwenswarm.agents.harness.common.rails.permissions._auto_permission.models import (
+    PermissionInterruptRequest,
+)
 from jiuwenswarm.agents.harness.common.rails.permissions.tool_decision_facts import (
     build_tool_decision_facts,
 )
 from jiuwenswarm.agents.harness.common.rails.permissions.persistent_audit import (
     PersistentAuditWriter,
+)
+from jiuwenswarm.agents.harness.common.rails.permissions.root_permission_queue import (
+    RootPermissionQueue,
 )
 from jiuwenswarm.server.runtime.agent_adapter.browser_runtime_security import (
     BrowserRuntimeSecurityProfile,
@@ -250,8 +263,16 @@ def _evolution_interrupt(
             "interrupt_kind": "skill_evolution_approval",
         },
         "ui_options": [
-            {"label": "本次允许", "value": "allow_once", "description": "允许本次技能演进变更执行"},
-            {"label": "总是允许", "value": "allow_always", "description": "自动允许后续匹配的技能演进变更"},
+            {
+                "label": "本次允许",
+                "value": "allow_once",
+                "description": "允许本次技能演进变更执行",
+            },
+            {
+                "label": "总是允许",
+                "value": "allow_always",
+                "description": "自动允许后续匹配的技能演进变更",
+            },
             {"label": "拒绝", "value": "reject", "description": "跳过本次技能演进变更"},
         ],
     }
@@ -334,42 +355,457 @@ def test_legacy_skill_evolution_approval_metadata_is_classified():
     assert result["approval_kind"] == "evolve"
 
 
+def _bind_single_permission_interaction(interaction) -> RootPermissionQueue:
+    tool_call_id = str(interaction.id)
+    invocation_id = f"invocation:{tool_call_id}"
+    queue = RootPermissionQueue(id_factory=lambda: invocation_id)
+    card = queue.begin(
+        root_session_id="root-session",
+        request_id="root-request",
+        execution_session_id="root-session",
+        tool_call_id=tool_call_id,
+        tool_name=str(_read_test_value(interaction.value, "tool_name") or "tool"),
+    )
+    metadata = dict(_read_test_value(interaction.value, "metadata") or {})
+    metadata["tool_invocation_key"] = card.key.to_wire()
+    _write_test_value(interaction.value, "tool_call_id", tool_call_id)
+    _write_test_value(interaction.value, "metadata", metadata)
+    request = PermissionInterruptRequest(
+        message="permission required",
+        payload_schema={},
+        metadata=metadata,
+        tool_name=str(_read_test_value(interaction.value, "tool_name") or "tool"),
+        tool_call_id=tool_call_id,
+    )
+    queue.mark_pending(card.key, request=request, auto_manual=False, root_context=None)
+    return queue
 
 
+def _read_test_value(value, name):
+    return value.get(name) if isinstance(value, dict) else getattr(value, name, None)
 
 
+def _write_test_value(value, name, item) -> None:
+    if isinstance(value, dict):
+        value[name] = item
+    else:
+        setattr(value, name, item)
 
 
+def test_permission_interrupt_exposes_only_reviewer_ui_metadata() -> None:
+    interaction = SimpleNamespace(
+        id="tool-call-17",
+        metadata={
+            "decision_source": "auto_reviewer",
+            "reviewer_status": "manual",
+            "secret_context": "must-not-reach-ui",
+        },
+        value={
+            "message": "reviewer_manual",
+            "tool_name": "bash",
+            "metadata": {
+                "final_reviewer_status": "manual",
+                "manual_reason_summary": "Review this command before execution.",
+            },
+        },
+    )
+
+    registry = _bind_single_permission_interaction(interaction)
+    result = convert_interactions_to_ask_user_question(
+        [interaction], root_permission_queue=registry
+    )
+
+    assert result is not None
+    assert result["source"] == "permission_interrupt"
+    question = result["questions"][0]
+    assert [option["label"] for option in question["options"]] == [
+        "本次允许",
+        "会话内记住",
+        "永久记住",
+        "拒绝",
+    ]
+    assert question["card_id"] == "invocation:tool-call-17"
+    assert "tool_call_id" not in question
+    assert "tool_invocation_key" not in question
+    assert question["reviewer_metadata"] == {
+        "decision_source": "auto_reviewer",
+        "final_reviewer_status": "manual",
+        "manual_reason_summary": "Review this command before execution.",
+        "reviewer_status": "manual",
+    }
+    assert "secret_context" not in question["reviewer_metadata"]
 
 
+def test_verified_permission_card_keeps_core_locator_backend_only() -> None:
+    interaction = SimpleNamespace(
+        id="tool-call-fail-closed",
+        value={
+            "message": "policy_engine_check_failed",
+            "tool_name": "free_search",
+            "tool_args": {"query": "C12-S205-FAIL-CLOSED"},
+            "metadata": {},
+        },
+    )
+    queue = _bind_single_permission_interaction(interaction)
+    key = queue.snapshot_scope(root_session_id="root-session")[0]
+    card = queue.get(key)
+
+    result = build_verified_permission_ask_user_question(interaction, card)
+
+    assert result is not None
+    assert result["request_id"] == "tool-call-fail-closed"
+    question = result["questions"][0]
+    assert question["card_id"] == "invocation:tool-call-fail-closed"
+    assert "tool_call_id" not in question
+    assert "tool_invocation_key" not in question
 
 
+def test_permission_interrupt_projects_reviewer_metadata_from_request_object() -> None:
+    tool_call_id = "tool-call-object"
+    interaction = SimpleNamespace(
+        id=tool_call_id,
+        value=PermissionInterruptRequest(
+            message="reviewer_manual",
+            payload_schema={},
+            metadata={},
+            tool_name="bash",
+            tool_call_id=tool_call_id,
+            decision_source="auto_reviewer",
+            reviewer_status="manual",
+            final_reviewer_status="manual",
+            manual_reason_summary="Review this command before execution.",
+            secret_context="must-not-reach-ui",
+        ),
+    )
+    registry = _bind_single_permission_interaction(interaction)
+
+    result = convert_interactions_to_ask_user_question(
+        [interaction], root_permission_queue=registry
+    )
+
+    assert result is not None
+    question = result["questions"][0]
+    assert question["reviewer_metadata"] == {
+        "decision_source": "auto_reviewer",
+        "final_reviewer_status": "manual",
+        "manual_reason_summary": "Review this command before execution.",
+        "reviewer_status": "manual",
+    }
+    assert "secret_context" not in question["reviewer_metadata"]
 
 
+def test_permission_interrupt_projects_sanitized_bounded_tool_payload() -> None:
+    interaction = SimpleNamespace(
+        id="tool-call-payload",
+        metadata={
+            "reviewer_assessment_id": "internal-id",
+            "decision_digest": "internal-digest",
+            "reviewer_prompt": "internal-prompt",
+            "manual_reason_summary": "Check token=plain-secret before approval.",
+            "contract_gate_missing_evidence": [
+                f"missing-{index}" for index in range(10)
+            ],
+        },
+        value={
+            "message": "reviewer_manual",
+            "tool_name": "bash",
+            "tool_args": {
+                "command": "echo visible",
+                "db_password": "hunter2",
+                "secret_context": "must-not-reach-ui",
+                "nested": {"secret_context": "also-hidden", "safe": True},
+            },
+        },
+    )
+
+    registry = _bind_single_permission_interaction(interaction)
+    result = convert_interactions_to_ask_user_question(
+        [interaction], root_permission_queue=registry
+    )
+
+    assert result is not None
+    question = result["questions"][0]
+    assert question["tool_payload"] == {
+        "command": "echo visible",
+        "db_password": "[REDACTED]",
+        "nested": {"safe": True},
+    }
+    reviewer = question["reviewer_metadata"]
+    assert (
+        reviewer["manual_reason_summary"] == "Check token=[redacted] before approval."
+    )
+    assert reviewer["contract_gate_missing_evidence"][-1] == "[TRUNCATED]"
+    assert len(reviewer["contract_gate_missing_evidence"]) == 9
+    for forbidden in (
+        "reviewer_assessment_id",
+        "decision_digest",
+        "reviewer_prompt",
+        "secret_context",
+    ):
+        assert forbidden not in reviewer
 
 
+def test_non_permission_interrupt_does_not_project_tool_payload() -> None:
+    interaction = SimpleNamespace(
+        id="confirm-payload",
+        value={
+            "message": "Please approve or reject?",
+            "tool_name": "switch_mode",
+            "tool_args": {"mode": "code"},
+        },
+    )
+
+    result = convert_interactions_to_ask_user_question([interaction])
+
+    assert result is not None
+    assert "tool_payload" not in result["questions"][0]
 
 
+def test_permission_interrupt_projects_only_opaque_live_card_id() -> None:
+    interaction = SimpleNamespace(
+        id="tool-call-17",
+        value={
+            "message": "approve this tool",
+            "tool_name": "bash",
+            "tool_call_id": "tool-call-17",
+        },
+    )
+    registry = _bind_single_permission_interaction(interaction)
+    result = convert_interactions_to_ask_user_question(
+        [interaction], root_permission_queue=registry
+    )
+
+    question = result["questions"][0]
+    assert question["card_id"] == "invocation:tool-call-17"
+    assert "tool_invocation_key" not in question
+    assert "tool_call_id" not in question
 
 
+def test_live_permission_locator_takes_priority_over_plain_query_shape() -> None:
+    interaction = SimpleNamespace(
+        id="tool-call-query",
+        value={
+            "message": "reviewer_manual",
+            "tool_name": "bash",
+            "tool_args": {"query": "humanoid robot embodied AI news August 2026"},
+        },
+    )
+    registry = _bind_single_permission_interaction(interaction)
+
+    result = convert_interactions_to_ask_user_question(
+        [interaction], root_permission_queue=registry
+    )
+
+    assert result is not None
+    assert result["source"] == "permission_interrupt"
+    assert result["request_id"] == "tool-call-query"
 
 
+@pytest.mark.parametrize("smart", [False, True])
+def test_permission_like_plain_query_uses_host_owner_not_payload_hint(smart) -> None:
+    interaction = SimpleNamespace(
+        id="tool-call-missing",
+        value={
+            "message": "reviewer_manual",
+            "tool_name": "bash",
+            "tool_args": {"query": "clarify this command"},
+        },
+    )
+
+    payload = convert_interactions_to_ask_user_question(
+        [interaction], root_permission_queue=RootPermissionQueue() if smart else None,
+    )
+    if smart:
+        assert payload is None
+    else:
+        assert payload["source"] == "permission_interrupt"
+        assert "card_id" not in payload["questions"][0]
 
 
+def test_invalid_permission_locator_blocks_structured_ask_fallback() -> None:
+    interaction = SimpleNamespace(
+        id="tool-call-forged",
+        value={
+            "tool_name": "ask_user",
+            "questions": [{"question": "Approve?", "header": "Approval"}],
+            "metadata": {"tool_invocation_key": {"version": 1}},
+        },
+    )
+
+    assert convert_interactions_to_ask_user_question([interaction]) is None
 
 
+def test_active_permission_locator_fails_closed_before_projection() -> None:
+    interaction = SimpleNamespace(
+        id="tool-call-active",
+        value={"message": "reviewer_manual", "tool_name": "bash"},
+    )
+    invocation_id = "invocation:active"
+    registry = RootPermissionQueue(id_factory=lambda: invocation_id)
+    card = registry.begin(
+        root_session_id="root-session",
+        request_id="root-request",
+        execution_session_id="root-session",
+        tool_call_id=interaction.id,
+        tool_name="bash",
+    )
+    interaction.value["metadata"] = {"tool_invocation_key": card.key.to_wire()}
+
+    assert (
+        convert_interactions_to_ask_user_question(
+            [interaction], root_permission_queue=registry
+        )
+        is None
+    )
 
 
+def test_live_permission_locator_takes_priority_over_parallel_ask_shell() -> None:
+    permission = SimpleNamespace(
+        id="tool-call-live",
+        value={"message": "reviewer_manual", "tool_name": "bash"},
+    )
+    registry = _bind_single_permission_interaction(permission)
+    ask = SimpleNamespace(
+        id="ask-call",
+        value={
+            "tool_name": "ask_user",
+            "questions": [{"question": "Unrelated?", "header": "Question"}],
+        },
+    )
+
+    result = convert_interactions_to_ask_user_question(
+        [permission, ask], root_permission_queue=registry
+    )
+
+    assert result is not None
+    assert result["source"] == "permission_interrupt"
+    assert result["request_id"] == "tool-call-live"
 
 
+@pytest.mark.parametrize(
+    ("tool_name", "metadata"),
+    [
+        ("switch_mode", {}),
+        (
+            "simplify_skill_experiences",
+            {
+                "source": "evolution_interrupt",
+                "interrupt_kind": "skill_evolution_approval",
+            },
+        ),
+    ],
+)
+def test_live_permission_locator_cannot_be_reclassified(
+    tool_name: str,
+    metadata: dict[str, str],
+) -> None:
+    interaction = SimpleNamespace(
+        id=f"tool-call-{tool_name}",
+        value={
+            "message": "Please approve or reject?",
+            "tool_name": tool_name,
+            "metadata": metadata,
+        },
+    )
+    registry = _bind_single_permission_interaction(interaction)
+
+    result = convert_interactions_to_ask_user_question(
+        [interaction], root_permission_queue=registry
+    )
+
+    assert result is not None
+    assert result["source"] == "permission_interrupt"
+    assert "approval_kind" not in result
 
 
+@pytest.mark.parametrize("nested", [False, True])
+@pytest.mark.parametrize("reverse", [False, True])
+def test_mixed_permission_set_with_missing_locator_fails_closed(
+    nested: bool,
+    reverse: bool,
+) -> None:
+    live = SimpleNamespace(
+        id="tool-call-live",
+        value={"message": "reviewer_manual", "tool_name": "bash"},
+    )
+    registry = _bind_single_permission_interaction(live)
+    missing = SimpleNamespace(
+        id="tool-call-missing",
+        value={"message": "reviewer_manual", "tool_name": "bash"},
+    )
+    interactions = [missing, live] if reverse else [live, missing]
+    state_outputs = [interactions] if nested else interactions
+
+    assert (
+        convert_interactions_to_ask_user_question(
+            state_outputs, root_permission_queue=registry
+        )
+        is None
+    )
 
 
+def test_permission_interrupt_without_root_queue_fails_closed() -> None:
+    interaction = SimpleNamespace(
+        id="interaction-17",
+        value={
+            "message": "approve this tool",
+            "tool_name": "bash",
+            "metadata": {
+                "tool_invocation_key": {
+                    "version": 1,
+                    "invocation_id": "tiv-17",
+                    "root_session_id": "session-1",
+                    "request_id": "request-1",
+                    "executor_kind": "agent",
+                    "execution_session_id": "session-1",
+                    "tool_call_id": "tool-call-17",
+                }
+            },
+        },
+    )
+
+    result = convert_interactions_to_ask_user_question([interaction])
+
+    assert result is None
 
 
+def test_permission_interrupt_drops_partial_invocation_key() -> None:
+    interaction = SimpleNamespace(
+        id="interaction-17",
+        value={
+            "message": "approve this tool",
+            "tool_name": "bash",
+            "metadata": {
+                "tool_invocation_key": {
+                    "version": 1,
+                    "invocation_id": "partial",
+                }
+            },
+        },
+    )
+
+    result = convert_interactions_to_ask_user_question([interaction])
+
+    assert result is None
 
 
+def test_confirm_interrupt_does_not_expose_reviewer_ui_metadata() -> None:
+    interaction = SimpleNamespace(
+        id="confirm-17",
+        value={
+            "message": "Please approve or reject?",
+            "tool_name": "switch_mode",
+            "metadata": {"reviewer_status": "manual"},
+        },
+    )
+
+    result = convert_interactions_to_ask_user_question([interaction])
+
+    assert result is not None
+    assert result["source"] == "confirm_interrupt"
+    question = result["questions"][0]
+    assert "tool_call_id" not in question
+    assert "reviewer_metadata" not in question
 
 
 def _scene_hook_input(normalized_tool_name: str, user_input):
@@ -404,7 +840,10 @@ def test_scene_hook_approves_ask_user_on_resume():
     approve ask_user so its answer reaches the model.
     """
     hook = _permission_scene_hook()
-    resume_answer = {"answers": {"__free_text__": "数据处理"}, "original_request": "..."}
+    resume_answer = {
+        "answers": {"__free_text__": "数据处理"},
+        "original_request": "...",
+    }
 
     outcome = asyncio.run(hook(_scene_hook_input("ask_user", resume_answer)))
 

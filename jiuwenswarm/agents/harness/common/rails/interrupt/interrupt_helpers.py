@@ -32,8 +32,19 @@ from jiuwenswarm.agents.harness.common.rails.interrupt.permission_options import
     REJECT,
     SESSION_ALLOW,
 )
+from jiuwenswarm.agents.harness.common.rails.permissions.tool_invocation_key import (
+    ToolInvocationKeyV1,
+)
+from jiuwenswarm.agents.harness.common.rails.permissions.root_permission_queue import (
+    RootPermissionCard,
+    RootPermissionQueue,
+)
 from jiuwenswarm.agents.harness.common.rails.permissions.tool_capabilities import (
     install_permission_file_semantics,
+)
+from jiuwenswarm.agents.harness.common.rails.permissions.reviewer_redaction import (
+    redact_secret_values,
+    sanitize_permission_ui_payload,
 )
 from jiuwenswarm.common.utils import logger
 
@@ -742,13 +753,19 @@ def _is_ask_user_interrupt_value(value_obj: Any) -> bool:
     # structural fallbacks below only for those identity-less payloads.
     if hasattr(value_obj, "payload_schema") and hasattr(value_obj, "questions"):
         return True
-    if isinstance(value_obj, dict) and "payload_schema" in value_obj and "questions" in value_obj:
+    if (
+        isinstance(value_obj, dict)
+        and "payload_schema" in value_obj
+        and "questions" in value_obj
+    ):
         return True
-    tool_args = _normalize_tool_args(_read_value_field(value_obj, "tool_args", None))
-    if isinstance(tool_args, dict) and str(tool_args.get("query") or "").strip():
-        if not tool_args.get("questions"):
-            return True
     return False
+
+
+def _is_explicit_ask_user_shell(value_obj: Any) -> bool:
+    return (
+        str(_read_value_field(value_obj, "tool_name", "") or "").strip() == "ask_user"
+    )
 
 
 def _build_plain_ask_user_question(value_obj: Any) -> dict | None:
@@ -790,7 +807,7 @@ _PERMISSION_INTERRUPT_MARKERS = (
     "安全风险评估",
 )
 # exit_plan_mode uses PlanApprovalInterruptRail (extends ConfirmInterruptRail)
-_CONFIRM_INTERRUPT_TOOLS = frozenset({"switch_mode", "exit_plan_mode"})  
+_CONFIRM_INTERRUPT_TOOLS = frozenset({"switch_mode", "exit_plan_mode"})
 
 
 def _read_interrupt_fields(value_obj: Any) -> tuple[str, str, dict | None]:
@@ -809,9 +826,12 @@ def _read_interrupt_fields(value_obj: Any) -> tuple[str, str, dict | None]:
 
     if isinstance(value_obj, dict):
         tool_name = tool_name or str(value_obj.get("tool_name", "") or "").strip()
-        message = message or str(
-            value_obj.get("message", "") or value_obj.get("question", "") or ""
-        ).strip()
+        message = (
+            message
+            or str(
+                value_obj.get("message", "") or value_obj.get("question", "") or ""
+            ).strip()
+        )
         if tool_args is None:
             tool_args = _normalize_tool_args(value_obj.get("tool_args"))
 
@@ -850,10 +870,14 @@ def _resolve_interrupt_source(tool_name: str, message: str) -> str:
     return "confirm_interrupt"
 
 
-def convert_interactions_to_ask_user_question(state_outputs: list) -> dict | None:
+def convert_interactions_to_ask_user_question(
+    state_outputs: list,
+    *,
+    root_permission_queue: RootPermissionQueue | None = None,
+) -> dict | None:
     """Convert __interaction__ list to frontend chat.ask_user_question format.
 
-    AskUserRail 中断: value 有 questions 字段，或 ask_user 的 plain query
+    AskUserRail 中断: value 有 questions 字段，或明确 ask_user 的 plain query
         → source="ask_user_interrupt"
     PermissionRail 中断: value 无 questions 字段 → source="permission_interrupt"
     ConfirmInterruptRail 中断: 控制类工具确认 → source="confirm_interrupt"
@@ -868,55 +892,108 @@ def convert_interactions_to_ask_user_question(state_outputs: list) -> dict | Non
     interactions = list(_iter_interactions(state_outputs))
     if not interactions:
         return None
-
-    # A controller output can contain both a permission interrupt shell and the
-    # real ask_user interrupt. Prefer the structured ask_user payload; otherwise
-    # the frontend may receive an empty permission prompt and have no request_id
-    # to resume the waiting tool call.
-    for interaction in interactions:
-        request_id, value_obj = _extract_interaction_parts(interaction)
-        if not request_id:
-            continue
-
-        questions_raw = _extract_questions_from_value(value_obj)
-        if questions_raw is None:
-            continue
-
-        questions = _build_multi_questions(
-            questions_raw, _extract_ask_user_query(value_obj)
+    locator_rows = [
+        (
+            interaction,
+            *_tool_invocation_locator_from_interaction(
+                interaction,
+                _extract_interaction_parts(interaction)[1],
+                root_permission_queue=root_permission_queue,
+            ),
         )
-        return {
-            "event_type": "chat.ask_user_question",
-            "request_id": request_id,
-            "questions": questions,
-            "source": "ask_user_interrupt",
-        }
+        for interaction in interactions
+    ]
+    if any(state == "invalid" for _item, state, _record in locator_rows):
+        return None
+    live_interactions = [
+        item for item, state, _record in locator_rows if state == "live"
+    ]
+    if live_interactions:
+        absent_interactions = [
+            item for item, state, _record in locator_rows if state == "absent"
+        ]
+        if any(
+            not _is_explicit_ask_user_shell(_extract_interaction_parts(item)[1])
+            for item in absent_interactions
+        ):
+            return None
+        interactions = live_interactions
+        if len(live_interactions) != 1:
+            return None
 
-    for interaction in interactions:
-        request_id, value_obj = _extract_interaction_parts(interaction)
-        if not request_id:
-            continue
+    # Without a live permission locator, retain the existing ask_user projection.
+    # A live host-owned locator takes priority and cannot be reclassified by a
+    # query-shaped payload or a parallel ask_user shell.
+    if not live_interactions:
+        for interaction in interactions:
+            request_id, value_obj = _extract_interaction_parts(interaction)
+            if not request_id:
+                continue
 
-        plain_question = _build_plain_ask_user_question(value_obj)
-        if plain_question:
+            questions_raw = _extract_questions_from_value(value_obj)
+            if questions_raw is None:
+                continue
+
+            questions = _build_multi_questions(questions_raw, _extract_ask_user_query(value_obj))
             return {
                 "event_type": "chat.ask_user_question",
                 "request_id": request_id,
-                "questions": [plain_question],
+                "questions": questions,
                 "source": "ask_user_interrupt",
             }
+
+        for interaction in interactions:
+            request_id, value_obj = _extract_interaction_parts(interaction)
+            if not request_id:
+                continue
+
+            plain_question = _build_plain_ask_user_question(value_obj)
+            if plain_question:
+                return {
+                    "event_type": "chat.ask_user_question",
+                    "request_id": request_id,
+                    "questions": [plain_question],
+                    "source": "ask_user_interrupt",
+                }
+
+    # Only the Host-bound Smart queue owns the single-card contract. Ordinary
+    # SDK permission batches keep develop's first-question projection.
+    if root_permission_queue is not None and len(interactions) > 1 and any(
+        _is_permission_interaction(item) for item in interactions
+    ):
+        return None
 
     for interaction in interactions:
         request_id, value_obj = _extract_interaction_parts(interaction)
         if not request_id:
             continue
 
-        question_data = extract_question_from_interaction(interaction)
+        question_data = extract_question_from_interaction(
+            interaction,
+            root_permission_queue=root_permission_queue,
+        )
         if not question_data:
             continue
 
         tool_name, message, _tool_args = _read_interrupt_fields(value_obj)
-        source = _resolve_interrupt_source(tool_name, message)
+        has_permission_locator = "card_id" in question_data
+        source = (
+            "permission_interrupt"
+            if has_permission_locator
+            else _resolve_interrupt_source(tool_name, message)
+        )
+        structured_approval = (
+            None
+            if has_permission_locator
+            else _classify_structured_approval(value_obj, question_data)
+        )
+        if (
+            root_permission_queue is not None
+            and source == "permission_interrupt"
+            and structured_approval is None
+            and "card_id" not in question_data
+        ):
+            return None
 
         payload = {
             "event_type": "chat.ask_user_question",
@@ -936,19 +1013,49 @@ def convert_interactions_to_ask_user_question(state_outputs: list) -> dict | Non
             payload["plan_approval_kind"] = "plan_approval"
             # Web 用的动作说明。TUI 忽略该字段，继续使用 questions[].options 的
             # approve / reject，因此两端行为互不影响。
-            payload["plan_actions"] = build_plan_approval_actions(resolved_plan_language)
+            payload["plan_actions"] = build_plan_approval_actions(
+                resolved_plan_language
+            )
         plan_path = str(question_data.get("plan_path") or "").strip()
         plan_slug = str(question_data.get("plan_slug") or "").strip()
         if plan_path:
             payload["plan_path"] = plan_path
         if plan_slug:
             payload["plan_slug"] = plan_slug
-        structured_approval = _classify_structured_approval(value_obj, question_data)
         if structured_approval:
             payload.update(structured_approval)
         return payload
 
     return None
+
+
+def build_verified_permission_ask_user_question(
+    interaction: Any,
+    card: RootPermissionCard,
+) -> dict[str, Any] | None:
+    """Render one queue-verified permission card."""
+
+    request_id, value_obj = _extract_interaction_parts(interaction)
+    if request_id != card.key.tool_call_id:
+        return None
+    question = _format_question_from_interaction(
+        interaction,
+        value_obj,
+        source="permission_interrupt",
+        invocation_record=card,
+    )
+    return {
+        "event_type": "chat.ask_user_question",
+        "request_id": request_id,
+        "questions": [question],
+        "source": "permission_interrupt",
+    }
+
+
+def _is_permission_interaction(interaction: Any) -> bool:
+    _request_id, value_obj = _extract_interaction_parts(interaction)
+    tool_name, message, _tool_args = _read_interrupt_fields(value_obj)
+    return _resolve_interrupt_source(tool_name, message) == "permission_interrupt"
 
 
 def _iter_interactions(state_outputs: list) -> Any:
@@ -984,7 +1091,7 @@ def _extract_questions_from_value(value_obj: Any) -> list | None:
     arguments, which are preserved in ToolCallInterruptRequest.tool_args.
     """
     # 1. Direct questions attribute on value_obj
-    if hasattr(value_obj, 'questions'):
+    if hasattr(value_obj, "questions"):
         qs = value_obj.questions
         if qs and len(qs) > 0:
             return qs
@@ -996,7 +1103,7 @@ def _extract_questions_from_value(value_obj: Any) -> list | None:
     # 2. questions embedded in tool_args (StructuredAskUserRail path)
     # ToolCallInterruptRequest.tool_args preserves the original tool call
     # arguments, including the `questions` parameter.
-    tool_args = getattr(value_obj, 'tool_args', None)
+    tool_args = getattr(value_obj, "tool_args", None)
     if tool_args is not None:
         if isinstance(tool_args, str):
             try:
@@ -1085,7 +1192,11 @@ def _build_multi_questions(questions_data: list, fallback_query: str = "") -> li
         if not isinstance(raw_options, list):
             raw_options = []
         if raw_options:
-            options = [_normalize_question_option(opt) for opt in raw_options if isinstance(opt, dict)]
+            options = [
+                _normalize_question_option(opt)
+                for opt in raw_options
+                if isinstance(opt, dict)
+            ]
             options.append({"label": "Other", "description": "Custom input"})
         else:
             options = []
@@ -1106,7 +1217,11 @@ def _build_multi_questions(questions_data: list, fallback_query: str = "") -> li
 
 
 def _extract_ui_options(value_obj: Any) -> list[dict[str, Any]]:
-    options = getattr(value_obj, "ui_options", None) if hasattr(value_obj, "ui_options") else None
+    options = (
+        getattr(value_obj, "ui_options", None)
+        if hasattr(value_obj, "ui_options")
+        else None
+    )
     if options is None and isinstance(value_obj, dict):
         options = value_obj.get("ui_options")
     return [item for item in options or [] if isinstance(item, dict)]
@@ -1125,6 +1240,74 @@ def _extract_interrupt_metadata(value_obj: Any) -> dict[str, Any]:
     if metadata is None and isinstance(value_obj, dict):
         metadata = value_obj.get("metadata")
     return dict(metadata) if isinstance(metadata, dict) else {}
+
+
+def _extract_interaction_metadata(interaction: Any) -> dict[str, Any]:
+    metadata = (
+        interaction.get("metadata")
+        if isinstance(interaction, dict)
+        else getattr(interaction, "metadata", None)
+    )
+    return dict(metadata) if isinstance(metadata, dict) else {}
+
+
+def _reviewer_ui_metadata_from_interaction(
+    interaction: Any,
+    value_obj: Any,
+) -> dict[str, Any]:
+    metadata = _extract_interaction_metadata(interaction)
+    metadata.update(_extract_interrupt_metadata(value_obj))
+    for key in _AUTO_REVIEWER_UI_METADATA_KEYS:
+        value = _read_value_field(value_obj, key, None)
+        if value not in (None, ""):
+            metadata[key] = value
+    projected: dict[str, Any] = {}
+    for key in _AUTO_REVIEWER_UI_METADATA_KEYS:
+        value = metadata.get(key)
+        if value in (None, ""):
+            continue
+        if key in _AUTO_REVIEWER_UI_LIST_METADATA_KEYS:
+            if not isinstance(value, list | tuple):
+                continue
+            items = [
+                redact_secret_values(item, max_length=_AUTO_REVIEWER_UI_MAX_TEXT_LENGTH)
+                for item in value[:_AUTO_REVIEWER_UI_MAX_LIST_ITEMS]
+                if isinstance(item, str) and item.strip()
+            ]
+            if len(value) > _AUTO_REVIEWER_UI_MAX_LIST_ITEMS:
+                items.append("[TRUNCATED]")
+            if items:
+                projected[key] = items
+            continue
+        if isinstance(value, str) and value.strip():
+            projected[key] = redact_secret_values(
+                value,
+                max_length=_AUTO_REVIEWER_UI_MAX_TEXT_LENGTH,
+            )
+    return projected
+
+
+def _tool_invocation_locator_from_interaction(
+    interaction: Any,
+    value_obj: Any,
+    *,
+    root_permission_queue: RootPermissionQueue | None,
+) -> tuple[str, RootPermissionCard | None]:
+    metadata = _extract_interaction_metadata(interaction)
+    metadata.update(_extract_interrupt_metadata(value_obj))
+    if "tool_invocation_key" not in metadata:
+        return "absent", None
+    if root_permission_queue is None:
+        return "invalid", None
+    candidate = metadata.get("tool_invocation_key")
+    try:
+        key = ToolInvocationKeyV1.from_wire(candidate)
+    except (TypeError, ValueError):
+        return "invalid", None
+    card = root_permission_queue.get(key)
+    if card is None or card.state != "pending":
+        return "invalid", None
+    return "live", card
 
 
 def _normalize_question_option(option: dict[str, Any]) -> dict[str, Any]:
@@ -1180,7 +1363,10 @@ def _question_options_from_ui_options(
             options.append(normalized)
     if options:
         return options
-    return _plan_approval_interrupt_options(source, tool_name, message) or _default_interrupt_options()
+    return (
+        _plan_approval_interrupt_options(source, tool_name, message)
+        or _default_interrupt_options()
+    )
 
 
 def _classify_structured_approval(
@@ -1197,7 +1383,10 @@ def _classify_structured_approval(
         source in EVOLUTION_INTERRUPT_METADATA_SOURCES
         or interrupt_kind == LEGACY_SKILL_EVOLUTION_APPROVAL_SOURCE
     )
-    if not is_evolution_interrupt and tool_name not in SKILL_EVOLUTION_APPROVAL_TOOL_KINDS:
+    if (
+        not is_evolution_interrupt
+        and tool_name not in SKILL_EVOLUTION_APPROVAL_TOOL_KINDS
+    ):
         return None
     approval_kind = str(metadata.get("approval_kind") or "").strip()
     if approval_kind not in {"evolve", "simplify"}:
@@ -1213,7 +1402,11 @@ def _classify_structured_approval(
     return payload
 
 
-def extract_question_from_interaction(payload: Any) -> dict | None:
+def extract_question_from_interaction(
+    payload: Any,
+    *,
+    root_permission_queue: RootPermissionQueue | None = None,
+) -> dict | None:
     """Extract question info from a single interaction payload.
 
     Args:
@@ -1224,7 +1417,6 @@ def extract_question_from_interaction(payload: Any) -> dict | None:
     """
     if payload is None:
         return None
-
     if hasattr(payload, "value"):
         value_obj = payload.value
     elif isinstance(payload, dict):
@@ -1233,10 +1425,41 @@ def extract_question_from_interaction(payload: Any) -> dict | None:
         return None
 
     tool_name, message, tool_args = _read_interrupt_fields(value_obj)
-    source = _resolve_interrupt_source(tool_name, message)
+    locator_state, invocation_record = _tool_invocation_locator_from_interaction(
+        payload,
+        value_obj,
+        root_permission_queue=root_permission_queue,
+    )
+    if locator_state == "invalid":
+        return None
+    source = (
+        "permission_interrupt"
+        if locator_state == "live"
+        else _resolve_interrupt_source(tool_name, message)
+    )
+    return _format_question_from_interaction(
+        payload,
+        value_obj,
+        source=source,
+        invocation_record=invocation_record,
+    )
 
+
+def _format_question_from_interaction(
+    payload: Any,
+    value_obj: Any,
+    *,
+    source: str,
+    invocation_record: RootPermissionCard | None,
+) -> dict[str, Any]:
+    """Render one question after queue identity validation."""
+
+    tool_name, message, tool_args = _read_interrupt_fields(value_obj)
+    reviewer_metadata = _reviewer_ui_metadata_from_interaction(payload, value_obj)
     generic_confirm_message = message.strip() in {"", "Please approve or reject?"}
-    needs_message = not message or (source == "confirm_interrupt" and generic_confirm_message)
+    needs_message = not message or (
+        source == "confirm_interrupt" and generic_confirm_message
+    )
     if tool_name and needs_message:
         if source == "confirm_interrupt":
             from jiuwenswarm.agents.harness.code.rails.code_confirm_interrupt_rail import (
@@ -1260,9 +1483,19 @@ def extract_question_from_interaction(payload: Any) -> dict | None:
         header = ask_title or (f"权限审批: {tool_name}" if tool_name else "权限审批")
         question = message
 
-    return {
+    question_data = {
         "question": question,
         "header": header,
-        "options": _question_options_from_ui_options(value_obj, source, tool_name, message),
+        "options": _question_options_from_ui_options(
+            value_obj, source, tool_name, message
+        ),
         "multi_select": False,
     }
+    if source == "permission_interrupt":
+        if invocation_record is not None:
+            question_data["card_id"] = invocation_record.key.invocation_id
+        if reviewer_metadata:
+            question_data["reviewer_metadata"] = reviewer_metadata
+        if isinstance(tool_args, dict):
+            question_data["tool_payload"] = sanitize_permission_ui_payload(tool_args)
+    return question_data
