@@ -62,7 +62,7 @@ CALLS = 0
 def register_tools():
     global CALLS
     CALLS += 1
-    return [_Tool("psbc_system_tool"), _Tool("get_current_user")]
+    return [_Tool("biz_system_tool"), _Tool("get_current_user")]
 '''
 
 _SINGLE_TOOL_MODULE = '''
@@ -113,7 +113,7 @@ class _Tool:
 
 def register_tools():
     return [
-        _Tool("psbc_system_tool"),
+        _Tool("biz_system_tool"),
         _Tool("wiki_query"),
         _Tool(""),
     ]
@@ -246,7 +246,7 @@ def test_module_without_register_tools_is_skipped(
 
     tools = JiuWenSwarmDeepAdapter._load_extra_tools_from_env()
 
-    assert [tool.card.name for tool in tools] == ["psbc_system_tool", "get_current_user"]
+    assert [tool.card.name for tool in tools] == ["biz_system_tool", "get_current_user"]
 
 
 def test_single_tool_factory_result_is_wrapped(
@@ -280,7 +280,7 @@ def test_factory_exception_is_skipped_and_retried(
     first = JiuWenSwarmDeepAdapter._load_extra_tools_from_env()
     second = JiuWenSwarmDeepAdapter._load_extra_tools_from_env()
 
-    assert [tool.card.name for tool in first] == ["psbc_system_tool", "get_current_user"]
+    assert [tool.card.name for tool in first] == ["biz_system_tool", "get_current_user"]
     assert second == first
     # Failures stay retryable per build: the factory ran on both loader calls.
     assert importlib.import_module(raising).CALLS == 2
@@ -315,10 +315,10 @@ def test_extra_tool_cards_enter_tool_cards_with_conflict_and_nameless_skip(
         adapter_logger.removeHandler(handler)
 
     # The conflicting "wiki_query" and the nameless tool never made it in.
-    assert [card.name for card in tool_cards] == ["wiki_query", "psbc_system_tool"]
+    assert [card.name for card in tool_cards] == ["wiki_query", "biz_system_tool"]
     assert len(fake_resource_mgr.tools) == 1
     registered = next(iter(fake_resource_mgr.tools.values()))
-    assert registered.card.name == "psbc_system_tool"
+    assert registered.card.name == "biz_system_tool"
     assert registered.card.stateless is True  # process-shared via mark_stateless
     assert "conflicts with existing tool" in capture.text
     assert "without card.name" in capture.text
@@ -346,7 +346,7 @@ def test_single_registration_failure_does_not_block_others(
     original = JiuWenSwarmDeepAdapter._register_shared_tool
 
     def _flaky_register(tool: Any) -> Any:
-        if tool.card.name == "psbc_system_tool":
+        if tool.card.name == "biz_system_tool":
             raise RuntimeError("resource_mgr exploded")
         return original(tool)
 

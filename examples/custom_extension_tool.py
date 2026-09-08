@@ -47,9 +47,9 @@ CURRENT_USER: contextvars.ContextVar[str] = contextvars.ContextVar(
 # 模块级【不可变】白名单：允许的 (system_code, api_code) -> 下游地址。
 # 这是常量注册表，不是会话状态；真实集成里换成签名客户端配置。
 SYSTEM_API_REGISTRY: dict[tuple[str, str], str] = {
-    ("core", "query_account_balance"): "https://core.example.psbc/balance",
-    ("core", "query_account_detail"): "https://core.example.psbc/detail",
-    ("channel", "submit_transaction"): "https://channel.example.psbc/submit",
+    ("core", "query_account_balance"): "https://core.example.internal/balance",
+    ("core", "query_account_detail"): "https://core.example.internal/detail",
+    ("channel", "submit_transaction"): "https://channel.example.internal/submit",
 }
 
 # 超时钳制：模型可填 timeout 参数，但不能给离谱值拖垮会话
