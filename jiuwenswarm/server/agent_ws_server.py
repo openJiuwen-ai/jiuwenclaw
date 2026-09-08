@@ -624,7 +624,6 @@ class AgentWebSocketServer:
             # enabled=false, 用户不显式写 sandbox.enabled: true 就不拉起 (opt-in,
             # 避免开箱即 install + 建进程)。
             if sys.platform == "win32":
-                from jiuwenswarm.common.config import get_sandbox_runtime
                 sandbox_runtime = get_sandbox_runtime()
                 if not sandbox_runtime.get("enabled"):
                     logger.info(
