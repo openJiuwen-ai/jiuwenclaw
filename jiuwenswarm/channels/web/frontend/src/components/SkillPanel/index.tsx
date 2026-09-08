@@ -978,17 +978,29 @@ export function SkillPanel({
     [withSession],
   );
 
+  const handleMarketplaceCategoryChange = useCallback(
+    (category: (typeof MARKETPLACE_CATEGORIES)[number]) => {
+      if (category === marketplaceCategory) return;
+      // 立即失效在途搜索/推荐，避免迟到响应覆盖新分类结果
+      hubFetchSeqRef.current += 1;
+      setSearch('');
+      setHubSkills([]);
+      setHubLoading(true);
+      setMarketplaceCategory(category);
+    },
+    [marketplaceCategory],
+  );
+
   useEffect(() => {
     if (activeTab !== 'marketplace') return;
     const keyword = search.trim();
-    const timer = setTimeout(() => {
-      if (keyword) {
+    if (keyword) {
+      const timer = setTimeout(() => {
         fetchOnlineSearch(keyword);
-      } else {
-        fetchHubSkills(marketplaceCategory);
-      }
-    }, 500);
-    return () => clearTimeout(timer);
+      }, 500);
+      return () => clearTimeout(timer);
+    }
+    fetchHubSkills(marketplaceCategory);
   }, [activeTab, marketplaceCategory, search, fetchHubSkills, fetchOnlineSearch]);
 
   // 按 plugin_type 分组：swarmskill → 精选团队技能，其余 → 精选技能
@@ -2411,7 +2423,13 @@ export function SkillPanel({
                   <div className="chat-picker-panel__tabs">
                     <button
                       type="button"
-                      onClick={() => setActiveTab('marketplace')}
+                      onClick={() => {
+                        if (activeTab === 'my') {
+                          // 与 setActiveTab 同批清空搜索，避免广场首帧沿用「我的技能」关键词
+                          setSearch('');
+                        }
+                        setActiveTab('marketplace');
+                      }}
                       className={activeTab === 'marketplace' ? 'is-active' : ''}
                       data-testid="skill-panel-tab"
                       data-variant="marketplace"
@@ -2420,7 +2438,15 @@ export function SkillPanel({
                     </button>
                     <button
                       type="button"
-                      onClick={() => setActiveTab('my')}
+                      onClick={() => {
+                        if (activeTab !== 'my') {
+                          // 从广场/关系图等切来时同批清空，避免首帧沿用他页关键词；并失效在途广场请求
+                          hubFetchSeqRef.current += 1;
+                          setHubLoading(false);
+                          setSearch('');
+                        }
+                        setActiveTab('my');
+                      }}
                       className={activeTab === 'my' ? 'is-active' : ''}
                       data-testid="skill-panel-tab"
                       data-variant="my"
@@ -2810,7 +2836,7 @@ export function SkillPanel({
                       label: t(`skills.marketplaceCategories.${cat}`),
                     }))}
                     value={marketplaceCategory}
-                    onChange={setMarketplaceCategory}
+                    onChange={handleMarketplaceCategoryChange}
                   />
                   </div>
 
