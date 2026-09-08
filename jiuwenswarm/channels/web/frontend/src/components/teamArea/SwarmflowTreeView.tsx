@@ -42,12 +42,13 @@ import {
   detectPhaseLoops,
   sortPhasesByExecution,
   computeLoopStatus,
+  computeSessionStatus,
   findActiveIterationIndex,
 } from './workflowTypes';
 import { useChatStore } from '../../stores/chatStore';
 import { useSessionStore } from '../../stores/sessionStore';
 import { webRequest } from '../../services/webClient';
-import type { AskUserQuestionPayload } from '../../types/websocket';
+import type { AskUserQuestionPayload, WebError } from '../../types/websocket';
 import {
   AgentDetailModal,
   buildDetailSections,
@@ -55,6 +56,7 @@ import {
   accentChipClass,
   type AgentModalState,
 } from './AgentDetailModal';
+import { Toast } from '../ConnectorMarket/Toast';
 
 // ── 状态图标映射 ──────────────────────────────────────────
 
@@ -80,6 +82,17 @@ function StatusIcon({ status, className }: { status: WorkflowStatus; className?:
       return <Circle className={`${cls} text-gray-400`} />;
   }
 }
+
+// 控制 RPC 失败时服务端带回的权威 status → toast 文案 key 映射。
+// 服务端在 controller miss 时会把 run 的真实状态（终态/暂停态）附在失败
+// payload 里，前端据此提示并纠正陈旧卡片。
+const CONTROL_STATUS_KEY: Record<string, string> = {
+  completed: 'swarmflow.controlAlreadyCompleted',
+  stopped: 'swarmflow.controlAlreadyStopped',
+  failed: 'swarmflow.controlAlreadyFailed',
+  paused: 'swarmflow.controlAlreadyPaused',
+  running: 'swarmflow.controlUnavailable',
+};
 
 // ── 状态文本 ──────────────────────────────────────────────
 
@@ -732,11 +745,15 @@ function PhaseNode({
           {sessions.map((session) => {
             const representative = session.members[0];
             if (!representative) return null;
+            // 代表节点状态按 members 聚合：Turn0 完成不代表整张卡完成。
+            const status = computeSessionStatus(session.members);
+            const node =
+              status === representative.status ? representative : { ...representative, status };
             return (
               <div key={representative.id} className="relative pl-4">
                 <div className="absolute left-0 top-1/2 -translate-y-1/2 w-3 border-t border-border/30" />
                 <AgentNode
-                  agent={representative}
+                  agent={node}
                   phaseAgents={phase.agents ?? []}
                   depth={0}
                   runId={runId}
@@ -776,6 +793,54 @@ function RunNode({
   const { t } = useTranslation();
   const [expanded, setExpanded] = useState(true);
   const [runDetail, setRunDetail] = useState<AgentModalState | null>(null);
+  // 暂停请求在途标记：点 pause 后按钮立即转圈并禁用，直到 run 状态真正翻成
+  // paused（进度事件到达）才恢复。后端 abort 可能耗时数秒，控制通道被阻塞时
+  // 更久（09-08 实测 80s 后 res 才回、但事件与 res 一并到达），期间禁用可
+  // 避免用户重复点击（14:36 转圈回落后被连点两次 resume 的先例）。不设超时
+  // 兜底：按钮只认 run.status 翻转，事件不来就一直转——状态以事件为准。
+  const [pausing, setPausing] = useState(false);
+  useEffect(() => {
+    if (pausing && run.status !== 'running') {
+      setPausing(false);
+    }
+  }, [pausing, run.status]);
+  const [controlError, setControlError] = useState<string | null>(null);
+  // 控制 RPC 失败统一处理：服务端在 controller miss 时把权威 status 附在
+  // 失败 payload 里带回，据此纠正停在 running/paused 的陈旧卡片并用 Toast
+  // 明确提示——此前只 console.error，用户连点没反应还不知道原因
+  // （17:06-17:07 对已完成 run 反复点暂停、前端只报 not found 的先例）。
+  const applyControlFailure = useCallback(
+    (err: unknown): boolean => {
+      console.error('[swarmflow] control failed:', err);
+      const webErr = err as WebError | undefined;
+      const payload = webErr?.payload as
+        | { status?: unknown }
+        | undefined;
+      const status = typeof payload?.status === 'string' ? payload.status : null;
+      if (status && status !== run.status) {
+        // 最小 delta：mergeWorkflowRun 只覆盖 incoming 携带的字段，
+        // name/summary 等缺席字段保留 store 现值，不会用旧渲染快照回退。
+        useSessionStore.getState().applyWorkflowUpdate(sessionId, {
+          id: run.id,
+          status: status as WorkflowStatus,
+        } as WorkflowRun);
+      }
+      // 传输层错误（超时/断连，code 非空）没有权威 payload：如实显示其自带
+      // 文案（如"请求超时"），不误报"未找到工作流运行"（16:0x 断连窗口点
+      // resume 弹 controlNotFound 的先例）。返回是否服务端权威失败，供 pause
+      // 在途态决定复位——传输层错误时转圈保持到事件到达，状态以事件为准。
+      const transport = webErr?.code !== undefined;
+      setControlError(
+        status
+          ? t(CONTROL_STATUS_KEY[status] || 'swarmflow.controlNotFound')
+          : transport && webErr?.message
+            ? webErr.message
+            : t('swarmflow.controlNotFound'),
+      );
+      return !transport;
+    },
+    [run.id, run.status, sessionId, t],
+  );
   const completedCount =
     run.completed_agent_count ??
     (run.phases ?? []).reduce(
@@ -889,18 +954,34 @@ function RunNode({
             <button
               type="button"
               title={t('swarmflow.pauseResumeHint')}
-              className="flex items-center justify-center w-7 h-7 rounded text-text-muted hover:text-amber-500 hover:bg-secondary transition-colors"
+              disabled={pausing}
+              className="flex items-center justify-center w-7 h-7 rounded text-text-muted hover:text-amber-500 hover:bg-secondary transition-colors disabled:opacity-70 disabled:cursor-wait"
               data-testid="team-area-swarmflow-run-pause-btn"
               data-variant={run.status === 'running' ? 'pause' : 'resume'}
               onClick={() => {
-                const method =
-                  run.status === 'running' ? 'swarmflow.pause' : 'swarmflow.resume';
-                void webRequest(method, { session_id: sessionId, run_id: run.id }).catch(
-                  (err) => console.error('[swarmflow] control failed:', err),
-                );
+                if (run.status !== 'running') {
+                  void webRequest('swarmflow.resume', {
+                    session_id: sessionId,
+                    run_id: run.id,
+                  }).catch(applyControlFailure);
+                  return;
+                }
+                setPausing(true);
+                void webRequest('swarmflow.pause', {
+                  session_id: sessionId,
+                  run_id: run.id,
+                }).catch((err) => {
+                  // 传输层错误（超时/断连）无权威结论：转圈保持到事件到达；
+                  // 只有服务端权威失败才复位，避免又回到"转圈回落+连点"。
+                  if (applyControlFailure(err)) {
+                    setPausing(false);
+                  }
+                });
               }}
             >
-              {run.status === 'running' ? (
+              {pausing ? (
+                <Loader2 className="w-4 h-4 animate-spin text-amber-500" />
+              ) : run.status === 'running' ? (
                 <Pause className="w-4 h-4" />
               ) : (
                 <Play className="w-4 h-4" />
@@ -913,7 +994,7 @@ function RunNode({
               data-testid="team-area-swarmflow-run-stop-btn"
               onClick={() => {
                 void webRequest('swarmflow.stop', { session_id: sessionId, run_id: run.id }).catch(
-                  (err) => console.error('[swarmflow] control failed:', err),
+                  applyControlFailure,
                 );
               }}
             >
@@ -923,6 +1004,9 @@ function RunNode({
         )}
       </div>
 
+      {controlError && (
+        <Toast message={controlError} onClose={() => setControlError(null)} variant="error" />
+      )}
       {run.error && (
         <button
           type="button"
