@@ -182,8 +182,11 @@ class JiuWenClaw:
         user_workspace_dir: str | None = None,
         agent_id: str | None = None,
         service_id: str | None = None,
+        assembly_cache: Any | None = None,
     ) -> None:
         self._adapter: AgentAdapter | None = None
+        # 租户级装配缓存(AgentManager 注入): 传递给 DeepAdapter 复用 ent_cfg/skill_sync
+        self._assembly_cache = assembly_cache
         self._sdk_name: str | None = None
         self._agent_id = agent_id
         self._service_id = service_id
@@ -244,6 +247,7 @@ class JiuWenClaw:
                 workspace_dir=self._workspace_dir,
                 agent_id=self._agent_id,
                 service_id=self._service_id,
+                assembly_cache=self._assembly_cache,
             )
             if hasattr(self._adapter, "set_skill_manager"):
                 self._adapter.set_skill_manager(self._skill_manager)
