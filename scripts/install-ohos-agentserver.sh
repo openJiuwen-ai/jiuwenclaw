@@ -252,8 +252,10 @@ clone_openjiuwen_repo() {
   mkdir -p "$(dirname "$_dest")" "$REPORT_DIR/phase-2"
   if [ -d "$_dest/.git" ]; then
     log "refresh clone: $_dest ($_ref)"
+    # checkout -B 重置到 origin/$_ref：checkout 本地旧分支不会因 fetch 前进，
+    # refresh 会假成功并一直装旧 commit（鸿蒙打包机实踩）。
     "$_git" -C "$_dest" fetch --depth 1 origin "$_ref" >>"$_log" 2>&1 \
-      && "$_git" -C "$_dest" checkout "$_ref" >>"$_log" 2>&1 \
+      && "$_git" -C "$_dest" checkout -B "$_ref" "origin/$_ref" >>"$_log" 2>&1 \
       && return 0
     log "WARN: git fetch failed, re-clone"
     rm -rf "$_dest"
@@ -294,7 +296,7 @@ clone_deepsearch_repo() {
   if [ -d "$DEEPSEARCH_SRC_DIR/.git" ]; then
     log "refresh deepsearch clone: $DEEPSEARCH_SRC_DIR ($DEEPSEARCH_GIT_REF)"
     "$_git" -C "$DEEPSEARCH_SRC_DIR" fetch --depth 1 origin "$DEEPSEARCH_GIT_REF" >>"$_log" 2>&1 \
-      && "$_git" -C "$DEEPSEARCH_SRC_DIR" checkout "$DEEPSEARCH_GIT_REF" >>"$_log" 2>&1 \
+      && "$_git" -C "$DEEPSEARCH_SRC_DIR" checkout -B "$DEEPSEARCH_GIT_REF" "origin/$DEEPSEARCH_GIT_REF" >>"$_log" 2>&1 \
       && return 0
     log "WARN: deepsearch git fetch failed, re-clone"
     rm -rf "$DEEPSEARCH_SRC_DIR"
@@ -364,12 +366,37 @@ resolve_agent_core_path() {
 }
 
 install_openjiuwen() {
+  # 旧版 openjiuwen 也能裸 import 成功——必须顺带验证 agent_teams 关键模块，
+  # 否则 2026-08 的旧 .venv 会被误判"已安装"而跳过更新（鸿蒙打包机实踩：
+  # 重装后仍缺 agent_teams/context.py，构建 Phase 2b 校验失败）。
   if [ "$REUSE_INSTALLED" = "1" ] && [ "$FORCE_REINSTALL" != "1" ] \
-    && runtime_imports_ok "import openjiuwen"; then
-    log "SKIP installed: openjiuwen"
+    && runtime_imports_ok "import openjiuwen; import openjiuwen.agent_teams.context"; then
+    log "SKIP installed: openjiuwen (agent_teams OK)"
     return 0
   fi
   ensure_pep517_minimal
+
+  # 离线 wheel 优先（与 openjiuwen_deepsearch 本体的安装策略一致）：wheel 是
+  # 2026-09 手机实测（专家团 + DeepSearch 全通）的 0.1.10 精确快照。agent-core
+  # 的 enterprise-dev 分支持续重构（harmonyos/ 已是纯 pyproject 壳，代码挪到
+  # 仓库根，文件位置漂移），git/本地源的版本与目录结构不可控；离线 wheel
+  # 保证各打包机装出的 openjiuwen 与实测版本逐字节一致。
+  for _w in "$WHEEL_DIR"/openjiuwen_harmonyos-*.whl; do
+    [ -f "$_w" ] || continue
+    if [ "$(head -c 2 "$_w" 2>/dev/null)" != "PK" ]; then
+      log "WARN: openjiuwen wheel 是 Git LFS 指针（本机未装 git-lfs），跳过离线安装: $_w"
+      continue
+    fi
+    log "openjiuwen: 安装离线 wheel ($(basename "$_w"))"
+    pip_in_venv --no-deps --force-reinstall "$_w" \
+      || die "openjiuwen 离线 wheel 安装失败: $_w"
+    # 文件级验证（不用 import 验证：受限终端无法 dlopen .so，import aiohttp
+    # 必然 Permission denied，会误报失败——见 install-deepsearch-ohos.sh 金丝雀）
+    [ -f "$VENV_DIR/lib/python3.12/site-packages/openjiuwen/agent_teams/context.py" ] \
+      || die "openjiuwen 装后验证失败：agent_teams/context.py 不存在"
+    log "openjiuwen: 离线 wheel 安装验证 OK (agent_teams/context.py)"
+    return 0
+  done
 
   if [ "$USE_LOCAL_OPENJIUWEN" = "1" ]; then
     _local=$(resolve_agent_core_path) || die "USE_LOCAL_OPENJIUWEN=1 but AGENT_CORE_PATH not found (set AGENT_CORE_PATH=$OFFICE_CLAW/agent-core)"

@@ -1530,6 +1530,19 @@ def _build_deepresearch_child_env(
     # stdout encoding is cp936/GBK, so NDJSON with Chinese outline text is emitted
     # as GBK bytes; the sidecar reads stdout as UTF-8 -> decode fails -> mojibake.
     env["PYTHONUTF8"] = "1"
+    # agentserver resolves ``jiuwenclaw`` via ``python -m`` cwd injection (the OHOS
+    # bundle keeps it under vendor/, outside site-packages), while this child starts
+    # in script mode (sys.path[0] = the script dir) and the spawn allowlist above
+    # never forwards PYTHONPATH — so ``import jiuwenclaw`` failed with
+    # ModuleNotFoundError on device. Forward the live sys.path verbatim so the
+    # child resolves modules exactly like the agentserver process (vendor tree +
+    # HNP site-packages + cwd).
+    child_pythonpath = os.pathsep.join(p for p in sys.path if p)
+    if child_pythonpath:
+        inherited = env.get("PYTHONPATH", "")
+        env["PYTHONPATH"] = (
+            f"{child_pythonpath}{os.pathsep}{inherited}" if inherited else child_pythonpath
+        )
     return env
 
 
