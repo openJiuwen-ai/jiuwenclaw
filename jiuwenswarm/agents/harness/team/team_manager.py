@@ -329,6 +329,9 @@ class TeamManager:
         self._session_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = (
             weakref.WeakValueDictionary()
         )
+        self._startup_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = (
+            weakref.WeakValueDictionary()
+        )
         # 当 cancel 请求到达时设置，通知正在执行的 pause 操作中止自身并让 cancel 执行
         self._cancel_requested: dict[str, bool] = {}
         # 追踪当前正在执行的 pause 任务，供 cancel 抢占取消
@@ -761,6 +764,14 @@ class TeamManager:
         if lock is None:
             lock = asyncio.Lock()
             self._session_locks[session_id] = lock
+        return lock
+
+    def get_startup_lock(self, session_id: str) -> asyncio.Lock:
+        """Serialize startup without blocking lifecycle cleanup or live inputs."""
+        lock = self._startup_locks.get(session_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._startup_locks[session_id] = lock
         return lock
 
     def get_monitor(self, session_id: str) -> TeamMonitorHandler | None:
