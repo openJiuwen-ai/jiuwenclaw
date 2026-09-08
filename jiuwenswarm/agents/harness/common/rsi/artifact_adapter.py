@@ -97,7 +97,7 @@ def provider_node_to_dict(node: Any) -> dict[str, Any]:
     node_type = str(raw.get("type") or "").upper()
     paper = (raw.get("extra") or {}).get("paper") or {}
     program = (raw.get("extra") or {}).get("program")
-    if node_type == "CANDIDATE":
+    if node_type in {"CANDIDATE", "RUNNING"}:
         normalized_type = "PROVISIONAL"
     elif program is not None and node_type == "ADOPTED" and not raw.get("adopted"):
         normalized_type = "REJECTED"

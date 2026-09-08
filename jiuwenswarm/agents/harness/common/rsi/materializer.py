@@ -282,7 +282,7 @@ class RsiTaskMaterializer:
             "data_loader": {
                 "file_pattern": "*.json",
                 "batch_size": profile_options["batch_size"],
-                "batch_balance_keys": ["domain", "source", "task_type"],
+                "batch_balance_keys": ["difficulty", "dimension", "source", "task_type"],
             },
             "evaluator": {
                 "backend": "single_harness",
@@ -764,7 +764,7 @@ def _profile_options(options: Mapping[str, Any] | None) -> dict[str, Any]:
     raw = options or {}
     values = {
         "max_epochs": _profile_int(raw, "max_epochs", default=1, minimum=1),
-        "batch_size": _profile_int(raw, "batch_size", default=8, minimum=1),
+        "batch_size": _profile_int(raw, "batch_size", default=1, minimum=1),
         "max_issue_attempts": _profile_int(raw, "max_issue_attempts", default=8, minimum=0),
         "max_repair_rounds": _profile_int(raw, "max_repair_rounds", default=1, minimum=1),
         "sibling_candidate_count": _profile_int(

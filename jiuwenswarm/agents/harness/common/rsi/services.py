@@ -766,7 +766,7 @@ def _harness_profile_options(params: Mapping[str, Any]) -> dict[str, Any]:
         "improver_policy_ref": improver_policy_ref,
         "execution_mode": execution_mode,
         "max_epochs": _positive_int(value("max_epochs"), default=1, field="max_epochs"),
-        "batch_size": _positive_int(value("batch_size"), default=8, field="batch_size"),
+        "batch_size": _positive_int(value("batch_size"), default=1, field="batch_size"),
         "max_issue_attempts": _non_negative_int(
             value("max_issue_attempts"), default=8, field="max_issue_attempts"
         ),
