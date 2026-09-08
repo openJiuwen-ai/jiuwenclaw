@@ -493,6 +493,12 @@ class PaperProvider:
 
         config = self._load_config(load_config)
         config = self._configure_for_model(config, request.model)
+        topic_config = dict(config.get("topic_survey") or {})
+        topic_config["web_proxy"] = str(request.web_proxy or "").strip() or None
+        configured_scope = str(topic_config.get("search_scope") or "").strip().lower()
+        if configured_scope not in {"domestic", "global"}:
+            topic_config["search_scope"] = "global"
+        config["topic_survey"] = topic_config
         set_project_root(run_dir)
         manager = ManagerAgent(
             config,
