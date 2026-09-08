@@ -1616,7 +1616,9 @@ def prepare_workspace(
 
     from jiuwenswarm.common.config import set_preferred_language_in_config_file
 
-    set_preferred_language_in_config_file(config_yaml_dest, resolved_lang)
+    # 企业版 config.yaml 由部署侧挂载（只读），不回写语言偏好
+    if not is_enterprise():
+        set_preferred_language_in_config_file(config_yaml_dest, resolved_lang)
 
     # ----- 默认安装内置技能: skill-creator 和 swarmskill-creator -----
     _install_default_builtin_skills(
