@@ -94,10 +94,6 @@ gen_gateway_file() {
 }
 
 render_gateway_files() {
-    local pvc_template_file="${CONFIG["CLAW_PVC_TEMPLATE_FILE"]}"
-    local pvc_file="${CONFIG["CLAW_PVC_FILE"]}"
-    local mount_type="${DEPLOY_VARS["CLAW_MOUNT_TYPE"]}"
-    local is_external_pvc="${DEPLOY_VARS["ENABLE_EXTERNAL_PVC"]}"
     local mode="${DEPLOY_VARS["MODE"]}"
 
     if [ "${mode}" == "dev" ]; then
@@ -110,10 +106,6 @@ render_gateway_files() {
     gen_gateway_env_file
     gen_gateway_config_file
 
-    if [[ "${mount_type}" == "pvc" && "${is_external_pvc}" == "false" ]]; then
-        render_config_template "${pvc_template_file}" "${pvc_file}" "DEPLOY_VARS"
-    fi
-
     ensure_available_port "GATEWAY_CONFIG_HTTP_NODE_PORT"
     gen_gateway_file
 }
@@ -124,18 +116,11 @@ deploy_gateway() {
     local conf_yaml_file="${CONFIG["GATEWAY_CONFIG_YAML_FILE"]}"
     local name="${DEPLOY_VARS["GATEWAY_NAME"]}"
     local gateway_file="${CONFIG["GATEWAY_FILE"]}"
-    local pvc_file="${CONFIG["CLAW_PVC_FILE"]}"
-    local mount_type="${DEPLOY_VARS["CLAW_MOUNT_TYPE"]}"
-    local is_external_pvc="${DEPLOY_VARS["ENABLE_EXTERNAL_PVC"]}"
 
     ensure_secret_configmap
     # 使用 apply 保证重复部署幂等：ConfigMap 已存在时更新内容，不因 create 冲突失败。
     exec_cmd kubectl apply -f "${env_yaml_file}"
     exec_cmd kubectl apply -f "${conf_yaml_file}"
-
-    if [[ "${mount_type}" == "pvc" && "${is_external_pvc}" == "false" && -f "${pvc_file}" ]]; then
-        exec_cmd kubectl apply -f "${pvc_file}"
-    fi
 
     exec_cmd kubectl apply -f "${gateway_file}"
     wait_k8s_resource_ready "deployment" "${name}" "${namespace}"
@@ -143,8 +128,6 @@ deploy_gateway() {
 
 uninstall_gateway() {
     local gateway_file="${CONFIG["GATEWAY_FILE"]}"
-    local mount_type="${DEPLOY_VARS["CLAW_MOUNT_TYPE"]}"
-    local pvc_file="${CONFIG["CLAW_PVC_FILE"]}"
     local env_yaml_file="${CONFIG["GATEWAY_ENV_YAML_FILE"]}"
     local conf_yaml_file="${CONFIG["GATEWAY_CONFIG_YAML_FILE"]}"
 
@@ -152,10 +135,6 @@ uninstall_gateway() {
     exec_cmd kubectl delete -f "${env_yaml_file}" --ignore-not-found=true
     exec_cmd kubectl delete -f "${conf_yaml_file}" --ignore-not-found=true
 
-    # 仅在内置 PVC时删
-    if [[ "${mount_type}" == "pvc" && -z "${DEPLOY_VARS["CLAW_PVC"]:-}" && -f "${pvc_file}" ]]; then
-        exec_cmd kubectl delete -f "${pvc_file}" --ignore-not-found=true
-    fi
     uninstall_secret_configmap
     ensure_redis_down
 }
