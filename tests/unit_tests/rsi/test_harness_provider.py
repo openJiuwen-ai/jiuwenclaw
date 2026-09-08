@@ -198,6 +198,72 @@ def test_baseline_progress_does_not_consume_an_epoch(tmp_path: Path) -> None:
     assert state.baseline == 0.5
 
 
+@pytest.mark.asyncio
+async def test_epoch_push_query_recovery_and_plugin_artifacts_are_consistent(tmp_path: Path):
+    import zipfile
+    from openjiuwen.rsi.events import NodeStageEvent
+    from openjiuwen.rsi.harness_rsi.single_harness.events_translate import (
+        active_epoch_node_event, epoch_node_event, root_node_event,
+    )
+    from jiuwenswarm.agents.harness.common.rsi.artifact_service import RsiArtifactService
+    from jiuwenswarm.agents.harness.common.rsi.event_consumer import RsiEventConsumer
+    from jiuwenswarm.agents.harness.common.rsi.projector import RsiProjector
+    from jiuwenswarm.agents.harness.common.rsi.usage_recorder import RsiUsageRecorder
+
+    task_id = "epoch-task"
+    package = tmp_path / task_id / "candidate"
+    skill = package / "skills" / "verification" / "SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_text("Verify before delivery.", encoding="utf-8")
+    (package / "harness_config.yaml").write_text("id: candidate\n", encoding="utf-8")
+    refs = tmp_path / task_id / "refs.yaml"
+    refs.write_text(yaml.safe_dump({"harness_refs": {"solver": str(package)}}), encoding="utf-8")
+    state = {**_state_dict(), "max_iteration": 3, "epoch_checkpoints": [], "active_epoch": 1,
+             "active_epoch_before_harness_refs_path": str(refs), "source_harness_refs_path": str(refs),
+             "best_harness_refs_path": str(refs)}
+    projector = RsiProjector(tmp_path)
+    projector.register_root(task_id)
+    artifacts = RsiArtifactService(tmp_path)
+    consumer = RsiEventConsumer(task_id, RsiUsageRecorder(), projector, artifacts)
+    await consumer.on_engine_event(root_node_event(state))
+    await consumer.on_engine_event(active_epoch_node_event(state))
+    await consumer.on_engine_event(NodeStageEvent("epoch-001", {"name": "Analyzing failed cases"}))
+    nodes = projector.derive_tree(task_id)["nodes"]
+    assert len(nodes) == 2
+    assert nodes[0]["description"] == "Initial Harness"
+    assert nodes[1]["description"] == "Analyzing failed cases"
+
+    checkpoint = {"epoch": 1, "before_harness_refs_path": str(refs), "harness_refs_path": str(refs),
+                  "selected_harness_refs_path": str(refs), "score": 1.0, "promotion_applied": True}
+    state.update(epoch_checkpoints=[checkpoint], active_epoch=2, best_score=1.0)
+    event = epoch_node_event(state, checkpoint)
+    assert any(item["role"] == "PRIMARY" and item["path"] == str(package) for item in event.artifacts)
+    await consumer.on_engine_event(event)
+    await consumer.on_engine_event(active_epoch_node_event(state))
+    # Simulate a persisted tree from the older candidate-based query adapter.
+    projector.on_node_created(task_id, {"node": {"ref": "legacy-candidate", "score": 0.0}})
+    projector.on_progress_metric(task_id, {"iteration": 99})
+    _write_state(tmp_path, task_id, state)
+    provider = HarnessProvider(tmp_path)
+    for view in (projector, RsiProjector(tmp_path)):
+        view.load_from_disk(task_id)
+        tree = view.merge_provider_tree(task_id, provider.get_tree(task_id))
+        assert [node["node_id"] for node in tree["nodes"]] == ["ROOT", "epoch-001", "epoch-002"]
+        assert tree["iteration"] == 1
+        assert tree["nodes"][1]["snapshot_artifact_id"] == "Aepoch-001"
+    assert provider.read_state(task_id).best_node_id == "epoch-001"
+    assert provider.read_report(task_id).best_node_id == "epoch-001"
+    assert provider._result_from_state(task_id).final_node_id == "epoch-001"
+    assert {item.node_id for item in provider.read_report(task_id).artifact_index} == {"h0", "epoch-001"}
+    snapshot = artifacts.locate(task_id, "Aepoch-001")
+    with zipfile.ZipFile(snapshot.path) as archive:
+        assert "PRIMARY_candidate/skills/verification/SKILL.md" in archive.namelist()
+        assert "PRIMARY_candidate/harness_config.yaml" in archive.namelist()
+    # Replaying H0 must not make it newer than the adopted epoch artifact.
+    await consumer.on_engine_event(root_node_event(state))
+    assert artifacts.best_artifact(task_id)["artifact_id"] == "Aepoch-001"
+
+
 @pytest.mark.parametrize("baseline_score", [0.0, 0.5])
 def test_real_engine_baseline_reaches_push_report_tree_and_resume(tmp_path: Path, baseline_score: float) -> None:
     import asyncio

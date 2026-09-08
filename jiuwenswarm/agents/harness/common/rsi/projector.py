@@ -140,6 +140,9 @@ class RsiProjector:
         from jiuwenswarm.agents.harness.common.rsi.artifact_adapter import provider_tree_to_web
 
         raw = provider_tree_to_web(tree)
+        epoch_projection = any(
+            (item.get("extra") or {}).get("iteration_unit") == "epoch" for item in raw.get("nodes", [])
+        )
         incoming_nodes: list[RsiTreeNode] = []
         for item in raw.get("nodes", []):
             node = self._tree_node_from_web(item, task_id=task_id)
@@ -149,6 +152,16 @@ class RsiProjector:
             nodes = self._nodes.setdefault(task_id, {})
             self._ensure_root_locked(task_id)
             ref_index = self._ref_index.setdefault(task_id, {})
+            if epoch_projection:
+                # Older Harness queries projected candidates as G* peers. Only
+                # canonical epoch snapshots are authoritative for these tasks.
+                incoming_ids = {node.node_id for node in incoming_nodes}
+                for node_id in list(nodes):
+                    if node_id != _ROOT and node_id not in incoming_ids:
+                        del nodes[node_id]
+                for ref, node_id in list(ref_index.items()):
+                    if node_id not in nodes:
+                        del ref_index[ref]
             for incoming in incoming_nodes:
                 if incoming.node_id == _ROOT:
                     root = nodes[_ROOT]
@@ -173,7 +186,7 @@ class RsiProjector:
                 ),
                 default=0,
             )
-            metric["iteration"] = max(
+            metric["iteration"] = _safe_int(raw.get("iteration")) if epoch_projection else max(
                 _safe_int(metric.get("iteration")),
                 _safe_int(raw.get("iteration")),
                 node_iteration,
@@ -381,6 +394,12 @@ class RsiProjector:
 
     @classmethod
     def _merge_node(cls, local: RsiTreeNode, provider: RsiTreeNode) -> RsiTreeNode:
+        if (provider.extra or {}).get("iteration_unit") == "epoch":
+            provider.snapshot_artifact_id = local.snapshot_artifact_id or provider.snapshot_artifact_id
+            if provider.type == "PROVISIONAL":
+                provider.description = local.description or provider.description
+                provider.extra = {**(local.extra or {}), **(provider.extra or {})}
+            return cls._normalize_node(provider)
         adopted = bool(local.adopted or provider.adopted)
         extra = {**(local.extra or {}), **(provider.extra or {})}
         paper_extra = (provider.extra or {}).get("paper")
