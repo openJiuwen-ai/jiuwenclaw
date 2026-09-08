@@ -315,7 +315,7 @@ class LogMaskingEngine:
 
         单机版（``JIUWENSWARM_EDITION`` 非企业版）不访问 GDB，直接使用内置规则。
         企业版直接读本网关 DB（每网关独立库，不依赖实例 id 绑定）。
-        读库走本地 ``enterprise_config.gateway_db``，不依赖 ``packages/jiuwenclaw-ee``。
+        读库走本地 ``enterprise_config.db_queries``，不依赖 ``packages/jiuwenclaw-ee``。
 
         ``db_authoritative``：
         - ``None``（默认）：GDB 有行时以库为准，空库保留内置；
@@ -362,9 +362,9 @@ class LogMaskingEngine:
         table_name: str = _LOG_MASKING_RULE_TABLE,
     ) -> list[dict[str, Any]]:
         """返回 ``enabled=true`` 的规则行（priority DESC）。"""
-        from jiuwenswarm.server.runtime.enterprise_config import gateway_db
+        from jiuwenswarm.server.runtime.enterprise_config import db_queries
 
-        rows = await gateway_db.list_records(
+        rows = await db_queries.list_records(
             table_name,
             filters={"enabled": True},
             order_by="priority DESC",

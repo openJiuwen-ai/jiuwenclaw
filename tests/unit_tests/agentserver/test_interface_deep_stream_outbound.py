@@ -216,6 +216,58 @@ def test_hitl_suppress_dict_task_failed_not_noise() -> None:
     assert parsed == {"event_type": "chat.error", "error": "model failed"}
 
 
+def test_controller_output_task_interaction_is_dropped() -> None:
+    """ISSUE #3892: TASK_INTERACTION must not stringify as chat.delta body."""
+    chunk = SimpleNamespace(
+        type="controller_output",
+        payload=SimpleNamespace(
+            type="task_interaction",
+            data=[SimpleNamespace(data={"result_type": "interrupt", "state": []})],
+            metadata={"task_id": "t1"},
+        ),
+    )
+    parsed = JiuWenSwarmDeepAdapter._parse_stream_chunk(chunk)
+    assert parsed is None
+
+
+def test_controller_output_control_plane_types_are_dropped() -> None:
+    for inner in ("task_completion", "processing", "all_tasks_processed"):
+        chunk = SimpleNamespace(
+            type="controller_output",
+            payload=SimpleNamespace(type=inner, data=[]),
+        )
+        assert JiuWenSwarmDeepAdapter._parse_stream_chunk(chunk) is None
+
+
+def test_controller_output_dict_task_interaction_is_dropped() -> None:
+    chunk = SimpleNamespace(
+        type="controller_output",
+        payload={
+            "type": "task_interaction",
+            "data": [
+                {
+                    "data": {
+                        "result_type": "interrupt",
+                        "state": [],
+                        "interrupt_ids": ["call_x"],
+                        "_interaction_emitted": True,
+                    }
+                }
+            ],
+            "metadata": {"task_id": "t2"},
+        },
+    )
+    assert JiuWenSwarmDeepAdapter._parse_stream_chunk(chunk) is None
+
+
+def test_controller_output_unknown_type_is_dropped() -> None:
+    chunk = SimpleNamespace(
+        type="controller_output",
+        payload=SimpleNamespace(type="future_new_type", data=[]),
+    )
+    assert JiuWenSwarmDeepAdapter._parse_stream_chunk(chunk) is None
+
+
 def test_hitl_suppress_cleared_on_resume_or_unknown_chunk() -> None:
     """Content and unknown SDK frames clear suppress (default = resumed)."""
     for chunk_type in ("llm_output", "answer", "chat.file", "task.start", "tool_call"):

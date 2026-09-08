@@ -225,7 +225,7 @@ async def _run_with_telemetry(host: str, port: int, telemetry_lifecycle) -> None
     from jiuwenswarm.extensions.registry import ExtensionRegistry
     from jiuwenswarm.common.config import get_config
 
-    # 脱敏冷加载尽量提前：读库走 gateway_db/module_importer，不依赖扩展加载完成。
+    # 脱敏冷加载尽量提前：读库走 infrastructure.db，不依赖扩展加载完成。
     # 失败时仍保留内置规则；企业版 identity 在 import 阶段已可对 user_id= 等脱敏。
     try:
         from jiuwenswarm.infrastructure.log_masking.engine import LogMaskingEngine
@@ -317,7 +317,23 @@ async def _run_with_telemetry(host: str, port: int, telemetry_lifecycle) -> None
     )
     await server.start()
 
-    # ---------- ProactiveEngine 初始化 ----------
+    # Packaged sidecar topology (relay-claw) has no Gateway process, so the
+    # A2A outbound tools' reverse RPCs would otherwise stall to the 300s tool
+    # deadline. Install an in-process answerer that only defers when a real
+    # Gateway manager exists (see a2a_outbound_local_rpc module docstring).
+    try:
+        from jiuwenswarm.server.runtime.a2a_outbound_local_rpc import (
+            handle_a2a_outbound_tool_push,
+        )
+
+        server._set_a2a_outbound_local_rpc_handler(handle_a2a_outbound_tool_push)
+        logger.info("[AgentServer] local A2A outbound RPC fallback installed")
+    except Exception:
+        logger.warning(
+            "[AgentServer] local A2A outbound RPC fallback install failed",
+            exc_info=True,
+        )
+
     # 适配逻辑（建专用 agent + 触发主 agent 回调）封装在 proactive_adapter，
     # app_agentserver 只调 init_proactive_engine。
     from jiuwenswarm.server.runtime.proactive_adapter import init_proactive_engine

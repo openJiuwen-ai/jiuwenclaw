@@ -18,7 +18,10 @@
     "pagination": {
       "total": "共 {{count}} 个",
       "prev": "上一页",
-      "next": "下一页"
+      "next": "下一页",
+      "pageSize": "每页",
+      "jumpTo": "跳至",
+      "go": "确定"
     }
   },
   "a2ui": {

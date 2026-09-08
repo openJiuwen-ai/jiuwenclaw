@@ -31,18 +31,18 @@ def resolve_manager_http_base(cfg: Settings | None = None) -> str:
 
 
 class InstanceService:
-    """启动时确保 GatewayDb 连接可用。"""
+    """启动时确保企业库连接可用。"""
 
     def __init__(self, cfg: Settings | None = None) -> None:
         self._cfg = cfg or get_settings()
 
     async def start(self) -> None:
         try:
-            from ..enterprise_config.gateway_db import GatewayDb
+            from jiuwenswarm.infrastructure.db.database import Database
 
-            GatewayDb.current()
+            Database.current()
         except Exception:  # noqa: BLE001
-            logger.debug("[InstanceService] GatewayDb.current failed", exc_info=True)
+            logger.debug("[InstanceService] Database.current failed", exc_info=True)
             return
         logger.info(
             "[InstanceService] endpoint=%s (Manager health-probes this Gateway)",

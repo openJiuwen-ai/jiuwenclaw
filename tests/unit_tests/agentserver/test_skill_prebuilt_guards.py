@@ -1,4 +1,4 @@
-"""Skill 白名单的租户守卫与 workspace 状态同步回归。"""
+"""预置技能租户守卫与 workspace 状态同步回归。"""
 
 import asyncio
 from pathlib import Path
@@ -11,7 +11,7 @@ from jiuwenswarm.common.utils import (
     get_multi_tenant_skill_dirs,
     get_tenant_agent_workspace_dir,
 )
-from jiuwenswarm.server.runtime.skill.skill_whitelist import is_skill_whitelist_tenant
+from jiuwenswarm.server.runtime.skill.skill_prebuilt import is_skill_prebuilt_tenant
 
 
 @pytest.fixture
@@ -21,23 +21,23 @@ def agent_runtime_env(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.delenv("JIUWENSWARM_EDITION", raising=False)
 
 
-def test_is_skill_whitelist_tenant_rejects_empty_ids(agent_runtime_env) -> None:
-    assert is_skill_whitelist_tenant("", "") is False
-    assert is_skill_whitelist_tenant("  ", "bot") is False
-    assert is_skill_whitelist_tenant("bot", None) is False
+def test_is_skill_prebuilt_tenant_rejects_empty_ids(agent_runtime_env) -> None:
+    assert is_skill_prebuilt_tenant("", "") is False
+    assert is_skill_prebuilt_tenant("  ", "bot") is False
+    assert is_skill_prebuilt_tenant("bot", None) is False
 
 
-def test_is_skill_whitelist_tenant_legacy_tenants(agent_runtime_env) -> None:
-    assert is_skill_whitelist_tenant("default", "default") is False
-    assert is_skill_whitelist_tenant("acp", "global_acp") is False
-    assert is_skill_whitelist_tenant("real-agent", "real-svc") is True
+def test_is_skill_prebuilt_tenant_legacy_tenants(agent_runtime_env) -> None:
+    assert is_skill_prebuilt_tenant("default", "default") is False
+    assert is_skill_prebuilt_tenant("acp", "global_acp") is False
+    assert is_skill_prebuilt_tenant("real-agent", "real-svc") is True
 
 
-def test_is_skill_whitelist_tenant_requires_agent_runtime(
+def test_is_skill_prebuilt_tenant_requires_agent_runtime(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.delenv("JIUWENSWARM_EDITION", raising=False)
-    assert is_skill_whitelist_tenant("real-agent", "real-svc") is False
+    assert is_skill_prebuilt_tenant("real-agent", "real-svc") is False
 
 
 def test_tenant_workspace_defaults_without_key() -> None:
@@ -55,33 +55,33 @@ def test_multi_tenant_skill_dirs_single_tenant_fallback() -> None:
     assert get_multi_tenant_skill_dirs() == [get_agent_skills_dir()]
 
 
-def test_parse_agent_skill_whitelist_identity_fields() -> None:
-    from jiuwenswarm.server.runtime.skill.skill_whitelist import parse_agent_skill_whitelist
+def test_parse_agent_skill_prebuilt_identity_fields() -> None:
+    from jiuwenswarm.server.runtime.skill.skill_prebuilt import parse_agent_skill_prebuilt
 
-    config = parse_agent_skill_whitelist(
+    config = parse_agent_skill_prebuilt(
         "bot-1",
         "my-svc",
         [{
             "skill_id": "asset-1",
-            "skill_version": "3.0.1",
-            "skill_source": "https://artifacts.example/pkg.zip",
+            "package_url": "https://artifacts.example/pkg.zip",
             "source_id": "customer-skillhub",
             "version_id": "version-001",
         }],
     )
     item = config.skills[0]
-    assert (item.id, item.version, item.source_id, item.version_id) == (
-        "asset-1", "3.0.1", "customer-skillhub", "version-001"
+    assert (item.id, item.source_id, item.version_id, item.package_url) == (
+        "asset-1", "customer-skillhub", "version-001", "https://artifacts.example/pkg.zip"
     )
+    assert item.install_mode() == "provider"
     assert len(config.items_with_source) == 1
 
 
-def test_parse_agent_skill_whitelist_skips_invalid_items() -> None:
-    from jiuwenswarm.server.runtime.skill.skill_whitelist import parse_agent_skill_whitelist
+def test_parse_agent_skill_prebuilt_skips_invalid_items() -> None:
+    from jiuwenswarm.server.runtime.skill.skill_prebuilt import parse_agent_skill_prebuilt
 
-    assert parse_agent_skill_whitelist("bot-1", "my-svc", []).skills == []
-    config = parse_agent_skill_whitelist(
-        "bot-1", "my-svc", [{"skill_id": "only-id", "skill_version": "1.0.0"}]
+    assert parse_agent_skill_prebuilt("bot-1", "my-svc", []).skills == []
+    config = parse_agent_skill_prebuilt(
+        "bot-1", "my-svc", [{"skill_id": "only-id"}]
     )
     assert config.items_with_source == []
 
@@ -99,29 +99,53 @@ def test_workspace_state_sync_records_prebuilt_and_skips_same_version(
     tmp_path: Path,
 ) -> None:
     from jiuwenswarm.server.runtime.skill.skill_manager import SkillManager
-    from jiuwenswarm.server.runtime.skill.skill_whitelist import (
-        AgentSkillWhitelistConfig,
-        SkillWhitelistItem,
-        SkillWhitelistSynchronizer,
+    from jiuwenswarm.server.runtime.skill.skill_prebuilt import (
+        AgentSkillPrebuiltConfig,
+        SkillPrebuiltItem,
+        SkillPrebuiltSynchronizer,
     )
 
     workspace = tmp_path / "tenant_ws"
     manager = SkillManager(workspace_dir=str(workspace))
     calls = {"count": 0}
 
-    def _download(_url: str, _force: bool, _mirror: None, _checksum: str = "") -> dict[str, Any]:
+    async def _provider_install(
+        *, source_id: str, skill_id: str, version_id: str, force: bool = True
+    ) -> dict[str, Any]:
+        del force
         calls["count"] += 1
         _write_managed_skill(workspace, "managed-skill")
-        return {"ok": True, "skill_name": "managed-skill"}
+        row = manager.record_skill_installation(
+            name="managed-skill",
+            source_type="prebuilt",
+            source=source_id,
+            origin=f"{source_id}:{skill_id}",
+            version="1.0.0",
+            skill_id=skill_id,
+            source_id=source_id,
+            version_id=version_id,
+            replace_by_name=True,
+        )
+        return {
+            "ok": True,
+            "skill_name": "managed-skill",
+            "row": row,
+            "version": "1.0.0",
+        }
 
-    manager.install_skill_sync = _download  # type: ignore[method-assign]
-    synchronizer = SkillWhitelistSynchronizer(
+    def _url_must_not_run(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        pytest.fail("provider triple must not fall back to package_url install")
+
+    manager.install_prebuilt_from_provider = _provider_install  # type: ignore[method-assign]
+    manager.install_skill_sync = _url_must_not_run  # type: ignore[method-assign]
+    synchronizer = SkillPrebuiltSynchronizer(
         workspace, "svc", "bot", skill_manager=manager
     )
-    config = AgentSkillWhitelistConfig(
+    # source_id + skill_id + version_id → provider；package_url 不得改写路径。
+    config = AgentSkillPrebuiltConfig(
         agent_id="bot",
         service_id="svc",
-        skills=[SkillWhitelistItem(
+        skills=[SkillPrebuiltItem(
             id="asset-1",
             version="1.0.0",
             source="https://example.com/managed.zip",
@@ -132,9 +156,12 @@ def test_workspace_state_sync_records_prebuilt_and_skips_same_version(
 
     first = asyncio.run(synchronizer.sync(config))
     second = asyncio.run(synchronizer.sync(config))
-    record = manager.list_skill_installations()[0]
+    records = manager.list_skill_installations()
 
-    assert first.ok is True and second.ok is True
+    assert first.ok is True, first.errors
+    assert second.ok is True, second.errors
+    assert records, "provider sync must write an installation record"
+    record = records[0]
     assert calls["count"] == 1
     assert record["name"] == "managed-skill"
     assert record["source_type"] == "prebuilt"
@@ -150,10 +177,10 @@ def test_workspace_state_sync_backfills_matching_prebuilt_without_download(
 ) -> None:
     """Catch regressions that re-download an already provisioned prebuilt dir."""
     from jiuwenswarm.server.runtime.skill.skill_manager import SkillManager
-    from jiuwenswarm.server.runtime.skill.skill_whitelist import (
-        AgentSkillWhitelistConfig,
-        SkillWhitelistItem,
-        SkillWhitelistSynchronizer,
+    from jiuwenswarm.server.runtime.skill.skill_prebuilt import (
+        AgentSkillPrebuiltConfig,
+        SkillPrebuiltItem,
+        SkillPrebuiltSynchronizer,
     )
 
     workspace = tmp_path / "tenant_ws"
@@ -171,33 +198,39 @@ def test_workspace_state_sync_backfills_matching_prebuilt_without_download(
     )
     manager = SkillManager(workspace_dir=str(workspace))
 
-    def _unexpected_download(*_args: Any) -> dict[str, Any]:
+    def _unexpected_download(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        pytest.fail("matching prebuilt directory must be adopted without download")
+
+    async def _unexpected_provider(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
         pytest.fail("matching prebuilt directory must be adopted without download")
 
     manager.install_skill_sync = _unexpected_download  # type: ignore[method-assign]
-    config = AgentSkillWhitelistConfig(
+    manager.install_prebuilt_from_provider = _unexpected_provider  # type: ignore[method-assign]
+    # 盘→账本回填仅 url 路径：完整 provider 三元组会改走下载，故不填 version_id。
+    config = AgentSkillPrebuiltConfig(
         agent_id="bot",
         service_id="svc",
-        skills=[SkillWhitelistItem(
+        skills=[SkillPrebuiltItem(
             id="asset-1",
             version="1.0.0",
             source="https://example.com/managed.zip",
             source_id="customer-skillhub",
-            version_id="version-1",
         )],
     )
 
     result = asyncio.run(
-        SkillWhitelistSynchronizer(
+        SkillPrebuiltSynchronizer(
             workspace, "svc", "bot", skill_manager=manager
         ).sync(config)
     )
 
-    assert result.ok is True
+    assert result.ok is True, result.errors
     assert result.succeeded == ["managed-skill"]
     assert result.enabled_skill_dirs == ["managed-skill"]
-    assert manager.list_skill_installations() == [{
-        "installation_id": manager.list_skill_installations()[0]["installation_id"],
+    records = manager.list_skill_installations()
+    assert records, "url sync must adopt the existing dir into the ledger"
+    assert records == [{
+        "installation_id": records[0]["installation_id"],
         "name": "managed-skill",
         "declared_name": "managed-skill",
         "entity_dir": "managed-skill",
@@ -205,12 +238,11 @@ def test_workspace_state_sync_backfills_matching_prebuilt_without_download(
         "source": "customer-skillhub",
         "origin": "https://example.com/managed.zip",
         "version": "1.0.0",
-        "installed_at": manager.list_skill_installations()[0]["installed_at"],
-        "updated_at": manager.list_skill_installations()[0]["updated_at"],
+        "installed_at": records[0]["installed_at"],
+        "updated_at": records[0]["updated_at"],
         "enabled": True,
         "source_id": "customer-skillhub",
         "skill_id": "asset-1",
-        "version_id": "version-1",
     }]
 
 
@@ -218,10 +250,10 @@ def test_workspace_state_failed_refresh_preserves_previous_record(
     tmp_path: Path,
 ) -> None:
     from jiuwenswarm.server.runtime.skill.skill_manager import SkillManager
-    from jiuwenswarm.server.runtime.skill.skill_whitelist import (
-        AgentSkillWhitelistConfig,
-        SkillWhitelistItem,
-        SkillWhitelistSynchronizer,
+    from jiuwenswarm.server.runtime.skill.skill_prebuilt import (
+        AgentSkillPrebuiltConfig,
+        SkillPrebuiltItem,
+        SkillPrebuiltSynchronizer,
     )
 
     workspace = tmp_path / "tenant_ws"
@@ -237,16 +269,19 @@ def test_workspace_state_failed_refresh_preserves_previous_record(
     manager.install_skill_sync = lambda *_args: {  # type: ignore[method-assign]
         "ok": False, "detail": "network failed"
     }
-    config = AgentSkillWhitelistConfig(
+    # url 路径按 origin/package_url 决定是否刷新，同 URL 不会因 version 字段重下。
+    config = AgentSkillPrebuiltConfig(
         agent_id="bot",
         service_id="svc",
-        skills=[SkillWhitelistItem(
-            id="asset-1", version="2.0.0", source="https://example.com/managed.zip"
+        skills=[SkillPrebuiltItem(
+            id="asset-1",
+            version="2.0.0",
+            source="https://example.com/managed-v2.zip",
         )],
     )
 
     result = asyncio.run(
-        SkillWhitelistSynchronizer(
+        SkillPrebuiltSynchronizer(
             workspace, "svc", "bot", skill_manager=manager
         ).sync(config)
     )
@@ -261,30 +296,27 @@ def test_workspace_state_failed_refresh_preserves_previous_record(
 # 管理面 enabled 字段 + builtin 只填真空（不改写 prebuilt/user）
 # ---------------------------------------------------------------------------
 
-def test_parse_agent_skill_whitelist_skips_disabled_items() -> None:
+def test_parse_agent_skill_prebuilt_skips_disabled_items() -> None:
     """管理面禁用的模板项不得下发到租户；缺省 enabled 视为启用."""
-    from jiuwenswarm.server.runtime.skill.skill_whitelist import parse_agent_skill_whitelist
+    from jiuwenswarm.server.runtime.skill.skill_prebuilt import parse_agent_skill_prebuilt
 
-    config = parse_agent_skill_whitelist(
+    config = parse_agent_skill_prebuilt(
         "bot-1",
         "my-svc",
         [
             {
                 "skill_id": "asset-disabled",
-                "skill_version": "1.0.0",
-                "skill_source": "https://example.com/disabled.zip",
+                "package_url": "https://example.com/disabled.zip",
                 "enabled": False,
             },
             {
                 "skill_id": "asset-enabled",
-                "skill_version": "1.0.0",
-                "skill_source": "https://example.com/enabled.zip",
+                "package_url": "https://example.com/enabled.zip",
                 "enabled": True,
             },
             {
                 "skill_id": "asset-default",
-                "skill_version": "1.0.0",
-                "skill_source": "https://example.com/default.zip",
+                "package_url": "https://example.com/default.zip",
             },
         ],
     )
@@ -351,9 +383,9 @@ def test_register_builtin_skills_does_not_flip_prebuilt(
 
 def test_workspace_state_cleanup_removes_only_prebuilt(tmp_path: Path) -> None:
     from jiuwenswarm.server.runtime.skill.skill_manager import SkillManager
-    from jiuwenswarm.server.runtime.skill.skill_whitelist import (
-        AgentSkillWhitelistConfig,
-        SkillWhitelistSynchronizer,
+    from jiuwenswarm.server.runtime.skill.skill_prebuilt import (
+        AgentSkillPrebuiltConfig,
+        SkillPrebuiltSynchronizer,
     )
 
     workspace = tmp_path / "tenant_ws"
@@ -367,9 +399,9 @@ def test_workspace_state_cleanup_removes_only_prebuilt(tmp_path: Path) -> None:
         )
 
     result = asyncio.run(
-        SkillWhitelistSynchronizer(
+        SkillPrebuiltSynchronizer(
             workspace, "svc", "bot", skill_manager=manager
-        ).sync(AgentSkillWhitelistConfig(agent_id="bot", service_id="svc"))
+        ).sync(AgentSkillPrebuiltConfig(agent_id="bot", service_id="svc"))
     )
 
     assert result.ok is True

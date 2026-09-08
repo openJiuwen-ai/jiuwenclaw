@@ -14,7 +14,7 @@ import { ConfirmDialog } from '../../components/common/ConfirmDialog';
 import { useToast } from '../../components/common/useToast';
 import { buildSourcePresentationParams, sourceSkillIdentity, isSourceSkillInstalled } from './installMetadata';
 
-const PAGE_SIZE = 20;
+const PAGE_SIZE_DEFAULT = 20;
 
 type LoadState = 'idle' | 'loading' | 'success' | 'error' | 'empty';
 
@@ -104,8 +104,8 @@ function isFresh(at: number): boolean {
   return Date.now() - at < MOUNT_CACHE_TTL_MS;
 }
 
-function searchCacheKey(sessionId: string, sourceId: string, q: string, page: number): string {
-  return `${sessionId}|${sourceId}|${q}|${page}`;
+function searchCacheKey(sessionId: string, sourceId: string, q: string, page: number, pageSize: number): string {
+  return `${sessionId}|${sourceId}|${q}|${page}|${pageSize}`;
 }
 
 /**
@@ -139,13 +139,14 @@ export function EnterpriseSkillSourcePanel({ sessionId, installedSkillOrigins, i
   const [results, setResults] = useState<SkillCandidate[]>([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(PAGE_SIZE_DEFAULT);
   const [loadState, setLoadState] = useState<LoadState>('idle');
   const { toast, showToast, clearToast } = useToast();
   const [installingId, setInstallingId] = useState<string | null>(null);
   const [updateStatuses, setUpdateStatuses] = useState<Map<string, UpdateStatus>>(new Map());
   const [pendingConfirm, setPendingConfirm] = useState<SkillCandidate | null>(null);
 
-  const totalPages = useMemo(() => Math.max(1, Math.ceil(total / PAGE_SIZE)), [total]);
+  const totalPages = useMemo(() => Math.max(1, Math.ceil(total / pageSize)), [total, pageSize]);
 
   const withSession = useCallback((params?: Record<string, unknown>) => ({ ...(params || {}), session_id: sessionId }), [sessionId]);
 
@@ -226,7 +227,7 @@ export function EnterpriseSkillSourcePanel({ sessionId, installedSkillOrigins, i
     async (targetPage: number, options?: { preferCache?: boolean }) => {
       if (!sourceId) return;
       const q = query.trim();
-      const cacheKey = searchCacheKey(sessionId, sourceId, q, targetPage);
+      const cacheKey = searchCacheKey(sessionId, sourceId, q, targetPage, pageSize);
       if (options?.preferCache) {
         const cached = searchCache.get(cacheKey);
         if (cached && isFresh(cached.at)) {
@@ -251,7 +252,7 @@ export function EnterpriseSkillSourcePanel({ sessionId, installedSkillOrigins, i
             source_id: sourceId,
             q,
             page: targetPage,
-            page_size: PAGE_SIZE,
+            page_size: pageSize,
           }),
         );
         if (!data.success) throw new Error(data.error_message || t('skills.source.errors.searchFailed'));
@@ -277,7 +278,7 @@ export function EnterpriseSkillSourcePanel({ sessionId, installedSkillOrigins, i
         showToast('error', error instanceof Error ? error.message : t('skills.source.errors.searchFailed'));
       }
     },
-    [query, sessionId, showToast, sourceId, t, withSession],
+    [pageSize, query, sessionId, showToast, sourceId, t, withSession],
   );
 
   useEffect(() => {
@@ -311,6 +312,15 @@ export function EnterpriseSkillSourcePanel({ sessionId, installedSkillOrigins, i
     void runSearch(1);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [query, isExternalQuery]);
+
+  const handlePageSizeChange = useCallback(
+    (nextSize: number) => {
+      setPageSize(nextSize);
+      setPage(1);
+      if (sourceId) void runSearch(1);
+    },
+    [runSearch, sourceId],
+  );
 
   const handleInstall = useCallback(
     async (item: SkillCandidate, force = false) => {
@@ -583,7 +593,17 @@ export function EnterpriseSkillSourcePanel({ sessionId, installedSkillOrigins, i
         </div>
       )}
 
-      {loadState === 'success' && <Pagination page={page} totalPages={totalPages} total={total} onPageChange={p => void runSearch(p)} className="mt-3" />}
+      {loadState === 'success' && (
+        <Pagination
+          page={page}
+          totalPages={totalPages}
+          total={total}
+          pageSize={pageSize}
+          onPageSizeChange={handlePageSizeChange}
+          onPageChange={p => void runSearch(p)}
+          className="mt-3"
+        />
+      )}
       {pendingConfirm && (
         <ConfirmDialog
           title={t('skills.source.replaceConfirmTitle')}

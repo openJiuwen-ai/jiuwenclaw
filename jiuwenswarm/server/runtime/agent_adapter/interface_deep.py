@@ -565,10 +565,10 @@ from jiuwenswarm.server.runtime.skill_turbo.plan_node import AbortError as _Skil
 from jiuwenswarm.gateway.cron import CronTargetChannel
 from jiuwenswarm.common.schema.agent import AgentRequest, AgentResponse, AgentResponseChunk
 from jiuwenswarm.common.schema.message import ReqMethod
-from jiuwenswarm.server.runtime.skill.skill_whitelist import (
-    SkillWhitelistSynchronizer,
-    is_skill_whitelist_tenant,
-    parse_agent_skill_whitelist,
+from jiuwenswarm.server.runtime.skill.skill_prebuilt import (
+    SkillPrebuiltSynchronizer,
+    is_skill_prebuilt_tenant,
+    parse_agent_skill_prebuilt,
 )
 from jiuwenswarm.common.utils import (
     DEFAULT_ENABLE_READ_IMAGE_MULTIMODAL,
@@ -2364,7 +2364,7 @@ class JiuWenSwarmDeepAdapter:
         (e.g. office-claw-skills), those roots are used instead of only the
         empty workspace skills folder.
         """
-        if is_skill_whitelist_tenant(self._agent_id, self._service_id):
+        if is_skill_prebuilt_tenant(self._agent_id, self._service_id):
             skills_dirs = [str(Path(self._workspace_dir) / "skills")]
         else:
             skills_dirs = [str(p) for p in resolve_agent_registered_skill_dirs()]
@@ -2397,7 +2397,7 @@ class JiuWenSwarmDeepAdapter:
 
     async def _refresh_skill_identity(self, skill_name: str) -> None:
         """按安装账本校准当前企业 Skill 的预置身份，不改变 Skill 加载集合。"""
-        if not is_skill_whitelist_tenant(self._agent_id, self._service_id):
+        if not is_skill_prebuilt_tenant(self._agent_id, self._service_id):
             return
         name = str(skill_name or "").strip()
         if not name or Path(name).name != name:
@@ -6274,7 +6274,7 @@ class JiuWenSwarmDeepAdapter:
             else []
         )
         enabled = self._enabled_skills
-        if is_skill_whitelist_tenant(self._agent_id, self._service_id) and enabled is None:
+        if is_skill_prebuilt_tenant(self._agent_id, self._service_id) and enabled is None:
             enabled = []
         elif enabled is None:
             raw = enabled_skills_from_environ()
@@ -6890,7 +6890,7 @@ class JiuWenSwarmDeepAdapter:
             logger.info("[JiuWenSwarmDeepAdapter] current skill_mode: %s", skill_mode)
             skills_dirs = self._resolve_skill_dirs(extra_skill_dir)
             enabled_skills = self._enabled_skills
-            if is_skill_whitelist_tenant(self._agent_id, self._service_id) and enabled_skills is None:
+            if is_skill_prebuilt_tenant(self._agent_id, self._service_id) and enabled_skills is None:
                 enabled_skills = []
             elif enabled_skills is None:
                 # OfficeClaw tip path: ENABLED_SKILLS from sync_agents_configs.
@@ -7157,7 +7157,7 @@ class JiuWenSwarmDeepAdapter:
 
     async def refresh_enabled_skills_from_db(self) -> None:
         """workspace Skill 状态变更后刷新启用集并热替换 ``SkillUseRail``。"""
-        if not is_skill_whitelist_tenant(self._agent_id, self._service_id):
+        if not is_skill_prebuilt_tenant(self._agent_id, self._service_id):
             return
         if self._instance is None:
             logger.debug(
@@ -8967,16 +8967,16 @@ class JiuWenSwarmDeepAdapter:
                 )
 
                 if (
-                    is_skill_whitelist_tenant(self._agent_id, self._service_id)
+                    is_skill_prebuilt_tenant(self._agent_id, self._service_id)
                     and self._enterprise_config is not None
                 ):
                     enterprise_skills: list[dict[str, Any]] = (
-                        getattr(self._enterprise_config, "skill_whitelist", None) or []
+                        getattr(self._enterprise_config, "skill_prebuilt", None) or []
                     )
-                    skill_config = parse_agent_skill_whitelist(
+                    skill_config = parse_agent_skill_prebuilt(
                         self._agent_id, self._service_id, enterprise_skills
                     )
-                    sync_result = await SkillWhitelistSynchronizer(
+                    sync_result = await SkillPrebuiltSynchronizer(
                         self._workspace_dir,
                         self._service_id,
                         self._agent_id,
@@ -8984,7 +8984,7 @@ class JiuWenSwarmDeepAdapter:
                     ).sync(skill_config)
                     if sync_result.errors:
                         logger.warning(
-                            "[SkillWhitelist] sync partial errors: agent_id=%s service_id=%s errors=%s",
+                            "[SkillPrebuilt] sync partial errors: agent_id=%s service_id=%s errors=%s",
                             self._agent_id,
                             self._service_id,
                             sync_result.errors,
@@ -18599,8 +18599,6 @@ class JiuWenSwarmDeepAdapter:
                     if inner_t is None and isinstance(payload, dict):
                         inner_t = payload.get("type")
                     inner_val = getattr(inner_t, "value", inner_t) if inner_t is not None else None
-                    if inner_val == "task_completion":
-                        return None
                     if inner_val == "task_failed":
                         data = getattr(payload, "data", None)
                         if data is None and isinstance(payload, dict):
@@ -18624,6 +18622,20 @@ class JiuWenSwarmDeepAdapter:
                                 "任务执行失败",
                             )
                         return {"event_type": "chat.error", "error": error or "任务执行失败"}
+                    # Close the controller_output enum: HITL cards are emitted via
+                    # ``__interaction__``; remaining types are control-plane metadata.
+                    # Never fall through to ``str(payload)`` → chat.delta (ISSUE #3892).
+                    if inner_val not in (
+                        "task_completion",
+                        "task_interaction",
+                        "processing",
+                        "all_tasks_processed",
+                    ):
+                        logger.debug(
+                            "[interface_deep] drop unhandled controller_output type=%r",
+                            inner_val,
+                        )
+                    return None
 
                 if chunk_type == "llm_output":
                     content = (
