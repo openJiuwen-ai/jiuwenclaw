@@ -2117,6 +2117,20 @@ def _is_slide_exportable(html: str) -> bool:
     return _main_inside_ppt_slide(html)
 
 
+def _is_tool_failure_envelope(result: Any) -> bool:
+    """识别 read_file 工具级失败信封（success=False）。"""
+    if hasattr(result, "success") and result.success is False:
+        return True
+    if isinstance(result, dict) and result.get("success") is False:
+        return True
+    if isinstance(result, str):
+        stripped = result.strip()
+        return stripped.startswith("success=False") or stripped.startswith(
+            "success= False"
+        )
+    return False
+
+
 _CHART_DIV_RE = re.compile(
     r'<div\b[^>]*\bid\s*=\s*["\'][^"\']*chart[^"\']*["\'][^>]*>',
     re.IGNORECASE,
@@ -5714,14 +5728,23 @@ class QAFixNode(PlanNode):
             "fix_report": "; ".join(fix_report_parts),
         }
 
-    async def _read_page_file(self, path: str) -> str:
+    async def _read_page_file(self, path: str) -> str | None:
+        """读取页面文件；超时/异常/工具级失败信封返回 None，区别于「读到空内容」。"""
         if not path or not self.has_tool("read_file"):
-            return ""
+            return None
         try:
             result = await asyncio.wait_for(
                 self.call_tool("read_file", file_path=path),
                 timeout=_P82_READ_TIMEOUT_SECONDS,
             )
+            # 工具级失败信封：read_file 对路径错误/文件过大/token 超限等不抛异常，
+            # 而是返回 success=False（对象/dict）或 "success=False" 前缀 str。
+            # 必须归入 None：parse_tool_file_content 会把信封折叠成 ""，
+            # 而 "" 会伪装成「读到空内容」通过 after_html is not None 检查，
+            # 触发 backup 误回退，把 fix 成功的页面毁掉。
+            if _is_tool_failure_envelope(result):
+                logger.warning("[P8.2] 读取页面返回失败信封 path=%s", path)
+                return None
             return PptCommon.parse_tool_file_content(result)
         except TimeoutError:
             logger.warning(
@@ -5729,12 +5752,12 @@ class QAFixNode(PlanNode):
                 path,
                 _P82_READ_TIMEOUT_SECONDS,
             )
-            return ""
+            return None
         except Exception as e:
             if isinstance(e, AbortError):
                 raise
             logger.warning("[P8.2] 读取页面失败 %s: %s", path, e)
-            return ""
+            return None
 
     async def _write_page_file(self, path: str, content: str) -> bool:
         if not path or not self.has_tool("write_file"):
@@ -5785,7 +5808,11 @@ class QAFixNode(PlanNode):
         style_file_path: str,
     ) -> list[tuple[int, bool, str] | BaseException]:
         """仅对指定页面并发执行新版 pptx-craft fix。"""
-        sem = asyncio.Semaphore(10)
+        # fix（pptx-craft cli.js）是纯 Node CPU 密集任务：正则/HTML DOM/JS AST
+        # 全量重扫，stabilize 模式最多 12 轮收敛。并发过高会吃满宿主机 CPU，
+        # Python 服务进程被 OS 饿死（loop lag 6-8s，曾导致 read_file 60s 锁
+        # 等待超时）。3 路并发已接近桌面机吞吐上限。
+        sem = asyncio.Semaphore(3)
 
         async def _fix_one_body(page_num: int) -> tuple[int, bool, str]:
             page_path = f"{pages_dir}/page-{page_num}.pptx.html"
@@ -5818,8 +5845,10 @@ class QAFixNode(PlanNode):
                 )
 
             after_html = await self._read_page_file(page_path)
-            after_ok = bool(after_html) and _is_slide_exportable(after_html)
-            if before_ok and not after_ok:
+            after_ok = after_html is not None and _is_slide_exportable(after_html)
+            # 读失败（None）时无法判定 DOM 是否被破坏，禁止用 backup 覆盖 ——
+            # 否则会把 fix 成功的页面误回退。
+            if before_ok and after_html is not None and not after_ok:
                 backup_path = await self._find_latest_backup_path(pages_dir, page_num)
                 if backup_path:
                     backup_html = await self._read_page_file(backup_path)
