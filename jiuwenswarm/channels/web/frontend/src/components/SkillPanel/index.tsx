@@ -3462,7 +3462,7 @@ export function SkillPanel({
                               {builtinSkills.length > 0 && (
                                 <div className="flex items-center justify-between mb-3">
                                   <span className="font-bold text-text-strong" style={{ fontSize: '16px' }}>
-                                    {t('skills.mySkillsTabs.other')}
+                                    {t('skills.mySkillsGroups.added')}
                                   </span>
                                 </div>
                               )}
@@ -3476,7 +3476,7 @@ export function SkillPanel({
                             <>
                               <div className="flex items-center justify-between mb-3">
                                 <span className="font-bold text-text-strong" style={{ fontSize: '16px' }}>
-                                  {t('skills.mySkillsTabs.builtin')}
+                                  {t('skills.mySkillsGroups.builtin')}
                                 </span>
                               </div>
                               <div className="card-grid-auto">

@@ -1535,8 +1535,11 @@
       "all": "全部",
       "enabled": "启用",
       "disabled": "禁用",
-      "builtin": "内置",
-      "other": "其他技能"
+      "builtin": "内置"
+    },
+    "mySkillsGroups": {
+      "added": "已添加技能",
+      "builtin": "内置技能"
     },
     "publishFilter": {
       "all": "全部",
