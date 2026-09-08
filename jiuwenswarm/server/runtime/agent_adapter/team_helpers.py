@@ -10,6 +10,7 @@ import logging
 import os
 import re
 import time
+from contextlib import AsyncExitStack, aclosing
 from contextvars import ContextVar, Token
 from dataclasses import dataclass
 from pathlib import Path
@@ -2035,6 +2036,7 @@ async def _start_team_stream_round(
     debug: bool = False,
     source: str = "first",
     exclusive_waiter: bool = False,
+    request_queue: asyncio.Queue | None = None,
 ) -> asyncio.Queue:
     """Start a team stream round and register its waiter queue."""
     # Sync team observability with current config before streaming.
@@ -2045,16 +2047,17 @@ async def _start_team_stream_round(
 
     sync_team_observability()
     await team_manager.prepare_runtime_activation(session_id, team_name)
-    request_queue = _new_team_event_queue()
-    if exclusive_waiter:
-        team_manager.add_waiter(
-            session_id,
-            request_id,
-            request_queue,
-            exclusive=True,
-        )
-    else:
-        team_manager.add_waiter(session_id, request_id, request_queue)
+    if request_queue is None:
+        request_queue = _new_team_event_queue()
+        if exclusive_waiter:
+            team_manager.add_waiter(
+                session_id,
+                request_id,
+                request_queue,
+                exclusive=True,
+            )
+        else:
+            team_manager.add_waiter(session_id, request_id, request_queue)
     logger.info(
         "[TeamHelpers] %s team request: channel_id=%s session_id=%s",
         source,
@@ -2087,13 +2090,35 @@ async def process_team_message_stream(
     inputs: dict[str, Any],
     deep_agent: DeepAgent,
 ) -> AsyncIterator[AgentResponseChunk]:
+    """Hold the session startup lock until registration, never while streaming."""
+    team_manager = get_team_manager(request.channel_id)
+    startup_lock = team_manager.get_startup_lock(request.session_id or "default")
+    async with AsyncExitStack() as startup:
+        await startup.enter_async_context(startup_lock)
+        async with aclosing(_process_team_message_stream(
+            request, inputs, deep_agent, team_manager=team_manager, startup=startup,
+        )) as stream:
+            async for chunk in stream:
+                # Early replies (validation errors, slash commands) also end
+                # startup ownership before handing control to the caller.
+                await startup.aclose()
+                yield chunk
+
+
+async def _process_team_message_stream(
+    request: Any,
+    inputs: dict[str, Any],
+    deep_agent: DeepAgent,
+    *,
+    team_manager: TeamManager,
+    startup: AsyncExitStack,
+) -> AsyncIterator[AgentResponseChunk]:
     """Process a team-mode streaming request."""
     heartbeat_service = _TEAM_HEARTBEAT_SERVICE.get()
     session_id = request.session_id or "default"
     rid = request.request_id
     channel_id = request.channel_id
 
-    team_manager = get_team_manager(channel_id)
     language = _resolve_request_language(request)
     # ``query`` stays the user's own words for the whole function — directive
     # stripping, ``$member`` routing and slash commands all parse it. Every
@@ -2114,17 +2139,17 @@ async def process_team_message_stream(
             session_id,
             exc,
         )
-    # is_first_request 判断：
-    # 1. stream task 存在 → False
-    # 2. 已有同 session 的 waiter → False
-    # 3. session 已初始化过 team runtime → False
-    # 4. 否则 → True（首次请求，需要创建 team spec + stream）
+    # The startup lock covers this check through waiter + stream registration,
+    # including the awaits in spec assembly and MCP preflight below.
     has_active_waiters = team_manager.has_waiters(session_id)
     is_first_request = (
-        not team_manager.has_stream_task(session_id)
+        not await _team_session_has_runtime(team_manager, session_id)
         and not has_active_waiters
         and not team_manager.is_session_initialized(session_id)
     )
+    if not is_first_request:
+        # Live follow-ups must remain concurrent; they only submit an input.
+        await startup.aclose()
     request_queue: asyncio.Queue | None = None
     is_heartbeat_request = _is_heartbeat_request(request)
     is_cron_request = _is_cron_request_id(rid)
@@ -2246,6 +2271,7 @@ async def process_team_message_stream(
             return
         if preparation.recovered_runtime:
             is_first_request = False
+            await startup.aclose()
         else:
             query = preparation.query
             query_text = query if isinstance(query, str) else ""
@@ -2515,6 +2541,24 @@ async def process_team_message_stream(
                         success = boundary_result.success
                         reason = boundary_result.reason
                         first_request_ready = boundary_result.first_request_ready
+                    while not success and first_request_ready:
+                        # Another follow-up may already be rebuilding the same
+                        # stopped runtime. Recheck after acquiring ownership.
+                        await startup.enter_async_context(
+                            team_manager.get_startup_lock(session_id)
+                        )
+                        if not await _team_session_has_runtime(team_manager, session_id):
+                            break
+                        await startup.aclose()
+                        boundary_result = await _deliver_followup_interact_across_boundary(
+                            team_manager,
+                            session_id,
+                            followup_payload,
+                            initial_reason=reason,
+                        )
+                        success = boundary_result.success
+                        reason = boundary_result.reason
+                        first_request_ready = boundary_result.first_request_ready
                     if not success and first_request_ready:
                         preparation = await _prepare_first_team_request(
                             team_manager=team_manager,
@@ -2528,6 +2572,8 @@ async def process_team_message_stream(
                                 yield chunk
                             return
                         is_first_request = not preparation.recovered_runtime
+                        if not is_first_request:
+                            await startup.aclose()
                         if is_first_request:
                             first_request_source = "follow-up fallback"
                             query = preparation.query
@@ -2585,6 +2631,7 @@ async def process_team_message_stream(
                     await _finish_round_submission(accepted=True)
 
             if not is_first_request:
+                await startup.aclose()
                 if is_bounded_round and request_queue is not None:
                     logger.info(
                         "[TeamHelpers] automated follow-up team request waits for round: "
@@ -2667,9 +2714,9 @@ async def process_team_message_stream(
                     return
 
         if is_first_request:
-            if request_queue is not None:
-                team_manager.remove_waiter(session_id, rid)
-                request_queue = None
+            # Keep an attached follow-up waiter throughout fallback startup.
+            # Detaching it before prepare_runtime_activation() leaves a window
+            # where another follow-up installs a second persistent consumer.
             await _begin_team_round()
             try:
                 request_queue = await _start_team_stream_round(
@@ -2684,10 +2731,14 @@ async def process_team_message_stream(
                     debug=debug,
                     source=first_request_source,
                     exclusive_waiter=is_heartbeat_request,
+                    request_queue=request_queue,
                 )
             except BaseException:
+                team_manager.remove_waiter(session_id, rid)
+                team_manager.clear_pending_runtime(session_id)
                 await _finish_round_submission(accepted=False)
                 raise
+            await startup.aclose()
             await _finish_round_submission(accepted=True)
 
         try:
