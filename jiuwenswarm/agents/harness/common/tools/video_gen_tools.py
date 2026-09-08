@@ -147,7 +147,20 @@ async def _poll_job(
     polling_url: str,
     status: str,
     job: dict[str, Any] | None = None,
-) -> tuple[str, dict[str, Any], int]:
+) -> tuple[str, dict[str, Any], int, str | None]:
+    """Poll until the job reaches a terminal status or the poll budget runs
+    out.
+
+    Returns (status, job, elapsed_seconds, error). error is None on success
+    (including the ordinary "still running after budget" case, which the
+    caller reports itself); when set, the caller should return it directly
+    as the tool's result rather than relying on status/job/elapsed. A
+    non-200 poll response or a malformed JSON body is reported this way
+    instead of raised: a raised exception here would only be caught by
+    generate_video's ``except httpx.HTTPError``, and neither RuntimeError
+    nor json.JSONDecodeError (a ValueError) is an instance of that, which
+    previously let both crash the tool call instead of degrading gracefully.
+    """
     # Seeded with the caller's already-known job state (e.g. the submit
     # response) rather than {}, so that a job already terminal on submit -
     # no polling iteration ever runs - doesn't lose its "error" field to an
@@ -159,10 +172,17 @@ async def _poll_job(
         elapsed += _POLL_INTERVAL_SECONDS
         poll = await ctx.client.get(polling_url, headers=ctx.headers)
         if poll.status_code != 200:
-            raise RuntimeError(f"polling video job {ctx.job_id} failed: {poll.status_code} {poll.text}")
-        job = poll.json()
+            return status, job, elapsed, (
+                f"[ERROR]: polling video job {ctx.job_id} failed: {poll.status_code} {poll.text}"
+            )
+        try:
+            job = poll.json()
+        except ValueError as exc:
+            return status, job, elapsed, (
+                f"[ERROR]: polling video job {ctx.job_id} returned invalid JSON: {exc!r}"
+            )
         status = job.get("status", "pending")
-    return status, job, elapsed
+    return status, job, elapsed, None
 
 
 @tool(
@@ -256,7 +276,10 @@ async def generate_video(  # pylint: disable=huawei-too-many-arguments
             submit = await client.post(f"{api_base}/videos", headers=headers, json=body)
             if submit.status_code not in (200, 201, 202):
                 return f"[ERROR]: video generation submit failed: {submit.status_code} {submit.text}"
-            job = submit.json()
+            try:
+                job = submit.json()
+            except ValueError as exc:
+                return f"[ERROR]: video generation submit returned invalid JSON: {exc!r}"
             job_id = job.get("id")
             if not job_id:
                 return f"[ERROR]: video generation submit returned no job id: {job}"
@@ -264,7 +287,9 @@ async def generate_video(  # pylint: disable=huawei-too-many-arguments
             status = job.get("status", "pending")
             ctx = _JobContext(client=client, headers=headers, job_id=job_id)
 
-            status, job, elapsed = await _poll_job(ctx, polling_url, status, job)
+            status, job, elapsed, poll_error = await _poll_job(ctx, polling_url, status, job)
+            if poll_error:
+                return poll_error
 
             if status not in _TERMINAL_STATUSES:
                 return (
@@ -318,7 +343,10 @@ async def check_video_status(job_id: str, save_dir: str | None = None) -> str:
             poll = await client.get(f"{api_base}/videos/{job_id}", headers=headers)
             if poll.status_code != 200:
                 return f"[ERROR]: checking video job {job_id} failed: {poll.status_code} {poll.text}"
-            job = poll.json()
+            try:
+                job = poll.json()
+            except ValueError as exc:
+                return f"[ERROR]: checking video job {job_id} returned invalid JSON: {exc!r}"
             status = job.get("status", "unknown")
             if status == "completed":
                 ctx = _JobContext(client=client, headers=headers, job_id=job_id)

@@ -371,6 +371,20 @@ async def test_generate_visual_non_200_returns_error(monkeypatch: pytest.MonkeyP
 
 
 @pytest.mark.asyncio
+async def test_generate_visual_invalid_json_response_returns_error(monkeypatch: pytest.MonkeyPatch):
+    _set_visual_gen_config(monkeypatch)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text="not json")
+
+    _patch_async_client(monkeypatch, handler)
+
+    result = await generate_visual(prompt="a cat")
+
+    assert result.startswith("[ERROR]: image generation request returned invalid JSON:")
+
+
+@pytest.mark.asyncio
 async def test_generate_visual_unexpected_response_shape_returns_error(monkeypatch: pytest.MonkeyPatch):
     _set_visual_gen_config(monkeypatch)
 

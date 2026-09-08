@@ -152,7 +152,10 @@ async def generate_visual(
             resp = await client.post(f"{api_base}/chat/completions", headers=headers, json=body)
             if resp.status_code != 200:
                 return f"[ERROR]: image generation request failed: {resp.status_code} {resp.text}"
-            data = resp.json()
+            try:
+                data = resp.json()
+            except ValueError as exc:
+                return f"[ERROR]: image generation request returned invalid JSON: {exc!r}"
     except httpx.HTTPError as exc:
         return f"[ERROR]: image generation request failed: {exc!r}"
 

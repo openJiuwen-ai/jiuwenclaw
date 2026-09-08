@@ -637,7 +637,7 @@ async def test_download_video_non_200_returns_error(monkeypatch: pytest.MonkeyPa
 
 
 @pytest.mark.asyncio
-async def test_poll_job_raises_on_non_200_poll_response(monkeypatch: pytest.MonkeyPatch):
+async def test_poll_job_returns_error_on_non_200_poll_response(monkeypatch: pytest.MonkeyPatch):
     _speed_up_polling(monkeypatch)
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -647,5 +647,74 @@ async def test_poll_job_raises_on_non_200_poll_response(monkeypatch: pytest.Monk
 
     async with httpx.AsyncClient() as client:
         ctx = vg._JobContext(client=client, headers={}, job_id="job-y")
-        with pytest.raises(RuntimeError, match="polling video job job-y failed: 503"):
-            await vg._poll_job(ctx, f"{_TEST_API_BASE}/videos/job-y", "pending")
+        _, _, _, error = await vg._poll_job(ctx, f"{_TEST_API_BASE}/videos/job-y", "pending")
+
+    assert error == "[ERROR]: polling video job job-y failed: 503 service unavailable"
+
+
+@pytest.mark.asyncio
+async def test_poll_job_returns_error_on_invalid_json_poll_response(monkeypatch: pytest.MonkeyPatch):
+    _speed_up_polling(monkeypatch)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text="not json")
+
+    _patch_async_client(monkeypatch, handler)
+
+    async with httpx.AsyncClient() as client:
+        ctx = vg._JobContext(client=client, headers={}, job_id="job-z")
+        _, _, _, error = await vg._poll_job(ctx, f"{_TEST_API_BASE}/videos/job-z", "pending")
+
+    assert error is not None
+    assert error.startswith("[ERROR]: polling video job job-z returned invalid JSON:")
+
+
+@pytest.mark.asyncio
+async def test_generate_video_returns_error_when_poll_response_non_200(monkeypatch: pytest.MonkeyPatch):
+    _set_video_model_config(monkeypatch)
+    _speed_up_polling(monkeypatch)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST" and request.url.path.endswith("/videos"):
+            return httpx.Response(200, json={"id": "job-1", "status": "pending"})
+        if request.url.path.endswith("/videos/job-1"):
+            return httpx.Response(503, text="service unavailable")
+        raise AssertionError(f"unexpected request: {request.method} {request.url}")
+
+    _patch_async_client(monkeypatch, handler)
+
+    result = await generate_video(prompt="a cat")
+
+    assert result == "[ERROR]: polling video job job-1 failed: 503 service unavailable"
+
+
+@pytest.mark.asyncio
+async def test_generate_video_returns_error_when_submit_response_invalid_json(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    _set_video_model_config(monkeypatch)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text="not json")
+
+    _patch_async_client(monkeypatch, handler)
+
+    result = await generate_video(prompt="a cat")
+
+    assert result.startswith("[ERROR]: video generation submit returned invalid JSON:")
+
+
+@pytest.mark.asyncio
+async def test_check_video_status_returns_error_when_poll_response_invalid_json(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    _set_video_model_config(monkeypatch)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text="not json")
+
+    _patch_async_client(monkeypatch, handler)
+
+    result = await check_video_status(job_id="job-789")
+
+    assert result.startswith("[ERROR]: checking video job job-789 returned invalid JSON:")
