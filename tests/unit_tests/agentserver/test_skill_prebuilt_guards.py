@@ -381,6 +381,97 @@ def test_register_builtin_skills_does_not_flip_prebuilt(
     assert "builtin copy" not in skill_md
 
 
+def _write_skill_package(root: Path, name: str, *, description: str) -> Path:
+    skill_dir = root / name
+    skill_dir.mkdir(parents=True, exist_ok=True)
+    (skill_dir / "SKILL.md").write_text(
+        f"---\nname: {name}\ndescription: {description}\n---\n# {name}\n",
+        encoding="utf-8",
+    )
+    return skill_dir
+
+
+def test_commit_prebuilt_overwrites_untracked_skill_dir(tmp_path: Path) -> None:
+    """目录已在但账本缺失时，prebuilt 覆盖落盘并记账，不报 skill_name_conflict。"""
+    from jiuwenswarm.server.runtime.skill.skill_manager import SkillManager
+
+    workspace = tmp_path / "tenant_ws"
+    manager = SkillManager(workspace_dir=str(workspace))
+    _write_managed_skill(workspace, "employment-rights-team")
+    manager._add_local_skill(
+        {
+            "name": "employment-rights-team",
+            "origin": "local:employment-rights-team",
+            "source": "local",
+        }
+    )
+    assert manager.list_skill_installations() == []
+
+    incoming = _write_skill_package(
+        tmp_path / "incoming",
+        "employment-rights-team",
+        description="provider-prebuilt",
+    )
+    record = manager._commit_source_skill_entity(
+        incoming,
+        skill_name="employment-rights-team",
+        source_id="swarmskillhub",
+        skill_id="asset-er",
+        version_id="ver-1",
+        version="1.0.0",
+        force=True,
+        source_type="prebuilt",
+    )
+
+    assert record["source_type"] == "prebuilt"
+    assert record["skill_id"] == "asset-er"
+    assert record["source_id"] == "swarmskillhub"
+    assert record["version_id"] == "ver-1"
+    installed = manager.list_skill_installations()
+    assert len(installed) == 1
+    assert installed[0]["source_type"] == "prebuilt"
+    skill_md = (workspace / "skills" / "employment-rights-team" / "SKILL.md").read_text(
+        encoding="utf-8"
+    )
+    assert "provider-prebuilt" in skill_md
+    assert all(
+        str(row.get("name") or "") != "employment-rights-team"
+        for row in manager.get_local_skills()
+    )
+
+
+def test_commit_user_source_still_rejects_untracked_skill_dir(tmp_path: Path) -> None:
+    """用户市场安装仍不得覆盖无账本残留目录。"""
+    from jiuwenswarm.server.runtime.skill.skill_manager import SkillManager
+    from jiuwenswarm.server.runtime.skill.source_registry import SourceRegistryError
+
+    workspace = tmp_path / "tenant_ws"
+    manager = SkillManager(workspace_dir=str(workspace))
+    _write_managed_skill(workspace, "competitive-research-team")
+    incoming = _write_skill_package(
+        tmp_path / "incoming",
+        "competitive-research-team",
+        description="user-install",
+    )
+
+    with pytest.raises(SourceRegistryError, match="skill directory already exists"):
+        manager._commit_source_skill_entity(
+            incoming,
+            skill_name="competitive-research-team",
+            source_id="swarmskillhub",
+            skill_id="asset-cr",
+            version_id="ver-1",
+            version="1.0.0",
+            force=True,
+            source_type="user",
+        )
+    assert manager.list_skill_installations() == []
+    leftover = (workspace / "skills" / "competitive-research-team" / "SKILL.md").read_text(
+        encoding="utf-8"
+    )
+    assert "description: managed" in leftover
+
+
 def test_workspace_state_cleanup_removes_only_prebuilt(tmp_path: Path) -> None:
     from jiuwenswarm.server.runtime.skill.skill_manager import SkillManager
     from jiuwenswarm.server.runtime.skill.skill_prebuilt import (
