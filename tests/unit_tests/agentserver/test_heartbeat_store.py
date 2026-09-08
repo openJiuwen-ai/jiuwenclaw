@@ -300,6 +300,33 @@ async def test_update_enabled_false_sets_disabled(store: HeartbeatJobStore) -> N
     assert updated.next_run_at is None
 
 
+async def test_late_pause_toggle_preserves_completed_status(
+    store: HeartbeatJobStore,
+) -> None:
+    job = await store.create_job(
+        name="n", channel_id="web", session_id="s1", prompt="p",
+        schedule=_interval_schedule(), source="agent_tool", max_runs=1,
+    )
+    await store.claim_run(
+        job.id, "run1", 999.0, trigger="run_now", reschedule=False
+    )
+    await store.finish_run(
+        job.id,
+        "run1",
+        1000.0,
+        outcome="succeeded",
+        error=None,
+        next_run_at=None,
+        terminal=True,
+    )
+
+    updated = await store.update_job(job.id, {"enabled": False})
+
+    assert updated.status == STATUS_COMPLETED
+    assert updated.enabled is False
+    assert updated.next_run_at is None
+
+
 async def test_toggle_requires_more_budget_before_reactivating_completed(store: HeartbeatJobStore) -> None:
     job = await store.create_job(
         name="n", channel_id="web", session_id="s1", prompt="p",
