@@ -271,7 +271,11 @@ class FakeRegistryClient:
             ImageInfo(
                 image_name="opencode",
                 image_uri="registry://opencode:latest",
-                metadata={"agent_type": "opencode", "user_id": user_id},
+                metadata={
+                    "agent_type": "opencode",
+                    "name": "opencode",
+                    "user_id": user_id,
+                },
             ),
         ]
 
@@ -893,7 +897,11 @@ async def test_agent_list_returns_registry_images_without_creating() -> None:
     assert [item["agent_type"] for item in response["payload"]["agents"]] == [
         "opencode",
     ]
+    assert response["payload"]["agents"][0]["name"] == "opencode"
+    assert response["payload"]["agents"][0]["image_name"] == "opencode"
     assert response["payload"]["agents"][0]["image_uri"] == "registry://opencode:latest"
+    assert response["payload"]["agents"][0]["metadata"]["name"] == "opencode"
+    assert "framework" not in response["payload"]["agents"][0]["metadata"]
     assert await agent_manager.list_user_agents("u1") == []
 
 

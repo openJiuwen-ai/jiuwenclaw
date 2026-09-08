@@ -1649,17 +1649,18 @@ class AgentOSRouterClient(AgentServerClient):
         images = await self._registry.list_user_images(uid)
         agents: list[dict[str, Any]] = []
         for image in images:
-            agent_type = str(
-                (image.metadata or {}).get("agent_type") or image.image_name or ""
-            ).strip()
+            meta = dict(image.metadata or {})
+            name = str(meta.get("name") or image.image_name or "").strip()
+            agent_type = str(meta.get("agent_type") or name).strip()
             if not agent_type:
                 continue
             agents.append(
                 {
                     "agent_type": agent_type,
-                    "image_name": image.image_name,
+                    "name": name or agent_type,
+                    "image_name": name or image.image_name,
                     "image_uri": image.image_uri,
-                    "metadata": dict(image.metadata or {}),
+                    "metadata": meta,
                 }
             )
         current = (
