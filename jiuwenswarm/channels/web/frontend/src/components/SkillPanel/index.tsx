@@ -1697,6 +1697,22 @@ export function SkillPanel({
     };
   }, [evolutionEntries, detailTab, selectedSkill, saveEvolutionEntries]);
 
+  const createUploadError = useCallback(
+    (code: string | undefined, status: number) => {
+      let message = t('skills.errors.uploadFailed');
+      // 服务端写入失败也使用 SKILL_INVALID_PACKAGE，须先区分 HTTP 状态。
+      if (status === 400) {
+        if (code === 'SKILL_UNSAFE_PATH') {
+          message = t('skills.errors.uploadUnsafePath');
+        } else if (code === 'SKILL_INVALID_PACKAGE') {
+          message = t('skills.errors.uploadInvalidRequest');
+        }
+      }
+      return Object.assign(new Error(message), { code, status });
+    },
+    [t],
+  );
+
   /** 上传技能 .zip 包：先上传到临时目录，再通过 WebSocket 调用 skills.import_upload */
   const handleSkillUpload = useCallback(
     async (file: File) => {
@@ -1704,13 +1720,13 @@ export function SkillPanel({
       setMessage(null);
       setMessageType(null);
       try {
-        // Step 1: 上传文件到 Vite dev server 临时目录
+        // Step 1: 上传文件到服务端临时目录
         const form = new FormData();
         form.append('file', file);
         const uploadResp = await fetch('/file-api/skills/upload-temp', { method: 'POST', body: form });
         const uploadData = await uploadResp.json();
         if (!uploadResp.ok || !uploadData.path) {
-          throw new Error(uploadData.error || t('skills.errors.importFailed'));
+          throw createUploadError(uploadData.code, uploadResp.status);
         }
         const tempPath = uploadData.path;
 
@@ -1767,7 +1783,7 @@ export function SkillPanel({
         setActionTarget(null);
       }
     },
-    [fetchSkills, fetchSkillDetail, t, withSession],
+    [createUploadError, fetchSkills, fetchSkillDetail, t, withSession],
   );
 
   /** 知识转技能：先上传文件到临时目录（如有），再通过 WebSocket 调用 skills.create_from_knowledge */
@@ -1794,7 +1810,7 @@ export function SkillPanel({
           const uploadResp = await fetch('/file-api/skills/upload-temp', { method: 'POST', body: form });
           const uploadData = await uploadResp.json();
           if (!uploadResp.ok || !uploadData.path) {
-            throw new Error(uploadData.error || t('skills.errors.importFailed'));
+            throw createUploadError(uploadData.code, uploadResp.status);
           }
           filePath = uploadData.path;
         } else if (params.link) {
@@ -1835,7 +1851,7 @@ export function SkillPanel({
         }
       }
     },
-    [fetchSkills, t, withSession, knowledgeTaskCount],
+    [createUploadError, fetchSkills, t, withSession, knowledgeTaskCount],
   );
 
   // ── 发布表单校验（与 skillhub 对齐） ──
