@@ -3,8 +3,11 @@ from __future__ import annotations
 import asyncio
 import io
 import json
+import threading
 import zipfile
+from contextlib import contextmanager
 from pathlib import Path
+from typing import Iterator
 
 import pytest
 
@@ -407,3 +410,49 @@ def test_stale_prebuilt_removal_does_not_delete_same_name_user_skill(
     assert skill_dir.is_dir()
     assert manager.list_skill_installations() == [user_record]
     assert result.succeeded == []
+
+
+def test_async_skill_handler_acquires_state_lock_off_event_loop(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "tenant"
+    builtin_dir = tmp_path / "builtin"
+    builtin_dir.mkdir()
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.skill.skill_manager.is_enterprise",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.skill.skill_manager.get_builtin_skills_dir",
+        lambda: builtin_dir,
+    )
+    manager = SkillManager(workspace_dir=str(workspace))
+    _write_skill(workspace, "user-skill")
+    manager.record_skill_installation(
+        name="user-skill",
+        source_type="user",
+    )
+    original_transaction = manager.state_transaction
+    lock_threads: list[int] = []
+
+    @contextmanager
+    def observed_transaction() -> Iterator[None]:
+        lock_threads.append(threading.get_ident())
+        with original_transaction():
+            yield
+
+    monkeypatch.setattr(manager, "state_transaction", observed_transaction)
+    event_loop_thread = threading.get_ident()
+
+    async def exercise_handlers() -> dict:
+        await manager.handle_skills_list({})
+        return await manager.handle_skills_toggle(
+            {"name": "user-skill", "enabled": False}
+        )
+
+    result = asyncio.run(exercise_handlers())
+
+    assert result["success"] is True
+    assert len(lock_threads) >= 2
+    assert all(thread_id != event_loop_thread for thread_id in lock_threads)

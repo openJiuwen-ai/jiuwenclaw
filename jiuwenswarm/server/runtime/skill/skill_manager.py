@@ -471,27 +471,24 @@ def _handle_copy_error(exc: OSError, dest: Path, logger_prefix: str, src: Path |
 
 
 def _state_transactional(method: Callable[..., Any]) -> Callable[..., Any]:
-    """Wrap a SkillManager state-mutating method in the workspace lock.
+    """Wrap a synchronous SkillManager mutation in the workspace lock.
 
     The outer-most wrapper reloads the authoritative skills_state.json from
     disk before the body runs, so cross-pod AgentServer instances sharing one
     workspace never overwrite each other's writes (last-writer-wins bug for
     enterprise skill state). Nested wrappers reuse the same transaction and do
-    not reload, preserving inner helper mutations.
+    not reload, preserving inner helper mutations. Async handlers must call a
+    decorated synchronous helper through ``asyncio.to_thread`` so waiting for
+    the cross-process file lock never blocks the event-loop thread.
     """
-
-    @wraps(method)
-    async def async_wrapper(self: "SkillManager", *args: Any, **kwargs: Any) -> Any:
-        with self.state_transaction():
-            return await method(self, *args, **kwargs)
+    if asyncio.iscoroutinefunction(method):
+        raise TypeError("_state_transactional only supports synchronous methods")
 
     @wraps(method)
     def sync_wrapper(self: "SkillManager", *args: Any, **kwargs: Any) -> Any:
         with self.state_transaction():
             return method(self, *args, **kwargs)
 
-    if asyncio.iscoroutinefunction(method):
-        return async_wrapper
     return sync_wrapper
 
 
@@ -768,7 +765,7 @@ class SkillManager:
             await self._sync_marketplace_repos()
         # 每次列举前，把手动拷入 skills 目录、尚未登记的本地技能补登记为 local，
         # 使其无需重启 server、刷新"我的技能"即可显示（与导入本地技能一致）。
-        self._register_unmanaged_local_skills()
+        await asyncio.to_thread(self._register_unmanaged_local_skills)
         local = self._scan_local_skills()
         # 内置技能（仓内内置）两版都扫描展示；企业版不再跳过 builtin。
         builtin = self._scan_builtin_skills()
@@ -958,7 +955,6 @@ class SkillManager:
 
         raise ValueError(f"未找到 skill: {name}")
 
-    @_state_transactional
     async def handle_skills_toggle(self, params: dict) -> dict:
         """切换已安装本地 skill 的 enabled 状态。
 
@@ -968,6 +964,11 @@ class SkillManager:
                 记录，避免重名技能误操作另一条。
             enabled: 目标状态
         """
+        return await asyncio.to_thread(self._handle_skills_toggle_sync, params)
+
+    @_state_transactional
+    def _handle_skills_toggle_sync(self, params: dict) -> dict:
+        """Apply one toggle while holding the workspace state transaction."""
         name = params.get("name", "")
         origin = str(params.get("origin", "") or "").strip() or None
         enabled = params.get("enabled")
@@ -2506,7 +2507,8 @@ class SkillManager:
                     or descriptor.metadata.get("version")
                     or version_id
                 ).strip()
-                record = self._commit_source_skill_entity(
+                record = await asyncio.to_thread(
+                    self._commit_source_skill_entity,
                     skill_dir,
                     skill_name=skill_name,
                     source_id=source_id,
@@ -2585,7 +2587,8 @@ class SkillManager:
                     or descriptor_metadata.get("owner_display_name")
                     or market_author
                 ).strip()[:200]
-                record = self._commit_source_skill_entity(
+                record = await asyncio.to_thread(
+                    self._commit_source_skill_entity,
                     skill_dir,
                     skill_name=skill_name,
                     source_id=source_id,
@@ -2766,7 +2769,10 @@ class SkillManager:
                             "checked_at": checked_at,
                         }
                     )
-        self._commit_skill_update_statuses(pending_updates)
+        await asyncio.to_thread(
+            self._commit_skill_update_statuses,
+            pending_updates,
+        )
         return {"success": True, "items": items, "count": len(items)}
 
     async def handle_skills_team_skills_hub_info(self, params: dict) -> dict:
@@ -3387,7 +3393,6 @@ class SkillManager:
             protected_source_types=protected_source_types,
         )
 
-    @_state_transactional
     async def handle_skills_uninstall(self, params: dict) -> dict:
         """卸载已安装的 skill.
 
@@ -3396,6 +3401,11 @@ class SkillManager:
             origin: 可选，技能来源标识（如 ``clawhub:owner/slug``、URL）。提供时按
                 origin 精确定位目录与记录，避免重名技能误删另一个。
         """
+        return await asyncio.to_thread(self._handle_skills_uninstall_sync, params)
+
+    @_state_transactional
+    def _handle_skills_uninstall_sync(self, params: dict) -> dict:
+        """Uninstall one skill while holding the workspace state transaction."""
         raw_name = params.get("name", "")
         raw_origin = str(params.get("origin", "") or "").strip()
         if not raw_name:
@@ -3811,7 +3821,8 @@ class SkillManager:
                 }
             skill_version = str(meta.get("version") or "").strip() or None
 
-            return self._commit_web_skill_install(
+            return await asyncio.to_thread(
+                self._commit_web_skill_install,
                 skill_dir,
                 skill_name=skill_name,
                 skill_version=skill_version,

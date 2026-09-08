@@ -440,7 +440,8 @@ class SkillPrebuiltSynchronizer:
             if name in kept_prebuilt_names:
                 continue
             try:
-                removed = self._manager.remove_skill_installation_entity(
+                removed = await asyncio.to_thread(
+                    self._manager.remove_skill_installation_entity,
                     name=name,
                     origin=str(row.get("origin") or "") or None,
                     expected_source_type=SOURCE_PREBUILT,
@@ -585,7 +586,8 @@ class SkillPrebuiltSynchronizer:
             else item.package_url
         )
         try:
-            row = self._manager.record_skill_installation(
+            row = await asyncio.to_thread(
+                self._manager.record_skill_installation,
                 name=installed_dir,
                 source_type=SOURCE_PREBUILT,
                 source=item.source_id or "enterprise-prebuilt",
