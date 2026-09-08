@@ -1,3 +1,4 @@
+import atexit
 from jiuwenswarm.edition import is_enterprise
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
@@ -2735,6 +2736,29 @@ _log_listener: QueueListener | None = None
 _SUPPORTS_RESPECT_HANDLER_LEVEL: bool = sys.version_info >= (3, 12)
 
 
+def _stop_log_listener() -> None:
+    """Stop the QueueListener daemon thread at interpreter shutdown.
+
+    setup_logger() starts a QueueListener daemon thread that blocks on queue.get().
+    Without explicit stop, the thread survives to interpreter finalizing, where it
+    races for the stderr BufferedWriter lock and triggers
+    ``Fatal Python error: _enter_buffered_busy`` (exit code 134 / SIGABRT).
+    """
+    global _log_listener
+    if _log_listener is None:
+        return
+    targets = list(_log_listener.handlers)
+    _log_listener.stop()
+    for handler in targets:
+        try:
+            handler.close()
+        except Exception as exc:
+            # listener 已停止，日志经 QueueHandler 会滞留队列无法输出；
+            # 但 close 极少失败，此处使用 logging 模块以满足 G.LOG.02。
+            logger.warning("[jiuwenswarm] log handler close failed during shutdown: %s", exc)
+    _log_listener = None
+
+
 def _iter_log_output_handlers() -> list[logging.Handler]:
     """Return handlers that actually write logs (listener targets when queued)."""
     if _log_listener is not None:
@@ -2922,6 +2946,9 @@ def setup_logger(log_level: Optional[str] = None) -> logging.Logger:
                 target.addFilter(lambda record, handler=target: record.levelno >= handler.level)
             _log_listener = QueueListener(_log_queue, *listener_targets)
         _log_listener.start()
+        # setup_logger 支持重复调用，先撤销旧注册避免 atexit 条目累积。
+        atexit.unregister(_stop_log_listener)
+        atexit.register(_stop_log_listener)
 
     # 保留 dev-stable 既有的源头脱敏（与 handler 层 SensitiveDataFilter 双保险）
     install_source_record_masking()
