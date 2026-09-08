@@ -1096,30 +1096,69 @@ export function SkillPanel({
       const installKey = skill.identifier || skill.asset_id;
       setActionTarget(`install:${installKey}`);
       try {
-        const isTeamSkillHub = !skill.source || skill.source === 'teamskillshub';
-        let data: { success: boolean; skill?: { name: string }; detail?: string; message?: string };
+        type InstallPayload = {
+          success: boolean;
+          pending?: boolean;
+          skill?: { name: string };
+          detail?: string;
+          detail_key?: string;
+          message?: string;
+        };
 
-        if (isTeamSkillHub) {
-          // SwarmSkillHub 安装：通过 asset_id
-          data = await webRequest<{
-            success: boolean;
-            skill?: { name: string };
-            detail?: string;
-          }>('skills.teamskillshub.install', withSession({ asset_id: skill.asset_id, force: false }), {
-            timeoutMs: 60000,
+        const buildParams = (force: boolean) =>
+          withSession({
+            source: skill.source || 'teamskillshub',
+            identifier: skill.identifier || skill.asset_id,
+            force,
+            ...(skill.owner_handle ? { owner_handle: skill.owner_handle } : {}),
+            ...((skill.display_name || skill.name)
+              ? { display_name: skill.display_name || skill.name }
+              : {}),
           });
-        } else {
-          // ClawHub 安装：通过 spec（slug@clawhub）
-          const spec = `${skill.name}@clawhub`;
-          data = await webRequest<{
-            success: boolean;
-            detail?: string;
-            message?: string;
-          }>('skills.install', withSession({ spec, force: false }), { timeoutMs: 60000 });
+
+        const alreadyInstalledKeys = new Set([
+          'skills.clawhub.errors.skillAlreadyInstalled',
+          'skills.skillNet.errors.skillAlreadyInstalled',
+        ]);
+
+        let force = false;
+        let data: InstallPayload;
+        while (true) {
+          data = await webRequest<InstallPayload>(
+            'skills.online_search.install',
+            buildParams(force),
+            { timeoutMs: 60000 },
+          );
+          if (
+            !data.success &&
+            !force &&
+            data.detail_key &&
+            alreadyInstalledKeys.has(data.detail_key)
+          ) {
+            const confirmText =
+              data.detail_key === 'skills.clawhub.errors.skillAlreadyInstalled'
+                ? t('skills.clawhub.replaceConfirm', {
+                    name: skill.display_name || skill.name,
+                  })
+                : `${data.detail || t('skills.errors.installFailed')}\n${t('skills.overwriteConfirm')}`;
+            const overwrite = window.confirm(confirmText);
+            if (!overwrite) return;
+            force = true;
+            continue;
+          }
+          break;
         }
 
         if (!data.success) {
-          throw new Error(data.detail || data.message || t('skills.errors.installFailed'));
+          throw new Error(
+            (data.detail_key ? t(data.detail_key) : null) ||
+              data.detail ||
+              data.message ||
+              t('skills.errors.installFailed'),
+          );
+        }
+        if (data.pending) {
+          throw new Error(t('skills.errors.installFailedHint'));
         }
         showMessage('success', t('skills.messages.installed', { name: data.skill?.name || skill.name }));
         await fetchSkills();
@@ -1544,7 +1583,8 @@ export function SkillPanel({
             e.stopPropagation();
             handleInstallHubSkill(skill);
           }}
-          className="w-8 h-8 flex items-center justify-center rounded-[8px] bg-[var(--color-skill-card-action-surface)] hover:bg-[var(--color-skill-card-action-hover-surface)] text-text-muted hover:text-chat-accent transition-colors"
+          disabled={actionTarget === `install:${skill.identifier || skill.asset_id}`}
+          className="w-8 h-8 flex items-center justify-center rounded-[8px] bg-[var(--color-skill-card-action-surface)] hover:bg-[var(--color-skill-card-action-hover-surface)] text-text-muted hover:text-chat-accent transition-colors disabled:opacity-50"
         >
           <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
             <path strokeLinecap="round" strokeLinejoin="round" d="M12 5v14M5 12h14" />
@@ -1552,7 +1592,7 @@ export function SkillPanel({
         </button>
       );
     },
-    [installedSkillMap, handleGoToChat, handleInstallHubSkill],
+    [installedSkillMap, handleGoToChat, handleInstallHubSkill, actionTarget],
   );
 
   // 新建会话：skill-creator（所有 Skill Creator 统一入口）chip + "帮我修改这个技能" + 该技能 chip
@@ -2263,6 +2303,29 @@ export function SkillPanel({
             </svg>
           </span>
           {cleanMessage}
+          <button
+            type="button"
+            onClick={() => setMessage(null)}
+            className="ml-auto w-5 h-5 flex items-center justify-center hover:bg-card/30 rounded-full "
+            data-testid="skill-panel-toast-close-btn"
+          >
+            <svg className="w-4 h-4 text-text-muted" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+            </svg>
+          </button>
+        </div>
+      )}
+      {message && messageType === 'error' && (
+        <div
+          className="fixed top-4 right-4 z-[9999] rounded-[4px] text-sm text-text shadow-lg flex items-center gap-3 px-4 border border-danger"
+          style={{ backgroundColor: 'var(--color-card, var(--color-bg-card, #fff))', width: '564px', minHeight: '40px' }}
+          data-testid="skill-panel-toast"
+          data-variant="error"
+        >
+          <span className="w-4 h-4 rounded-full bg-danger flex items-center justify-center flex-shrink-0 text-text-inverse text-[10px] font-bold">
+            !
+          </span>
+          <span className="flex-1 py-2 break-words">{cleanMessage}</span>
           <button
             type="button"
             onClick={() => setMessage(null)}
