@@ -1613,6 +1613,18 @@ textarea.rsi-input {
 select.rsi-input {
   cursor: pointer;
 }
+
+.rsi-create-dialog__select--rounded {
+  border-radius: 8px;
+}
+.rsi-select {
+  position: relative;
+}
+.rsi-select__badge {
+  flex: 0 0 auto;
+  font-size: 12px;
+  color: #808080;
+}
 .rsi-input:focus {
   outline: 2px solid var(--color-border-focus);
   outline-offset: 1px;
