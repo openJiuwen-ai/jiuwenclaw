@@ -33,6 +33,10 @@ import {
 import {
   buildMediaModelConfigUpdates,
   createMediaModelDraft,
+  filterVendorCatalogForModality,
+  mediaDefaultModelForPreset,
+  mediaModelOptionsForPreset,
+  shouldFetchRemoteMediaModels,
 } from '../node_modules/.cache/settings-refactor/modules/agent/mediaModelConfig.js';
 
 const root = new URL('../', import.meta.url);
@@ -1312,15 +1316,156 @@ test('search dialogs keep the shared required-field contract', () => {
 
 test('multimodal dialogs reuse provider-first model configuration without model testing or account login', () => {
   const agentSettings = source('src/features/settings/modules/agent/AgentSettings.tsx');
+  const agentSettingsFile = parseTsx('src/features/settings/modules/agent/AgentSettings.tsx');
   const dialog = source('src/features/settings/modules/agent/MediaModelConfigDialog.tsx');
+  assert.deepEqual(findVariableArrayStrings(agentSettingsFile, 'modalities'), [
+    'vision',
+    'audio',
+    'video',
+    'image_gen',
+    'video_gen',
+  ]);
   assert.match(agentSettings, /<MediaModelConfigDialog/);
   assert.match(dialog, /<ModelProviderSelect/);
   assert.match(dialog, /includeOpenAIAccount=\{false\}/);
   assert.match(dialog, /<ModelNameField/);
   assert.match(dialog, /'vendors\.list'/);
   assert.match(dialog, /'vendors\.fetch_models'/);
+  assert.match(dialog, /mediaModelOptionsForPreset/);
+  assert.match(dialog, /shouldFetchRemoteMediaModels/);
+  assert.match(dialog, /filterVendorCatalogForModality/);
   assert.match(dialog, /showOptional=\{false\}/);
   assert.doesNotMatch(dialog, /config\.validate_model|OpenAIAccountSettings|reasoning_level|settingsActionIcons\.delete/);
+});
+
+test('video generation reuses dedicated vendor presets instead of the chat model list', () => {
+  const alibaba = {
+    vendor_key: 'alibaba',
+    display_name: 'Alibaba',
+    plan: 'custom_api',
+    client_provider: 'OpenAI',
+    api_base: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+    endpoint_profile: 'dashscope',
+    default_model: 'qwen3.8-max',
+    model_options: ['qwen3.8-max', 'qwen3.7-max'],
+    icon_key: 'qwen',
+    models_endpoint: 'https://dashscope.aliyuncs.com/compatible-mode/v1/models',
+    models_needs_key: true,
+    supports_anthropic: true,
+    anthropic_base: 'https://dashscope.aliyuncs.com/apps/anthropic',
+    anthropic_client_provider: 'Anthropic',
+    video_gen_default_model: 'wan2.6-t2v',
+    video_gen_model_options: ['wan2.6-t2v'],
+    video_gen_api_base: 'https://dashscope.aliyuncs.com/api/v1',
+    image_gen_default_model: 'wanx-v1',
+    image_gen_model_options: ['wanx-v1', 'wan2.5-t2i-preview', 'qwen-image-plus'],
+    image_gen_api_base: 'https://dashscope.aliyuncs.com/api/v1',
+  };
+  assert.deepEqual(mediaModelOptionsForPreset(alibaba, 'video_gen'), ['wan2.6-t2v']);
+  assert.equal(mediaDefaultModelForPreset(alibaba, 'video_gen'), 'wan2.6-t2v');
+  assert.equal(shouldFetchRemoteMediaModels(alibaba, 'video_gen'), false);
+  assert.deepEqual(mediaModelOptionsForPreset(alibaba, 'image_gen'), [
+    'wanx-v1',
+    'wan2.5-t2i-preview',
+    'qwen-image-plus',
+  ]);
+  assert.equal(mediaDefaultModelForPreset(alibaba, 'image_gen'), 'wanx-v1');
+  assert.equal(shouldFetchRemoteMediaModels(alibaba, 'image_gen'), false);
+  assert.deepEqual(mediaModelOptionsForPreset(alibaba, 'vision'), ['qwen3.8-max', 'qwen3.7-max']);
+  assert.equal(shouldFetchRemoteMediaModels(alibaba, 'vision'), true);
+  assert.equal(
+    buildMediaModelConfigUpdates(
+      {
+        vendor_selection: 'custom_api:alibaba',
+        protocol: 'openai',
+        api_base: alibaba.api_base,
+        api_key: 'dash-key',
+        model_name: 'wan2.6-t2v',
+        model_input_mode: 'options',
+        provider: 'OpenAI',
+        endpoint_profile: 'dashscope',
+        vendor_key: 'alibaba',
+        plan: 'custom_api',
+      },
+      { reasoning: null, token_plan: [], coding_plan: [], custom_api: [alibaba] },
+      'video_gen',
+      true,
+    ).video_gen_api_base,
+    'https://dashscope.aliyuncs.com/api/v1',
+  );
+  assert.equal(
+    buildMediaModelConfigUpdates(
+      {
+        vendor_selection: 'custom_api:alibaba',
+        protocol: 'openai',
+        api_base: alibaba.api_base,
+        api_key: 'dash-key',
+        model_name: 'wanx-v1',
+        model_input_mode: 'options',
+        provider: 'OpenAI',
+        endpoint_profile: 'dashscope',
+        vendor_key: 'alibaba',
+        plan: 'custom_api',
+      },
+      { reasoning: null, token_plan: [], coding_plan: [], custom_api: [alibaba] },
+      'image_gen',
+      true,
+    ).image_gen_api_base,
+    'https://dashscope.aliyuncs.com/api/v1',
+  );
+
+  const minimax = {
+    vendor_key: 'minimax',
+    display_name: 'MiniMax',
+    plan: 'custom_api',
+    client_provider: 'OpenAI',
+    api_base: 'https://api.minimaxi.com/v1',
+    endpoint_profile: null,
+    default_model: 'MiniMax-M3',
+    model_options: ['MiniMax-M3', 'MiniMax-M2'],
+    icon_key: 'minimax',
+    models_endpoint: 'https://api.minimaxi.com/v1/models',
+    models_needs_key: true,
+    supports_anthropic: true,
+    anthropic_base: 'https://api.minimaxi.com/anthropic',
+    anthropic_client_provider: 'Anthropic',
+    video_gen_default_model: 'MiniMax-H3-Max',
+    video_gen_model_options: ['MiniMax-H3', 'MiniMax-H3-Max'],
+  };
+  assert.deepEqual(mediaModelOptionsForPreset(minimax, 'video_gen'), ['MiniMax-H3', 'MiniMax-H3-Max']);
+  assert.equal(mediaDefaultModelForPreset(minimax, 'video_gen'), 'MiniMax-H3-Max');
+  assert.equal(shouldFetchRemoteMediaModels(minimax, 'video_gen'), false);
+  // Without dedicated image_gen options, never fall back to chat models.
+  assert.deepEqual(mediaModelOptionsForPreset(minimax, 'image_gen'), []);
+  assert.equal(shouldFetchRemoteMediaModels(minimax, 'image_gen'), false);
+  assert.deepEqual(mediaModelOptionsForPreset(minimax, 'vision'), ['MiniMax-M3', 'MiniMax-M2']);
+  assert.equal(shouldFetchRemoteMediaModels(minimax, 'vision'), true);
+
+  const filtered = filterVendorCatalogForModality(
+    {
+      reasoning: null,
+      token_plan: [alibaba, minimax],
+      coding_plan: [],
+      custom_api: [alibaba, minimax],
+    },
+    'image_gen',
+  );
+  assert.deepEqual(
+    filtered.custom_api.map((preset) => preset.vendor_key),
+    ['alibaba'],
+  );
+  assert.deepEqual(
+    filterVendorCatalogForModality(
+      {
+        reasoning: null,
+        token_plan: [alibaba, minimax],
+        coding_plan: [],
+        custom_api: [alibaba, minimax],
+      },
+      'video_gen',
+    ).custom_api.map((preset) => preset.vendor_key),
+    ['alibaba', 'minimax'],
+  );
 });
 
 test('legacy multimodal configuration remains custom while provider selections persist exact catalog identity', () => {

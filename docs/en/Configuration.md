@@ -39,7 +39,7 @@ JiuwenSwarm supports multiple model types to meet diverse scenario requirements:
 | **Image Generation Model** | Generate images from text descriptions; supports AI painting, image creation | Must support **image generation** and create images from text | ⭕ No     |
 | **Video Generation Model** | Generate videos from text descriptions; supports text-to-video | Must support **video generation** and create videos from text | ⭕ No     |
 
-> 💡 **Tip**: The default model is essential for system operation and must be configured correctly. Video vision, audio, vision, image generation, and video generation models are optional; configure them only when multimodal capabilities are needed. The image generation model is not shown in the frontend configuration panel yet; configure it via the main config (`models.image_gen`) or environment variables (`IMAGE_GEN_API_BASE`, etc.).
+> 💡 **Tip**: The default model is essential for system operation and must be configured correctly. Video vision, audio, vision, image generation, and video generation models are optional; configure them only when multimodal capabilities are needed. Image generation and video generation can both be configured under Settings → Agent → Tools.
 
 ### 2.2 Configuration Fields
 

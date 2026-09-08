@@ -69,7 +69,7 @@ _EMBED_MODEL_KEY_MAP = {
     "image_gen": "image_gen_model",
 }
 
-_MULTIMODAL_MODEL_TYPES = ("audio", "vision", "video")
+_MULTIMODAL_MODEL_TYPES = ("audio", "vision", "video", "video_gen", "image_gen")
 
 
 def _model_provider(model_config: dict[str, Any]) -> str:
@@ -302,6 +302,7 @@ def apply_image_gen_model_config_from_yaml(config_base: dict[str, Any] | None) -
     api_base = str(mc.get("api_base") or "").strip()
     model_name = str(mc.get("model_name") or mc.get("model") or "").strip()
     provider = str(mc.get("client_provider") or mc.get("model_provider") or "").strip()
+    endpoint_profile = str(mc.get("endpoint_profile") or os.getenv("IMAGE_GEN_ENDPOINT_PROFILE") or "").strip()
 
     if api_key:
         os.environ["IMAGE_GEN_API_KEY"] = api_key
@@ -311,37 +312,26 @@ def apply_image_gen_model_config_from_yaml(config_base: dict[str, Any] | None) -
         os.environ["IMAGE_GEN_MODEL_NAME"] = model_name
     if provider:
         os.environ["IMAGE_GEN_PROVIDER"] = provider
+    if endpoint_profile:
+        os.environ["IMAGE_GEN_ENDPOINT_PROFILE"] = endpoint_profile
 
 
 def apply_video_gen_model_config_from_yaml(config_base: dict[str, Any] | None) -> None:
-    """Apply text-to-video config; default to the same provider API as image_gen.
+    """Apply text-to-video config from ``models.video_gen`` / ``VIDEO_GEN_*``.
 
     Priority:
     1. models.video_gen.model_config / VIDEO_GEN_* env
-    2. models.image_gen / IMAGE_GEN_* (shared DashScope / provider credentials)
-    3. Built-in DashScope defaults (api_base + wan2.6-t2v)
+    2. Built-in DashScope defaults (api_base + wan2.6-t2v)
     """
     if not isinstance(config_base, dict):
         config_base = {}
 
-    # Ensure image_gen env is populated first so we can fall back to it.
-    apply_image_gen_model_config_from_yaml(config_base)
-
     mc = _get_model_config(config_base, "video_gen")
-    image_mc = _get_model_config(config_base, "image_gen")
 
-    api_key = str(
-        mc.get("api_key")
-        or os.getenv("VIDEO_GEN_API_KEY")
-        or image_mc.get("api_key")
-        or os.getenv("IMAGE_GEN_API_KEY")
-        or ""
-    ).strip()
+    api_key = str(mc.get("api_key") or os.getenv("VIDEO_GEN_API_KEY") or "").strip()
     api_base = str(
         mc.get("api_base")
         or os.getenv("VIDEO_GEN_API_BASE")
-        or image_mc.get("api_base")
-        or os.getenv("IMAGE_GEN_API_BASE")
         or "https://dashscope.aliyuncs.com/api/v1"
     ).strip()
     model_name = str(
@@ -354,10 +344,10 @@ def apply_video_gen_model_config_from_yaml(config_base: dict[str, Any] | None) -
         mc.get("client_provider")
         or mc.get("model_provider")
         or os.getenv("VIDEO_GEN_PROVIDER")
-        or image_mc.get("client_provider")
-        or image_mc.get("model_provider")
-        or os.getenv("IMAGE_GEN_PROVIDER")
         or "DashScope"
+    ).strip()
+    endpoint_profile = str(
+        mc.get("endpoint_profile") or os.getenv("VIDEO_GEN_ENDPOINT_PROFILE") or ""
     ).strip()
 
     if api_key:
@@ -368,3 +358,5 @@ def apply_video_gen_model_config_from_yaml(config_base: dict[str, Any] | None) -
         os.environ["VIDEO_GEN_MODEL_NAME"] = model_name
     if provider:
         os.environ["VIDEO_GEN_PROVIDER"] = provider
+    if endpoint_profile:
+        os.environ["VIDEO_GEN_ENDPOINT_PROFILE"] = endpoint_profile

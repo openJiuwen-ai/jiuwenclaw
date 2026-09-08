@@ -1304,7 +1304,7 @@ async def test_config_set_rejects_unknown_video_gen_provider(tmp_path, monkeypat
 
 
 def test_media_capability_provider_identity_has_exact_env_contract():
-    for modality in ("vision", "audio", "video"):
+    for modality in ("vision", "audio", "video", "video_gen", "image_gen"):
         prefix = modality.upper()
         assert app_web_handlers._CONFIG_SET_ENV_MAP[f"{modality}_endpoint_profile"] == f"{prefix}_ENDPOINT_PROFILE"
         assert app_web_handlers._CONFIG_SET_ENV_MAP[f"{modality}_vendor_key"] == f"{prefix}_VENDOR_KEY"

@@ -343,14 +343,14 @@ models:
         timeout: 1800
       model_config_obj:
         temperature: 0.95
-  # Text-to-video. When unset, falls back to models.image_gen credentials
-  # (same DashScope / provider API) with default model wan2.6-t2v.
+  # Text-to-video. Uses dedicated VIDEO_GEN_* credentials (not IMAGE_GEN_*).
   video_gen:
       model_client_config:
         api_base: ${VIDEO_GEN_API_BASE}
         api_key: ${VIDEO_GEN_API_KEY}
         model_name: ${VIDEO_GEN_MODEL_NAME}
         client_provider: ${VIDEO_GEN_PROVIDER}
+        endpoint_profile: ${VIDEO_GEN_ENDPOINT_PROFILE:-dashscope}
         verify_ssl: true
         timeout: 1800
       model_config_obj:

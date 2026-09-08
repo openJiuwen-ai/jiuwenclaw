@@ -176,6 +176,7 @@ models:
         api_key: ${VIDEO_GEN_API_KEY}
         model_name: ${VIDEO_GEN_MODEL_NAME}
         client_provider: ${VIDEO_GEN_PROVIDER}
+        endpoint_profile: ${VIDEO_GEN_ENDPOINT_PROFILE:-dashscope}
         verify_ssl: false
         timeout: 1800
       model_config_obj:

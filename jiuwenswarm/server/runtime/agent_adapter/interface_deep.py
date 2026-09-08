@@ -4479,8 +4479,15 @@ class JiuWenSwarmDeepAdapter:
     def _build_image_gen_model_config(
         config_base: dict[str, Any],
     ) -> bool:
-        """Build DeepAgent image generation config from service config/env mapping."""
+        """Build DeepAgent image generation config from dedicated IMAGE_GEN_* settings."""
         apply_image_gen_model_config_from_yaml(config_base)
+        if os.getenv("IMAGE_GEN_ENABLED") is not None and not multimodal_model_enabled(
+            config_base, "image_gen"
+        ):
+            logger.info(
+                "[JiuWenSwarmDeepAdapter] image_gen tool skipped: capability disabled"
+            )
+            return False
         if not os.getenv("IMAGE_GEN_API_KEY"):
             logger.info("[JiuWenSwarmDeepAdapter] image_gen tool skipped: incomplete config")
             return False
@@ -4490,8 +4497,15 @@ class JiuWenSwarmDeepAdapter:
     def _build_video_gen_model_config(
         config_base: dict[str, Any],
     ) -> bool:
-        """Build video generation config; falls back to image_gen credentials."""
+        """Build video generation config from dedicated VIDEO_GEN_* settings."""
         apply_video_gen_model_config_from_yaml(config_base)
+        if os.getenv("VIDEO_GEN_ENABLED") is not None and not multimodal_model_enabled(
+            config_base, "video_gen"
+        ):
+            logger.info(
+                "[JiuWenSwarmDeepAdapter] video_gen tool skipped: capability disabled"
+            )
+            return False
         if not os.getenv("VIDEO_GEN_API_KEY"):
             logger.info("[JiuWenSwarmDeepAdapter] video_gen tool skipped: incomplete config")
             return False
@@ -7777,7 +7791,7 @@ class JiuWenSwarmDeepAdapter:
                     exc,
                 )
 
-        # generate_video tool: video_gen config, falling back to image_gen credentials
+        # generate_video tool: use dedicated video_gen model config
         self._video_gen_tool_registered = False
         if self._video_gen_model_config:
             try:

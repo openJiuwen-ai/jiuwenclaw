@@ -10,8 +10,8 @@ elements, each self-gated by the config source and filtered against the swarm
 * ``swarm.skill_retrieval`` — agentic installed skill tree retrieval tools.
 * ``swarm.user_todos`` — the personal todo tool.
 * ``swarm.video`` — the video-understanding tool (``models.video`` gated).
-* ``swarm.image_gen`` — image/video generation tools (``IMAGE_GEN_API_KEY`` /
-  ``VIDEO_GEN_API_KEY`` gated; video falls back to image_gen credentials).
+* ``swarm.image_gen`` — image generation tool (``IMAGE_GEN_API_KEY`` gated).
+* ``swarm.video_gen`` — video generation tool (``VIDEO_GEN_API_KEY`` gated).
 * ``swarm.xiaoyi_phone`` — the xiaoyi phone tools (channel-switch gated).
 * ``swarm.code_extra_tools`` — code-mode-exclusive ``acp_chat``.
 
@@ -104,6 +104,7 @@ SKILL_RETRIEVAL = "swarm.skill_retrieval"
 USER_TODOS = "swarm.user_todos"
 VIDEO = "swarm.video"
 IMAGE_GEN = "swarm.image_gen"
+VIDEO_GEN = "swarm.video_gen"
 XIAOYI_PHONE = "swarm.xiaoyi_phone"
 SYMPHONY_TOOLKIT = "swarm.symphony_toolkit"
 CODE_EXTRA_TOOLS = "swarm.code_extra_tools"
@@ -421,18 +422,27 @@ def _build_video_tools(ctx: SwarmBuildContext) -> list[Any]:
 
 
 def _build_image_gen_tools(ctx: SwarmBuildContext) -> list[Any]:
-    """Build image/video generation tools when media-gen credentials exist."""
+    """Build the image generation tool when IMAGE_GEN_API_KEY is set."""
     config = ctx.config or {}
     apply_image_gen_model_config_from_yaml(config)
-    apply_video_gen_model_config_from_yaml(config)
-    tools: list[Any] = []
-    if os.getenv("IMAGE_GEN_API_KEY"):
-        tools.append(generate_image)
-    if os.getenv("VIDEO_GEN_API_KEY"):
-        tools.append(generate_video)
-    if not tools:
+    image_gen_enabled = os.getenv("IMAGE_GEN_ENABLED")
+    if image_gen_enabled is not None and not multimodal_model_enabled(config, "image_gen"):
         return []
-    return _mark_stateless(tools)
+    if not os.getenv("IMAGE_GEN_API_KEY"):
+        return []
+    return _mark_stateless([generate_image])
+
+
+def _build_video_gen_tools(ctx: SwarmBuildContext) -> list[Any]:
+    """Build the video generation tool when VIDEO_GEN_API_KEY is set."""
+    config = ctx.config or {}
+    apply_video_gen_model_config_from_yaml(config)
+    video_gen_enabled = os.getenv("VIDEO_GEN_ENABLED")
+    if video_gen_enabled is not None and not multimodal_model_enabled(config, "video_gen"):
+        return []
+    if not os.getenv("VIDEO_GEN_API_KEY"):
+        return []
+    return _mark_stateless([generate_video])
 
 
 def _build_xiaoyi_phone_tools(ctx: SwarmBuildContext) -> list[Any]:
@@ -535,14 +545,21 @@ def build_video_tools(params: dict[str, Any], ctx: SwarmBuildContext) -> list[An
 @harness_element(
     kind=ElementKind.TOOL,
     name=IMAGE_GEN,
-    description=(
-        "Image/video generation tools (built when IMAGE_GEN_API_KEY or "
-        "VIDEO_GEN_API_KEY is set; video falls back to image_gen credentials)."
-    ),
+    description="Image generation tool (built when IMAGE_GEN_API_KEY is set).",
 )
 def build_image_gen_tools(params: dict[str, Any], ctx: SwarmBuildContext) -> list[Any]:
-    """Build the whitelist-filtered image/video generation tools."""
+    """Build the whitelist-filtered image generation tools."""
     return _filter_whitelist(_build_image_gen_tools(ctx))
+
+
+@harness_element(
+    kind=ElementKind.TOOL,
+    name=VIDEO_GEN,
+    description="Video generation tool (built when VIDEO_GEN_API_KEY is set).",
+)
+def build_video_gen_tools(params: dict[str, Any], ctx: SwarmBuildContext) -> list[Any]:
+    """Build the whitelist-filtered video generation tools."""
+    return _filter_whitelist(_build_video_gen_tools(ctx))
 
 
 @harness_element(
@@ -600,6 +617,7 @@ __all__ = [
     "USER_TODOS",
     "VIDEO",
     "IMAGE_GEN",
+    "VIDEO_GEN",
     "XIAOYI_PHONE",
     "SYMPHONY_TOOLKIT",
     "CODE_EXTRA_TOOLS",

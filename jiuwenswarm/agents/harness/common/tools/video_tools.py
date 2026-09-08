@@ -266,31 +266,15 @@ async def _invoke_model_video_generation(
 
     cfg = get_config() or {}
     mc = _get_model_config(cfg, "video_gen")
-    image_mc = _get_model_config(cfg, "image_gen")
 
-    api_key = str(
-        mc.get("api_key")
-        or os.getenv("VIDEO_GEN_API_KEY")
-        or image_mc.get("api_key")
-        or os.getenv("IMAGE_GEN_API_KEY")
-        or os.getenv("API_KEY")
-        or ""
-    ).strip()
+    api_key = str(mc.get("api_key") or os.getenv("VIDEO_GEN_API_KEY") or "").strip()
     api_base = str(
         mc.get("api_base")
         or os.getenv("VIDEO_GEN_API_BASE")
-        or image_mc.get("api_base")
-        or os.getenv("IMAGE_GEN_API_BASE")
-        or os.getenv("API_BASE")
         or "https://dashscope.aliyuncs.com/api/v1"
     ).strip()
     if not api_key:
-        return {
-            "error": (
-                "[ERROR]: VIDEO_GEN_API_KEY / IMAGE_GEN_API_KEY / API_KEY "
-                "is not configured for video generation."
-            )
-        }
+        return {"error": "[ERROR]: VIDEO_GEN_API_KEY is not configured for video generation."}
 
     model = str(
         mc.get("model_name")
@@ -302,22 +286,29 @@ async def _invoke_model_video_generation(
         mc.get("client_provider")
         or mc.get("model_provider")
         or os.getenv("VIDEO_GEN_PROVIDER")
-        or image_mc.get("client_provider")
-        or image_mc.get("model_provider")
-        or os.getenv("IMAGE_GEN_PROVIDER")
         or "DashScope"
     ).strip()
+    # DashScope text-to-video uses OpenAI client_provider + endpoint_profile=dashscope.
+    endpoint_profile = str(
+        mc.get("endpoint_profile") or os.getenv("VIDEO_GEN_ENDPOINT_PROFILE") or ""
+    ).strip().lower()
+    if provider in ("DashScope", "dashscope"):
+        provider = "OpenAI"
+        endpoint_profile = endpoint_profile or "dashscope"
 
     try:
-        model_client_config = ModelClientConfig(
+        _mcc_kwargs: dict[str, Any] = dict(
             client_id="video_gen_client",
             client_provider=provider,
             api_key=api_key,
             api_base=api_base,
-            verify_ssl=mc.get("verify_ssl", image_mc.get("verify_ssl", True)),
-            ssl_cert=mc.get("ssl_cert", image_mc.get("ssl_cert")),
-            timeout=mc.get("timeout", image_mc.get("timeout", 1800)),
+            verify_ssl=mc.get("verify_ssl", True),
+            ssl_cert=mc.get("ssl_cert"),
+            timeout=mc.get("timeout", 1800),
         )
+        if endpoint_profile:
+            _mcc_kwargs["endpoint_profile"] = endpoint_profile
+        model_client_config = ModelClientConfig(**_mcc_kwargs)
         model_config = ModelRequestConfig(model=model)
         model_instance = Model(
             model_config=model_config,

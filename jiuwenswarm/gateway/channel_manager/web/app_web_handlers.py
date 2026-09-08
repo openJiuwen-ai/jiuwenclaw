@@ -156,6 +156,14 @@ _MULTIMODAL_RELOAD_ENV_KEYS = {
     "VIDEO_GEN_MODEL_NAME",
     "VIDEO_GEN_API_BASE",
     "VIDEO_GEN_API_KEY",
+    "VIDEO_GEN_ENDPOINT_PROFILE",
+    "VIDEO_GEN_ENABLED",
+    "IMAGE_GEN_PROVIDER",
+    "IMAGE_GEN_MODEL_NAME",
+    "IMAGE_GEN_API_BASE",
+    "IMAGE_GEN_API_KEY",
+    "IMAGE_GEN_ENDPOINT_PROFILE",
+    "IMAGE_GEN_ENABLED",
 }
 
 
@@ -1025,6 +1033,19 @@ _CONFIG_SET_ENV_MAP = {
     "video_gen_api_key": "VIDEO_GEN_API_KEY",
     "video_gen_model": "VIDEO_GEN_MODEL_NAME",
     "video_gen_provider": "VIDEO_GEN_PROVIDER",
+    "video_gen_endpoint_profile": "VIDEO_GEN_ENDPOINT_PROFILE",
+    "video_gen_vendor_key": "VIDEO_GEN_VENDOR_KEY",
+    "video_gen_plan": "VIDEO_GEN_PLAN",
+    "video_gen_enabled": "VIDEO_GEN_ENABLED",
+    # image_gen model (text-to-image)
+    "image_gen_api_base": "IMAGE_GEN_API_BASE",
+    "image_gen_api_key": "IMAGE_GEN_API_KEY",
+    "image_gen_model": "IMAGE_GEN_MODEL_NAME",
+    "image_gen_provider": "IMAGE_GEN_PROVIDER",
+    "image_gen_endpoint_profile": "IMAGE_GEN_ENDPOINT_PROFILE",
+    "image_gen_vendor_key": "IMAGE_GEN_VENDOR_KEY",
+    "image_gen_plan": "IMAGE_GEN_PLAN",
+    "image_gen_enabled": "IMAGE_GEN_ENABLED",
     # 其他
     "email_address": "EMAIL_ADDRESS",
     "email_token": "EMAIL_TOKEN",

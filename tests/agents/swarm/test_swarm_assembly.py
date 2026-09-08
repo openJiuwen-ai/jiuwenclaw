@@ -219,6 +219,7 @@ _COMMON_TOOL_NAMES: frozenset[str] = frozenset(
         registry.USER_TODOS,
         registry.VIDEO,
         registry.IMAGE_GEN,
+        registry.VIDEO_GEN,
         registry.XIAOYI_PHONE,
         registry.CRON_TOOLS,
         registry.SEND_FILE,
@@ -1707,35 +1708,42 @@ def test_video_tool_gated_by_config(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_image_gen_tool_gated_by_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Image/video generation tools are built when media-gen credentials exist."""
+    """Image generation tool is built only when IMAGE_GEN_API_KEY is set."""
     ctx = SwarmBuildContext(config={})
     monkeypatch.setattr(
         tools, "apply_image_gen_model_config_from_yaml", lambda cfg: None
-    )
-    monkeypatch.setattr(
-        tools, "apply_video_gen_model_config_from_yaml", lambda cfg: None
     )
     monkeypatch.delenv("IMAGE_GEN_API_KEY", raising=False)
     monkeypatch.delenv("VIDEO_GEN_API_KEY", raising=False)
     assert tools._build_image_gen_tools(ctx) == []
 
     monkeypatch.setenv("IMAGE_GEN_API_KEY", "k")
-    monkeypatch.delenv("VIDEO_GEN_API_KEY", raising=False)
+    monkeypatch.setenv("VIDEO_GEN_API_KEY", "vk")
     built = tools._build_image_gen_tools(ctx)
     assert [tool.card.name for tool in built] == ["generate_image"]
 
+
+def test_video_gen_tool_gated_by_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Video generation tool is built only when VIDEO_GEN_API_KEY is set."""
+    ctx = SwarmBuildContext(config={})
+    monkeypatch.setattr(
+        tools, "apply_video_gen_model_config_from_yaml", lambda cfg: None
+    )
     monkeypatch.delenv("IMAGE_GEN_API_KEY", raising=False)
-    monkeypatch.setenv("VIDEO_GEN_API_KEY", "vk")
-    built_video = tools._build_image_gen_tools(ctx)
-    assert [tool.card.name for tool in built_video] == ["generate_video"]
+    monkeypatch.delenv("VIDEO_GEN_API_KEY", raising=False)
+    monkeypatch.delenv("VIDEO_GEN_ENABLED", raising=False)
+    assert tools._build_video_gen_tools(ctx) == []
 
     monkeypatch.setenv("IMAGE_GEN_API_KEY", "k")
+    monkeypatch.delenv("VIDEO_GEN_API_KEY", raising=False)
+    assert tools._build_video_gen_tools(ctx) == []
+
     monkeypatch.setenv("VIDEO_GEN_API_KEY", "vk")
-    built_both = tools._build_image_gen_tools(ctx)
-    assert [tool.card.name for tool in built_both] == [
-        "generate_image",
-        "generate_video",
-    ]
+    built = tools._build_video_gen_tools(ctx)
+    assert [tool.card.name for tool in built] == ["generate_video"]
+
+    monkeypatch.setenv("VIDEO_GEN_ENABLED", "false")
+    assert tools._build_video_gen_tools(ctx) == []
 
 
 def test_symphony_toolkit_is_leader_only(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2188,6 +2196,7 @@ def test_code_capability_specs_rail_and_tool_names(mode: str) -> None:
         registry.USER_TODOS,
         registry.VIDEO,
         registry.IMAGE_GEN,
+        registry.VIDEO_GEN,
         registry.XIAOYI_PHONE,
         registry.SYMPHONY_TOOLKIT,
         registry.CODE_EXTRA_TOOLS,
