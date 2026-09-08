@@ -335,6 +335,7 @@ async def test_heartbeat_web_methods_preserve_health_check_aliases_and_session()
         {
             "name": "n",
             "prompt": "p",
+            "max_runs": None,
             "channel_id": "other",
             "session_id": "other-session",
             "schedule": {"type": "interval", "interval_seconds": 120},
@@ -350,6 +351,7 @@ async def test_heartbeat_web_methods_preserve_health_check_aliases_and_session()
     )
     created = controller.calls[1][1]
     assert created["channel_id"] == "web"
+    assert created["max_runs"] is None
     assert created["session_id"] == "session-current"
     assert created["source"] == "web_rpc"
     assert controller.calls[1][2] == "user-current"

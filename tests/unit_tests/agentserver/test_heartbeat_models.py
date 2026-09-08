@@ -155,6 +155,13 @@ def test_job_roundtrip_preserves_fields() -> None:
     assert job2.kind == "heartbeat"
 
 
+def test_job_roundtrip_preserves_unlimited_max_runs() -> None:
+    job = _make_interval_job(max_runs=None)
+    restored = HeartbeatJob.from_dict(job.to_dict())
+
+    assert restored.max_runs is None
+
+
 def test_job_from_dict_requires_mandatory_fields() -> None:
     with pytest.raises(ValueError, match="channel_id is required"):
         HeartbeatJob.from_dict(
