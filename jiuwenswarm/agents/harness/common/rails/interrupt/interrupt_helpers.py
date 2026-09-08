@@ -151,6 +151,7 @@ def build_permission_rail(
         compose_host_effective_permissions,
     )
     from jiuwenswarm.agents.harness.common.rails.permissions.permissions_layers import (
+        load_global_permissions,
         load_session_permissions,
         load_user_permissions,
         persist_session_overlay_from_effective,
@@ -440,8 +441,15 @@ def build_permission_rail(
                     "file_guard": {"enabled": False},
                 }
             sid = _effective_session_id(session_id)
+            # BUG-FIX (permission hot-reload): 重新从磁盘读取 global 权限，
+            # 不要使用 build_permission_rail 闭包中捕获的 inline_permissions。
+            # 否则当用户从 full_access 切到 default 时，rail 仍按
+            # build 时的配置做决策，导致该 ASK 的工具不再弹审批。
+            current_global = load_global_permissions()
+            if not isinstance(current_global, dict):
+                current_global = {}
             return compose_host_effective_permissions(
-                    global_permissions=inline_permissions,
+                    global_permissions=current_global,
                     user_permissions=load_user_permissions(),
                     session_permissions=load_session_permissions(sid),
                     session_id=sid,
