@@ -758,6 +758,7 @@ _SKILL_ROUTES: dict[ReqMethod, str] = {
     ReqMethod.SKILLS_MARKETPLACE_REMOVE: "handle_skills_marketplace_remove",
     ReqMethod.SKILLS_MARKETPLACE_TOGGLE: "handle_skills_marketplace_toggle",
     ReqMethod.SKILLS_ONLINE_SEARCH: "handle_skills_online_search",
+    ReqMethod.SKILLS_ONLINE_SEARCH_INSTALL: "handle_skills_online_search_install",
     ReqMethod.SKILLS_SKILLNET_SEARCH: "handle_skills_skillnet_search",
     ReqMethod.SKILLS_SKILLNET_INSTALL: "handle_skills_skillnet_install",
     ReqMethod.SKILLS_SKILLNET_INSTALL_STATUS: "handle_skills_skillnet_install_status",
@@ -1767,10 +1768,18 @@ class JiuWenSwarm:
                 "handle_skills_import_upload",
                 "handle_skills_toggle",
                 "handle_skills_skillnet_install",
+                "handle_skills_online_search_install",
                 "handle_skills_clawhub_download",
                 "handle_skills_team_skills_hub_install",
             ]
-            if handler_name == "handle_skills_skillnet_install" and payload.get("pending"):
+            if (
+                handler_name
+                in {
+                    "handle_skills_skillnet_install",
+                    "handle_skills_online_search_install",
+                }
+                and payload.get("pending")
+            ):
                 _reload_after_skills = False
             if _reload_after_skills:
                 await self.create_instance()

@@ -2416,6 +2416,72 @@ class SkillManager:
             "sources": source_statuses,
         }
 
+    async def handle_skills_online_search_install(self, params: dict) -> dict:
+        """统一安装在线搜索/广场结果：按 source 转发到既有安装实现.
+
+        params:
+            source: teamskillshub | clawhub | skillnet；缺省按 teamskillshub
+            identifier: hub asset_id / clawhub slug / skillnet url
+            force: bool
+            owner_handle / display_name: clawhub 可选
+            url: skillnet 可选；缺省用 identifier
+        """
+        params = params or {}
+        source = str(params.get("source") or "teamskillshub").strip().casefold()
+        identifier = str(
+            params.get("identifier")
+            if params.get("identifier") is not None
+            else params.get("asset_id") or params.get("slug") or params.get("url") or ""
+        ).strip()
+        if not identifier:
+            return {"success": False, "detail": "缺少参数: identifier"}
+
+        force = bool(params.get("force", False))
+        if source in {"teamskillshub", "swarmskillshub"}:
+            return await self.handle_skills_team_skills_hub_install(
+                {
+                    "asset_id": identifier,
+                    "force": force,
+                    **(
+                        {"version": params["version"]}
+                        if params.get("version") is not None
+                        else {}
+                    ),
+                    **(
+                        {"market_url": params["market_url"]}
+                        if params.get("market_url") is not None
+                        else {}
+                    ),
+                }
+            )
+        if source == "clawhub":
+            payload: dict[str, Any] = {
+                "slug": identifier,
+                "force": force,
+            }
+            owner_handle = str(params.get("owner_handle") or "").strip()
+            display_name = str(params.get("display_name") or "").strip()
+            if owner_handle:
+                payload["owner_handle"] = owner_handle
+            if display_name:
+                payload["display_name"] = display_name
+            if params.get("version") is not None:
+                payload["version"] = params.get("version")
+            if params.get("tag") is not None:
+                payload["tag"] = params.get("tag")
+            return await self.handle_skills_clawhub_download(payload)
+        if source == "skillnet":
+            url = str(params.get("url") or identifier).strip()
+            skillnet_params: dict[str, Any] = {"url": url, "force": force}
+            if params.get("mirror_url") is not None:
+                skillnet_params["mirror_url"] = params.get("mirror_url")
+            return await self.handle_skills_skillnet_install(skillnet_params)
+        return {
+            "success": False,
+            "detail": f"不支持的 source: {source}",
+            "detail_key": "skills.onlineSearch.unsupportedSource",
+        }
+
     async def handle_skills_skillnet_search(self, params: dict) -> dict:
         """在线搜索 SkillNet 技能."""
         query = str(params.get("q", "")).strip()
