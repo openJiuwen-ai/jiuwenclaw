@@ -378,6 +378,9 @@ export function VideoGenSettings({ disabled }: SettingsCustomItemProps) {
   const { isConnected } = useSettingsServices();
   const { values, savingKeys, save } = useSettingsSource();
   const [dialog, setDialog] = useState<{ enableOnSave: boolean } | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState('');
   const saveConfig: SaveConfig = (updates, operation) => save(updates, operation);
 
   const configured = videoGenFields.every((name) => String(values[name] ?? '').trim());
@@ -394,6 +397,23 @@ export function VideoGenSettings({ disabled }: SettingsCustomItemProps) {
       await saveConfig({ video_gen_enabled: toConfigBoolean(nextEnabled) }, 'settingsPanel.fields.video_gen_enabled.title');
     } catch {
       // Surfaced via savingKeys/isConnected state already; nothing further to do here.
+    }
+  };
+
+  const confirmDelete = async () => {
+    const updates: Record<string, string> = Object.fromEntries(videoGenFields.map((field) => [field, '']));
+    if (parseConfigBoolean(values.video_gen_enabled)) {
+      updates.video_gen_enabled = toConfigBoolean(false);
+    }
+    setDeleting(true);
+    setDeleteError('');
+    try {
+      await saveConfig(updates, 'settingsPanel.fields.video_gen_enabled.title');
+      setDeleteTarget(false);
+    } catch (error) {
+      setDeleteError(error instanceof Error ? error.message : t('settingsPanel.feedback.saveFailed'));
+    } finally {
+      setDeleting(false);
     }
   };
 
@@ -416,6 +436,18 @@ export function VideoGenSettings({ disabled }: SettingsCustomItemProps) {
                   aria-label={`${t('common.modify')} ${name}`}
                   disabled={disabled || !isConnected || busy}
                   onClick={() => setDialog({ enableOnSave: false })}
+                />
+                <Button
+                  variant="quiet"
+                  size="sm"
+                  icon={<settingsActionIcons.delete aria-hidden />}
+                  title={t('common.delete')}
+                  aria-label={`${t('common.delete')} ${name}`}
+                  disabled={disabled || !isConnected || busy}
+                  onClick={() => {
+                    setDeleteError('');
+                    setDeleteTarget(true);
+                  }}
                 />
               </div>
             </div>
@@ -442,6 +474,17 @@ export function VideoGenSettings({ disabled }: SettingsCustomItemProps) {
           onClose={() => setDialog(null)}
         />
       ) : null}
+      <SettingsConfirmDialog
+        open={deleteTarget}
+        title={t('settingsPanel.agent.deleteModelTitle')}
+        message={t('settingsPanel.agent.deleteModelConfirm', { name })}
+        confirming={deleting}
+        error={deleteError}
+        onConfirm={() => void confirmDelete()}
+        onCancel={() => {
+          if (!deleting) setDeleteTarget(false);
+        }}
+      />
     </>
   );
 }
@@ -451,6 +494,9 @@ export function VisualGenSettings({ disabled }: SettingsCustomItemProps) {
   const { isConnected } = useSettingsServices();
   const { values, savingKeys, save } = useSettingsSource();
   const [dialog, setDialog] = useState<{ enableOnSave: boolean } | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState('');
   const saveConfig: SaveConfig = (updates, operation) => save(updates, operation);
 
   const configured = visualGenFields.every((name) => String(values[name] ?? '').trim());
@@ -467,6 +513,23 @@ export function VisualGenSettings({ disabled }: SettingsCustomItemProps) {
       await saveConfig({ visual_gen_enabled: toConfigBoolean(nextEnabled) }, 'settingsPanel.fields.visual_gen_enabled.title');
     } catch {
       // Surfaced via savingKeys/isConnected state already; nothing further to do here.
+    }
+  };
+
+  const confirmDelete = async () => {
+    const updates: Record<string, string> = Object.fromEntries(visualGenFields.map((field) => [field, '']));
+    if (parseConfigBoolean(values.visual_gen_enabled)) {
+      updates.visual_gen_enabled = toConfigBoolean(false);
+    }
+    setDeleting(true);
+    setDeleteError('');
+    try {
+      await saveConfig(updates, 'settingsPanel.fields.visual_gen_enabled.title');
+      setDeleteTarget(false);
+    } catch (error) {
+      setDeleteError(error instanceof Error ? error.message : t('settingsPanel.feedback.saveFailed'));
+    } finally {
+      setDeleting(false);
     }
   };
 
@@ -489,6 +552,18 @@ export function VisualGenSettings({ disabled }: SettingsCustomItemProps) {
                   aria-label={`${t('common.modify')} ${name}`}
                   disabled={disabled || !isConnected || busy}
                   onClick={() => setDialog({ enableOnSave: false })}
+                />
+                <Button
+                  variant="quiet"
+                  size="sm"
+                  icon={<settingsActionIcons.delete aria-hidden />}
+                  title={t('common.delete')}
+                  aria-label={`${t('common.delete')} ${name}`}
+                  disabled={disabled || !isConnected || busy}
+                  onClick={() => {
+                    setDeleteError('');
+                    setDeleteTarget(true);
+                  }}
                 />
               </div>
             </div>
@@ -515,6 +590,17 @@ export function VisualGenSettings({ disabled }: SettingsCustomItemProps) {
           onClose={() => setDialog(null)}
         />
       ) : null}
+      <SettingsConfirmDialog
+        open={deleteTarget}
+        title={t('settingsPanel.agent.deleteModelTitle')}
+        message={t('settingsPanel.agent.deleteModelConfirm', { name })}
+        confirming={deleting}
+        error={deleteError}
+        onConfirm={() => void confirmDelete()}
+        onCancel={() => {
+          if (!deleting) setDeleteTarget(false);
+        }}
+      />
     </>
   );
 }
