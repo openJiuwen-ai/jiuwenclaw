@@ -76,6 +76,9 @@ class RsiWorker:
         self._last_enqueued: str | None = None
         self._resume_task_ids: set[str] = set()
         self._control_tasks: dict[str, asyncio.Task[Any]] = {}
+        # 请求 pause/terminate 时用来提前让出执行位；见 ``_run_until_slot_free``。
+        self._slot_released: dict[str, asyncio.Future[None]] = {}
+        self._winding_down: set[asyncio.Task[Any]] = set()
         # Providers that return before their durable snapshot reaches a
         # terminal state are polled here.  Keep the bound configurable for
         # deployments and tests, while protecting the queue from a Provider
@@ -131,6 +134,7 @@ class RsiWorker:
             # A running task remains RUNNING until the Provider confirms the
             # pause.  The control task owns the eventual state transition.
             self._schedule_provider_control(task_id, adapter, "pause")
+            self._release_slot(task_id)
             return task.status
         if mode == "terminate":
             if task.status not in {
@@ -150,6 +154,7 @@ class RsiWorker:
                 # Keep the public state unchanged until the Provider confirms
                 # termination, including the PAUSED -> TERMINATED path.
                 self._schedule_provider_control(task_id, adapter, "terminate")
+                self._release_slot(task_id)
                 return task.status
             result = self.store.update_status(
                 task_id, [task.status], TaskStatus.TERMINATED.value, cause=f"cancel({mode})"
@@ -208,12 +213,45 @@ class RsiWorker:
                 )
                 resume = task_id in self._resume_task_ids
                 self._resume_task_ids.discard(task_id)
-                await self._execute_task(task_id, resume=resume)
+                await self._run_until_slot_free(task_id, resume=resume)
             except Exception:  # noqa: BLE001 - 单任务状态冲突/异常不拖垮 worker
                 logger.exception("[RSI] 任务执行异常 task=%s，跳过继续取下一个", task_id)
             finally:
                 self._running_task_id = None
                 self._queue.task_done()
+
+    async def _run_until_slot_free(self, task_id: str, *, resume: bool = False) -> None:
+        """占住队列那唯一的执行位，直到运行结束——或者直到有人请求了 pause/terminate。
+
+        pause 不会让引擎就地停下：Provider 要先把在飞的那次扩展做完，也就是一次
+        模型调用加一次评测。实测一次真实运行里这段是 2 分 34 秒，而这段时间执行位
+        一直被占着，排在后面的任务只能等一件谁都不再要其结果的工作做完。
+
+        控制指令一发出就把执行位让出来，正在收尾的运行转到后台继续，队列接着走。
+        代价是这段时间里两个运行短暂重叠，收尾的那个仍在占 CPU——所以以墙钟为
+        指标的任务，那一次评测会偏慢一点。
+        """
+        runner = asyncio.create_task(self._execute_task(task_id, resume=resume))
+        released: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+        self._slot_released[task_id] = released
+        try:
+            await asyncio.wait({runner, released}, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            self._slot_released.pop(task_id, None)
+            released.cancel()
+        if runner.done():
+            await runner          # 异常照旧抛给 _run_loop 的处理分支
+            return
+        # 后台收尾：留住引用，否则事件循环可能把这个 Task 回收掉。
+        self._winding_down.add(runner)
+        runner.add_done_callback(self._winding_down.discard)
+        logger.info("[RSI] 控制指令已下发，任务转后台收尾，队列继续: task=%s", task_id)
+
+    def _release_slot(self, task_id: str) -> None:
+        """让出执行位。控制指令已经在路上，等它落地不必占着队列。"""
+        released = self._slot_released.get(task_id)
+        if released is not None and not released.done():
+            released.set_result(None)
 
     async def _execute_task(self, task_id: str, *, resume: bool = False) -> None:
         task_view = self.store.get_view(task_id)
