@@ -4,6 +4,7 @@
 
 import importlib
 import os
+import shutil
 import sys
 from pathlib import Path
 from unittest.mock import patch
@@ -631,7 +632,8 @@ class TestWorkspaceToJiuwenclawWorkspaceMigration:
 
     def test_merge_top_level_conflict(self, tmp_path: Path):
         old_ws = self._make_old_layout(tmp_path, "personal")
-        new_ws = tmp_path / "service_default" / "agent_default" / "agent" / "jiuwenclaw_workspace"
+        agent_root = tmp_path / "service_default" / "agent_default" / "agent"
+        new_ws = agent_root / "jiuwenclaw_workspace"
         new_ws.mkdir(parents=True)
         (new_ws / "USER.md").write_text("new-side", encoding="utf-8")
         (old_ws / "USER.md").write_text("old-side", encoding="utf-8")
@@ -641,14 +643,17 @@ class TestWorkspaceToJiuwenclawWorkspaceMigration:
         assert not old_ws.exists()
         # New side wins the conflict...
         assert (new_ws / "USER.md").read_text(encoding="utf-8") == "new-side"
-        # ...and the old-side content is preserved in a backup dir, not lost
-        backups = list(new_ws.glob(".migration-backup-*/USER.md"))
+        # ...and the old-side content is preserved in a backup dir, not lost.
+        # Backup lives under agent/ (hidden sibling), not inside the workspace
+        # where it would pollute the file tree exposed to users and the Agent.
+        backups = list(agent_root.glob(".migration-backup-*/USER.md"))
         assert len(backups) == 1
         assert backups[0].read_text(encoding="utf-8") == "old-side"
 
     def test_merge_nested_conflict(self, tmp_path: Path):
         old_ws = self._make_old_layout(tmp_path, "personal")
-        new_ws = tmp_path / "service_default" / "agent_default" / "agent" / "jiuwenclaw_workspace"
+        agent_root = tmp_path / "service_default" / "agent_default" / "agent"
+        new_ws = agent_root / "jiuwenclaw_workspace"
         (new_ws / "memory").mkdir(parents=True)
         (new_ws / "memory" / "MEMORY.md").write_text("new-side", encoding="utf-8")
         (old_ws / "memory").mkdir()
@@ -663,7 +668,7 @@ class TestWorkspaceToJiuwenclawWorkspaceMigration:
         assert (new_ws / "memory" / "MEMORY.md").read_text(encoding="utf-8") == "new-side"
         assert (new_ws / "memory" / "2026-09-07.md").read_text(encoding="utf-8") == "daily"
         # Old-side conflicting file backed up, not overwritten/lost
-        backups = list(new_ws.glob(".migration-backup-*/memory/MEMORY.md"))
+        backups = list(agent_root.glob(".migration-backup-*/memory/MEMORY.md"))
         assert len(backups) == 1
         assert backups[0].read_text(encoding="utf-8") == "old-side"
 
@@ -677,3 +682,130 @@ class TestWorkspaceToJiuwenclawWorkspaceMigration:
         (old_ws / "todo").mkdir()
         utils._migrate_workspace_to_jiuwenclaw_workspace(tmp_path)
         assert (tmp_path / "agent" / "jiuwenclaw_workspace" / "todo").exists()
+
+    @staticmethod
+    def _write_legacy_metadata(agent_root: Path, old_ws: Path) -> None:
+        """Simulate pre-migration on-disk state: projects.json + session metadata
+        whose project_dir strings point at the OLD absolute workspace path."""
+        import json as _json
+
+        (agent_root / "projects.json").write_text(
+            _json.dumps(
+                {
+                    "version": 1,
+                    "projects": [
+                        {
+                            "project_id": "p1",
+                            "name": "demo",
+                            "project_dir": str(old_ws / "work" / "demo"),
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        sess_dir = agent_root / "sessions" / "sess-1"
+        sess_dir.mkdir(parents=True)
+        (sess_dir / "metadata.json").write_text(
+            _json.dumps(
+                {
+                    "session_id": "sess-1",
+                    "project_dir": str(old_ws / "work" / "demo"),
+                    "channel_metadata": {
+                        "cwd": str(old_ws / "work" / "demo"),
+                        "project_dir": str(old_ws / "work" / "demo"),
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    def test_migration_rewrites_persisted_project_dir(self, tmp_path: Path):
+        """Regression: persisted project_dir must follow the renamed directory.
+
+        Otherwise validate_project_dir re-creates the old path (zombie dir),
+        the next restart merges it away again, and files written in between
+        become invisible to the session.
+        """
+        import json as _json
+
+        old_ws = self._make_old_layout(tmp_path, "personal")
+        agent_root = tmp_path / "service_default" / "agent_default" / "agent"
+        self._write_legacy_metadata(agent_root, old_ws)
+
+        utils._migrate_workspace_to_jiuwenclaw_workspace(tmp_path)
+
+        new_ws = agent_root / "jiuwenclaw_workspace"
+        new_project_dir = str(new_ws / "work" / "demo")
+
+        projects = _json.loads(
+            (agent_root / "projects.json").read_text(encoding="utf-8")
+        )
+        assert projects["projects"][0]["project_dir"] == new_project_dir
+
+        meta = _json.loads(
+            (agent_root / "sessions" / "sess-1" / "metadata.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        assert meta["project_dir"] == new_project_dir
+        assert meta["channel_metadata"]["cwd"] == new_project_dir
+        assert meta["channel_metadata"]["project_dir"] == new_project_dir
+
+    def test_migration_rewrites_metadata_on_merge_too(self, tmp_path: Path):
+        """Merge branch (both dirs exist) must also rewrite persisted paths."""
+        import json as _json
+
+        old_ws = self._make_old_layout(tmp_path, "personal")
+        agent_root = tmp_path / "service_default" / "agent_default" / "agent"
+        (agent_root / "jiuwenclaw_workspace").mkdir(parents=True)
+        self._write_legacy_metadata(agent_root, old_ws)
+
+        utils._migrate_workspace_to_jiuwenclaw_workspace(tmp_path)
+
+        projects = _json.loads(
+            (agent_root / "projects.json").read_text(encoding="utf-8")
+        )
+        new_ws = agent_root / "jiuwenclaw_workspace"
+        assert projects["projects"][0]["project_dir"] == str(new_ws / "work" / "demo")
+
+    def test_metadata_rewrite_idempotent(self, tmp_path: Path):
+        """Re-running migration (e.g. crash-restart loop) must not corrupt metadata."""
+        import json as _json
+
+        old_ws = self._make_old_layout(tmp_path, "personal")
+        agent_root = tmp_path / "service_default" / "agent_default" / "agent"
+        self._write_legacy_metadata(agent_root, old_ws)
+
+        utils._migrate_workspace_to_jiuwenclaw_workspace(tmp_path)
+        # Second run: old dir gone; metadata rewrite must be a no-op, not a rewrite
+        mtime_first = (agent_root / "projects.json").stat().st_mtime_ns
+        utils._migrate_workspace_to_jiuwenclaw_workspace(tmp_path)
+
+        new_ws = agent_root / "jiuwenclaw_workspace"
+        projects = _json.loads(
+            (agent_root / "projects.json").read_text(encoding="utf-8")
+        )
+        assert projects["projects"][0]["project_dir"] == str(new_ws / "work" / "demo")
+        assert (agent_root / "projects.json").stat().st_mtime_ns == mtime_first
+
+    def test_concurrent_migration_missing_old_dir_no_crash(self, tmp_path: Path):
+        """Simulate another process finishing the move first: FileNotFoundError
+        from move/rmtree must not crash startup; metadata still rewritten."""
+        import json as _json
+
+        old_ws = self._make_old_layout(tmp_path, "personal")
+        agent_root = tmp_path / "service_default" / "agent_default" / "agent"
+        self._write_legacy_metadata(agent_root, old_ws)
+
+        # Another "process" migrates and leaves no old dir behind
+        (agent_root / "jiuwenclaw_workspace").mkdir(parents=True)
+        shutil.rmtree(old_ws)
+
+        utils._migrate_workspace_to_jiuwenclaw_workspace(tmp_path)  # must not raise
+
+        projects = _json.loads(
+            (agent_root / "projects.json").read_text(encoding="utf-8")
+        )
+        new_ws = agent_root / "jiuwenclaw_workspace"
+        assert projects["projects"][0]["project_dir"] == str(new_ws / "work" / "demo")

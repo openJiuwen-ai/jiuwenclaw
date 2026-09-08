@@ -904,6 +904,99 @@ def _migrate_from_jiuwenclaw_root() -> bool:
         return False
 
 
+def _replace_path_prefix(value: str, prefixes: list[tuple[str, str]]) -> str:
+    """替换字符串开头的旧工作区绝对路径前缀（分隔符边界感知）。
+
+    前缀命中后必须紧跟路径分隔符或结尾，避免误伤
+    ``.../agent/workspace_other`` 这类路径。旧/新前缀各自的分隔符风格
+    （``\\`` / ``/``）都处理。
+    """
+    for old_s, new_s in prefixes:
+        if value == old_s:
+            return new_s
+        if value.startswith(old_s) and value[len(old_s)] in ("\\", "/"):
+            return new_s + value[len(old_s):]
+    return value
+
+
+def _rewrite_json_path_prefix(
+    file_path: Path, prefixes: list[tuple[str, str]]
+) -> bool:
+    """重写 JSON 文件字符串值中的旧路径前缀；有变更并成功写回时返回 True。
+
+    解析后按值替换（避免 JSON 转义导致的文本替换错位），原子写回。
+    文件缺失/损坏时静默返回 False。
+    """
+    try:
+        data = json.loads(file_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+
+    changed = False
+
+    def _rewrite(obj: Any) -> Any:
+        nonlocal changed
+        if isinstance(obj, str):
+            new_value = _replace_path_prefix(obj, prefixes)
+            if new_value != obj:
+                changed = True
+                obj = new_value
+            return obj
+        if isinstance(obj, list):
+            return [_rewrite(item) for item in obj]
+        if isinstance(obj, dict):
+            return {key: _rewrite(value) for key, value in obj.items()}
+        return obj
+
+    new_data = _rewrite(data)
+    if not changed:
+        return False
+    tmp_path = file_path.with_suffix(file_path.suffix + ".migration.tmp")
+    try:
+        tmp_path.write_text(
+            json.dumps(new_data, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        tmp_path.replace(file_path)
+    except OSError as exc:
+        tmp_path.unlink(missing_ok=True)
+        logger.warning("重写 %s 中的旧路径前缀失败: %s", file_path, exc)
+        return False
+    return True
+
+
+def _rewrite_legacy_project_dir_metadata(
+    agent_root: Path, old_workspace: Path, new_workspace: Path
+) -> None:
+    """目录改名后同步重写持久化元数据中的旧工作区绝对路径。
+
+    存量 ``projects.json``（``project_dir``）与 ``sessions/*/metadata.json``
+    （``project_dir``、``channel_metadata.cwd`` 等）记录的是
+    ``.../agent/workspace`` 绝对路径。若不重写，``validate_project_dir`` 会在
+    旧路径上 mkdir 重建"僵尸目录"，下次重启又触发一轮合并迁移，且两次重启
+    之间写入旧目录的项目文件对会话不可见。
+
+    幂等：无旧前缀命中时不写盘，可安全重复调用（含并发迁移场景）。
+    """
+    old_s, new_s = str(old_workspace), str(new_workspace)
+    posix_old, posix_new = old_workspace.as_posix(), new_workspace.as_posix()
+    prefixes = [(old_s, new_s)]
+    if posix_old != old_s:
+        prefixes.append((posix_old, posix_new))
+
+    projects_file = agent_root / "projects.json"
+    if projects_file.is_file() and _rewrite_json_path_prefix(projects_file, prefixes):
+        print(f"[migration] Rewrote legacy project_dir in {projects_file}")
+
+    sessions_dir = agent_root / "sessions"
+    if sessions_dir.is_dir():
+        for entry in sessions_dir.iterdir():
+            if not entry.is_dir():
+                continue
+            meta_file = entry / "metadata.json"
+            if meta_file.is_file() and _rewrite_json_path_prefix(meta_file, prefixes):
+                print(f"[migration] Rewrote legacy project_dir in {meta_file}")
+
+
 def _migrate_workspace_to_jiuwenclaw_workspace(workspace_dir: Path) -> None:
     """Migrate from legacy workspace directory name to jiuwenclaw_workspace.
 
@@ -921,70 +1014,88 @@ def _migrate_workspace_to_jiuwenclaw_workspace(workspace_dir: Path) -> None:
     """
 
     def _merge_one(tenant_root: Path) -> None:
-        old_workspace = tenant_root / "agent" / "workspace"
-        new_workspace = tenant_root / "agent" / "jiuwenclaw_workspace"
+        agent_root = tenant_root / "agent"
+        old_workspace = agent_root / "workspace"
+        new_workspace = agent_root / "jiuwenclaw_workspace"
         if not old_workspace.exists():
+            # 旧目录已不存在：可能是并发进程刚完成迁移（可能来不及重写元数据
+            # 就崩溃），仍需重写元数据兜底（幂等，无命中不写盘）。
+            _rewrite_legacy_project_dir_metadata(agent_root, old_workspace, new_workspace)
             return
 
         def _conflict_backup_dir() -> Path:
-            """同名冲突时备份旧侧文件的目录（按时间戳隔离多次迁移）。"""
-            backup_dir = new_workspace / f".migration-backup-{int(time.time())}"
+            """同名冲突时备份旧侧文件的目录（按时间戳隔离多次迁移）。
+
+            放在 ``agent/`` 下的隐藏同级目录（与 ``.checkpoint``/``.logs``
+            布局一致），不污染新工作区文件树。
+            """
+            backup_dir = agent_root / f".migration-backup-{int(time.time())}"
             backup_dir.mkdir(parents=True, exist_ok=True)
             return backup_dir
 
-        if new_workspace.exists():
-            # Both exist - merge carefully
-            # 优先级方向统一为：新侧（jiuwenclaw_workspace）为胜者，旧侧独有内容并入；
-            # 旧侧同名冲突文件一律备份到 .migration-backup-{ts}/ 而非静默丢弃/覆盖。
-            print(f"[migration] Both workspace and jiuwenclaw_workspace exist, merging...")
-            backup_dir: Optional[Path] = None
-            for item in old_workspace.iterdir():
-                dest = new_workspace / item.name
-                if item.is_dir():
-                    if dest.exists():
-                        # Merge directories, keeping new-side files on conflict
-                        # (same priority direction as top-level files below).
-                        for sub in item.rglob("*"):
-                            dest_sub = dest / sub.relative_to(item)
-                            if sub.is_dir():
-                                dest_sub.mkdir(parents=True, exist_ok=True)
-                            elif not dest_sub.exists():
-                                shutil.copy2(sub, dest_sub)
-                            else:
-                                # Conflict inside directory: back up old-side file
-                                if backup_dir is None:
-                                    backup_dir = _conflict_backup_dir()
-                                backup_sub = backup_dir / item.name / sub.relative_to(item)
-                                backup_sub.parent.mkdir(parents=True, exist_ok=True)
-                                shutil.copy2(sub, backup_sub)
-                                logger.warning(
-                                    "Both workspace and jiuwenclaw_workspace have %s; "
-                                    "kept new version, old copy backed up to %s",
-                                    sub.relative_to(item), backup_sub,
-                                )
+        try:
+            if new_workspace.exists():
+                # Both exist - merge carefully
+                # 优先级方向统一为：新侧（jiuwenclaw_workspace）为胜者，旧侧独有内容并入；
+                # 旧侧同名冲突文件一律备份到 agent/.migration-backup-{ts}/ 而非静默丢弃/覆盖。
+                print(f"[migration] Both workspace and jiuwenclaw_workspace exist, merging...")
+                backup_dir: Optional[Path] = None
+                for item in old_workspace.iterdir():
+                    dest = new_workspace / item.name
+                    if item.is_dir():
+                        if dest.exists():
+                            # Merge directories, keeping new-side files on conflict
+                            # (same priority direction as top-level files below).
+                            for sub in item.rglob("*"):
+                                dest_sub = dest / sub.relative_to(item)
+                                if sub.is_dir():
+                                    dest_sub.mkdir(parents=True, exist_ok=True)
+                                elif not dest_sub.exists():
+                                    shutil.copy2(sub, dest_sub)
+                                else:
+                                    # Conflict inside directory: back up old-side file
+                                    if backup_dir is None:
+                                        backup_dir = _conflict_backup_dir()
+                                    backup_sub = backup_dir / item.name / sub.relative_to(item)
+                                    backup_sub.parent.mkdir(parents=True, exist_ok=True)
+                                    shutil.copy2(sub, backup_sub)
+                                    logger.warning(
+                                        "Both workspace and jiuwenclaw_workspace have %s; "
+                                        "kept new version, old copy backed up to %s",
+                                        sub.relative_to(item), backup_sub,
+                                    )
+                        else:
+                            shutil.copytree(item, dest)
                     else:
-                        shutil.copytree(item, dest)
-                else:
-                    if not dest.exists():
-                        shutil.copy2(item, dest)
-                    else:
-                        # Conflict: back up old-side file instead of dropping it
-                        if backup_dir is None:
-                            backup_dir = _conflict_backup_dir()
-                        backup_path = backup_dir / item.name
-                        shutil.copy2(item, backup_path)
-                        logger.warning(
-                            "Both workspace and jiuwenclaw_workspace have %s; "
-                            "kept new version, old copy backed up to %s",
-                            item.name, backup_path,
-                        )
-            # Remove old after successful merge
-            shutil.rmtree(old_workspace)
-            print(f"[migration] Merged and removed: {old_workspace}")
-        else:
-            # Simple rename
-            shutil.move(str(old_workspace), str(new_workspace))
-            print(f"[migration] Renamed: {old_workspace} -> {new_workspace}")
+                        if not dest.exists():
+                            shutil.copy2(item, dest)
+                        else:
+                            # Conflict: back up old-side file instead of dropping it
+                            if backup_dir is None:
+                                backup_dir = _conflict_backup_dir()
+                            backup_path = backup_dir / item.name
+                            shutil.copy2(item, backup_path)
+                            logger.warning(
+                                "Both workspace and jiuwenclaw_workspace have %s; "
+                                "kept new version, old copy backed up to %s",
+                                item.name, backup_path,
+                            )
+                # Remove old after successful merge
+                shutil.rmtree(old_workspace)
+                print(f"[migration] Merged and removed: {old_workspace}")
+            else:
+                # Simple rename
+                shutil.move(str(old_workspace), str(new_workspace))
+                print(f"[migration] Renamed: {old_workspace} -> {new_workspace}")
+        except FileNotFoundError:
+            # 多进程/多 Pod 并发启动时，旧目录可能已被其他进程迁移/清理。
+            # 此时迁移目标已达成，跳过而非崩溃。
+            print(
+                f"[migration] {old_workspace} already handled by another process, skipping"
+            )
+        # 无论迁移由本进程还是并发进程完成，都重写元数据中的旧路径前缀
+        # （幂等，无命中不写盘）。
+        _rewrite_legacy_project_dir_metadata(agent_root, old_workspace, new_workspace)
 
     tenant_roots = [workspace_dir / "service_default" / "agent_default"]
     if workspace_dir.is_dir():
@@ -1831,8 +1942,8 @@ _AGENT_WORKSPACE_DIR_NAMES = frozenset({"workspace", "jiuwenclaw_workspace"})
 def collapse_nested_agent_workspace_dir(path: Path | str) -> Path:
     """Collapse ``.../workspace/workspace`` back to the agent workspace.
 
-    The agent workspace is ``.../agent/jiuwenclaw_workspace`` (this project) or
-    ``.../agent/jiuwenclaw_workspace`` (upstream). PPT tooling historically
+    The agent workspace is ``.../agent/workspace`` (legacy name) or
+    ``.../agent/jiuwenclaw_workspace`` (current). PPT tooling historically
     used ``{cwd}/workspace`` as the session parent, which nests a second
     ``workspace`` directory when cwd is already the agent workspace.
     """
