@@ -1181,6 +1181,7 @@
       "installDialogTitle": "Install optional components",
       "installDialogDescription": "Closing this dialog does not interrupt installation. Your configuration will be saved automatically when installation finishes.",
       "installArtifact": "Downloading file {{current}} of {{total}}: {{package}} {{version}}",
+      "installActivity": "Latest installation activity",
       "installProgress": "Download progress",
       "installEta": "About {{eta}} remaining",
       "installRetry": "Download interrupted. Retrying ({{current}}/{{total}})",
