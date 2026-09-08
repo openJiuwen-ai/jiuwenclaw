@@ -127,10 +127,10 @@ def test_should_seed_pages():
 
 
 def test_resolve_skill_root():
-    from pathlib import Path
+    from pathlib import Path, PureWindowsPath
 
     assert Path(resolve_skill_root(r"D:\skills\pptx-craft")) == Path(r"D:\skills")
-    assert Path(resolve_skill_root(r"D:\skills\pptx-craft")).name == "skills"
+    assert PureWindowsPath(resolve_skill_root(r"D:\skills\pptx-craft")).name == "skills"
 
 
 def test_resolve_skill_root_posix_path():
