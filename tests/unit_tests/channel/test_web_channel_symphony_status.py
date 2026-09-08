@@ -1,3 +1,5 @@
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+
 import asyncio
 import json
 
@@ -13,6 +15,46 @@ from jiuwenswarm.gateway.routing.keys import RoutingKey
 from jiuwenswarm.gateway.routing.session_sharing import RoutingTarget
 
 
+@pytest.mark.asyncio
+async def test_web_channel_persists_frontend_context_usage_off_loop(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "jiuwenswarm.gateway.channel_manager.web.web_connect.get_logs_dir",
+        lambda: tmp_path,
+    )
+    channel = WebChannel(WebChannelConfig(enabled=True), RobotMessageRouter())
+    frame = {
+        "event": "context.usage",
+        "payload": {"session_id": "sess-context", "tokens_used": 12},
+    }
+
+    await channel._persist_frontend_context_usage(frame)
+
+    records = (tmp_path / "context_usage.jsonl").read_text(encoding="utf-8").splitlines()
+    assert [json.loads(record) for record in records] == [frame]
+
+
+def test_web_channel_rotates_frontend_context_usage_log(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "jiuwenswarm.gateway.channel_manager.web.web_connect.get_logs_dir",
+        lambda: tmp_path,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.gateway.channel_manager.web.web_connect._CONTEXT_USAGE_MAX_BYTES",
+        12,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.gateway.channel_manager.web.web_connect._CONTEXT_USAGE_BACKUP_COUNT",
+        2,
+    )
+
+    WebChannel._write_frontend_context_usage("first")
+    WebChannel._write_frontend_context_usage("second")
+
+    assert (tmp_path / "context_usage.jsonl").read_text(encoding="utf-8") == "second\n"
+    assert (tmp_path / "context_usage.jsonl.1").read_text(encoding="utf-8") == "first\n"
+    assert not (tmp_path / "context_usage.jsonl.2").exists()
+
+
 class _FakeClient:
     def __init__(self):
         self.frames = []
@@ -21,6 +63,35 @@ class _FakeClient:
 
     async def send(self, data):
         self.frames.append(json.loads(data))
+
+
+def test_web_channel_exposes_heartbeat_marker_without_routing_metadata():
+    automation = {
+        "kind": "heartbeat",
+        "job_id": "hb-1",
+        "run_id": "run-1",
+        "trigger": "scheduler",
+    }
+    msg = Message(
+        id="run-1",
+        type="event",
+        channel_id="web",
+        session_id="session-1",
+        params={},
+        timestamp=1.0,
+        ok=True,
+        payload={"event_type": "chat.final", "content": "done"},
+        event_type=EventType.CHAT_FINAL,
+        metadata={"automation": automation, "ws_id": "private-route"},
+    )
+
+    payload = WebChannel._build_event_payload(msg, "chat.final")
+    frame = WebChannel._serialize_frame(object.__new__(WebChannel), msg)
+
+    assert payload["metadata"] == {"automation": automation}
+    assert frame["payload"]["metadata"] == {"automation": automation}
+    assert "ws_id" not in payload["metadata"]
+    assert "ws_id" not in frame["payload"]["metadata"]
 
 
 def test_web_channel_preserves_goal_structured_payloads():

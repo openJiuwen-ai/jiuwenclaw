@@ -55,14 +55,23 @@ async def test_code_adapter_passes_context_engine_config_to_deep_agent(
     async def ensure_initialized() -> None:
         return None
 
+    ability_manager = SimpleNamespace(set_owner_id=lambda _owner_id: None)
     instance = SimpleNamespace(
         ensure_initialized=ensure_initialized,
         _registered_rails=[],
+        deep_config=SimpleNamespace(tool_owner_id=None),
+        ability_manager=ability_manager,
+        configured_rails=lambda: [],
     )
+    spec = SimpleNamespace(build=lambda _context: instance)
 
-    def create_deep_agent(**kwargs):
+    def build_spec(**kwargs):
         captured.update(kwargs)
-        return instance
+        context = SimpleNamespace(
+            tool_owner_id="code-context-test",
+            artifacts=SimpleNamespace(tools=[]),
+        )
+        return spec, context
 
     adapter = interface_code.JiuwenSwarmCodeAdapter()
     monkeypatch.setattr(adapter, "_skip_own_instance_build", lambda: False)
@@ -72,17 +81,25 @@ async def test_code_adapter_passes_context_engine_config_to_deep_agent(
         "get_agent_workspace_dir",
         lambda: tmp_path / "agent-workspace",
     )
-    monkeypatch.setattr(interface_code, "create_deep_agent", create_deep_agent)
+    monkeypatch.setattr(
+        interface_code.code_agent_spec,
+        "convert_code_config_to_deep_agent_spec",
+        build_spec,
+    )
     monkeypatch.setattr(adapter, "set_checkpoint", AsyncMock())
     monkeypatch.setattr(adapter, "_refresh_multimodal_configs", lambda config: None)
     monkeypatch.setattr(adapter, "_create_model", lambda config: object())
-    monkeypatch.setattr(adapter, "_get_tool_cards", AsyncMock(return_value=[]))
     monkeypatch.setattr(
         adapter,
         "_build_agent_rails",
         lambda config, config_base, mode: [],
     )
-    monkeypatch.setattr(adapter, "_create_sys_operation", lambda: object())
+
+    def create_sys_operation():
+        adapter._sys_operation_card = SimpleNamespace()
+        return object()
+
+    monkeypatch.setattr(adapter, "_create_sys_operation", create_sys_operation)
     monkeypatch.setattr(
         adapter,
         "_build_configured_subagents",
@@ -104,6 +121,7 @@ async def test_code_adapter_passes_context_engine_config_to_deep_agent(
         AsyncMock(),
     )
     monkeypatch.setattr(adapter, "load_user_rails", AsyncMock())
+    monkeypatch.setattr(adapter, "_load_active_packages", AsyncMock())
 
     await adapter.create_instance({"project_dir": str(tmp_path / "project")})
 

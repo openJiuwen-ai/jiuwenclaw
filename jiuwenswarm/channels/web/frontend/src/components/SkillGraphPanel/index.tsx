@@ -18,6 +18,7 @@ import {
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { webRequest } from '../../services/webClient';
+import { useMaxWidth } from '../../hooks';
 import {
   COMPONENT_CENTER_ATTRACTION_STRENGTH,
   computeConnectedComponents,
@@ -54,6 +55,8 @@ type BuildProgress = {
   total?: number;
   ts?: string;
   llm_token_usage?: LLMTokenUsageSummary;
+  detail?: string;
+  error?: string;
 };
 
 type SkillGraphPayload = {
@@ -63,6 +66,7 @@ type SkillGraphPayload = {
   build_log?: BuildLogEntry[];
   build_progress?: BuildProgress;
   llm_token_usage?: LLMTokenUsageSummary;
+  build_error?: string;
   manifest?: RawRecord;
   graph_manifest?: RawRecord;
   orchestration_min_edge_confidence?: number;
@@ -89,6 +93,7 @@ type SkillGraphUpdate = {
   build_log?: BuildLogEntry[];
   build_progress?: BuildProgress;
   llm_token_usage?: LLMTokenUsageSummary;
+  build_error?: string;
 };
 
 type SkillGraphStatus = {
@@ -98,6 +103,14 @@ type SkillGraphStatus = {
   build_log?: BuildLogEntry[];
   build_progress?: BuildProgress;
   llm_token_usage?: LLMTokenUsageSummary;
+  build_error?: string;
+};
+
+type TerminalBuildPayload = {
+  detail?: string;
+  build_error?: string;
+  cancelled?: boolean;
+  build_progress?: BuildProgress;
 };
 
 export type SkillGraphPanelHandle = {
@@ -108,6 +121,7 @@ export type SkillGraphPanelHandle = {
 
 type SkillGraphPanelProps = {
   onReadingChange?: (reading: boolean) => void;
+  onBuildAccepted?: (mode: SymphonyBuildMode) => void;
   externalError?: string | null;
   onExternalErrorClear?: () => void;
 };
@@ -191,6 +205,8 @@ function ArrangeGraphIcon() {
 const BUILD_STAGE_TRANSLATION_KEYS: Record<string, string> = {
   idle: 'idle',
   'update.start': 'updateStart',
+  'model.probe.start': 'modelProbeStart',
+  'model.probe.done': 'modelProbeDone',
   'update.cancel_requested': 'updateCancelRequested',
   'update.cancelled': 'updateCancelled',
   'scan.start': 'scanStart',
@@ -235,6 +251,7 @@ const SERVER_DETAIL_TRANSLATION_KEYS: Record<string, string> = {
 };
 
 const SERVER_DETAIL_PREFIX_TRANSLATION_KEYS: Array<{ prefix: string; key: string }> = [
+  { prefix: '主模型连接测试未通过：', key: 'skills.graph.errors.primaryModelProbeFailed' },
   { prefix: 'Symphony 总谱构建失败:', key: 'skills.graph.errors.buildFailedWithDetail' },
 ];
 
@@ -440,6 +457,19 @@ function isTerminalBuildStatus(status: BuildProgress['status'] | undefined): boo
   return status === 'success' || status === 'error' || status === 'cancelled';
 }
 
+function terminalBuildSignature(data: TerminalBuildPayload): string {
+  const status = data.build_progress?.status ?? (data.cancelled ? 'cancelled' : undefined);
+  const errorDetail = status === 'error'
+    ? data.build_error
+      || data.build_progress?.detail
+      || data.build_progress?.error
+      || data.detail
+    : '';
+  return [status, data.build_progress?.ts, errorDetail]
+    .map((item) => asString(item))
+    .join('|');
+}
+
 function buildStageLabel(stage: string, fallback: string, t: Translate): string {
   const key = BUILD_STAGE_TRANSLATION_KEYS[stage];
   if (!key) return fallback || stage || t('skills.graph.buildLogFallback');
@@ -466,6 +496,10 @@ function buildLogSummary(entry: BuildLogEntry, t: Translate): string {
     t,
   );
   if (entry.stage === 'update.done') return label;
+  if (entry.stage === 'update.failed') {
+    const detail = asString(entry.detail || entry.error).trim();
+    return detail ? `${label}: ${localizedServerDetail(detail, 'skills.graph.errors.refreshFailed', t)}` : label;
+  }
   const hasGlobalCandidateProgress = entry.stage === 'graph.resolve.progress'
     && entry.completed_candidate_count !== undefined
     && entry.total_candidate_count !== undefined;
@@ -688,7 +722,7 @@ function buildLogSignature(entries?: BuildLogEntry[]): string {
 }
 
 export const SkillGraphPanel = forwardRef<SkillGraphPanelHandle, SkillGraphPanelProps>(function SkillGraphPanel(
-  { onReadingChange, externalError, onExternalErrorClear },
+  { onReadingChange, onBuildAccepted, externalError, onExternalErrorClear },
   ref,
 ) {
   const { t } = useTranslation();
@@ -702,6 +736,7 @@ export const SkillGraphPanel = forwardRef<SkillGraphPanelHandle, SkillGraphPanel
   const hoveredRef = useRef<GraphNode | null>(null);
   const externalBuildRunningRef = useRef(false);
   const observedBuildLogSignatureRef = useRef<string | null>(null);
+  const observedTerminalBuildSignatureRef = useRef<string | null>(null);
   const autoFitRequestRef = useRef(0);
   const autoFitCancelledRef = useRef(false);
   const canvasSizeRef = useRef({ width: 0, height: 0 });
@@ -721,9 +756,7 @@ export const SkillGraphPanel = forwardRef<SkillGraphPanelHandle, SkillGraphPanel
   const [selectedNode, setSelectedNode] = useState<GraphNode | null>(null);
   const [detailDrawerOpen, setDetailDrawerOpen] = useState(false);
   const [detailDrawerBounds, setDetailDrawerBounds] = useState({ top: 0, right: 0, height: 0 });
-  const [isCompactDetail, setIsCompactDetail] = useState(
-    () => typeof window !== 'undefined' && window.matchMedia('(max-width: 1535px)').matches,
-  );
+  const isCompactDetail = useMaxWidth('graph');
   const [query, setQuery] = useState('');
   const [minConfidence, setMinConfidence] = useState(DEFAULT_MIN_CONFIDENCE);
   const [loading, setLoading] = useState(false);
@@ -740,14 +773,6 @@ export const SkillGraphPanel = forwardRef<SkillGraphPanelHandle, SkillGraphPanel
   const buildProgressStatusRef = useRef<BuildProgress['status'] | undefined>(undefined);
   const [autoFitRequest, setAutoFitRequest] = useState(0);
   const [zoomScale, setZoomScale] = useState(1);
-
-  useEffect(() => {
-    const media = window.matchMedia('(max-width: 1535px)');
-    const updateCompactDetail = () => setIsCompactDetail(media.matches);
-    updateCompactDetail();
-    media.addEventListener('change', updateCompactDetail);
-    return () => media.removeEventListener('change', updateCompactDetail);
-  }, []);
 
   useLayoutEffect(() => {
     if (!isCompactDetail) return undefined;
@@ -782,6 +807,7 @@ export const SkillGraphPanel = forwardRef<SkillGraphPanelHandle, SkillGraphPanel
 
   const applyBuildLog = useCallback((data: { build_log?: BuildLogEntry[]; build_progress?: BuildProgress; llm_token_usage?: LLMTokenUsageSummary }) => {
     const nextStatus = data.build_progress?.status;
+    if (nextStatus === 'error') setShowBuildLogPanel(true);
     const resetElapsedStart = nextStatus === 'running' && buildProgressStatusRef.current !== 'running';
     if (Array.isArray(data.build_log)) {
       const nextBuildLog = data.build_log;
@@ -805,18 +831,30 @@ export const SkillGraphPanel = forwardRef<SkillGraphPanelHandle, SkillGraphPanel
     }
   }, []);
 
-  const resetBuildUiOnTerminalStatus = useCallback((data: { detail?: string; cancelled?: boolean; build_progress?: BuildProgress }): boolean => {
+  const resetBuildUiOnTerminalStatus = useCallback((data: TerminalBuildPayload): boolean => {
     const status = data.build_progress?.status ?? (data.cancelled ? 'cancelled' : undefined);
     if (!isTerminalBuildStatus(status)) return false;
     externalBuildRunningRef.current = false;
     setUpdating(false);
     setBuildMode(null);
     setLoading(false);
+    observedTerminalBuildSignatureRef.current = terminalBuildSignature(data);
     if (status === 'error') {
-      setError(data.detail || data.build_progress?.label || t('skills.graph.errors.refreshFailed'));
+      setError(
+        localizedServerDetail(
+          data.build_error
+          || data.build_progress?.detail
+          || data.build_progress?.error
+          || data.detail,
+          'skills.graph.errors.refreshFailed',
+          t,
+        ),
+      );
+    } else {
+      setError(null);
     }
     return true;
-  }, []);
+  }, [t]);
 
   useEffect(() => {
     graphRef.current = graph;
@@ -980,13 +1018,20 @@ export const SkillGraphPanel = forwardRef<SkillGraphPanelHandle, SkillGraphPanel
     try {
       const data = await webRequest<SkillGraphPayload>('skills.graph.get', {}, { timeoutMs: 60_000 });
       applyBuildLog(data);
+      if (isTerminalBuildStatus(data.build_progress?.status)) {
+        observedTerminalBuildSignatureRef.current = terminalBuildSignature(data);
+      }
       if (!data.success) {
         if (isBuildRunningPayload(data)) {
           setShowBuildLogPanel(true);
           keepLoading = true;
           return;
         }
-        throw new Error(localizedServerDetail(data.detail, 'skills.graph.errors.readFailed', t));
+        throw new Error(localizedServerDetail(
+          data.build_error || data.build_progress?.detail || data.detail,
+          'skills.graph.errors.readFailed',
+          t,
+        ));
       }
       const normalized = normalizeGraph(data);
       setPayload(data);
@@ -1000,7 +1045,16 @@ export const SkillGraphPanel = forwardRef<SkillGraphPanelHandle, SkillGraphPanel
       selectedRef.current = null;
       setSelectedNode(null);
       setDetailDrawerOpen(false);
-      setError(null);
+      const hasLatestBuildFailure = data.build_progress?.status === 'error' || Boolean(data.build_error);
+      if (hasLatestBuildFailure) {
+        setError(localizedServerDetail(
+          data.build_error || data.build_progress?.detail || data.build_progress?.error,
+          'skills.graph.errors.refreshFailed',
+          t,
+        ));
+      } else {
+        setError(null);
+      }
       requestAutoFit();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -1032,6 +1086,7 @@ export const SkillGraphPanel = forwardRef<SkillGraphPanelHandle, SkillGraphPanel
 
   const rebuildGraph = useCallback(async (mode: SymphonyBuildMode) => {
     const force = mode === 'full';
+    observedTerminalBuildSignatureRef.current = null;
     setBuildElapsedStart(null);
     setUpdating(true);
     setBuildMode(mode);
@@ -1053,9 +1108,14 @@ export const SkillGraphPanel = forwardRef<SkillGraphPanelHandle, SkillGraphPanel
       );
       applyBuildLog(data);
       if (!data.success) {
-        throw new Error(localizedServerDetail(data.detail, 'skills.graph.errors.refreshFailed', t));
+        throw new Error(localizedServerDetail(
+          data.build_error || data.build_progress?.detail || data.build_progress?.error || data.detail,
+          'skills.graph.errors.refreshFailed',
+          t,
+        ));
       }
       externalBuildRunningRef.current = true;
+      onBuildAccepted?.(mode);
     } catch (err) {
       const error = err instanceof Error ? err : new Error(String(err));
       externalBuildRunningRef.current = false;
@@ -1069,7 +1129,7 @@ export const SkillGraphPanel = forwardRef<SkillGraphPanelHandle, SkillGraphPanel
       }));
       throw error;
     }
-  }, [applyBuildLog, onExternalErrorClear, t]);
+  }, [applyBuildLog, onBuildAccepted, onExternalErrorClear, t]);
 
   const cancelBuild = useCallback(async () => {
     setCancellingBuild(true);
@@ -1204,15 +1264,21 @@ export const SkillGraphPanel = forwardRef<SkillGraphPanelHandle, SkillGraphPanel
           const status = data.build_progress?.status;
           const wasRunning = externalBuildRunningRef.current;
           if (status === 'running') {
+            if (!wasRunning) setError(null);
+            observedTerminalBuildSignatureRef.current = null;
             setShowBuildLogPanel(true);
             setLoading(true);
             nextDelay = 1000;
           }
           applyBuildLog(data);
           externalBuildRunningRef.current = status === 'running';
-          if (wasRunning && status === 'success') {
-            setLoading(false);
-            void loadGraph();
+          const terminalSignature = terminalBuildSignature(data);
+          if (
+            isTerminalBuildStatus(status)
+            && observedTerminalBuildSignatureRef.current !== terminalSignature
+          ) {
+            resetBuildUiOnTerminalStatus(data);
+            if (status === 'success') void loadGraph();
           } else if (status !== 'running') {
             setLoading(false);
           }
@@ -1234,7 +1300,7 @@ export const SkillGraphPanel = forwardRef<SkillGraphPanelHandle, SkillGraphPanel
         window.clearTimeout(timer);
       }
     };
-  }, [applyBuildLog, loadGraph, updating]);
+  }, [applyBuildLog, loadGraph, resetBuildUiOnTerminalStatus, updating]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -1519,6 +1585,7 @@ export const SkillGraphPanel = forwardRef<SkillGraphPanelHandle, SkillGraphPanel
   );
 
   const isGraphBuildRunning = buildProgress?.status === 'running';
+  const isGraphBuildError = buildProgress?.status === 'error';
   const isGraphBuildCancelled = buildProgress?.status === 'cancelled';
   const isBusy = loading || updating;
   const canCancelBuild = (updating || isGraphBuildRunning) && !cancellingBuild;
@@ -1529,6 +1596,7 @@ export const SkillGraphPanel = forwardRef<SkillGraphPanelHandle, SkillGraphPanel
   const createdAt = asString(manifest.created_at);
   const graphUpdatedAt = createdAt ? new Date(createdAt).toLocaleString() : '';
   const currentProgressPercent = progressPercent(buildProgress);
+  const showBuildProgress = !isGraphBuildError && !isGraphBuildCancelled;
   const progressLabel = buildProgressLabel(buildProgress, updating, t);
   const progressTitle = isGraphBuildRunning
     ? t('skills.graph.status.refreshing')
@@ -1631,11 +1699,15 @@ export const SkillGraphPanel = forwardRef<SkillGraphPanelHandle, SkillGraphPanel
           <div data-testid="skill-graph-panel-build-log" className="skill-graph-panel__build-log">
             <div data-testid="skill-graph-panel-progress-head" className="skill-graph-panel__progress-head">
               <span data-testid="skill-graph-panel-progress-title">{progressTitle}</span>
-              <strong data-testid="skill-graph-panel-progress-percent">{currentProgressPercent}%</strong>
+              {showBuildProgress ? (
+                <strong data-testid="skill-graph-panel-progress-percent">{currentProgressPercent}%</strong>
+              ) : null}
             </div>
-            <div data-testid="skill-graph-panel-progress-track" className="skill-graph-panel__progress-track" aria-hidden="true">
-              <span style={{ width: `${currentProgressPercent}%` }} />
-            </div>
+            {showBuildProgress ? (
+              <div data-testid="skill-graph-panel-progress-track" className="skill-graph-panel__progress-track" aria-hidden="true">
+                <span style={{ width: `${currentProgressPercent}%` }} />
+              </div>
+            ) : null}
             {buildMetricsText ? (
               <div data-testid="skill-graph-panel-build-metrics" className="skill-graph-panel__build-metrics">
                 <span>{buildMetricsText}</span>

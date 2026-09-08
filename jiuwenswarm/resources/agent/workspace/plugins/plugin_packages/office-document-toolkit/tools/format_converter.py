@@ -3,7 +3,12 @@ from pathlib import Path
 
 from openjiuwen.core.foundation.tool import Tool, ToolCard
 
-from pdf_font_utils import select_pdf_font
+from text_utils import (
+    CJK_PDF_BLOCKED_MESSAGE,
+    collect_docx_text,
+    collect_presentation_text,
+    contains_cjk,
+)
 
 
 class FormatConverter(Tool):
@@ -31,12 +36,15 @@ class FormatConverter(Tool):
                             "enum": ["word", "pdf", "excel", "csv", "ppt"],
                             "description": "目标格式",
                         },
-                        "output_subdir": {
+                        "output_dir": {
                             "type": "string",
-                            "description": "输出子目录名，默认为 converted",
+                            "description": (
+                                "产物输出目录的绝对路径。传当前项目目录；"
+                                "用户指定了保存位置时用用户指定的目录。"
+                            ),
                         },
                     },
-                    "required": ["source_path", "target_format"],
+                    "required": ["source_path", "target_format", "output_dir"],
                 },
             )
         )
@@ -44,16 +52,19 @@ class FormatConverter(Tool):
     async def invoke(self, inputs, **kwargs):
         source_path = inputs.get("source_path", "")
         target_format = inputs.get("target_format", "")
-        output_subdir = inputs.get("output_subdir", "converted")
+        output_dir = inputs.get("output_dir", "")
 
         if not source_path or not os.path.isfile(source_path):
             return {"success": False, "error": f"源文件不存在: {source_path}"}
         if not target_format:
             return {"success": False, "error": "缺少 target_format 参数"}
+        if not output_dir:
+            return {
+                "success": False,
+                "error": "缺少 output_dir：请传入当前项目目录的绝对路径",
+            }
 
-        from openjiuwen.core.sys_operation.cwd import get_cwd
-
-        base_dir = Path(get_cwd()) / output_subdir
+        base_dir = Path(output_dir).expanduser()
         base_dir.mkdir(parents=True, exist_ok=True)
 
         source_ext = Path(source_path).suffix.lower()
@@ -153,7 +164,7 @@ class FormatConverter(Tool):
     @staticmethod
     def _pdf_to_word(output_path: str, source_path: str) -> None:
         from docx import Document
-        from pypdf import PdfReader
+        from PyPDF2 import PdfReader
 
         reader = PdfReader(source_path)
         doc = Document()
@@ -170,13 +181,14 @@ class FormatConverter(Tool):
         from fpdf import FPDF
 
         doc = Document(source_path)
+        if contains_cjk(collect_docx_text(doc)):
+            raise ValueError(CJK_PDF_BLOCKED_MESSAGE)
+
         pdf = FPDF()
         pdf.add_page()
         pdf.set_auto_page_break(auto=True, margin=15)
 
-        font_name = select_pdf_font(pdf)
-
-        pdf.set_font(font_name, "", 11)
+        pdf.set_font("Helvetica", "", 11)
         for para in doc.paragraphs:
             if para.text.strip():
                 pdf.multi_cell(0, 7, para.text)
@@ -219,14 +231,15 @@ class FormatConverter(Tool):
         from pptx import Presentation
 
         prs = Presentation(source_path)
+        if contains_cjk(collect_presentation_text(prs)):
+            raise ValueError(CJK_PDF_BLOCKED_MESSAGE)
+
         pdf = FPDF()
         pdf.set_auto_page_break(auto=True, margin=15)
 
-        font_name = select_pdf_font(pdf)
-
         for slide in prs.slides:
             pdf.add_page()
-            pdf.set_font(font_name, "B", 14)
+            pdf.set_font("Helvetica", "B", 14)
             for shape in slide.shapes:
                 if shape.has_text_frame:
                     text = shape.text_frame.text

@@ -3,7 +3,7 @@ from pathlib import Path
 
 from openjiuwen.core.foundation.tool import Tool, ToolCard
 
-from pdf_font_utils import select_pdf_font
+from text_utils import CJK_WATERMARK_BLOCKED_MESSAGE, contains_cjk
 
 
 class PDFManipulator(Tool):
@@ -52,12 +52,15 @@ class PDFManipulator(Tool):
                                 "extract_pages(page_numbers)"
                             ),
                         },
-                        "output_subdir": {
+                        "output_dir": {
                             "type": "string",
-                            "description": "输出子目录名，默认为 pdf_output",
+                            "description": (
+                                "产物输出目录的绝对路径。传当前项目目录；"
+                                "用户指定了保存位置时用用户指定的目录。"
+                            ),
                         },
                     },
-                    "required": ["operation"],
+                    "required": ["operation", "output_dir"],
                 },
             )
         )
@@ -67,14 +70,17 @@ class PDFManipulator(Tool):
         file_path = inputs.get("file_path", "")
         file_paths = inputs.get("file_paths", [])
         options = inputs.get("options", {})
-        output_subdir = inputs.get("output_subdir", "pdf_output")
+        output_dir = inputs.get("output_dir", "")
 
         if not operation:
             return {"success": False, "error": "缺少 operation 参数"}
+        if not output_dir:
+            return {
+                "success": False,
+                "error": "缺少 output_dir：请传入当前项目目录的绝对路径",
+            }
 
-        from openjiuwen.core.sys_operation.cwd import get_cwd
-
-        base_dir = Path(get_cwd()) / output_subdir
+        base_dir = Path(output_dir).expanduser()
         base_dir.mkdir(parents=True, exist_ok=True)
 
         try:
@@ -152,7 +158,7 @@ class PDFManipulator(Tool):
 
     @staticmethod
     def _merge_pdfs(file_paths: list, output_dir: str) -> dict:
-        from pypdf import PdfReader, PdfWriter
+        from PyPDF2 import PdfReader, PdfWriter
 
         if not file_paths:
             return {"error": "merge操作需要 file_paths 参数"}
@@ -185,7 +191,7 @@ class PDFManipulator(Tool):
     def _split_pdf(
         file_path: str, options: dict, output_dir: str
     ) -> dict:
-        from pypdf import PdfReader, PdfWriter
+        from PyPDF2 import PdfReader, PdfWriter
 
         page_ranges = options.get("page_ranges", [])
         reader = PdfReader(file_path)
@@ -225,7 +231,7 @@ class PDFManipulator(Tool):
 
     @staticmethod
     def _compress_pdf(file_path: str, output_dir: str) -> dict:
-        from pypdf import PdfReader, PdfWriter
+        from PyPDF2 import PdfReader, PdfWriter
 
         reader = PdfReader(file_path)
         writer = PdfWriter()
@@ -257,7 +263,7 @@ class PDFManipulator(Tool):
     def _encrypt_pdf(
         file_path: str, options: dict, output_dir: str
     ) -> dict:
-        from pypdf import PdfReader, PdfWriter
+        from PyPDF2 import PdfReader, PdfWriter
 
         password = options.get("password", "")
         if not password:
@@ -288,10 +294,13 @@ class PDFManipulator(Tool):
         file_path: str, options: dict, output_dir: str
     ) -> dict:
         from fpdf import FPDF
-        from pypdf import PdfReader, PdfWriter
+        from PyPDF2 import PdfReader, PdfWriter
 
         watermark_text = options.get("watermark_text", "WATERMARK")
         font_size = options.get("font_size", 50)
+
+        if contains_cjk(watermark_text):
+            return {"error": CJK_WATERMARK_BLOCKED_MESSAGE}
 
         reader = PdfReader(file_path)
         page = reader.pages[0]
@@ -300,8 +309,7 @@ class PDFManipulator(Tool):
 
         wm_pdf = FPDF(unit="pt", format=(page_width, page_height))
         wm_pdf.add_page()
-        font_name = select_pdf_font(wm_pdf)
-        wm_pdf.set_font(font_name, "", font_size)
+        wm_pdf.set_font("Helvetica", "", font_size)
         wm_pdf.set_text_color(200, 200, 200)
         wm_pdf.set_xy(0, page_height / 2)
         wm_pdf.cell(page_width, font_size, watermark_text, align="C")
@@ -339,7 +347,7 @@ class PDFManipulator(Tool):
     def _extract_pages(
         file_path: str, options: dict, output_dir: str
     ) -> dict:
-        from pypdf import PdfReader, PdfWriter
+        from PyPDF2 import PdfReader, PdfWriter
 
         page_numbers = options.get("page_numbers", [])
         reader = PdfReader(file_path)
@@ -371,9 +379,9 @@ class PDFManipulator(Tool):
 
     @staticmethod
     def _extract_images(file_path: str, output_dir: str) -> dict:
-        import pypdf
+        from PyPDF2 import PdfReader
 
-        reader = pypdf.PdfReader(file_path)
+        reader = PdfReader(file_path)
         extracted = []
         img_count = 0
 

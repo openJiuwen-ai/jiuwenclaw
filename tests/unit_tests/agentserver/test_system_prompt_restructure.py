@@ -1,25 +1,31 @@
 import asyncio
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import pytest
 
 from openjiuwen.core.foundation.llm import Model, ToolMessage
+from openjiuwen.core.foundation.tool import ToolCard
 from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.single_agent import AgentCard
 from openjiuwen.core.single_agent.rail.base import (
     AgentCallbackContext,
     ModelCallInputs,
     ToolCallInputs,
 )
 from openjiuwen.core.single_agent.ability_manager import AbilityExecutionError
-from openjiuwen.harness.rails.skills.skill_use_rail import SkillUseRail
+from openjiuwen.harness.schema.config import SubAgentConfig
 from openjiuwen.harness.prompts.prompt_attachment_manager import (
     PromptAttachmentManager,
 )
 from openjiuwen.harness.prompts import PromptSection, SystemPromptBuilder
+from openjiuwen.symphony.discovery import SkillPromptBranch, SkillPromptSnapshot
 
 from jiuwenswarm.agents.harness.common.browser_defaults import (
     DEFAULT_BROWSER_AGENT_MAX_ITERATIONS,
+)
+from jiuwenswarm.agents.harness.common.rails.browser_task_prompt_rail import (
+    BrowserTaskPromptRail,
 )
 from jiuwenswarm.common import utils as _utils_mod
 from jiuwenswarm.server.runtime.agent_adapter import interface_deep as interface_module
@@ -34,6 +40,7 @@ from jiuwenswarm.agents.harness.common.rails import skill_retrieval_prompt_rail 
 from jiuwenswarm.agents.harness.common.rails.runtime_prompt_rail import RuntimePromptRail
 from jiuwenswarm.agents.harness.common.rails.response_prompt_rail import ResponsePromptRail
 from jiuwenswarm.agents.harness.common.rails.skill_retrieval_prompt_rail import SkillRetrievalPromptRail
+from jiuwenswarm.agents.harness.common.tools.skill_retrieval_toolkits import SkillRetrievalToolkit
 from jiuwenswarm.agents.harness.common.rails.symphony import (
     SymphonyOrchestrationRail,
 )
@@ -80,8 +87,13 @@ class _FakeLiveModeAgent(_FakeAgent):
 class _FakeAbilityManager:
     def __init__(self) -> None:
         self._items = {
-            "list_skill": SimpleNamespace(name="list_skill"),
-            "search_skill": SimpleNamespace(name="search_skill"),
+            name: ToolCard(
+                id=name,
+                name=name,
+                description=name,
+                input_params={"type": "object", "properties": {}},
+            )
+            for name in ("list_skill", "search_skill")
         }
         self.added: list[str] = []
         self.removed: list[str] = []
@@ -277,6 +289,13 @@ async def test_symphony_orchestration_rail_injects_when_tool_visible(
     assert "Calling `skill_branch_explore` creates a mandatory orchestration follow-up" in prompt
     assert "never pass every Skill returned by exploration" in prompt
     assert "still call `symphony_compose_graph`" in prompt
+    assert "`planned_graph.graph.metadata.status`" in prompt
+    assert "`planned_graph.graph.nodes`" in prompt
+    assert "`planned_graph.graph.edges`" in prompt
+    assert "Do not present a planning" in prompt
+    assert "search_skill" not in prompt
+    assert "install_skill" not in prompt
+    assert "returned\n`content` directly" not in prompt
     assert "none of the three trigger conditions is true" in prompt
     assert "Symphony" not in prompt
 
@@ -784,7 +803,7 @@ async def test_runtime_dynamic_sections_go_to_prompt_attachment_when_manager_ava
     assert "# Language" not in prompt
     assert "# Model Name Answer Policy" not in prompt
     assert "# Browser Tool Policy" not in prompt
-    assert "## Browser Subagent Rules" not in prompt
+    assert "## Browser Capability Routing Rules" not in prompt
     assert "browser_preflight_submit" not in prompt
     assert "hotel_option_select" not in prompt
     assert "gmail_email_select" not in prompt
@@ -799,21 +818,89 @@ async def test_runtime_dynamic_sections_go_to_prompt_attachment_when_manager_ava
     assert [item.id for item in items] == ["session.sess1.runtime.setting"]
     rendered = agent.prompt_attachment_manager.render(items)
     assert "model-x" in rendered
+    assert "Current channel: web" in rendered
     assert "Always respond in English" not in prompt
     assert "# Browser Tool Policy" not in prompt
-    assert "## Browser Subagent Rules" not in prompt
+    assert "## Browser Capability Routing Rules" not in prompt
 
 
 @pytest.mark.asyncio
-async def test_browser_policy_is_localized_and_merged_into_task_tool_section():
-    rail = JiuWenSwarmDeepAdapter._build_subagent_rail()
-    if rail is None:
-        pytest.skip("SubagentRail is unavailable with the installed openjiuwen API")
+async def test_runtime_attachment_request_mode_wins_over_localized_snapshot(tmp_path, monkeypatch):
+    monkeypatch.setattr(_utils_mod, "get_config_dir", lambda: tmp_path)
+    builder = SystemPromptBuilder(language="cn")
+    agent = _FakeAgent(builder)
+    runtime_rail = RuntimePromptRail(language="cn", channel="web")
+    runtime_rail.init(agent)
+    runtime_rail.set_mode("agent")
+    ctx = AgentCallbackContext(
+        agent=agent,
+        inputs=None,
+        session=_FakeSession(),
+        extra={},
+    )
+
+    # The first refresh falls back to the request-bound canonical mode while
+    # the asynchronous diagnostic snapshot does not exist yet.
+    await runtime_rail.before_invoke(ctx)
+    items = await agent.prompt_attachment_manager.collect_for_session("sess1")
+    first_rendered = agent.prompt_attachment_manager.render(items)
+    assert "当前模式：agent" in first_rendered
+
+    # Once the snapshot appears, its localized representation must not create
+    # a false attachment update for the same effective mode.
+    runtime_state = tmp_path / "runtime_state" / "default.yaml"
+    runtime_state.parent.mkdir(parents=True, exist_ok=True)
+    runtime_state.write_text("mode: 智能体模式\n", encoding="utf-8")
+    await runtime_rail.before_model_call(ctx)
+    items = await agent.prompt_attachment_manager.collect_for_session("sess1")
+    second_rendered = agent.prompt_attachment_manager.render(items)
+    assert second_rendered == first_rendered
+
+
+@pytest.mark.asyncio
+async def test_runtime_attachment_tracks_request_mode_change(tmp_path, monkeypatch):
+    monkeypatch.setattr(_utils_mod, "get_config_dir", lambda: tmp_path)
+    builder = SystemPromptBuilder(language="en")
+    agent = _FakeAgent(builder)
+    runtime_rail = RuntimePromptRail(language="en", channel="web")
+    runtime_rail.init(agent)
+    runtime_rail.set_mode("agent")
+    ctx = AgentCallbackContext(
+        agent=agent,
+        inputs=None,
+        session=_FakeSession(),
+        extra={},
+    )
+
+    await runtime_rail.before_model_call(ctx)
+    items = await agent.prompt_attachment_manager.collect_for_session("sess1")
+    rendered = agent.prompt_attachment_manager.render(items)
+    assert "Current mode: agent" in rendered
+
+    runtime_rail.set_mode("team")
+    await runtime_rail.before_model_call(ctx)
+    items = await agent.prompt_attachment_manager.collect_for_session("sess1")
+    rendered = agent.prompt_attachment_manager.render(items)
+    assert "Current mode: team" in rendered
+    assert "Current mode: agent" not in rendered
+
+
+@pytest.mark.asyncio
+async def test_browser_policy_is_injected_only_when_browser_agent_is_loaded():
+    rail = BrowserTaskPromptRail()
+    assert rail is not None
     rail.tools = [object()]
     rail.system_prompt_builder = SystemPromptBuilder(language="en")
 
+    browser_agent = SubAgentConfig(
+        agent_card=AgentCard(name="browser_agent", description="browser"),
+        system_prompt="browser",
+    )
+    agent = SimpleNamespace(
+        deep_config=SimpleNamespace(subagents=[browser_agent])
+    )
     ctx = AgentCallbackContext(
-        agent=SimpleNamespace(),
+        agent=agent,
         inputs=None,
         session=_FakeSession(),
         extra={},
@@ -821,23 +908,72 @@ async def test_browser_policy_is_localized_and_merged_into_task_tool_section():
     await rail.before_model_call(ctx)
 
     task_section = rail.system_prompt_builder.get_section("task_tool")
-    if task_section is None:
-        pytest.skip("task_tool prompt section is unavailable in this tool configuration")
-    assert "# Subagent Usage Rules" in task_section.content["en"]
-    assert "## task_tool" not in task_section.content["en"]
-    assert "## Browser Subagent Rules" in task_section.content["en"]
+    assert task_section is not None
+    assert "## Browser Capability Routing Rules" in task_section.content["en"]
     assert 'set `subagent_type` to `"browser_agent"`' in task_section.content["en"]
+    assert "do not preflight with paid_search" in task_section.content["en"]
+    assert "Do not use `subagent_spawn` for browser_agent" in task_section.content["en"]
     assert not rail.system_prompt_builder.has_section("browser_tool_policy")
-    assert "浏览器子智能体规则" in build_browser_task_prompt("cn")
+    assert "浏览器能力路由规则" in build_browser_task_prompt("cn")
 
-    rail.set_channel("tui")
+    agent.deep_config.subagents = [
+        SubAgentConfig(
+            agent_card=AgentCard(name="explore_agent", description="explore"),
+            system_prompt="explore",
+        )
+    ]
     rail.system_prompt_builder = SystemPromptBuilder(language="en")
     await rail.before_model_call(ctx)
-    non_web_task_section = rail.system_prompt_builder.get_section("task_tool")
-    if non_web_task_section is None:
-        pytest.skip("task_tool prompt section is unavailable in this tool configuration")
-    assert "# Subagent Usage Rules" in non_web_task_section.content["en"]
-    assert "## Browser Subagent Rules" not in non_web_task_section.content["en"]
+    unloaded_task_section = rail.system_prompt_builder.get_section("task_tool")
+    assert unloaded_task_section is not None
+    assert "## Browser Capability Routing Rules" not in unloaded_task_section.content["en"]
+
+
+@pytest.mark.asyncio
+async def test_browser_uses_sync_task_tool_while_other_subagents_use_runtime():
+    browser_agent = SubAgentConfig(
+        agent_card=AgentCard(name="browser_agent", description="browser"),
+        system_prompt="browser",
+    )
+    research_agent = SubAgentConfig(
+        agent_card=AgentCard(name="research_agent", description="research"),
+        system_prompt="research",
+    )
+    builder = SystemPromptBuilder(language="en")
+    agent = SimpleNamespace(
+        card=AgentCard(name="main", description="main"),
+        deep_config=SimpleNamespace(subagents=[browser_agent, research_agent]),
+        system_prompt_builder=builder,
+        ability_manager=Mock(),
+    )
+    rail = BrowserTaskPromptRail(enable_subagent_runtime=True)
+
+    rail.init(agent)
+    await rail.before_model_call(
+        AgentCallbackContext(
+            agent=agent,
+            inputs=None,
+            session=_FakeSession(),
+            extra={},
+        )
+    )
+
+    tools_by_name = {tool.card.name: tool for tool in rail.tools}
+    assert "task_tool" in tools_by_name
+    assert "subagent_spawn" in tools_by_name
+    assert tools_by_name["task_tool"]._allowed_subagent_types == frozenset(
+        {"browser_agent"}
+    )
+    assert tools_by_name["subagent_spawn"]._allowed_subagent_types == frozenset(
+        {"research_agent"}
+    )
+    task_section = builder.get_section("task_tool")
+    runtime_section = builder.get_section("subagent_tools")
+    assert task_section is not None
+    assert runtime_section is not None
+    assert "Browser Capability Routing Rules" in task_section.content["en"]
+    assert "Adding to a cart is reversible" in task_section.content["en"]
+    assert "Browser Capability Routing Rules" not in runtime_section.content["en"]
 
 
 def test_task_planning_tools_remain_enabled_without_todo_prompt_section():
@@ -863,6 +999,7 @@ async def test_runtime_attachment_tracks_live_code_agent_mode(tmp_path, monkeypa
     agent = _FakeLiveModeAgent(builder, mode="plan")
     runtime_rail = RuntimePromptRail(language="en", channel="tui")
     runtime_rail.init(agent)
+    runtime_rail.set_mode("code.normal")
     ctx = AgentCallbackContext(
         # Inner ReactAgent callbacks do not expose DeepAgent.load_state().
         agent=SimpleNamespace(),
@@ -886,7 +1023,7 @@ async def test_runtime_attachment_tracks_live_code_agent_mode(tmp_path, monkeypa
 
 
 @pytest.mark.asyncio
-async def test_runtime_git_status_attachment_clears_when_git_context_disappears(tmp_path, monkeypatch):
+async def test_runtime_git_status_is_stable_system_context_for_one_invoke(tmp_path, monkeypatch):
     monkeypatch.setattr(_utils_mod, "get_config_dir", lambda: tmp_path)
     runtime_state = tmp_path / "runtime_state" / "default.yaml"
     runtime_state.parent.mkdir(parents=True, exist_ok=True)
@@ -907,18 +1044,35 @@ async def test_runtime_git_status_attachment_clears_when_git_context_disappears(
         extra={},
     )
 
-    await runtime_rail.before_model_call(ctx)
-    session_items = await agent.prompt_attachment_manager.list_by_filter(session_id="sess1")
-    assert [item.id for item in session_items if item.id.endswith(".git_status")] == ["session.sess1.git_status"]
-
-    runtime_state.write_text("git_branch: ''\n", encoding="utf-8")
-    await runtime_rail.before_model_call(ctx)
+    await runtime_rail.before_invoke(ctx)
+    prompt = builder.build()
+    assert "This is the git status at the start of the conversation." in prompt
+    assert "Current branch: feature/test" in prompt
+    assert "Status:\nM file.py" in prompt
+    assert "Recent commits:\nabc init" in prompt
     session_items = await agent.prompt_attachment_manager.list_by_filter(session_id="sess1")
     assert [item.id for item in session_items if item.id.endswith(".git_status")] == []
 
+    runtime_state.write_text(
+        "git_branch: feature/changed\n"
+        "git_status: M changed.py\n"
+        "git_recent_commits: def changed\n",
+        encoding="utf-8",
+    )
+    await runtime_rail.before_model_call(ctx)
+    prompt = builder.build()
+    assert "Current branch: feature/test" in prompt
+    assert "feature/changed" not in prompt
+    session_items = await agent.prompt_attachment_manager.list_by_filter(session_id="sess1")
+    assert [item.id for item in session_items if item.id.endswith(".git_status")] == []
+
+    runtime_state.write_text("git_branch: ''\n", encoding="utf-8")
+    await runtime_rail.before_invoke(ctx)
+    assert "This is the git status at the start of the conversation." not in builder.build()
+
 
 @pytest.mark.asyncio
-async def test_runtime_prompt_uses_runtime_cwd_over_stale_trusted_dir(tmp_path, monkeypatch):
+async def test_runtime_prompt_distinguishes_cwd_from_project_dir(tmp_path, monkeypatch):
     builder = SystemPromptBuilder(language="en")
     agent = _FakeAgent(builder)
     stale_dir = tmp_path / "missing-worktree"
@@ -955,18 +1109,105 @@ async def test_runtime_prompt_uses_runtime_cwd_over_stale_trusted_dir(tmp_path, 
     assert "# Directory and File-Operation Boundaries" in prompt
     assert "# Runtime Directory Context" not in prompt
     assert "# Working Directory Runtime Values" not in prompt
-    assert "The project directory is your current workspace" in prompt
+    assert "The project directory is the project root and project-context boundary" in prompt
     assert f"the current project directory is: `{project_dir}`" in prompt
+    assert (
+        f"The current working directory (cwd, relative-path base, and Bash default) is: `{current_dir}`"
+        in prompt
+    )
+    assert "Resolve relative paths in user tasks against the current working directory" in prompt
     assert "Agent internal data directory" in prompt
     assert "## JiuwenSwarm Internal Directories" in prompt
     assert str(project_dir) in prompt
-    assert str(current_dir) not in prompt
+    assert str(current_dir) in prompt
     assert str(stale_dir) not in prompt
     assert str(extra_dir) not in prompt
     assert "System directory" not in prompt
 
     items = await agent.prompt_attachment_manager.list_by_filter(session_id="sess1")
     assert [item.id for item in items if item.id.endswith(".trusted_dirs_policy")] == []
+
+
+@pytest.mark.asyncio
+async def test_runtime_prompt_distinguishes_cwd_from_project_dir_in_chinese(
+    tmp_path, monkeypatch
+):
+    builder = SystemPromptBuilder(language="cn")
+    agent = _FakeAgent(builder)
+    project_dir = tmp_path / "project"
+    current_dir = tmp_path / "task"
+    agent_data_dir = tmp_path / "agent-data"
+    project_dir.mkdir()
+    current_dir.mkdir()
+    agent_data_dir.mkdir()
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.harness.common.rails.runtime_prompt_rail.get_agent_workspace_dir",
+        lambda: agent_data_dir,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.harness.common.rails.runtime_prompt_rail.get_user_workspace_dir",
+        lambda: tmp_path / "jiuwenswarm-data",
+    )
+
+    runtime_rail = RuntimePromptRail(language="cn", channel="tui")
+    runtime_rail.init(agent)
+    runtime_rail.set_runtime_paths(cwd=str(current_dir), project_dir=str(project_dir))
+    ctx = AgentCallbackContext(
+        agent=agent,
+        inputs=None,
+        session=_FakeSession(),
+        extra={},
+    )
+
+    await runtime_rail.before_model_call(ctx)
+
+    prompt = builder.build()
+    assert "项目目录是当前项目的根目录与项目上下文边界" in prompt
+    assert f"当前项目目录是：`{project_dir}`" in prompt
+    assert (
+        f"当前工作目录（cwd、相对路径基准及 Bash 默认目录）是：`{current_dir}`" in prompt
+    )
+    assert (
+        "用户任务中的相对路径必须相对于当前工作目录路径去解析" in prompt
+    )
+
+
+@pytest.mark.asyncio
+async def test_runtime_prompt_preserves_single_directory_prompt_when_paths_match(
+    tmp_path, monkeypatch
+):
+    builder = SystemPromptBuilder(language="en")
+    agent = _FakeAgent(builder)
+    project_dir = tmp_path / "project"
+    agent_data_dir = tmp_path / "agent-data"
+    project_dir.mkdir()
+    agent_data_dir.mkdir()
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.harness.common.rails.runtime_prompt_rail.get_agent_workspace_dir",
+        lambda: agent_data_dir,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.harness.common.rails.runtime_prompt_rail.get_user_workspace_dir",
+        lambda: tmp_path / "jiuwenswarm-data",
+    )
+
+    runtime_rail = RuntimePromptRail(language="en", channel="web")
+    runtime_rail.init(agent)
+    runtime_rail.set_runtime_paths(cwd=str(project_dir), project_dir=str(project_dir))
+    ctx = AgentCallbackContext(
+        agent=agent,
+        inputs=None,
+        session=_FakeSession(),
+        extra={},
+    )
+
+    await runtime_rail.before_model_call(ctx)
+
+    prompt = builder.build()
+    assert "## Project Directory" in prompt
+    assert "## Project and Working Directories" not in prompt
+    assert f"the current project directory is: `{project_dir}`" in prompt
+    assert "Resolve relative paths in user tasks against the current project directory" in prompt
 
 
 @pytest.mark.asyncio
@@ -999,8 +1240,8 @@ async def test_runtime_prompt_describes_external_cwd_without_project(tmp_path, m
     await runtime_rail.before_model_call(ctx)
 
     prompt = builder.build()
-    assert "The project directory is your current workspace" in prompt
-    assert f"the current project directory is: `{task_dir}`" in prompt
+    assert "## Current Project Directory" in prompt
+    assert f"current runtime workspace: `{task_dir}`" in prompt
     assert "Other accessible directories" not in prompt
     assert "fallen back to the Agent internal data directory" not in prompt
 
@@ -1034,7 +1275,7 @@ async def test_runtime_prompt_describes_agent_data_cwd_fallback(tmp_path, monkey
 
     prompt = builder.build()
     assert "# 目录与文件操作边界" in prompt
-    assert f"当前项目目录是：`{agent_data_dir}`" in prompt
+    assert f"当前运行时工作空间：`{agent_data_dir}`" in prompt
     assert "其他可访问目录" not in prompt
 
 
@@ -1098,7 +1339,7 @@ async def test_runtime_prompt_reports_powershell_and_removes_generic_shell_rules
     prompt = builder.build()
     assert "- Shell：PowerShell" in prompt
     assert "Shell 规则：" not in prompt
-    assert "### 项目目录规则" in prompt
+    assert "## 当前项目目录" in prompt
     assert "### 项目录规则" not in prompt
 
 
@@ -1146,19 +1387,19 @@ async def test_runtime_prompt_language_output_prefers_rail_language_over_runtime
 
 
 @pytest.mark.asyncio
-async def test_skill_retrieval_prompt_hides_legacy_list_skill(monkeypatch):
+async def test_skill_retrieval_prompt_renders_directory_guidance(
+    monkeypatch,
+    tmp_path,
+):
     monkeypatch.setattr(
         _skill_retrieval_prompt_mod,
-        "is_agentic_retrieval_enabled",
-        lambda: True,
-    )
-    monkeypatch.setattr(
-        _skill_retrieval_prompt_mod,
-        "render_skill_retrieval_prompt_for_visible_skills",
-        lambda manager, language, visible_skill_names=None: "# Agentic 技能检索\n使用 skill_branch_explore。",
+        "is_skill_retrieval_enabled",
+        lambda *_args: True,
     )
     builder = SystemPromptBuilder(language="cn")
-    builder.add_section(PromptSection(name="skills", content={"cn": "旧 list_skill 提示"}, priority=40))
+    builder.add_section(
+        PromptSection(name="skills", content={"cn": "旧 list_skill 提示"}, priority=40)
+    )
     agent = _FakeToolAgent(builder)
     ctx = AgentCallbackContext(
         agent=agent,
@@ -1166,88 +1407,114 @@ async def test_skill_retrieval_prompt_hides_legacy_list_skill(monkeypatch):
             tools=[
                 SimpleNamespace(name="list_skill"),
                 SimpleNamespace(name="list_skills"),
-                SimpleNamespace(name="skill_branch_explore"),
+                SimpleNamespace(name="skill_index"),
             ],
         ),
         session=_FakeSession(),
         extra={},
     )
 
-    rail = SkillRetrievalPromptRail()
+    toolkit = SkillRetrievalToolkit(
+        skill_directories=[], artifact_root=tmp_path / "skillfs"
+    )
+    rail = SkillRetrievalPromptRail(toolkit=toolkit)
     rail.init(agent)
     await rail.before_model_call(ctx)
 
-    assert [tool.name for tool in ctx.inputs.tools] == ["skill_branch_explore"]
+    assert [tool.name for tool in ctx.inputs.tools] == ["skill_index"]
     assert agent.ability_manager.get("list_skill") is None
-    prompt = builder.build()
-    assert "旧 list_skill 提示" not in prompt
-    assert "Agentic 技能检索" in prompt
+    assert "旧 list_skill 提示" not in builder.build()
+    rendered = agent.prompt_attachment_manager.render(
+        await agent.prompt_attachment_manager.list_by_filter(session_id="sess1")
+    )
+    assert "## 已安装 Skill" in rendered
+    assert "当前没有可用 Skill" in rendered
+    assert "## Skill 发现" not in rendered
 
-    await rail.after_model_call(ctx)
+    class _AttachmentContext:
+        def __init__(self):
+            self.messages = []
 
+        def get_messages(self, with_history=False):
+            _ = with_history
+            return list(self.messages)
+
+        async def add_messages(self, *messages):
+            self.messages.extend(messages)
+
+    history = _AttachmentContext()
+    manager = agent.prompt_attachment_manager
+    assert await manager.sync_to_context(history, "sess1") is not None
+
+    # before_invoke runs before the model tool list exists. It must not clear
+    # and then re-add the same large snapshot on every user turn.
+    await rail.before_invoke(
+        AgentCallbackContext(
+            agent=agent,
+            inputs=SimpleNamespace(tools=[]),
+            session=_FakeSession(),
+            extra={},
+        )
+    )
+    await rail.before_model_call(ctx)
+    assert await manager.sync_to_context(history, "sess1") is None
+    assert len(history.messages) == 1
+
+    missing_index_ctx = AgentCallbackContext(
+        agent=agent,
+        inputs=SimpleNamespace(tools=[]),
+        session=_FakeSession(),
+        extra={},
+    )
+    await rail.before_model_call(missing_index_ctx)
+    assert [tool.name for tool in missing_index_ctx.inputs.tools] == ["list_skill"]
     assert agent.ability_manager.get("list_skill") is not None
     assert "旧 list_skill 提示" in builder.build()
 
+    indexed = SkillPromptSnapshot(
+        mode="indexed",
+        total_count=20,
+        entries=(),
+        estimated_candidate_tokens=2_000,
+        candidate_budget_tokens=100,
+        index_state="fresh",
+        branches=(
+            SkillPromptBranch(
+                path="/OfficeDocs",
+                label="OfficeDocs",
+                description=(
+                    "办公文档处理。\n\nCovers 8 descendant skills.\n\n"
+                    "Representative keywords: office, docs\n"
+                    "Select when: 用户要处理 Word 或 PDF。\n"
+                    "Don't select when: 用户只需普通问答。"
+                ),
+            ),
+        ),
+    )
+    indexed_appendix = rail._build_candidate_appendix("cn", indexed)
+    assert "`OfficeDocs`: 办公文档处理。 Select when: 用户要处理 Word 或 PDF。" in indexed_appendix
+    assert "Covers 8 descendant skills" not in indexed_appendix
+    assert "Representative keywords" not in indexed_appendix
+
 
 @pytest.mark.asyncio
-async def test_skill_retrieval_prompt_hides_native_skill_prompt_after_skill_use_rail(
+async def test_skill_retrieval_prompt_clears_section_when_disabled(
     monkeypatch,
     tmp_path,
 ):
     monkeypatch.setattr(
         _skill_retrieval_prompt_mod,
-        "is_agentic_retrieval_enabled",
-        lambda: True,
-    )
-    monkeypatch.setattr(
-        _skill_retrieval_prompt_mod,
-        "render_skill_retrieval_prompt_for_visible_skills",
-        lambda manager, language, visible_skill_names=None: "# Agentic 技能检索\n使用 skill_branch_explore。",
+        "is_skill_retrieval_enabled",
+        lambda *_args: False,
     )
     builder = SystemPromptBuilder(language="cn")
-    agent = _FakeToolAgent(builder)
-    agent.card = SimpleNamespace(id="test-agent")
-    agent.deep_config = SimpleNamespace(enable_read_image_multimodal=False)
-    ctx = AgentCallbackContext(
-        agent=agent,
-        inputs=SimpleNamespace(
-            tools=[
-                SimpleNamespace(name="list_skill"),
-                SimpleNamespace(name="skill_branch_explore"),
-            ],
-        ),
-        session=_FakeSession(),
-        extra={},
+    builder.add_section(
+        PromptSection(
+            name="skill_retrieval",
+            content={"cn": "残留技能检索提示"},
+            priority=41,
+        )
     )
-    skill_rail = SkillUseRail(
-        str(tmp_path),
-        skill_mode=SkillUseRail.SKILL_MODE_AUTO_LIST,
-        include_tools=False,
-    )
-    retrieval_rail = SkillRetrievalPromptRail()
-    skill_rail.init(agent)
-    retrieval_rail.init(agent)
-
-    rails = sorted([skill_rail, retrieval_rail], key=lambda rail: rail.priority, reverse=True)
-    await rails[0].before_model_call(ctx)
-    await rails[1].before_model_call(ctx)
-
-    prompt = builder.build()
-    assert "需要时先调用 list_skill 查看可用技能" not in prompt
-    assert "# 技能" not in prompt
-    assert "Agentic 技能检索" in prompt
-    assert [tool.name for tool in ctx.inputs.tools] == ["skill_branch_explore"]
-
-
-@pytest.mark.asyncio
-async def test_skill_retrieval_prompt_clears_section_when_disabled(monkeypatch):
-    monkeypatch.setattr(
-        _skill_retrieval_prompt_mod,
-        "is_agentic_retrieval_enabled",
-        lambda: False,
-    )
-    builder = SystemPromptBuilder(language="cn")
-    builder.add_section(PromptSection(name="skill_retrieval", content={"cn": "残留 Agentic 技能检索"}, priority=41))
     agent = _FakeToolAgent(builder)
     ctx = AgentCallbackContext(
         agent=agent,
@@ -1255,87 +1522,20 @@ async def test_skill_retrieval_prompt_clears_section_when_disabled(monkeypatch):
         session=_FakeSession(),
         extra={},
     )
-
-    rail = SkillRetrievalPromptRail()
+    toolkit = SkillRetrievalToolkit(
+        skill_directories=[], artifact_root=tmp_path / "skillfs"
+    )
+    rail = SkillRetrievalPromptRail(toolkit=toolkit)
     rail.init(agent)
     await rail.before_model_call(ctx)
 
+    assert "残留技能检索提示" not in builder.build()
     assert [tool.name for tool in ctx.inputs.tools] == ["list_skill"]
-    assert "残留 Agentic 技能检索" not in builder.build()
-    assert agent.ability_manager.get("list_skill") is not None
-
-
-@pytest.mark.asyncio
-async def test_skill_retrieval_prompt_disabled_restores_hidden_skills_section(monkeypatch):
-    enabled = True
-    monkeypatch.setattr(
-        _skill_retrieval_prompt_mod,
-        "is_agentic_retrieval_enabled",
-        lambda: enabled,
-    )
-    monkeypatch.setattr(
-        _skill_retrieval_prompt_mod,
-        "render_skill_retrieval_prompt_for_visible_skills",
-        lambda manager, language, visible_skill_names=None: "# Agentic 技能检索\n使用 skill_branch_explore。",
-    )
-    builder = SystemPromptBuilder(language="cn")
-    builder.add_section(PromptSection(name="skills", content={"cn": "原生技能提示"}, priority=40))
-    agent = _FakeToolAgent(builder)
-    ctx = AgentCallbackContext(
-        agent=agent,
-        inputs=SimpleNamespace(tools=[SimpleNamespace(name="skill_branch_explore")]),
-        session=_FakeSession(),
-        extra={},
-    )
-
-    rail = SkillRetrievalPromptRail()
-    rail.init(agent)
-    await rail.before_model_call(ctx)
-    assert "原生技能提示" not in builder.build()
-
-    enabled = False
-    await rail.before_model_call(ctx)
-
-    prompt = builder.build()
-    assert "Agentic 技能检索" not in prompt
-    assert "原生技能提示" in prompt
-
-
-@pytest.mark.asyncio
-async def test_skill_retrieval_prompt_render_empty_restores_native_skills(monkeypatch):
-    monkeypatch.setattr(
-        _skill_retrieval_prompt_mod,
-        "is_agentic_retrieval_enabled",
-        lambda: True,
-    )
-    monkeypatch.setattr(
-        _skill_retrieval_prompt_mod,
-        "render_skill_retrieval_prompt_for_visible_skills",
-        lambda manager, language, visible_skill_names=None: "",
-    )
-    builder = SystemPromptBuilder(language="cn")
-    builder.add_section(PromptSection(name="skills", content={"cn": "原生技能提示"}, priority=40))
-    agent = _FakeToolAgent(builder)
-    ctx = AgentCallbackContext(
-        agent=agent,
-        inputs=SimpleNamespace(tools=[SimpleNamespace(name="list_skill")]),
-        session=_FakeSession(),
-        extra={},
-    )
-
-    rail = SkillRetrievalPromptRail()
-    rail.init(agent)
-    await rail.before_model_call(ctx)
-
-    assert "原生技能提示" in builder.build()
-    assert agent.ability_manager.get("list_skill") is not None
-    assert [tool.name for tool in ctx.inputs.tools] == ["list_skill"]
-
 
 def test_resolve_skill_mode_accepts_all_and_auto_list(monkeypatch):
     monkeypatch.setattr(
         "jiuwenswarm.server.runtime.agent_adapter.interface_deep.is_skill_retrieval_enabled",
-        lambda: False,
+        lambda *_args: False,
     )
     assert JiuWenSwarmDeepAdapter._resolve_skill_mode({"skill_mode": "all"}) == "all"
     assert JiuWenSwarmDeepAdapter._resolve_skill_mode({"skill_mode": "auto_list"}) == "auto_list"
@@ -1343,44 +1543,51 @@ def test_resolve_skill_mode_accepts_all_and_auto_list(monkeypatch):
 
     monkeypatch.setattr(
         "jiuwenswarm.server.runtime.agent_adapter.interface_deep.is_skill_retrieval_enabled",
-        lambda: True,
+        lambda *_args: True,
     )
     assert JiuWenSwarmDeepAdapter._resolve_skill_mode({"skill_mode": "all"}) == "auto_list"
 
 
-def test_deep_adapter_visible_skill_names_match_list_skill(monkeypatch, tmp_path):
-    for name in ("alpha", "beta", "_internal", ".hidden"):
-        skill_dir = tmp_path / name
-        skill_dir.mkdir()
-        (skill_dir / "SKILL.md").write_text("---\nname: x\n---\n", encoding="utf-8")
-    (tmp_path / "not-a-skill").mkdir()
-
-    adapter = _TestableJiuWenSwarmDeepAdapter()
-    adapter.set_skill_manager(
-        SimpleNamespace(list_execution_disabled_skills=lambda: ["beta"])
+def test_deep_adapter_skill_retrieval_prompt_uses_live_toolkit(monkeypatch, tmp_path):
+    monkeypatch.setenv(
+        "SYMPHONY_SKILL_RETRIEVAL_ROOT",
+        str(tmp_path / "skillfs-artifacts"),
     )
-    monkeypatch.setattr(
-        "jiuwenswarm.server.runtime.agent_adapter.interface_deep.get_agent_skills_dir",
-        lambda: tmp_path,
+    skill_dir = tmp_path / "alpha"
+    skill_dir.mkdir()
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: Alpha\ndescription: alpha skill\n---\n",
+        encoding="utf-8",
     )
-
-    assert adapter._visible_skill_names_for_list_skill() == {"alpha"}
-
-
-def test_deep_adapter_skill_retrieval_prompt_uses_visible_skill_provider(monkeypatch):
     captured: dict[str, object] = {}
 
     class FakeRail:
-        def __init__(self, *, manager, visible_skill_names):
-            captured["manager"] = manager
-            captured["visible_skill_names"] = visible_skill_names
+        def __init__(self, *, toolkit, **_kwargs):
+            captured["toolkit"] = toolkit
 
-    manager = SimpleNamespace(list_execution_disabled_skills=lambda: [])
+    class FakeManager:
+        def __init__(self):
+            self.disabled: list[str] = []
+            self.persisted_disabled: list[str] = []
+            self.reload_count = 0
+
+        def reload_state(self):
+            self.reload_count += 1
+            self.disabled = list(self.persisted_disabled)
+
+        def list_execution_disabled_skills(self):
+            return list(self.disabled)
+
+    manager = FakeManager()
     adapter = _TestableJiuWenSwarmDeepAdapter()
     adapter.set_skill_manager(manager)
     monkeypatch.setattr(
         "jiuwenswarm.server.runtime.agent_adapter.interface_deep.is_skill_retrieval_enabled",
-        lambda: True,
+        lambda *_args: True,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.agent_adapter.interface_deep.get_agent_skills_dir",
+        lambda: tmp_path,
     )
     monkeypatch.setattr(
         "jiuwenswarm.server.runtime.agent_adapter.interface_deep.SkillRetrievalPromptRail",
@@ -1390,8 +1597,12 @@ def test_deep_adapter_skill_retrieval_prompt_uses_visible_skill_provider(monkeyp
     rail = adapter._build_skill_retrieval_prompt_rail()
 
     assert isinstance(rail, FakeRail)
-    assert captured["manager"] is manager
-    assert captured["visible_skill_names"] == adapter._visible_skill_names_for_list_skill
+    toolkit = captured["toolkit"]
+    assert isinstance(toolkit, SkillRetrievalToolkit)
+    assert [record.worker_id for record in toolkit.current_records()] == ["alpha"]
+    manager.persisted_disabled.append("alpha")
+    assert toolkit.current_records() == ()
+    assert manager.reload_count >= 2
 
 
 @pytest.mark.asyncio
@@ -1435,27 +1646,63 @@ async def test_deep_adapter_skill_retrieval_prompt_rail_sync_hot_toggles(monkeyp
     assert unregistered == [rail]
 
 
-def test_code_adapter_skill_retrieval_sync_respects_configured_tools(monkeypatch):
-    from jiuwenswarm.server.runtime.agent_adapter.interface_code import JiuwenSwarmCodeAdapter
+def test_code_adapter_skill_retrieval_sync_freezes_spec_snapshot():
+    from jiuwenswarm.server.runtime.agent_adapter.interface_code import (
+        JiuwenSwarmCodeAdapter,
+    )
 
     adapter = JiuwenSwarmCodeAdapter()
-    monkeypatch.setattr(
-        interface_module,
-        "is_skill_retrieval_enabled",
-        lambda: True,
-    )
 
     assert (
         adapter._skill_retrieval_tools_enabled_for_runtime(
-            {"modes": {"code": {"tools": ["skill_toolkit"]}}}
+            {
+                "modes": {"code": {"tools": ["skill_toolkit"]}},
+                "symphony": {"skill_retrieval": {"enabled": True}},
+            }
+        )
+        is False
+    )
+    adapter = JiuwenSwarmCodeAdapter()
+    assert (
+        adapter._skill_retrieval_tools_enabled_for_runtime(
+            {
+                "modes": {"code": {"tools": ["skill_toolkit", "skill_retrieval"]}},
+                "symphony": {"skill_retrieval": {"enabled": True}},
+            }
+        )
+        is True
+    )
+    assert (
+        adapter._skill_retrieval_tools_enabled_for_runtime(
+            {
+                "modes": {
+                    "code": {"tools": ["skill_toolkit", "skill_retrieval"]}
+                },
+                "symphony": {"skill_retrieval": {"enabled": False}},
+            }
         )
         is False
     )
     assert (
         adapter._skill_retrieval_tools_enabled_for_runtime(
-            {"modes": {"code": {"tools": ["skill_toolkit", "skill_retrieval"]}}}
+            {
+                "modes": {
+                    "code": {"tools": ["skill_toolkit", "skill_retrieval"]}
+                },
+                "symphony": {"skill_retrieval": {"enabled": True}},
+            }
         )
         is True
+    )
+    adapter = JiuwenSwarmCodeAdapter()
+    assert (
+        adapter._skill_retrieval_tools_enabled_for_runtime(
+            {
+                "modes": {"code": {"tools": ["skill_retrieval"]}},
+                "symphony": {"skill_retrieval": {"enabled": False}},
+            }
+        )
+        is False
     )
 
 

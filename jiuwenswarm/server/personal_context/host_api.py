@@ -14,6 +14,7 @@ import os
 from pathlib import Path
 import stat
 import tempfile
+from collections.abc import Awaitable, Callable
 from typing import NoReturn, cast
 
 import yaml
@@ -26,12 +27,13 @@ from jiuwenswarm.common.config import get_default_models
 _CONFIG_FILENAME = "personal_context.yaml"
 _MAX_CONFIG_BYTES = 4 * 1024 * 1024
 _STOP_TIMEOUT_SECONDS = 30.0
+_PERSONAL_CONTEXT_MODEL_MAX_RETRIES = 2
 
 
-def _initial_stored_config(*, enabled: bool) -> dict[str, object]:
+def _initial_stored_config(*, collection_enabled: bool) -> dict[str, object]:
     return {
-        "enabled": enabled,
-        "fetching_enabled": False,
+        "collection_enabled": collection_enabled,
+        "agent_use_enabled": False,
         "strategy_profile": "rules",
         "fetch_services": [],
     }
@@ -40,8 +42,8 @@ def _initial_stored_config(*, enabled: bool) -> dict[str, object]:
 def _unconfigured_projection() -> dict[str, object]:
     return {
         "configured": False,
-        "enabled": False,
-        "fetching_enabled": False,
+        "collection_enabled": False,
+        "agent_use_enabled": False,
         "strategy_profile": "rules",
         "model_index": None,
         "fetch_services": [],
@@ -254,6 +256,7 @@ def _resolve_model_reference(
     model_name = str(client.pop("model_name", "")).strip()
     if not model_name:
         _raise_host_error("selected JiuwenSwarm model is invalid")
+    client["max_retries"] = _PERSONAL_CONTEXT_MODEL_MAX_RETRIES
     request["model"] = model_name
     return client, request
 
@@ -342,13 +345,17 @@ class PersonalContextHostAPI:
                         exc,
                         "PersonalContext runtime status could not be read",
                     ) from None
-        if same_configuration and previous_active == candidate.enabled:
+        if same_configuration and previous_active == candidate.collection_enabled:
             _publish_yaml(self._config_path, payload)
             self._stored_config = deepcopy(stored)
             return
 
         temporary: Path | None = _stage_yaml(self._config_path, payload)
-        disabling = previous is not None and previous.enabled and not candidate.enabled
+        disabling = (
+            previous is not None
+            and previous.collection_enabled
+            and not candidate.collection_enabled
+        )
         disabled_yaml_published = False
         rollback_runtime = False
         phase = "stop"
@@ -372,7 +379,7 @@ class PersonalContextHostAPI:
             rollback_runtime = True
             await self._personal_context.set_configuration(candidate)
 
-            if candidate.enabled:
+            if candidate.collection_enabled:
                 phase = "activate"
                 await self._personal_context.activate_runtime()
 
@@ -435,6 +442,67 @@ class PersonalContextHostAPI:
         finally:
             _cleanup_temporary(temporary)
 
+    async def _apply_live_update_locked(
+        self,
+        candidate: PersonalContext.Config,
+        stored: dict[str, object],
+        payload: bytes,
+        *,
+        apply: Callable[[], Awaitable[None]],
+        rollback: Callable[[], Awaitable[None]],
+        publish_before_apply: bool = False,
+    ) -> None:
+        """Atomically couple one hot Core update with its complete YAML snapshot."""
+
+        if self._stored_config is None:
+            _raise_host_error("PersonalContext is not configured")
+        previous_payload = _serialize_config(self._stored_config)
+        temporary: Path | None = _stage_yaml(self._config_path, payload)
+        published = False
+        apply_started = False
+        try:
+            if publish_before_apply:
+                if temporary is None:
+                    _raise_host_error("PersonalContext configuration staging failed")
+                _replace_yaml(temporary, self._config_path)
+                temporary = None
+                published = True
+            apply_started = True
+            await apply()
+            if not published:
+                if temporary is None:
+                    _raise_host_error("PersonalContext configuration staging failed")
+                _replace_yaml(temporary, self._config_path)
+                temporary = None
+                published = True
+            self._config = candidate
+            self._stored_config = deepcopy(stored)
+        except BaseException as exc:
+            rollback_error: BaseException | None = None
+            if apply_started:
+                try:
+                    await rollback()
+                except BaseException as restore_exc:
+                    rollback_error = restore_exc
+            if published:
+                try:
+                    _publish_yaml(self._config_path, previous_payload)
+                except BaseException as restore_exc:
+                    rollback_error = rollback_error or restore_exc
+            if isinstance(exc, asyncio.CancelledError):
+                raise
+            if rollback_error is not None:
+                raise _as_host_error(
+                    rollback_error,
+                    "PersonalContext previous live configuration could not be restored",
+                ) from None
+            raise _as_host_error(
+                exc,
+                "PersonalContext live configuration could not be applied",
+            ) from None
+        finally:
+            _cleanup_temporary(temporary)
+
     async def get_overview(self) -> dict[str, object]:
         """Return one consistent copy of the full configuration and Core status."""
 
@@ -463,7 +531,11 @@ class PersonalContextHostAPI:
 
         if not isinstance(patch, dict):
             _raise_host_error("patch must be an object")
-        unknown = set(patch) - {"strategy_profile"}
+        unknown = set(patch) - {
+            "collection_enabled",
+            "agent_use_enabled",
+            "strategy_profile",
+        }
         if unknown:
             _raise_host_error("runtime patch contains unsupported fields")
         async with self._operation_lock:
@@ -497,8 +569,8 @@ class PersonalContextHostAPI:
             )
             return deepcopy(stored)
 
-    async def set_runtime_enabled(self, enabled: bool) -> dict[str, object]:
-        """Persist and apply the whole PersonalContext runtime enable switch."""
+    async def set_collection_enabled(self, enabled: bool) -> dict[str, object]:
+        """Persist and apply the PersonalContext collection switch."""
 
         if not isinstance(enabled, bool):
             _raise_host_error("enabled must be a boolean")
@@ -507,39 +579,83 @@ class PersonalContextHostAPI:
             if self._stored_config is None:
                 if not enabled:
                     return _unconfigured_projection()
-                stored = _initial_stored_config(enabled=True)
+                stored = _initial_stored_config(collection_enabled=True)
             else:
                 stored = deepcopy(self._stored_config)
-            stored["enabled"] = enabled
+            stored["collection_enabled"] = enabled
             stored, candidate = _prepare_stored_config(stored)
-            await self._apply_configuration_locked(
-                candidate,
-                stored,
-                _serialize_config(stored),
-            )
+            if first_start:
+                await self._apply_configuration_locked(
+                    candidate,
+                    stored,
+                    _serialize_config(stored),
+                )
+            else:
+                await self._apply_live_update_locked(
+                    candidate,
+                    stored,
+                    _serialize_config(stored),
+                    apply=(
+                        self._personal_context.start_collection
+                        if enabled
+                        else lambda: self._personal_context.stop_collection(
+                            timeout_seconds=_STOP_TIMEOUT_SECONDS
+                        )
+                    ),
+                    rollback=(
+                        (
+                            lambda: self._personal_context.stop_collection(
+                                timeout_seconds=_STOP_TIMEOUT_SECONDS
+                            )
+                        )
+                        if enabled
+                        else self._personal_context.start_collection
+                    ),
+                    publish_before_apply=not enabled,
+                )
             result = deepcopy(stored)
             if first_start:
                 result["model_index"] = None
             return result
 
+    async def set_agent_use_enabled(self, enabled: bool) -> dict[str, object]:
+        """Persist the Agent-use switch without creating an initial configuration."""
+
+        if not isinstance(enabled, bool):
+            _raise_host_error("enabled must be a boolean")
+        async with self._operation_lock:
+            if self._stored_config is None:
+                _raise_host_error("PersonalContext is not configured")
+            stored = deepcopy(self._stored_config)
+            stored["agent_use_enabled"] = enabled
+            stored, candidate = _prepare_stored_config(stored)
+            await self._apply_live_update_locked(
+                candidate,
+                stored,
+                _serialize_config(stored),
+                apply=(
+                    self._personal_context.start_agent_use
+                    if enabled
+                    else self._personal_context.stop_agent_use
+                ),
+                rollback=(
+                    self._personal_context.stop_agent_use
+                    if enabled
+                    else self._personal_context.start_agent_use
+                ),
+            )
+            return deepcopy(stored)
+
     async def list_fetch_services(self) -> list[dict[str, object]]:
-        """Return every fixed fetch service with current state and last error."""
+        """Return every fixed fetch service configuration."""
 
         async with self._operation_lock:
             if self._stored_config is None:
                 return []
-            status = await self._personal_context.snapshot()
-            states = getattr(status, "fetch_service_states", {})
-            errors = getattr(status, "fetch_service_errors", {})
-            services = cast(
+            return cast(
                 list[dict[str, object]],
                 deepcopy(self._stored_config["fetch_services"]),
             )
-            for service in services:
-                service_id = cast(str, service["service_id"])
-                service["state"] = states.get(service_id, "STOPPED")
-                service["last_error"] = errors.get(service_id)
-            return services
 
     async def create_fetch_service(
         self,
@@ -678,6 +794,7 @@ class PersonalContextHostAPI:
             "max_items_per_run",
             "source",
             "credentials",
+            "time_range",
         }
         if set(patch) - allowed:
             _raise_host_error("fetch service patch contains unsupported fields")
@@ -737,57 +854,66 @@ class PersonalContextHostAPI:
             if normalized_id is not None and normalized_id not in configured_ids:
                 _raise_host_error("unknown PersonalContext fetch service")
             status = await self._personal_context.snapshot()
-            states = getattr(status, "fetch_service_states", {})
-            errors = getattr(status, "fetch_service_errors", {})
+            progress_by_service = getattr(status, "fetch_run_progress", {})
 
             def project(item_id: str) -> dict[str, object]:
+                progress = progress_by_service.get(item_id)
+                if isinstance(progress, dict):
+                    return deepcopy(progress)
                 return {
                     "service_id": item_id,
-                    "state": states.get(item_id, "STOPPED"),
-                    "last_error": errors.get(item_id),
+                    "run_state": "idle",
+                    "progress_percent": 0,
+                    "total_items": 0,
+                    "completed_items": 0,
+                    "last_error": None,
                 }
 
             if normalized_id is not None:
                 return project(normalized_id)
             return {"services": [project(item_id) for item_id in configured_ids]}
 
-    async def set_fetching(
+    async def set_fetch_service_enabled(
         self,
-        *,
+        service_id: str,
         enabled: bool,
-        service_id: str | None = None,
     ) -> None:
-        """Persist and hot-apply the global or one-service fetch switch."""
+        """Persist and hot-apply one service's future scheduling switch."""
 
         if not isinstance(enabled, bool):
             _raise_host_error("enabled must be a boolean")
-        if service_id is not None and not isinstance(service_id, str):
+        if not isinstance(service_id, str):
             _raise_host_error("service_id must be a string")
         async with self._operation_lock:
             if self._stored_config is None:
                 _raise_host_error(
-                    "PersonalContext configuration must be set before changing fetching"
+                    "PersonalContext configuration must be set before changing a fetch service"
                 )
             raw = deepcopy(self._stored_config)
-            if service_id is None:
-                raw["fetching_enabled"] = enabled
-            else:
-                normalized_id = service_id.strip()
-                if not normalized_id:
-                    _raise_host_error("service_id must not be empty")
-                services = cast(list[dict[str, object]], raw["fetch_services"])
-                target = next(
-                    (item for item in services if item["service_id"] == normalized_id),
-                    None,
-                )
-                if target is None:
-                    _raise_host_error("unknown PersonalContext fetch service")
-                target["enabled"] = enabled
+            normalized_id = service_id.strip()
+            if not normalized_id:
+                _raise_host_error("service_id must not be empty")
+            services = cast(list[dict[str, object]], raw["fetch_services"])
+            target = next(
+                (item for item in services if item["service_id"] == normalized_id),
+                None,
+            )
+            if target is None:
+                _raise_host_error("unknown PersonalContext fetch service")
+            target["enabled"] = enabled
             raw, candidate = _prepare_stored_config(raw)
-            await self._apply_configuration_locked(
+            await self._apply_live_update_locked(
                 candidate,
                 raw,
                 _serialize_config(raw),
+                apply=lambda: self._personal_context.set_fetch_service_enabled(
+                    normalized_id,
+                    enabled,
+                ),
+                rollback=lambda: self._personal_context.set_fetch_service_enabled(
+                    normalized_id,
+                    not enabled,
+                ),
             )
 
     async def run_fetch(
@@ -800,10 +926,25 @@ class PersonalContextHostAPI:
         async with self._operation_lock:
             return await self._personal_context.run_fetch(service_id=service_id)
 
-    async def get_graph(self) -> dict[str, object]:
-        """Read the last published Context structure without starting Core."""
+    async def get_graph(
+        self,
+        *,
+        root_id: str | None = None,
+        depth: int = 3,
+    ) -> dict[str, object]:
+        """Read one graph slice without starting Core."""
 
-        return await self._personal_context.get_graph()
+        return await self._personal_context.get_graph(root_id=root_id, depth=depth)
+
+    async def get_tree(
+        self,
+        *,
+        root_id: str | None = None,
+        depth: int = 3,
+    ) -> dict[str, object]:
+        """Read one file-tree slice without starting Core."""
+
+        return await self._personal_context.get_tree(root_id=root_id, depth=depth)
 
     async def search_graph(self, query: str) -> dict[str, object]:
         """Search the last published Context pages without starting Core."""
@@ -814,6 +955,11 @@ class PersonalContextHostAPI:
         """Read one published Context page without starting Core."""
 
         return await self._personal_context.get_graph_page(node_id)
+
+    async def get_source(self, source_id: str) -> dict[str, object]:
+        """Read one structured atomic-source detail without starting Core."""
+
+        return await self._personal_context.get_source(source_id)
 
     async def get_authorization_status(self, provider: str) -> dict[str, object]:
         """Read provider authorization status without storing Host-side state."""
@@ -880,7 +1026,7 @@ class PersonalContextHostAPI:
                 self._config = config
                 self._stored_config = stored
             config = self._config
-            if config is None or not config.enabled:
+            if config is None or not config.collection_enabled:
                 return
             try:
                 await self._personal_context.activate_runtime()
@@ -892,11 +1038,11 @@ class PersonalContextHostAPI:
                 ) from None
 
     async def is_runtime_enabled(self) -> bool:
-        """Return the loaded Host switch without reading or parsing YAML."""
+        """Return the loaded Agent-use switch without reading or parsing YAML."""
 
         async with self._operation_lock:
             config = self._config
-            return bool(config is not None and config.enabled)
+            return bool(config is not None and config.agent_use_enabled)
 
     async def get_status(self) -> PersonalContext.Status:
         """Return the Core's bounded, credential-free status snapshot."""
@@ -940,7 +1086,7 @@ class PersonalContextHostAPI:
             self._stored_config = None
             return
         await self._personal_context.set_configuration(previous)
-        if was_active and previous.enabled:
+        if was_active and previous.collection_enabled:
             await self._personal_context.activate_runtime()
         self._config = previous
         self._stored_config = deepcopy(previous_stored)

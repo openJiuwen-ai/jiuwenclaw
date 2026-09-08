@@ -11,13 +11,10 @@ from pathlib import Path
 from typing import Any
 
 from openjiuwen.core.foundation.tool import Tool, ToolCard
-from openjiuwen.core.sys_operation.cwd import get_cwd
 
 
 class HealthProfileTool(Tool):
     """用户健康档案管理工具，配合 health-life-planning skill 使用。"""
-
-    AGENT_NAME = "health-life-advisor"
 
     def __init__(self) -> None:
         super().__init__(
@@ -28,6 +25,7 @@ class HealthProfileTool(Tool):
                     "用户健康档案管理工具：建档、更新档案、读取档案、生成/迭代健康生活方案、"
                     "记录执行情况、阶段性复盘。配合 health-life-planning skill 使用。"
                     "所有档案读写一律通过本工具完成，禁止手改档案文件。"
+                    "调用时必须传入 output_dir（当前项目目录或用户指定目录的绝对路径），禁止自行推导落盘路径。"
                 ),
                 input_params={
                     "type": "object",
@@ -48,6 +46,13 @@ class HealthProfileTool(Tool):
                                 "get_profile=读取档案, generate_plan=生成方案, "
                                 "update_plan=迭代方案, log_progress=记录执行, "
                                 "review_progress=复盘"
+                            ),
+                        },
+                        "output_dir": {
+                            "type": "string",
+                            "description": (
+                                "档案落盘目录的绝对路径。传当前项目目录；"
+                                "用户指定了保存位置时用用户指定的目录。禁止自行推导。"
                             ),
                         },
                         "profile_data": {
@@ -84,21 +89,30 @@ class HealthProfileTool(Tool):
                             ),
                         },
                     },
-                    "required": ["action"],
+                    "required": ["action", "output_dir"],
                 },
             )
         )
 
-    def _get_profile_path(self, kwargs: dict[str, Any]) -> Path:
-        """获取当前 session 的健康档案路径。"""
+    def _get_profile_path(
+        self, inputs: dict[str, Any], kwargs: dict[str, Any]
+    ) -> Path | dict[str, Any]:
+        """按入参 output_dir 与当前 session 解析健康档案路径。"""
+        output_dir = inputs.get("output_dir", "")
+        if not isinstance(output_dir, str) or not output_dir.strip():
+            return {
+                "success": False,
+                "error": "缺少 output_dir：请传入当前项目目录的绝对路径",
+            }
         session = kwargs.get("session")
         session_id = "default"
         if session is not None:
             get_session_id = getattr(session, "get_session_id", None)
             if callable(get_session_id):
-                session_id = get_session_id()
-        base = Path(get_cwd())
-        profile_dir = base / self.AGENT_NAME / session_id
+                sid = get_session_id()
+                if sid:
+                    session_id = str(sid)
+        profile_dir = Path(output_dir).expanduser() / str(session_id)
         profile_dir.mkdir(parents=True, exist_ok=True)
         return profile_dir / "health_profile.json"
 
@@ -138,7 +152,9 @@ class HealthProfileTool(Tool):
     async def invoke(self, inputs: dict[str, Any], **kwargs) -> dict[str, Any]:
         try:
             action = inputs.get("action", "")
-            path = self._get_profile_path(kwargs)
+            path = self._get_profile_path(inputs, kwargs)
+            if isinstance(path, dict):
+                return path
 
             if action == "create_profile":
                 return self._create_profile(path, inputs)
@@ -162,9 +178,7 @@ class HealthProfileTool(Tool):
     async def stream(self, inputs: dict[str, Any], **kwargs):
         yield await self.invoke(inputs, **kwargs)
 
-    def _create_profile(
-        self, path: Path, inputs: dict[str, Any]
-    ) -> dict[str, Any]:
+    def _create_profile(self, path: Path, inputs: dict[str, Any]) -> dict[str, Any]:
         if path.exists():
             return {
                 "success": False,
@@ -178,16 +192,12 @@ class HealthProfileTool(Tool):
         self._save_profile(path, profile)
         return {"success": True, "message": "健康档案已创建", "profile": profile}
 
-    def _update_profile(
-        self, path: Path, inputs: dict[str, Any]
-    ) -> dict[str, Any]:
+    def _update_profile(self, path: Path, inputs: dict[str, Any]) -> dict[str, Any]:
         profile = self._load_profile(path)
         data = inputs.get("profile_data", {})
         for key in ("basic_info", "diet", "sleep", "emotion"):
             if key in data:
-                if isinstance(profile.get(key), dict) and isinstance(
-                    data[key], dict
-                ):
+                if isinstance(profile.get(key), dict) and isinstance(data[key], dict):
                     profile[key].update(data[key])
                 else:
                     profile[key] = data[key]
@@ -204,9 +214,7 @@ class HealthProfileTool(Tool):
         profile = self._load_profile(path)
         return {"success": True, "profile": profile}
 
-    def _generate_plan(
-        self, path: Path, inputs: dict[str, Any]
-    ) -> dict[str, Any]:
+    def _generate_plan(self, path: Path, inputs: dict[str, Any]) -> dict[str, Any]:
         profile = self._load_profile(path)
         plan_data = inputs.get("plan_data", {})
         now = datetime.now(timezone.utc).isoformat()
@@ -235,9 +243,7 @@ class HealthProfileTool(Tool):
             "plan": plan,
         }
 
-    def _update_plan(
-        self, path: Path, inputs: dict[str, Any]
-    ) -> dict[str, Any]:
+    def _update_plan(self, path: Path, inputs: dict[str, Any]) -> dict[str, Any]:
         profile = self._load_profile(path)
         plans = profile.get("plans", [])
         if not plans:
@@ -265,9 +271,7 @@ class HealthProfileTool(Tool):
             "diet": plan_data.get("diet", active_plan.get("diet", {})),
             "sleep": plan_data.get("sleep", active_plan.get("sleep", {})),
             "emotion": plan_data.get("emotion", active_plan.get("emotion", {})),
-            "exercise": plan_data.get(
-                "exercise", active_plan.get("exercise", {})
-            ),
+            "exercise": plan_data.get("exercise", active_plan.get("exercise", {})),
             "daily_actions": plan_data.get(
                 "daily_actions", active_plan.get("daily_actions", [])
             ),
@@ -288,13 +292,13 @@ class HealthProfileTool(Tool):
             "plan": new_plan,
         }
 
-    def _log_progress(
-        self, path: Path, inputs: dict[str, Any]
-    ) -> dict[str, Any]:
+    def _log_progress(self, path: Path, inputs: dict[str, Any]) -> dict[str, Any]:
         profile = self._load_profile(path)
         progress = inputs.get("progress_data", {})
         log_entry: dict[str, Any] = {
-            "date": progress.get("date", datetime.now(timezone.utc).strftime("%Y-%m-%d")),
+            "date": progress.get(
+                "date", datetime.now(timezone.utc).strftime("%Y-%m-%d")
+            ),
             "actions_completed": progress.get("actions_completed", []),
             "notes": progress.get("notes", ""),
             "logged_at": datetime.now(timezone.utc).isoformat(),
@@ -308,9 +312,7 @@ class HealthProfileTool(Tool):
             "log": log_entry,
         }
 
-    def _review_progress(
-        self, path: Path, inputs: dict[str, Any]
-    ) -> dict[str, Any]:
+    def _review_progress(self, path: Path, inputs: dict[str, Any]) -> dict[str, Any]:
         profile = self._load_profile(path)
         review_data = inputs.get("review_data", {})
         review: dict[str, Any] = {

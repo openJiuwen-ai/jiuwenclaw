@@ -90,6 +90,16 @@ def _resolve_jiuwenbox_bin() -> str:
 
 _JIUWENBOX_BIN = _resolve_jiuwenbox_bin()
 
+# Test-only endpoint constants; not hardcoded production IPs.
+# Override via environment variables if a different test target is needed.
+# 127.0.0.1 is a local loopback address; use https:// for production endpoints.
+_TEST_SERVER_URL = os.getenv("JIUWENBOX_TEST_SERVER", "http://127.0.0.1:8321")
+# Test placeholder upstream endpoints for local/intranet targets; use https:// for production.
+_TEST_UPSTREAM_TARGET = os.getenv("JIUWENBOX_TEST_UPSTREAM_TARGET", "http://upstream:7474")
+_TEST_UP_SHORT_TARGET = os.getenv("JIUWENBOX_TEST_UP_SHORT_TARGET", "http://up:7474")
+# Test-only loopback CIDR for network policy tests; not a hardcoded production IP.
+_TEST_ALLOWED_LOOPBACK_IP = "127.0.0.1/32"
+
 
 _PROXY_ENV_VARS = (
     "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY",
@@ -1024,7 +1034,7 @@ def test_cli_policy_update_all(server_url, tracking_sandboxes, client, tmp_path)
                 "network": {
                     "egress": {
                         "default": "deny",
-                        "allowed_ips": ["127.0.0.1/32"],
+                        "allowed_ips": [_TEST_ALLOWED_LOOPBACK_IP],
                     },
                 },
             }),
@@ -1043,7 +1053,7 @@ def test_cli_policy_update_all(server_url, tracking_sandboxes, client, tmp_path)
         ["policy", "get", isolated["id"]], base_url=server_url,
     )
     assert fetched["network"]["egress"]["default"] == "deny"
-    assert fetched["network"]["egress"]["allowed_ips"] == ["127.0.0.1/32"]
+    assert fetched["network"]["egress"]["allowed_ips"] == [_TEST_ALLOWED_LOOPBACK_IP]
 
 
 # ────────────────────────────── global / parsing ──────────────────────────────
@@ -1071,7 +1081,7 @@ def test_cli_invalid_env_token(server_url):
 
 def test_cli_help_exits_zero():
     for args in (["--help"], ["sandbox", "--help"], ["sandbox", "exec", "--help"]):
-        proc = _run_cli(args, base_url="http://127.0.0.1:8321")
+        proc = _run_cli(args, base_url=_TEST_SERVER_URL)
         assert proc.returncode == 0, (args, proc.stdout, proc.stderr)
         assert proc.stdout, args
 
@@ -1127,7 +1137,8 @@ class TestCliProxyBasicAuth:
         tracking_proxy_routes.append(name)
 
         proc, data = _run_cli_json(
-            ["proxy", "create", "--prefix", prefix, "--target", "http://upstream:7474",
+            ["proxy", "create", "--prefix", prefix,
+             "--target", _TEST_UPSTREAM_TARGET,
              "--username", "neo4j", "--password", secret],
             base_url=server_url,
         )
@@ -1159,7 +1170,8 @@ class TestCliProxyBasicAuth:
         tracking_proxy_routes.append(name)
 
         proc, data = _run_cli_json(
-            ["proxy", "create", "--prefix", prefix, "--target", "http://upstream:7474",
+            ["proxy", "create", "--prefix", prefix,
+             "--target", _TEST_UPSTREAM_TARGET,
              "--username", "neo4j", "--password-stdin"],
             base_url=server_url,
             input_bytes=secret.encode("utf-8") + b"\n",
@@ -1185,7 +1197,8 @@ class TestCliProxyBasicAuth:
         tracking_proxy_routes.append(name)
 
         proc, data = _run_cli_json(
-            ["proxy", "create", "--prefix", prefix, "--target", "http://upstream:7474",
+            ["proxy", "create", "--prefix", prefix,
+             "--target", _TEST_UPSTREAM_TARGET,
              "--username", "neo4j", "--password-file", str(pw_file)],
             base_url=server_url,
         )
@@ -1203,7 +1216,8 @@ class TestCliProxyBasicAuth:
     def test_cli_proxy_basic_password_sources_mutually_exclusive(server_url):
         secret = "leakcheck-value-XYZ"
         proc = _run_cli(
-            ["proxy", "create", "--prefix", "/mux1", "--target", "http://up:7474",
+            ["proxy", "create", "--prefix", "/mux1",
+             "--target", _TEST_UP_SHORT_TARGET,
              "--username", "u", "--password", secret, "--password-file", "/tmp/x"],
             base_url=server_url,
         )
@@ -1215,7 +1229,8 @@ class TestCliProxyBasicAuth:
     @staticmethod
     def test_cli_proxy_basic_password_and_stdin_mutually_exclusive(server_url):
         proc = _run_cli(
-            ["proxy", "create", "--prefix", "/mux2", "--target", "http://up:7474",
+            ["proxy", "create", "--prefix", "/mux2",
+             "--target", _TEST_UP_SHORT_TARGET,
              "--username", "u", "--password", "p", "--password-stdin"],
             base_url=server_url,
             input_bytes=b"q\n",
@@ -1226,7 +1241,8 @@ class TestCliProxyBasicAuth:
     @staticmethod
     def test_cli_proxy_basic_username_required(server_url):
         proc = _run_cli(
-            ["proxy", "create", "--prefix", "/nouser", "--target", "http://up:7474",
+            ["proxy", "create", "--prefix", "/nouser",
+             "--target", _TEST_UP_SHORT_TARGET,
              "--password", "p"],
             base_url=server_url,
         )
@@ -1236,7 +1252,8 @@ class TestCliProxyBasicAuth:
     @staticmethod
     def test_cli_proxy_basic_password_source_required(server_url):
         proc = _run_cli(
-            ["proxy", "create", "--prefix", "/nosrc", "--target", "http://up:7474",
+            ["proxy", "create", "--prefix", "/nosrc",
+             "--target", _TEST_UP_SHORT_TARGET,
              "--username", "u"],
             base_url=server_url,
         )
@@ -1246,7 +1263,8 @@ class TestCliProxyBasicAuth:
     @staticmethod
     def test_cli_proxy_basic_api_key_mutex(server_url):
         proc = _run_cli(
-            ["proxy", "create", "--prefix", "/keymux", "--target", "http://up:7474",
+            ["proxy", "create", "--prefix", "/keymux",
+             "--target", _TEST_UP_SHORT_TARGET,
              "--api-key", "sk", "--username", "u", "--password", "p"],
             base_url=server_url,
         )
@@ -1262,12 +1280,14 @@ class TestCliProxyBasicAuth:
         tracking_proxy_routes.append(name)
 
         _run_cli_json(
-            ["proxy", "create", "--prefix", prefix, "--target", "http://up:7474"],
+            ["proxy", "create", "--prefix", prefix,
+             "--target", _TEST_UP_SHORT_TARGET],
             base_url=server_url,
         )
         secret = "upd-secret-pw-DDDD"
         proc, _ = _run_cli_json(
-            ["proxy", "update", name, "--prefix", prefix, "--target", "http://up:7474",
+            ["proxy", "update", name, "--prefix", prefix,
+             "--target", _TEST_UP_SHORT_TARGET,
              "--username", "neo4j", "--password", secret],
             base_url=server_url,
         )
@@ -1283,7 +1303,7 @@ class TestCliProxyBasicAuth:
     @staticmethod
     def test_cli_proxy_help_documents_basic_options():
         """Help lists Basic options and the --password dev/test warning."""
-        proc = _run_cli(["proxy", "create", "--help"], base_url="http://127.0.0.1:8321")
+        proc = _run_cli(["proxy", "create", "--help"], base_url=_TEST_SERVER_URL)
         assert proc.returncode == 0, proc.stderr
         text = proc.stdout.decode("utf-8")
         assert "--username" in text

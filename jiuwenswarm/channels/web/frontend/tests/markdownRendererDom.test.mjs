@@ -44,7 +44,6 @@ function createI18n() {
             image: 'Image',
             code: 'Code',
             moreActions: 'More diagram actions',
-            downloadSource: 'Download source',
             downloadImage: 'Download as image',
             copyCode: 'Copy code',
             copied: 'Copied',
@@ -199,12 +198,19 @@ test('renders SVG markup only inside a sandboxed iframe and falls back to code f
     await act(async () => {
       root.render(createElement(I18nextProvider, { i18n }, createElement(SvgDiagram, { code: '<div>not an SVG</div>', complete: true, isStreaming: false })));
     });
-    assert.ok(container.querySelector('[data-svg-status="invalid"] .svg-diagram__code-view'));
-    assert.ok(container.querySelector('[data-svg-status="invalid"] .diagram-toolbar-status--warning'));
-    assert.equal(container.querySelector('[data-svg-status="invalid"] .diagram-toolbar-status--error'), null);
+    const invalidDiagram = container.querySelector('[data-svg-status="invalid"]');
+    assert.ok(invalidDiagram?.querySelector('.svg-diagram__code-view'));
+    assert.ok(invalidDiagram?.querySelector('.diagram-toolbar-status--warning'));
+    assert.equal(invalidDiagram?.querySelector('.diagram-toolbar-status--error'), null);
     assert.match(container.textContent, /SVG code contains errors/);
     assert.equal(Array.from(container.querySelectorAll('button')).find(button => button.textContent === 'Image')?.disabled, true);
-    assert.equal(container.querySelector('[data-svg-status="invalid"] iframe'), null);
+    assert.equal(invalidDiagram?.querySelector('iframe'), null);
+
+    await act(async () => {
+      invalidDiagram?.querySelector('[aria-label="More diagram actions"]')?.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true }));
+    });
+    assert.equal(invalidDiagram?.querySelector('[data-variant="download-source"]'), null);
+    assert.equal(invalidDiagram?.querySelector('[data-variant="download-image"]')?.disabled, false);
   } finally {
     if (root) await act(async () => root.unmount());
     restore();
@@ -232,13 +238,16 @@ test('renders Mermaid through the shared viewer and preserves the code fallback 
   let root;
   try {
     root = createRoot(container);
-    const renderSvg = async () => '<svg viewBox="0 0 120 60"><rect width="120" height="60" /></svg>';
+    const renderSvg = async () => '<svg width="100%" height="100%" viewBox="0 0 120 60" style="max-width: 120px"><rect width="120" height="60" /></svg>';
     await act(async () => {
       root.render(createElement(I18nextProvider, { i18n }, createElement(MermaidDiagram, { code: 'graph TD; A-->B', renderSvg })));
     });
 
     const diagram = container.querySelector('[data-mermaid-status="rendered"]');
-    assert.ok(diagram?.querySelector('.mermaid-svg-wrapper svg'));
+    const renderedSvg = diagram?.querySelector('.mermaid-svg-wrapper svg');
+    assert.ok(renderedSvg);
+    assert.equal(renderedSvg.style.width, '120px');
+    assert.equal(renderedSvg.style.height, '60px');
     assert.equal(diagram.getAttribute('data-markdown-block'), 'wide');
     assert.equal(diagram.querySelector('[aria-label="More diagram actions"]').getAttribute('aria-haspopup'), 'menu');
 
@@ -263,6 +272,80 @@ test('renders Mermaid through the shared viewer and preserves the code fallback 
       );
     });
     assert.equal(container.querySelector('pre.mermaid-error[data-mermaid-status="error"] code').textContent, 'invalid diagram');
+  } finally {
+    if (root) await act(async () => root.unmount());
+    restore();
+    dom.window.close();
+  }
+});
+
+test('preserves Mermaid zoom when the canvas is re-measured', async () => {
+  const dom = new JSDOM('<!doctype html><html><body><div id="root"></div></body></html>', { url: 'https://example.test/' });
+  let resizeCallback;
+  class ResizeObserverStub {
+    constructor(callback) {
+      resizeCallback = callback;
+    }
+    observe() {}
+    disconnect() {}
+  }
+  const restore = installGlobals({
+    HTMLElement: dom.window.HTMLElement,
+    IS_REACT_ACT_ENVIRONMENT: true,
+    MouseEvent: dom.window.MouseEvent,
+    ResizeObserver: ResizeObserverStub,
+    document: dom.window.document,
+    navigator: dom.window.navigator,
+    window: dom.window,
+  });
+  const container = dom.window.document.querySelector('#root');
+  const i18n = createI18n();
+  let root;
+  try {
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        createElement(
+          I18nextProvider,
+          { i18n },
+          createElement(MermaidDiagram, {
+            code: 'graph TD; A-->B',
+            canvasMinHeight: 168,
+            renderSvg: async () => '<svg viewBox="0 0 120 60"><rect width="120" height="60" /></svg>',
+          }),
+        ),
+      );
+    });
+
+    const diagram = container.querySelector('[data-mermaid-status="rendered"]');
+    const zoomIn = diagram?.querySelector('[aria-label="Zoom in"]');
+    const wrapper = diagram?.querySelector('.mermaid-svg-wrapper');
+    const canvas = diagram?.querySelector('[data-testid="markdown-mermaid-canvas"]');
+    assert.ok(zoomIn);
+    assert.ok(wrapper);
+    assert.ok(canvas);
+    Object.defineProperties(canvas, {
+      clientHeight: { configurable: true, value: 168 },
+      clientWidth: { configurable: true, value: 300 },
+      scrollHeight: { configurable: true, value: 600 },
+      scrollWidth: { configurable: true, value: 1000 },
+    });
+    canvas.scrollLeft = 100;
+    canvas.scrollTop = 50;
+    assert.equal(wrapper.style.transformOrigin, 'top left');
+    assert.match(wrapper.style.transform, /scale\(1\)$/);
+
+    await act(async () => {
+      zoomIn.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true }));
+    });
+    assert.match(wrapper.style.transform, /scale\(1\.25\)$/);
+    assert.equal(canvas.scrollLeft, 163);
+    assert.equal(canvas.scrollTop, 84);
+
+    await act(async () => {
+      resizeCallback?.();
+    });
+    assert.match(wrapper.style.transform, /scale\(1\.25\)$/);
   } finally {
     if (root) await act(async () => root.unmount());
     restore();

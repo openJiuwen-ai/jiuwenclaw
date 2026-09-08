@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 
 import pytest
@@ -37,6 +38,19 @@ class ClosingRecvWebSocket:
         raise ConnectionClosedError(None, None)
 
 
+class AckThenHangWebSocket:
+    """首次 recv 返回 connection.ack 事件帧，之后挂起（模拟 ack 迟到但连接保持）。"""
+
+    def __init__(self) -> None:
+        self.recv_calls = 0
+
+    async def recv(self) -> str:
+        self.recv_calls += 1
+        if self.recv_calls == 1:
+            return json.dumps({"type": "event", "event": "connection.ack", "params": {}})
+        await asyncio.Event().wait()  # 挂起，模拟连接保持
+
+
 class AgentClientHarness(WebSocketAgentServerClient):
     def set_ws_for_test(self, ws) -> None:
         self._ws = ws
@@ -49,6 +63,9 @@ class AgentClientHarness(WebSocketAgentServerClient):
 
     def set_server_ready_for_test(self, ready: bool) -> None:
         self._server_ready = ready
+
+    def get_server_ready_for_test(self) -> bool:
+        return self._server_ready
 
     def is_running_for_test(self) -> bool:
         return self._running
@@ -209,6 +226,35 @@ async def test_send_request_stream_absorbs_duplicate_complete_frames(monkeypatch
     assert len(chunks) == 2
     assert all(chunk.is_complete for chunk in chunks)
     assert client.has_message_queue_for_test("rid-complete") is False
+
+
+@pytest.mark.asyncio
+async def test_message_receiver_loop_sets_ready_on_late_connection_ack():
+    """迟到的 connection.ack（connect 5s 首帧等待超时后才到达）补置 server_ready。
+
+    回归：e2a_proxy 等依赖 server_ready 的入口（Web session.list）在
+    ack 迟到时不得永久返回 SERVICE_UNAVAILABLE。
+    """
+    client = AgentClientHarness()
+    ws = AckThenHangWebSocket()
+    client.set_ws_for_test(ws)
+    client.set_running_for_test(True)
+    client.set_server_ready_for_test(False)  # connect 首帧等待超时后的状态
+
+    task = asyncio.create_task(client.run_message_receiver_loop_for_test())
+    for _ in range(100):
+        if client.get_server_ready_for_test():
+            break
+        await asyncio.sleep(0.001)
+
+    assert client.get_server_ready_for_test() is True
+    assert ws.recv_calls >= 1  # ack 帧已被消费，连接保持（第二轮 recv 挂起中）
+
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
 
 
 @pytest.mark.asyncio

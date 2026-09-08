@@ -1,3 +1,4 @@
+# Copyright (c) Huawei Technologies Co., Ltd. 2025-2026. All rights reserved.
 # Windows 打包 exe 脚本
 # 用法: .\scripts\build-exe.ps1  或  pwsh -File scripts\build-exe.ps1
 
@@ -192,8 +193,8 @@ $BuildSetupFilename = [string]$BuildConfig.setup_filename
 Write-Host "Build identity: $BuildDisplayName $BuildVersion" -ForegroundColor Gray
 
 # 1. Install dependencies
-Write-Host "[1/4] Installing Python dependencies (uv sync --extra dev --extra claude --extra codex)..." -ForegroundColor Yellow
-uv sync --extra dev --extra claude --extra codex
+Write-Host "[1/4] Installing Python dependencies (uv sync --extra dev)..." -ForegroundColor Yellow
+uv sync --extra dev
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # 2. Build frontend
@@ -235,6 +236,17 @@ if ($VerifyProcess.ExitCode -ne 0) {
 if (Test-Truthy $BundleNode) {
     Write-Host "`n[3.5/4] Bundling Node.js runtime..." -ForegroundColor Yellow
     Copy-NodeRuntime -SourceDir $NodeSource -DistDir $FrozenDir
+
+    $PlaywrightVerifier = Join-Path $ProjectRoot "scripts\verify_playwright_mcp_bundle.py"
+    $PlaywrightVerifyProcess = Start-Process `
+        -FilePath $FrozenExe `
+        -ArgumentList @($PlaywrightVerifier) `
+        -Wait `
+        -PassThru `
+        -NoNewWindow
+    if ($PlaywrightVerifyProcess.ExitCode -ne 0) {
+        throw "Frozen Playwright MCP bundle verification failed. See ~/.jiuwenswarm/logs/$BuildErrorLogName"
+    }
 } else {
     Write-Host "`n[3.5/4] Skipping bundled Node.js runtime (BUNDLE_NODE=$BundleNode)" -ForegroundColor Yellow
 }

@@ -63,10 +63,13 @@ class ReportStyler(Tool):
             return {"success": False, "error": "缺少 operations 参数"}
 
         try:
+            # 图表是就地美化的中间产物，跟随被美化的文档存放。
+            charts_dir = Path(file_path).resolve().parent / "charts"
+            charts_dir.mkdir(parents=True, exist_ok=True)
             if fmt == "word":
-                results = self._style_word(file_path, operations)
+                results = self._style_word(file_path, operations, charts_dir)
             elif fmt == "ppt":
-                results = self._style_ppt(file_path, operations)
+                results = self._style_ppt(file_path, operations, charts_dir)
             else:
                 return {"success": False, "error": f"不支持的格式: {fmt}"}
 
@@ -91,7 +94,9 @@ class ReportStyler(Tool):
         yield await self.invoke(inputs, **kwargs)
 
     @staticmethod
-    def _style_word(file_path: str, operations: list) -> list:
+    def _style_word(
+        file_path: str, operations: list, charts_dir: Path
+    ) -> list:
         from docx import Document
         from docx.enum.text import WD_ALIGN_PARAGRAPH
         from docx.oxml import OxmlElement
@@ -192,7 +197,7 @@ class ReportStyler(Tool):
                 title = op.get("title", "")
 
                 chart_path = ReportStyler._generate_chart_image(
-                    chart_type, chart_data, title
+                    chart_type, chart_data, title, charts_dir
                 )
                 if chart_path:
                     doc.add_picture(chart_path, width=Inches(6))
@@ -352,7 +357,9 @@ class ReportStyler(Tool):
         return results
 
     @staticmethod
-    def _style_ppt(file_path: str, operations: list) -> list:
+    def _style_ppt(
+        file_path: str, operations: list, charts_dir: Path
+    ) -> list:
         from pptx import Presentation
         from pptx.dml.color import RGBColor
         from pptx.util import Inches
@@ -407,7 +414,7 @@ class ReportStyler(Tool):
                 slide_index = op.get("slide_index", -1)
 
                 chart_path = ReportStyler._generate_chart_image(
-                    chart_type, chart_data, title
+                    chart_type, chart_data, title, charts_dir
                 )
                 if chart_path:
                     if 0 <= slide_index < len(prs.slides):
@@ -459,7 +466,10 @@ class ReportStyler(Tool):
 
     @staticmethod
     def _generate_chart_image(
-        chart_type: str, chart_data: dict, title: str
+        chart_type: str,
+        chart_data: dict,
+        title: str,
+        charts_dir: Path,
     ) -> str | None:
         """Generate a chart image, return image path or None."""
         try:
@@ -469,11 +479,6 @@ class ReportStyler(Tool):
             import matplotlib.pyplot as plt
         except ImportError:
             return None
-
-        from openjiuwen.core.sys_operation.cwd import get_cwd
-
-        charts_dir = Path(get_cwd()) / "charts"
-        charts_dir.mkdir(parents=True, exist_ok=True)
 
         labels = chart_data.get("labels", [])
         values = chart_data.get("values", [])

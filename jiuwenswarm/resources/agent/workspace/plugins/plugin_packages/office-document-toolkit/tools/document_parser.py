@@ -99,7 +99,7 @@ class DocumentParser(Tool):
 
     @staticmethod
     def _parse_pdf(file_path: str, extract_tables: bool) -> dict:
-        from pypdf import PdfReader
+        from PyPDF2 import PdfReader
 
         reader = PdfReader(file_path)
         pages = []

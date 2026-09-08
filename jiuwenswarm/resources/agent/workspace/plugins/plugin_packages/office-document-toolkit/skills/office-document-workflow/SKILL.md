@@ -9,6 +9,16 @@ description: 办公文档处理工作流：指导PDF、Word、Excel、PPT文档�
 
 完成办公文档（PDF、Word、Excel、PPT）的全链路处理：解析、转换、批量处理、编辑修改、数据变换、PDF操控、高级排版、邮件合并、文档比较、打包压缩与文档脱敏。
 
+## 产物输出目录
+
+会写出文件的工具（`document_generator`、`format_converter`、`batch_processor`、
+`excel_transformer`、`pdf_manipulator`、`mail_merge_tool`、`archive_tool`、`redactor`）
+都要求传 `output_dir`：
+
+- 默认传运行时提示中「当前项目目录」的绝对路径
+- 用户明确指定了保存位置时，用用户指定的目录
+- 不要传智能体内部数据目录，那里只放智能体自身数据
+
 ## 工作流
 
 ### 1. 文档解析
@@ -35,6 +45,7 @@ description: 办公文档处理工作流：指导PDF、Word、Excel、PPT文档�
 
 - 指定 `format`、`filename` 和 `content`
 - `content` 结构：`{title, paragraphs[], tables[], sheets[], slides[]}`
+- 含中文内容且请求 PDF 时，会自动改为 Word（`.docx`）输出
 
 **调用时机**：需要将处理后的内容输出为文档文件时。
 
@@ -44,6 +55,7 @@ description: 办公文档处理工作流：指导PDF、Word、Excel、PPT文档�
 
 - 输入 `source_path` 和 `target_format`（word/pdf/excel/csv/ppt）
 - 支持 PDF→Word、PDF→Excel、Word→PDF、Excel↔CSV、PPT→PDF、Markdown→Word/PPT
+- Word/PPT 转 PDF 时，若源文档含中文会拒绝转换，请保留 Word 格式
 
 **调用时机**：用户需要转换文档格式时。
 

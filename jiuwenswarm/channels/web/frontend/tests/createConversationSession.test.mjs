@@ -8,6 +8,7 @@ import {
   createConversationSession,
   isAlreadyExistsError,
   isRequestTimeoutError,
+  parsePersistSessionCommand,
   resolveCreatedSessionId,
 } from '../node_modules/.cache/create-conversation-session/multi-session/state/createConversationSession.js';
 
@@ -28,6 +29,29 @@ test('session.create constants and response ID normalization', () => {
 test('error helpers read error.code', () => {
   assert.equal(isRequestTimeoutError({ code: 'REQUEST_TIMEOUT' }), true);
   assert.equal(isAlreadyExistsError({ code: 'ALREADY_EXISTS' }), true);
+});
+
+test('parses Persist Session only from an exact leading command', () => {
+  assert.deepEqual(parsePersistSessionCommand('/persist build the login flow'), {
+    content: 'build the login flow',
+    persistSession: true,
+  });
+  assert.deepEqual(parsePersistSessionCommand('/persist + build the login flow'), {
+    content: '+ build the login flow',
+    persistSession: true,
+  });
+  assert.deepEqual(parsePersistSessionCommand('/persistent data'), {
+    content: '/persistent data',
+    persistSession: false,
+  });
+  assert.deepEqual(parsePersistSessionCommand('explain /persist usage'), {
+    content: 'explain /persist usage',
+    persistSession: false,
+  });
+  assert.deepEqual(parsePersistSessionCommand('/persist'), {
+    content: '',
+    persistSession: true,
+  });
 });
 
 test('uses the AgentServer-returned ID', async () => {

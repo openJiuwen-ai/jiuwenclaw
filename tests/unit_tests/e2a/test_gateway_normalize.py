@@ -80,6 +80,21 @@ def test_e2a_to_agent_request_roundtrip():
     assert req.metadata == {"wecom_req_id": "abc"}
 
 
+def test_e2a_to_agent_request_preserves_user_id_for_agentos_routing():
+    env = e2a_from_agent_fields(
+        request_id="cron-snapshot",
+        channel_id="web",
+        session_id="session-1",
+        req_method=ReqMethod.CRON_JOBS_SYNC,
+        params={"jobs": []},
+        user_id="alice",
+    )
+
+    req = e2a_to_agent_request(env)
+
+    assert req.user_id == "alice"
+
+
 def test_message_to_e2a_or_fallback_preserves_user_id():
     msg = Message(
         id="r-user",
@@ -94,6 +109,7 @@ def test_message_to_e2a_or_fallback_preserves_user_id():
     )
     env = message_to_e2a_or_fallback(msg)
     assert env.user_id == "alice"
+    assert e2a_to_agent_request(env).user_id == "alice"
 
 
 def test_e2a_from_agent_fields_user_id():

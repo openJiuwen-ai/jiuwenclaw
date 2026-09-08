@@ -71,7 +71,6 @@ def test_rail_build_names_still_contains_other_required_entries():
     """Verify other required mappings are still present after LspRail removal."""
     required_keys = [
         "SkillUseRail",
-        "HeartbeatRail",
         "ProjectMemoryRail",
         "CodingMemoryRail",
     ]
@@ -79,6 +78,9 @@ def test_rail_build_names_still_contains_other_required_entries():
         assert key in _RAIL_BUILD_NAMES, (
             f"{key} should still be present in RAIL_BUILD_NAMES"
         )
+
+    assert "HeartbeatRail" not in _RAIL_BUILD_NAMES
+    assert "HeartbeatRail" in _FIXED_RAIL_NAMES
 
 
 def test_rail_build_names_lsp_rail_via_config_method_still_accessible():

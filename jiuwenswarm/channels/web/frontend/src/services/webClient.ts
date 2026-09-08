@@ -96,10 +96,6 @@ class WebClient {
     return this.state;
   }
 
-  getInflightCount(): number {
-    return this.pending.size;
-  }
-
   onStateChange(handler: StateHandler): () => void {
     this.stateHandlers.add(handler);
     return () => {
@@ -204,6 +200,15 @@ class WebClient {
         );
         if (this.manualClose || closeEvent.code === 1000) {
           this.updateState('closed');
+          return;
+        }
+        // 1008 Policy Violation: gateway 鉴权失败 (token 失效/缺失)。
+        // 重载页面, AppWithAuth 会探测 cookie 失效 -> 回到登录页。
+        if (closeEvent.code === 1008) {
+          this.updateState('closed');
+          if (typeof window !== 'undefined') {
+            window.location.reload();
+          }
           return;
         }
         this.scheduleReconnect();
@@ -461,7 +466,8 @@ class WebClient {
         message.error ?? i18n.t('network.requestFailed'),
         message.code,
         message.id,
-        this.isRetriableCode(message.code)
+        this.isRetriableCode(message.code),
+        message.payload
       )
     );
   }
@@ -550,12 +556,14 @@ class WebClient {
     message: string,
     code?: string,
     requestId?: string,
-    retriable = false
+    retriable = false,
+    payload?: unknown
   ): WebError {
     const error = new Error(message) as WebError;
     error.code = code;
     error.requestId = requestId;
     error.retriable = retriable;
+    error.payload = payload;
     return error;
   }
 
@@ -576,6 +584,100 @@ export async function webRequest<T = unknown>(
   options?: WebRequestOptions
 ): Promise<T> {
   return webClient.request<T>(method, params, options);
+}
+
+// ── SwarmFlow workflow 分页 RPC 封装（command.workflows） ─────────
+
+export interface WorkflowListResponse {
+  type?: string;
+  workflows?: unknown[];
+  session_id?: string;
+  total?: number;
+  has_more?: boolean;
+}
+
+export interface WorkflowDetailResponse {
+  type?: string;
+  workflow?: unknown;
+  session_id?: string;
+  phase_total?: number;
+  has_more?: boolean;
+}
+
+export interface WorkflowPhaseResponse {
+  type?: string;
+  phase?: unknown;
+  session_id?: string;
+  agent_total?: number;
+  has_more?: boolean;
+  error?: unknown;
+}
+
+export interface WorkflowAgentResponse {
+  type?: string;
+  agent?: unknown;
+  session_id?: string;
+  error?: unknown;
+}
+
+export async function requestWorkflowList(
+  sessionId: string,
+  offset = 0,
+  limit?: number,
+): Promise<WorkflowListResponse> {
+  return webRequest<WorkflowListResponse>('command.workflows', {
+    session_id: sessionId,
+    action: 'list',
+    offset,
+    ...(limit == null ? {} : { limit }),
+  });
+}
+
+export async function requestWorkflowDetail(
+  sessionId: string,
+  workflowId: string,
+  phaseOffset = 0,
+  phaseLimit?: number,
+): Promise<WorkflowDetailResponse> {
+  return webRequest<WorkflowDetailResponse>('command.workflows', {
+    session_id: sessionId,
+    action: 'get_workflow',
+    workflow_id: workflowId,
+    phase_offset: phaseOffset,
+    ...(phaseLimit == null ? {} : { phase_limit: phaseLimit }),
+  });
+}
+
+export async function requestPhaseAgents(
+  sessionId: string,
+  workflowId: string,
+  phaseId: string,
+  agentOffset = 0,
+  agentLimit?: number,
+): Promise<WorkflowPhaseResponse> {
+  return webRequest<WorkflowPhaseResponse>('command.workflows', {
+    session_id: sessionId,
+    action: 'get_phase',
+    workflow_id: workflowId,
+    phase_id: phaseId,
+    agent_offset: agentOffset,
+    ...(agentLimit == null ? {} : { agent_limit: agentLimit }),
+  });
+}
+
+export async function requestAgentDetail(
+  sessionId: string,
+  workflowId: string,
+  phaseId: string,
+  agentId: string,
+): Promise<WorkflowAgentResponse> {
+  return webRequest<WorkflowAgentResponse>('command.workflows', {
+    session_id: sessionId,
+    action: 'get_agent',
+    workflow_id: workflowId,
+    phase_id: phaseId,
+    agent_id: agentId,
+  });
 }
 
 interface GoalCommandResponsePayload {
@@ -626,8 +728,9 @@ export async function sendGoalStreamCommand(params: {
   action: 'set' | 'resume';
   objective?: string;
   mode?: string;
+  modelName?: string | null;
 }): Promise<void> {
-  const { sessionId, action, objective, mode } = params;
+  const { sessionId, action, objective, mode, modelName } = params;
   await webClient.sendFireAndForget(
     'command.goal',
     {
@@ -635,6 +738,7 @@ export async function sendGoalStreamCommand(params: {
       action,
       mode: mode ?? 'agent',
       ...(action === 'set' ? { objective, overwrite_confirmed: true } : {}),
+      ...(modelName ? { model_name: modelName } : {}),
     },
     { isStream: true }
   );

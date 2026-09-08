@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+# TEST ONLY: URL literals use RFC-reserved domains or ASGI's synthetic
+# ``http://test`` base; loopback listeners bind ephemeral local test servers.
+
 import base64
 import json
 from typing import Any
@@ -52,7 +55,13 @@ class _FakeYuanrong:
         self.upload_calls: list[dict[str, Any]] = []
         self.download_calls: list[dict[str, Any]] = []
         self.list_calls: list[dict[str, Any]] = []
+        self.mkdir_calls: list[dict[str, Any]] = []
         self.create_calls = 0
+        self.mkdir_result: dict[str, Any] = {
+            "success": True,
+            "path": "/home/agentos/sub",
+            "created": True,
+        }
         self.list_result: list[dict[str, Any]] = [
             {
                 "name": "README.md",
@@ -169,6 +178,28 @@ class _FakeYuanrong:
             }
         )
         return list(self.list_result)
+
+    async def mkdir_agent_dir(
+        self,
+        instance_id: str,
+        path: str,
+        *,
+        mode: str | None = None,
+        recursive: bool = False,
+        auth_headers: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        self.mkdir_calls.append(
+            {
+                "instance_id": instance_id,
+                "path": path,
+                "mode": mode,
+                "recursive": recursive,
+                "auth_headers": dict(auth_headers or {}),
+            }
+        )
+        result = dict(self.mkdir_result)
+        result["path"] = path
+        return result
 
 
 def _make_router_with_runtime(*, sandbox_id: str = "inst-1") -> AgentOSRouterClient:
@@ -347,6 +378,62 @@ async def test_router_list_container_files_forwards_dir_and_auth() -> None:
             max_depth=-1,
         )
     assert depth.value.code == "BAD_REQUEST"
+
+
+@pytest.mark.asyncio
+async def test_router_mkdir_container_dir_forwards_path_mode_and_auth() -> None:
+    router = _make_router_with_runtime()
+    yuanrong: _FakeYuanrong = router._yuanrong  # type: ignore[assignment]
+
+    payload = await router.mkdir_container_dir(
+        user_id="user-1",
+        path="/home/agentos/sub",
+        mode="0755",
+        recursive=True,
+        session_id="sess-1",
+        auth_headers={"Authorization": "Bearer token-1"},
+    )
+
+    assert payload == {
+        "success": True,
+        "path": "/home/agentos/sub",
+        "created": True,
+    }
+    assert yuanrong.mkdir_calls == [
+        {
+            "instance_id": "inst-1",
+            "path": "/home/agentos/sub",
+            "mode": "0755",
+            "recursive": True,
+            "auth_headers": {"Authorization": "Bearer token-1"},
+        }
+    ]
+    with pytest.raises(AgentOSFileTransferError) as relative:
+        await router.mkdir_container_dir(user_id="user-1", path="sub")
+    assert relative.value.code == "BAD_REQUEST"
+    with pytest.raises(AgentOSFileTransferError) as outside:
+        await router.mkdir_container_dir(user_id="user-1", path="/workspace/sub")
+    assert outside.value.code == "BAD_REQUEST"
+
+
+@pytest.mark.asyncio
+async def test_router_mkdir_container_dir_idempotent_created_false() -> None:
+    router = _make_router_with_runtime()
+    yuanrong: _FakeYuanrong = router._yuanrong  # type: ignore[assignment]
+    yuanrong.mkdir_result = {
+        "success": True,
+        "path": "/home/agentos/sub",
+        "created": False,
+    }
+
+    payload = await router.mkdir_container_dir(
+        user_id="user-1",
+        path="/home/agentos/sub",
+        recursive=True,
+        session_id="sess-1",
+    )
+
+    assert payload["created"] is False
 
 
 @pytest.mark.asyncio
@@ -690,6 +777,241 @@ async def test_container_file_http_raw_file_returns_binary_and_json() -> None:
 
 
 @pytest.mark.asyncio
+async def test_container_file_http_downloads_sent_file_from_token() -> None:
+    import httpx
+
+    from jiuwenswarm.gateway.channel_manager.base import RobotMessageRouter
+    from jiuwenswarm.gateway.channel_manager.web.web_channel_app import build_web_channel_app
+    from jiuwenswarm.gateway.channel_manager.web.web_connect import WebChannelConfig
+
+    router = _make_router_with_runtime()
+    router.download_container_file = AsyncMock(  # type: ignore[method-assign]
+        return_value=AgentFileDownloadChunk(
+            data=b"report",
+            path="/home/agentos/reports/result.txt",
+            offset=0,
+            chunk_size=6,
+            size=6,
+            content_type="text/plain",
+            eof=True,
+        )
+    )
+    payload = base64.urlsafe_b64encode(
+        json.dumps({"path": "/home/agentos/reports/result.txt", "sid": "session-1"}).encode()
+    ).decode().rstrip("=")
+    channel = WebChannel(WebChannelConfig(enabled=True, dual_protocol=True), RobotMessageRouter())
+    channel.container_file_client = router
+    app = build_web_channel_app(channel)
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        head = await client.head(
+            f"/file-api/download?token={payload}.signature&user_id=user-1",
+            headers={"Authorization": "Bearer tok-1"},
+        )
+        content = await client.get(
+            f"/file-api/download?token={payload}.signature&user_id=user-1",
+            headers={"Authorization": "Bearer tok-1"},
+        )
+
+    assert head.status_code == 200
+    assert head.headers["content-length"] == "6"
+    assert content.status_code == 200
+    assert content.content == b"report"
+    assert content.headers["content-disposition"].startswith("attachment;")
+    kwargs = router.download_container_file.await_args.kwargs
+    assert kwargs["user_id"] == "user-1"
+    assert kwargs["session_id"] == "session-1"
+    assert kwargs["path"] == "/home/agentos/reports/result.txt"
+    assert kwargs["auth_headers"].get("Authorization") == "Bearer tok-1"
+
+
+@pytest.mark.asyncio
+async def test_container_file_http_routes_verified_download_through_e2a(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import httpx
+
+    from jiuwenswarm.gateway.channel_manager.base import RobotMessageRouter
+    from jiuwenswarm.gateway.channel_manager.web.web_channel_app import build_web_channel_app
+    from jiuwenswarm.gateway.channel_manager.web.web_connect import WebChannelConfig
+    from jiuwenswarm.gateway.routing import e2a_proxy
+
+    content = b"x" * (512 * 1024 + 17)
+    calls: list[dict[str, Any]] = []
+
+    async def _fetch(**kwargs: Any) -> tuple[bool, dict[str, Any]]:
+        calls.append(kwargs)
+        params = kwargs["params"]
+        offset = int(params["offset"])
+        limit = int(params["limit"])
+        data = content[offset:offset + limit]
+        return True, {
+            "data_base64": base64.b64encode(data).decode("ascii"),
+            "offset": offset,
+            "chunk_size": len(data),
+            "size": len(content),
+            "eof": offset + len(data) >= len(content),
+            "name": "approved report.txt",
+            "mime_type": "text/plain",
+        }
+
+    monkeypatch.setattr(e2a_proxy, "fetch_agent_unary", _fetch)
+    router = _make_router_with_runtime()
+    router.download_container_file = AsyncMock(  # type: ignore[method-assign]
+        side_effect=AssertionError("verified download must not use generic container path")
+    )
+    payload = base64.urlsafe_b64encode(
+        json.dumps(
+            {
+                "kind": "verified_asset_v1",
+                "path": "/tmp/sealed.txt",
+                "sid": "session-1",
+            }
+        ).encode()
+    ).decode().rstrip("=")
+    channel = WebChannel(
+        WebChannelConfig(enabled=True, dual_protocol=True),
+        RobotMessageRouter(),
+        agent_client=router,
+    )
+    channel.container_file_client = router
+    app = build_web_channel_app(channel)
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        head = await client.head(
+            f"/file-api/download?token={payload}.signature&user_id=user-a"
+        )
+        partial = await client.get(
+            f"/file-api/download?token={payload}.signature&user_id=user-a",
+            headers={"Range": "bytes=2-7"},
+        )
+        full = await client.get(
+            f"/file-api/download?token={payload}.signature&user_id=user-a"
+        )
+
+    assert head.status_code == 200
+    assert head.headers["content-disposition"] == (
+        "attachment; filename*=UTF-8''approved%20report.txt"
+    )
+    assert partial.status_code == 206
+    assert partial.content == content[2:8]
+    assert partial.headers["content-range"] == f"bytes 2-7/{len(content)}"
+    assert partial.headers["cache-control"] == "no-store"
+    assert full.status_code == 200
+    assert full.content == content
+    assert [int(call["params"]["limit"]) for call in calls[-3:]] == [
+        1,
+        512 * 1024,
+        17,
+    ]
+    assert {call["user_id"] for call in calls} == {"user-a"}
+    assert {call["session_id"] for call in calls} == {"session-1"}
+    router.download_container_file.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_container_file_http_rejects_verified_chunk_past_declared_size(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import httpx
+
+    from jiuwenswarm.gateway.channel_manager.base import RobotMessageRouter
+    from jiuwenswarm.gateway.channel_manager.web.web_channel_app import build_web_channel_app
+    from jiuwenswarm.gateway.channel_manager.web.web_connect import WebChannelConfig
+    from jiuwenswarm.gateway.routing import e2a_proxy
+
+    async def _fetch(**kwargs: Any) -> tuple[bool, dict[str, Any]]:
+        offset = int(kwargs["params"]["offset"])
+        data = b"ab"
+        return True, {
+            "data_base64": base64.b64encode(data).decode("ascii"),
+            "offset": offset,
+            "chunk_size": len(data),
+            "size": 1,
+            "eof": True,
+            "name": "report.txt",
+            "mime_type": "text/plain",
+        }
+
+    monkeypatch.setattr(e2a_proxy, "fetch_agent_unary", _fetch)
+    router = _make_router_with_runtime()
+    payload = base64.urlsafe_b64encode(
+        json.dumps(
+            {
+                "kind": "verified_asset_v1",
+                "path": "/tmp/sealed.txt",
+                "sid": "session-1",
+            }
+        ).encode()
+    ).decode().rstrip("=")
+    channel = WebChannel(
+        WebChannelConfig(enabled=True, dual_protocol=True),
+        RobotMessageRouter(),
+        agent_client=router,
+    )
+    channel.container_file_client = router
+    app = build_web_channel_app(channel)
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get(
+            f"/file-api/download?token={payload}.signature&user_id=user-a"
+        )
+
+    assert response.status_code == 502
+    assert response.json()["error"] == "invalid verified download response"
+
+
+@pytest.mark.asyncio
+async def test_container_file_http_verified_cross_user_rejection_has_no_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import httpx
+
+    from jiuwenswarm.gateway.channel_manager.base import RobotMessageRouter
+    from jiuwenswarm.gateway.channel_manager.web.web_channel_app import build_web_channel_app
+    from jiuwenswarm.gateway.channel_manager.web.web_connect import WebChannelConfig
+    from jiuwenswarm.gateway.routing import e2a_proxy
+
+    async def _reject(**kwargs: Any) -> tuple[bool, dict[str, Any]]:
+        assert kwargs["user_id"] == "user-b"
+        return False, {"error": "verified download token rejected", "code": "FORBIDDEN"}
+
+    monkeypatch.setattr(e2a_proxy, "fetch_agent_unary", _reject)
+    router = _make_router_with_runtime()
+    router.download_container_file = AsyncMock(  # type: ignore[method-assign]
+        side_effect=AssertionError("rejected verified token must not fall back")
+    )
+    payload = base64.urlsafe_b64encode(
+        json.dumps(
+            {
+                "kind": "verified_asset_v1",
+                "path": "/tmp/user-a.txt",
+                "sid": "session-a",
+            }
+        ).encode()
+    ).decode().rstrip("=")
+    channel = WebChannel(
+        WebChannelConfig(enabled=True, dual_protocol=True),
+        RobotMessageRouter(),
+        agent_client=router,
+    )
+    channel.container_file_client = router
+    app = build_web_channel_app(channel)
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get(
+            f"/file-api/download?token={payload}.signature&user_id=user-b"
+        )
+
+    assert response.status_code == 403
+    router.download_container_file.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_container_file_http_upload_multipart() -> None:
     import httpx
 
@@ -930,4 +1252,57 @@ async def test_container_file_http_list_files_and_markdown() -> None:
     assert kwargs["max_depth"] == 3
     assert kwargs["user_id"] == "user-1"
     assert kwargs["session_id"] == ""
+@pytest.mark.asyncio
+async def test_container_file_http_mkdir() -> None:
+    import httpx
 
+    from jiuwenswarm.gateway.channel_manager.base import RobotMessageRouter
+    from jiuwenswarm.gateway.channel_manager.web.web_channel_app import build_web_channel_app
+    from jiuwenswarm.gateway.channel_manager.web.web_connect import WebChannelConfig
+
+    router = _make_router_with_runtime()
+    router.mkdir_container_dir = AsyncMock(  # type: ignore[method-assign]
+        return_value={
+            "success": True,
+            "path": "/home/agentos/sub",
+            "created": True,
+        }
+    )
+    channel = WebChannel(WebChannelConfig(enabled=True, dual_protocol=True), RobotMessageRouter())
+    channel.container_file_client = router
+    app = build_web_channel_app(channel)
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        missing_path = await client.post(
+            "/file-api/mkdir",
+            params={"user_id": "user-1"},
+            headers={"Authorization": "Bearer tok-1"},
+        )
+        created = await client.post(
+            "/file-api/mkdir",
+            params={
+                "path": "/home/agentos/sub",
+                "mode": "0755",
+                "recursive": "true",
+                "user_id": "user-1",
+                "session_id": "sess-1",
+            },
+            headers={"Authorization": "Bearer tok-1"},
+        )
+
+    assert missing_path.status_code == 400
+    assert missing_path.json()["error"] == "missing_path"
+    assert created.status_code == 200
+    assert created.json() == {
+        "success": True,
+        "path": "/home/agentos/sub",
+        "created": True,
+    }
+    kwargs = router.mkdir_container_dir.await_args.kwargs
+    assert kwargs["path"] == "/home/agentos/sub"
+    assert kwargs["mode"] == "0755"
+    assert kwargs["recursive"] is True
+    assert kwargs["user_id"] == "user-1"
+    assert kwargs["session_id"] == "sess-1"
+    assert kwargs["auth_headers"].get("Authorization") == "Bearer tok-1"
