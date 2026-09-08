@@ -93,7 +93,7 @@ def _empty_skeleton() -> dict[str, Any]:
     }
 
 
-def _ensure_copy_exists() -> Path:
+def ensure_copy_exists() -> Path:
     """副本不存在时建稀疏空骨架 (不 dump 基底). 返回副本路径.
 
     拷贝只一次: 已存在不重建 (exe 重启 / box-server 重启不重拷). 基底内容由
@@ -116,7 +116,7 @@ def _ensure_copy_exists() -> Path:
 def _load_copy() -> dict[str, Any]:
     """读副本 (不存在则建空骨架并返回)."""
     with _copy_lock:  # P1-13: 串行化, 防与 _save_copy 并发 lost-update
-        p = _ensure_copy_exists()
+        p = ensure_copy_exists()
         try:
             data = yaml.safe_load(p.read_text(encoding="utf-8"))
         except (OSError, yaml.YAMLError) as exc:

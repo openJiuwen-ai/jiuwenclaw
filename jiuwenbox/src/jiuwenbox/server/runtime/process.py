@@ -160,6 +160,27 @@ else:
 PYTHON_EXECUTABLE = "python3"
 
 
+def _resolve_local_jiuwenbox_src_dir() -> Path | None:
+    """从 sys.path 反推仓库内 jiuwenbox 源码目录 (``<repo>/jiuwenbox/src``).
+
+    dev 场景 agent-server 不 pip install jiuwenbox, 而是 spawn box-server 时
+    注入 ``PYTHONPATH=<repo>/jiuwenbox/src`` (经 Popen env block, 不回写
+    os.environ). box-server 内该路径已进 sys.path, 由此反推: 找到包含
+    ``jiuwenbox/__init__.py`` 的 sys.path 条目, 返回其父目录 (即 ``src``).
+    返回 None 表示未找到 (site-packages 安装版/冻包, runner python 自带模块).
+    """
+    for entry in sys.path:
+        if not entry:
+            continue
+        try:
+            candidate = Path(entry) / "jiuwenbox" / "__init__.py"
+            if candidate.is_file():
+                return candidate.parent.parent
+        except OSError:
+            continue
+    return None
+
+
 def _alloc_loopback_port() -> int:
     """分配一个空闲 TCP loopback 端口 (OS 自动选, bind 后立即 close).
 
@@ -3133,6 +3154,16 @@ class ProcessRuntime(RuntimeAdapter):
                 _inherit_val = os.environ.get(_inherit_key)
                 if _inherit_val:
                     env[_inherit_key] = _inherit_val
+        # PYTHONPATH 兜底: agent-server 用 ``Popen(env=...)`` 拉起 box-server 时,
+        # ``PYTHONPATH=<repo>/jiuwenbox/src`` 只进了 spawn env block, 不在 box-server
+        # 的 os.environ 里 (env dict 不回写父进程变量), 上面的继承拿不到. 此时从
+        # sys.path 反推: box-server 能 import jiuwenbox 说明源码路径在 sys.path 中,
+        # 把它拼成 PYTHONPATH 传给 runner, 避免系统 runner python (site-packages
+        # 未装 jiuwenbox) 因 ModuleNotFoundError 启动即退出.
+        if not env.get("PYTHONPATH") and not getattr(sys, "frozen", False):
+            _src_dir = str(_resolve_local_jiuwenbox_src_dir())
+            if _src_dir:
+                env["PYTHONPATH"] = _src_dir
         for _k, _v in os.environ.items():
             if _k.startswith("JIUWENBOX_") and _k not in env and _v:
                 env[_k] = _v
