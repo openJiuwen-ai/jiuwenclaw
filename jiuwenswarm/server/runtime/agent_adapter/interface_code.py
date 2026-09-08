@@ -33,7 +33,6 @@ from openjiuwen.harness.rails import (
     SysOperationRail,
     LspRail
 )
-from openjiuwen.harness.rails.context_engineer.context_assemble_rail import ContextAssembleRail
 from openjiuwen.harness.lsp import InitializeOptions
 from openjiuwen.harness.schema.config import SubAgentConfig
 from openjiuwen.harness.subagents.browser_agent import build_browser_agent_config
@@ -73,6 +72,7 @@ from jiuwenswarm.agents.harness.code.rails import (
     PlanApprovalInterruptRail,
 )
 from jiuwenswarm.agents.harness.common.rails import (
+    OrderedContextAssembleRail,
     ProjectMemoryRail,
     StructuredAskUserRail,
     ToolUsagePromptRail,
@@ -940,7 +940,7 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
 
     def _build_context_assemble_rail(self) -> Any:
         """构建 ContextEngineeringRail."""
-        return ContextAssembleRail()
+        return OrderedContextAssembleRail()
 
     @staticmethod
     def _build_tool_usage_prompt_rail() -> ToolUsagePromptRail:

@@ -358,18 +358,43 @@ def test_office_static_task_execution_follows_agent_core_tools_priority():
     assert prompt.index("# Safety") < prompt.index("# Tool Usage Rules") < prompt.index("# Task")
 
 
-def test_context_assemble_rail_uses_the_patched_tool_usage_priority():
-    from openjiuwen.core.foundation.tool.base import ToolCard
+@pytest.mark.asyncio
+async def test_ordered_context_assemble_rail_sets_tools_priority_locally():
     from openjiuwen.harness.rails.context_engineer.context_assemble_rail import (
-        build_tools_section,
+        ContextAssembleRail,
+    )
+    from jiuwenswarm.agents.harness.common.rails import tool_usage_prompt_rail
+    from jiuwenswarm.agents.harness.common.rails.tool_usage_prompt_rail import (
+        OrderedContextAssembleRail,
     )
 
-    section = build_tools_section(
-        SimpleNamespace(list=lambda: [ToolCard(name="read_file")]),
-        language="en",
+    builder = SystemPromptBuilder(language="en")
+    rail = OrderedContextAssembleRail()
+    rail.system_prompt_builder = builder
+    rail.workspace = object()
+    rail._ability_manager = SimpleNamespace()
+    upstream_section = PromptSection(
+        name="tools", content={"en": "# Upstream Tools\n"}, priority=30
+    )
+    product_section = PromptSection(
+        name="tools", content={"en": "# Tool Usage Rules\n"}, priority=30
     )
 
-    assert section is not None
+    async def write_upstream_tools(_self, _ctx):
+        builder.add_section(upstream_section)
+
+    with (
+        patch.object(ContextAssembleRail, "before_model_call", write_upstream_tools),
+        patch.object(
+            tool_usage_prompt_rail.context_sections,
+            "build_tools_section",
+            return_value=product_section,
+        ),
+    ):
+        await rail.before_model_call(SimpleNamespace())
+
+    section = builder.get_section("tools")
+    assert section is product_section
     assert section.priority == 14
 
 

@@ -150,6 +150,7 @@ from jiuwenswarm.agents.harness.common.rails import (
     JiuSwarmStreamEventRail,
     InvocationContextRail,
     MultimodalImageRail,
+    OrderedContextAssembleRail,
     ResponsePromptRail,
     RuntimePromptRail,
     StructuredAskUserRail,
@@ -887,7 +888,7 @@ def _deep_agent_kv_cache_affinity_config(
 def _build_context_assemble_rail() -> ContextAssembleRail | None:
     """Build ContextAssembleRail."""
     try:
-        context_assemble_rail = ContextAssembleRail()
+        context_assemble_rail = OrderedContextAssembleRail()
         logger.info("[JiuWenSwarmDeepAdapter] ContextAssembleRail create success")
     except Exception as exc:
         logger.warning("[JiuWenSwarmDeepAdapter] ContextAssembleRail create failed: %s", exc)
