@@ -4560,6 +4560,16 @@
   border: 1px solid var(--color-border-default);
 }
 
+.chat-panel-file-download-video-preview {
+  display: block;
+  width: 100%;
+  max-height: 320px;
+  border-radius: var(--radius-md, 8px);
+  border: 1px solid var(--color-border-default);
+  background-color: #000;
+  cursor: default;
+}
+
 .chat-panel-file-download-item:hover {
   border-color: var(--color-border-hover);
   box-shadow: var(--effect-shadow-md);

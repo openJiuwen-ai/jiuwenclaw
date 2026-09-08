@@ -1033,7 +1033,10 @@ function FileDownloadList({
         const isSaving = savingIndex === index;
         const isSaved = savedIndex.has(index);
         const isImage = !isSkill && Boolean(file.mime_type && file.mime_type.startsWith('image/')) && Boolean(file.download_url);
+        const isVideo = !isSkill && Boolean(file.mime_type && file.mime_type.startsWith('video/')) && Boolean(file.download_url);
         const showImagePreview = isImage && !expired;
+        const showVideoPreview = isVideo && !expired;
+        const showPreview = showImagePreview || showVideoPreview;
         return (
           <div
             key={`${file.name}-${index}`}
@@ -1041,7 +1044,7 @@ function FileDownloadList({
             data-variant={file.name}
             className={clsx(
               'chat-panel-file-download-item group',
-              showImagePreview && 'chat-panel-file-download-item--with-preview',
+              showPreview && 'chat-panel-file-download-item--with-preview',
               expired
                 ? 'chat-panel-file-download-item--expired'
                 : !onPreview && 'chat-panel-file-download-item--no-preview',
@@ -1152,6 +1155,17 @@ function FileDownloadList({
                 data-testid="chat-panel-file-download-image-preview"
                 loading="lazy"
               />
+            )}
+            {showVideoPreview && (
+              <video
+                controls
+                preload="metadata"
+                className="chat-panel-file-download-video-preview"
+                data-testid="chat-panel-file-download-video-preview"
+                onClick={(event) => event.stopPropagation()}
+              >
+                <source src={file.download_url} type={file.mime_type} />
+              </video>
             )}
           </div>
         );
