@@ -102,6 +102,11 @@ _SKILL_TURBO_TASK_EVENT_TYPES: frozenset[str] = frozenset({
     "task.update",
 })
 
+# 仅 task.update 可带外推送：它是全量 taskProgress 快照，后到 FIFO 覆盖先到，幂等。
+# task.start/task.complete 驱动前端 taskStack，必须与 chat.* 保持 FIFO 顺序；
+# 带外抢先 complete 会导致迟到的思考/工具调用丢 segment（见外层 todo 注释）。
+_SKILL_TURBO_OOB_TASK_EVENT_TYPES: frozenset[str] = frozenset({"task.update"})
+
 
 def _without_inner_task_routing(payload: dict[str, Any]) -> dict[str, Any]:
     """Copy a parent-bound event without its SkillTurbo-only task id."""
@@ -133,15 +138,16 @@ async def _push_task_event_out_of_band(
     channel_id: str,
     session_id: str,
 ) -> None:
-    """Bypass the parent stream FIFO so task lists do not stall behind P8 chunks.
+    """Bypass the parent stream FIFO for task.update snapshots only.
 
     ``chat.file`` already uses PushRegistry, so PPT can appear while
-    ``write_stream`` is still draining thousands of page-gen deltas. Task
-    start/complete/update used only that FIFO, leaving both side panels on
-    Stage 11 after delivery. Push the same payload out-of-band; the later
-    FIFO snapshot is idempotent.
+    ``write_stream`` is still draining thousands of page-gen deltas. The
+    right-hand task list is driven by ``task.update`` snapshots that used
+    only that FIFO, leaving Stage 11 in_progress after delivery. Later FIFO
+    ``task.update`` snapshots remain idempotent. ``task.start`` /
+    ``task.complete`` stay on the FIFO so they keep pace with ``chat.*``.
     """
-    if event_type not in _SKILL_TURBO_TASK_EVENT_TYPES:
+    if event_type not in _SKILL_TURBO_OOB_TASK_EVENT_TYPES:
         return
     if not request_id or not channel_id or not session_id:
         logger.debug(
@@ -886,22 +892,22 @@ async def skill_turbo(query: str) -> dict[str, Any] | str:
                             n_tasks,
                             type(parent_session).__name__,
                         )
-                        push_session_id = (
-                            str(external_session_id).strip()
-                            or str(parent_session.get_session_id() or "").strip()
-                        )
-                        await _push_task_event_out_of_band(
-                            event_type,
-                            payload,
-                            request_id=str(request_id or ""),
-                            channel_id=str(channel_id or ""),
-                            session_id=push_session_id,
-                        )
                 except Exception:
                     logger.warning(
                         "[SkillTurboTool] write_stream failed for event_type=%s",
                         event_type,
                         exc_info=True,
+                    )
+                    continue
+                if event_type in _SKILL_TURBO_OOB_TASK_EVENT_TYPES:
+                    await _push_task_event_out_of_band(
+                        event_type,
+                        payload,
+                        request_id=str(request_id or ""),
+                        channel_id=str(channel_id or ""),
+                        session_id=_resolve_skill_turbo_resume_session_id(
+                            external_session_id, parent_session
+                        ),
                     )
             elif event_type in _SKILL_TURBO_TASK_EVENT_TYPES:
                 logger.warning(
