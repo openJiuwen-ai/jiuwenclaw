@@ -781,12 +781,27 @@ async def test_task_update_is_also_pushed_out_of_band(_skill_turbo_runtime) -> N
     async def stream(*_args, **_kwargs):
         yield SimpleNamespace(
             payload={
+                "event_type": "task.start",
+                "task_id": "task_a2f23a2e",
+                "task_content": "Stage 11: 幻灯片生成",
+            }
+        )
+        yield SimpleNamespace(
+            payload={
                 "event_type": "task.update",
                 "tasks": [{
                     "task_id": "task_a2f23a2e",
                     "task_content": "Stage 11: 幻灯片生成",
                     "status": "completed",
                 }],
+            }
+        )
+        yield SimpleNamespace(
+            payload={
+                "event_type": "task.complete",
+                "task_id": "task_a2f23a2e",
+                "task_content": "Stage 11: 幻灯片生成",
+                "status": "completed",
             }
         )
         yield SimpleNamespace(
@@ -849,7 +864,7 @@ async def test_task_update_is_also_pushed_out_of_band(_skill_turbo_runtime) -> N
     assert pushed["session_id"] == "officeclaw_e0495cc952026dae2fb252ef"
     assert pushed["payload"]["event_type"] == "task.update"
     assert pushed["payload"]["tasks"][0]["task_content"] == "Stage 11: 幻灯片生成"
-    assert parent_session.write_stream.await_count == 2
+    assert parent_session.write_stream.await_count == 4
 
 
 @pytest.mark.asyncio
@@ -863,6 +878,31 @@ async def test_push_task_event_skips_non_task_events() -> None:
         await _push_task_event_out_of_band(
             "chat.delta",
             {"event_type": "chat.delta", "content": "x"},
+            request_id="r1",
+            channel_id="officeclaw",
+            session_id="sess-1",
+        )
+    send_push.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_push_task_event_skips_start_and_complete() -> None:
+    send_push = AsyncMock(return_value=1)
+    server = SimpleNamespace(send_push=send_push)
+    with patch(
+        "jiuwenswarm.server.agent_ws_server.AgentWebSocketServer.get_instance",
+        return_value=server,
+    ):
+        await _push_task_event_out_of_band(
+            "task.start",
+            {"event_type": "task.start", "task_id": "task_a"},
+            request_id="r1",
+            channel_id="officeclaw",
+            session_id="sess-1",
+        )
+        await _push_task_event_out_of_band(
+            "task.complete",
+            {"event_type": "task.complete", "task_id": "task_a"},
             request_id="r1",
             channel_id="officeclaw",
             session_id="sess-1",
