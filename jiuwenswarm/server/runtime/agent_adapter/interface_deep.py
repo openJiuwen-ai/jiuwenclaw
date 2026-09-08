@@ -11980,9 +11980,9 @@ class JiuWenSwarmDeepAdapter:
             _resume_params = (
                 request.params if isinstance(getattr(request, "params", None), dict) else {}
             )
-            _resume_rid_in = str(_resume_params.get("request_id") or "").strip()
-            _m = re.search(r"^(?P<base>.+)#\d+$", _resume_rid_in)
-            outer_call_id = (_m.group("base").strip() if _m and _m.group("base").strip() else "")
+            outer_call_id = self._derive_outer_call_id(
+                str(_resume_params.get("request_id") or "")
+            )
             # 同 run_stream 的 ask_user 卡片去重集合：同一外层 call id 内的第 N
             # 次中断需加 {id}#{n} 后缀区分，避免与首个 ask_user 卡片 id 冲突。
             _resume_emitted_ask_ids: set[str] = set()
@@ -12070,6 +12070,18 @@ class JiuWenSwarmDeepAdapter:
             )
 
         return _resume_impl()
+
+    @staticmethod
+    def _derive_outer_call_id(params_request_id: str) -> str:
+        """从入站 ask_user 作答的 params.request_id 派生外层 call id。
+
+        与 ``interface._build_inputs`` 剥 ``{id}#{n}`` 后缀同一套规则：有后缀
+        取 base，无后缀保留原值（不返回空串）。resume 内二次中断的 ask_user
+        卡片需用此 id 作 request_id，对齐首个 ask_user（TIE 重写后用外层 call id）。
+        """
+        rid = (params_request_id or "").strip()
+        m = re.search(r"^(?P<base>.+)#\d+$", rid)
+        return (m.group("base").strip() if m and m.group("base").strip() else rid)
 
     @staticmethod
     def _skill_turbo_answers_to_confirm_payload(
