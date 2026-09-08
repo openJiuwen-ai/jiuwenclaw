@@ -63,12 +63,17 @@ import { processOAuthCallback } from './utils/gitcodeOAuth';
 import { useTeamPanelState } from './features/teamPanelState';
 import { useSingleAgentPanelState } from './features/singleAgentPanelState';
 import { AgentMode, MediaItem, UserAnswer, ModelEntry, type Session } from './types';
-import type {
-  ExternalCliAgentKind,
-  ExternalCliDependencyInstallStatus,
-  ExternalCliDetectResult,
-  ExternalCliPendingChoice,
+import {
+  EXTERNAL_CLI_AGENT_KINDS,
+  type ExternalCliAgentKind,
+  type ExternalCliDependencyInstallStatus,
+  type ExternalCliDetectResult,
+  type ExternalCliPendingChoice,
 } from './components/ExternalCliAgentsSection';
+import {
+  loadExternalCliPendingChoices,
+  persistExternalCliPendingChoices,
+} from './features/settings/modules/experimental/externalCliInstallState';
 import {
   ensureSessionRuntimes,
   useSessionStore,
@@ -321,9 +326,9 @@ function AppContent({
   const [externalCliInstallStatuses, setExternalCliInstallStatuses] = useState<ExternalCliInstallStatuses>({});
   const [hasVisitedAgents, setHasVisitedAgents] = useState(false);
   // Deferred CLI agent choices held here (not inside Settings) so they survive
-  // leaving/returning to the Settings page while a dependency install runs.
+  // leaving/returning to Settings and a full page refresh while an install runs.
   const [externalCliPendingChoices, setExternalCliPendingChoices] =
-    useState<Partial<Record<ExternalCliAgentKind, ExternalCliPendingChoice>>>({});
+    useState<Partial<Record<ExternalCliAgentKind, ExternalCliPendingChoice>>>(loadExternalCliPendingChoices);
   // Latest CLI detect results, also held at the App layer so returning to the
   // Settings page shows the previous status instead of flashing "not checked".
   const [externalCliDetectResults, setExternalCliDetectResults] =
@@ -1638,6 +1643,34 @@ function AppContent({
     },
     [request],
   );
+
+  useEffect(() => {
+    persistExternalCliPendingChoices(externalCliPendingChoices);
+  }, [externalCliPendingChoices]);
+
+  useEffect(() => {
+    if (!isConnected) return undefined;
+    let cancelled = false;
+    const restoreInstallStatuses = async () => {
+      const results = await Promise.allSettled(
+        EXTERNAL_CLI_AGENT_KINDS.map(async (agent) => {
+          const status = await getExternalCliDependencyInstallStatus(agent);
+          return [agent, status] as const;
+        }),
+      );
+      if (cancelled) return;
+      const restored: ExternalCliInstallStatuses = {};
+      for (const result of results) {
+        if (result.status === 'fulfilled') restored[result.value[0]] = result.value[1];
+      }
+      if (Object.keys(restored).length === 0) return;
+      setExternalCliInstallStatuses((current) => ({ ...current, ...restored }));
+    };
+    void restoreInstallStatuses();
+    return () => {
+      cancelled = true;
+    };
+  }, [getExternalCliDependencyInstallStatus, isConnected]);
 
   const trackExternalCliDependencyInstalls = useCallback(
     (statuses: ExternalCliInstallStatuses) => {

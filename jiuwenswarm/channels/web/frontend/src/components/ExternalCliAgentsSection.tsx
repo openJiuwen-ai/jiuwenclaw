@@ -19,7 +19,9 @@ export type ExternalCliDependencyInstallStatus = {
   cli_agent?: ExternalCliAgentKind;
   status?: string;
   phase?: string;
+  progress_kind?: 'installer_activity' | 'download_metrics';
   error?: string;
+  last_log?: string;
   log_tail?: string[];
   downloaded_bytes?: number;
   total_bytes?: number;
