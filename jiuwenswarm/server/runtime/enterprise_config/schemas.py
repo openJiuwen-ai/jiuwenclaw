@@ -14,6 +14,7 @@ class TemplateRefSlot(StrEnum):
     VIDEO_MODEL = "video_model"
     AUDIO_MODEL = "audio_model"
     VISION_MODEL = "vision_model"
+    IMAGE_GEN_MODEL = "image_gen_model"
     EMBEDDING_MODEL = "embedding_model"
     SKILL_PREBUILT = "skill_prebuilt"
     EXTENSION_CONFIG = "extension_config"
@@ -26,6 +27,7 @@ SLOT_ENTITY_TABLE: dict[TemplateRefSlot, str] = {
     TemplateRefSlot.VIDEO_MODEL: "model_template",
     TemplateRefSlot.AUDIO_MODEL: "model_template",
     TemplateRefSlot.VISION_MODEL: "model_template",
+    TemplateRefSlot.IMAGE_GEN_MODEL: "model_template",
     TemplateRefSlot.EMBEDDING_MODEL: "embedding_template",
     TemplateRefSlot.SKILL_PREBUILT: "skill_prebuilt_template",
     TemplateRefSlot.EXTENSION_CONFIG: "extension_config_template",
@@ -38,6 +40,7 @@ MODEL_SLOT_KEYS = frozenset({
     TemplateRefSlot.VIDEO_MODEL,
     TemplateRefSlot.AUDIO_MODEL,
     TemplateRefSlot.VISION_MODEL,
+    TemplateRefSlot.IMAGE_GEN_MODEL,
 })
 
 DEFAULT_AGENT_LOAD_SLOTS = frozenset({
@@ -51,10 +54,7 @@ DEFAULT_AGENT_LOAD_SLOTS = frozenset({
 
 
 def normalize_template_ref(value: Any) -> dict[str, list[str]]:
-    """将 ``template_ref`` 规范为 ``{slot: [ref_string, ...]}``；空值键省略，同槽位去重保序。
-
-    丢弃已废弃的 ``skill_whitelist`` 槽位。
-    """
+    """将 ``template_ref`` 规范为 ``{slot: [ref_string, ...]}``；空值键省略，同槽位去重保序。"""
     if value is None:
         return {}
     if not isinstance(value, dict):
@@ -62,7 +62,7 @@ def normalize_template_ref(value: Any) -> dict[str, list[str]]:
     out: dict[str, list[str]] = {}
     for key, raw in value.items():
         slot = str(key).strip()
-        if not slot or raw is None or slot == "skill_whitelist":
+        if not slot or raw is None:
             continue
         if not isinstance(raw, list):
             raise ValueError(f"template_ref[{slot!r}] must be a list")

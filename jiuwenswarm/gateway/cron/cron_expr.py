@@ -7,8 +7,10 @@ from typing import Any
 
 from zoneinfo import ZoneInfo
 
-# Harness / CronJob 常见默认提前量；相对 one-shot 时不可超过 delay。
-_DEFAULT_WAKE_OFFSET_SECONDS = 300
+# 提前唤醒默认量：0 = 到点执行。
+# 与个人版 CronJob.wake_offset_seconds 字段默认值保持一致，企业版 DB 路径
+# 仅 NULL/缺失时回落到此值，二者语义统一（差异只在存储介质，不在默认值）。
+_DEFAULT_WAKE_OFFSET_SECONDS = 0
 
 
 def cron_field_count(expr: str) -> int:

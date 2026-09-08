@@ -7,6 +7,7 @@ import {
 import { projectRegistryClient } from '../features/workspace/projectRegistryClient';
 import { webRequest } from '../services/webClient';
 import type { Session } from '../types';
+import { useChatStore } from './chatStore';
 
 export interface SidebarCronJob {
   id: string;
@@ -44,6 +45,12 @@ interface CronState {
   // job_id → 最近"立即执行"返回的 session_id，用于广播消息路由
   lastRunSessionId: Record<string, string>;
   setLastRunSessionId: (jobId: string, sessionId: string) => void;
+  // 轮询检测到「当前正打开会话 == 某 job 新 last_session_id」时，投递一次历史刷新请求。
+  // 企业版 HTTP 无 cron 结果 push，立即执行跳转后 skipHistoryLoad，消息两头落空；
+  // 这里用 30s 轮询作为兜底：命中就把 session_id 交给 App.tsx 触发 startHistoryRestore。
+  pendingActiveHistoryRefresh: string | null;
+  requestActiveHistoryRefresh: (sessionId: string) => void;
+  consumeActiveHistoryRefresh: () => string | null;
   // 定时任务未读状态（is_placeholder=false 的广播到达时标记，点击后清除）
   unreadCronJobs: Record<string, boolean>;
   markCronJobUnread: (jobId: string) => void;
@@ -82,6 +89,13 @@ export const useCronStore = create<CronState>((set, get) => ({
   lastRunSessionId: {},
   setLastRunSessionId: (jobId, sessionId) =>
     set((s) => ({ lastRunSessionId: { ...s.lastRunSessionId, [jobId]: sessionId } })),
+  pendingActiveHistoryRefresh: null,
+  requestActiveHistoryRefresh: (sessionId) => set({ pendingActiveHistoryRefresh: sessionId }),
+  consumeActiveHistoryRefresh: () => {
+    const pending = get().pendingActiveHistoryRefresh;
+    if (pending) set({ pendingActiveHistoryRefresh: null });
+    return pending;
+  },
   unreadCronJobs: (() => {
     try {
       const value = JSON.parse(localStorage.getItem('jiuwenswarm_cron_unread') || '{}');
@@ -133,9 +147,23 @@ export const useCronStore = create<CronState>((set, get) => ({
         runSyncFingerprints: nextFingerprints,
       });
 
+      const activeSessionId = useChatStore.getState().activeSessionId;
+
       for (const jobId of updatedJobIds) {
-        get().markCronJobUnread(jobId);
         const job = webJobs.find((item) => item.id === jobId);
+        const lastSid = (job?.last_session_id ?? '').trim();
+        // 当前正打开的会话恰好是这次新产生的 cron 会话：企业版 HTTP 无 push，
+        // 立即执行跳转后 skipHistoryLoad，消息两头落空。这里用轮询兜底——
+        // 投递一次历史刷新请求，并直接清掉蓝点（消息即将实打实显示出来）。
+        if (lastSid && activeSessionId && lastSid === activeSessionId) {
+          get().clearCronJobUnread(jobId);
+          get().requestActiveHistoryRefresh(lastSid);
+          if (job) {
+            void get().loadCronSessions(job.project_id || 'default', jobId);
+          }
+          continue;
+        }
+        get().markCronJobUnread(jobId);
         if (job) {
           void get().loadCronSessions(job.project_id || 'default', jobId);
         }

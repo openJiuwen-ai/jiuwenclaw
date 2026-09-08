@@ -32,7 +32,7 @@ const SKILLS_FETCH_TIMEOUT_NORMAL_MS = 30_000;
 const SKILL_RETRIEVAL_RUNNING_POLL_MS = 10_000;
 const SKILL_RETRIEVAL_IDLE_POLL_MS = 5 * 60_000;
 const GRAPH_READING_MIN_VISIBLE_MS = 500;
-const MY_SKILLS_PAGE_SIZE = 20;
+const MY_SKILLS_PAGE_SIZE_DEFAULT = 20;
 
 type SkillItem = {
   name: string;
@@ -613,6 +613,7 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
   const [activeTab, setActiveTab] = useState<"my" | "marketplace" | "index" | "graph">("my");
   const [mySkillsSubTab, setMySkillsSubTab] = useState<"all" | "enabled" | "disabled" | "builtin" | "prebuilt" | "user">("all");
   const [mySkillsPage, setMySkillsPage] = useState(1);
+  const [mySkillsPageSize, setMySkillsPageSize] = useState(MY_SKILLS_PAGE_SIZE_DEFAULT);
   const [marketplaceSubTab, setMarketplaceSubTab] = useState<"builtin" | "swarmskills" | "online">("builtin");
   // 企业版：技能源为空时不展示 SwarmSkills 入口（null=未知，加载中先展示）
   const [enterpriseSourceCount, setEnterpriseSourceCount] = useState<number | null>(null);
@@ -1539,14 +1540,19 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
   }, [visibleSkills, mySkillsSubTab, installedSkillMap, readOnly]);
 
   const mySkillsFiltered = useMemo(() => getMySkillsFiltered(), [getMySkillsFiltered]);
-  const mySkillsTotalPages = Math.max(1, Math.ceil(mySkillsFiltered.length / MY_SKILLS_PAGE_SIZE));
+  const mySkillsTotalPages = Math.max(1, Math.ceil(mySkillsFiltered.length / mySkillsPageSize));
   const pagedMySkills = useMemo(
     () => mySkillsFiltered.slice(
-      (mySkillsPage - 1) * MY_SKILLS_PAGE_SIZE,
-      mySkillsPage * MY_SKILLS_PAGE_SIZE
+      (mySkillsPage - 1) * mySkillsPageSize,
+      mySkillsPage * mySkillsPageSize
     ),
-    [mySkillsFiltered, mySkillsPage]
+    [mySkillsFiltered, mySkillsPage, mySkillsPageSize]
   );
+
+  const handleMySkillsPageSizeChange = (nextSize: number) => {
+    setMySkillsPageSize(nextSize);
+    setMySkillsPage(1);
+  };
 
   useEffect(() => {
     setMySkillsPage(1);
@@ -2511,9 +2517,6 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
                       className="w-full px-3 py-2 rounded-md bg-panel border border-border text-sm text-text placeholder:text-text-muted"
                     />
                   </div>
-                  <div className="text-xs text-text-muted flex-shrink-0">
-                    {t('skills.totalCount', { count: mySkillsFiltered.length })}
-                  </div>
                 </div>
 
                 <div className={`mt-4 flex-1 min-h-0 overflow-y-auto ${viewMode === "grid" ? "flex flex-wrap gap-4 content-start" : "space-y-3"}`}>
@@ -2638,6 +2641,9 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
                   <Pagination
                     page={mySkillsPage}
                     totalPages={mySkillsTotalPages}
+                    total={mySkillsFiltered.length}
+                    pageSize={mySkillsPageSize}
+                    onPageSizeChange={handleMySkillsPageSizeChange}
                     onPageChange={(page) => setMySkillsPage(page)}
                     className="mt-3"
                   />

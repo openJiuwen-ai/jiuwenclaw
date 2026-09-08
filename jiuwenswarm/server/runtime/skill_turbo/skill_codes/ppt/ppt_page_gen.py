@@ -610,8 +610,11 @@ def _extract_head_url_fingerprint(html: str) -> frozenset[str]:
     return frozenset(urls)
 
 
-# agenda 条目编号模式：>01< ~ >09<（模板内编号 span）
-_AGENDA_ITEM_NUM_RE = re.compile(r">0([1-9])<")
+# agenda 模板注释锚点：预设模板默认保留 `<!-- 条目 N -->` / `<!-- 01 -->` / `<!-- Ⅰ -->`
+_AGENDA_ITEM_COMMENT_RE = re.compile(
+    r"<!--\s*(?:条目\s*\d+|0*\d+|[ⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩ]+)\s*-->",
+    re.IGNORECASE,
+)
 # 大纲中研究需求 ✅ 行模式
 _OUTLINE_RESEARCH_REQ_RE = re.compile(r"\*\*研究需求\*\*.*?✅")
 
@@ -639,8 +642,26 @@ def _find_agenda_page_num(outline_text: str) -> int:
 
 
 def _count_agenda_items(html: str) -> int:
-    """从 agenda 页 HTML 中统计条目数（按编号 01-09 去重计数）。"""
-    return len(set(_AGENDA_ITEM_NUM_RE.findall(html or "")))
+    """从 agenda 页 HTML 中统计条目数。
+
+    对齐 pptx-craft：目录条目允许随风格使用 01/罗马数字/P03 等不同展示形式，
+    因此这里只按条目结构做宽松统计，不把编号字面量当作硬门禁。
+    """
+    if not html:
+        return 0
+
+    comment_hits = _AGENDA_ITEM_COMMENT_RE.findall(html)
+    if comment_hits:
+        return len(set(comment_hits))
+
+    main_match = _MAIN_BLOCK_RE.search(html)
+    scan_html = main_match.group(0) if main_match else html
+    item_count = 0
+    for match in _VISIBLE_TEXT_LEAF_RE.finditer(scan_html):
+        marker = _normalize_page_marker_text(match.group("text"))
+        if _VISIBLE_PAGE_MARKER_RE.fullmatch(marker):
+            item_count += 1
+    return item_count
 
 
 def _validate_agenda_item_count(
@@ -1121,6 +1142,7 @@ def _build_content_template_fill_prompt(
     user_query: str = "",
     total_pages: int = 0,
     rewrite_hint: str = "",
+    original_html: str = "",
 ) -> str:
     """内容页 content-template 预铺填槽 prompt（四预设三槽；custom 含 THEME_*）。"""
     user_query_section = ""
@@ -1167,6 +1189,13 @@ def _build_content_template_fill_prompt(
             f"{rewrite_hint}\n"
             "⚠️ 仅修复上述不通过项，不要改动其他正常部分。\n"
         )
+        if original_html:
+            rewrite_section += (
+                "⚠️ 本轮必须以“上次产物（原始 HTML）”为编辑基底做定点修复，"
+                "不要回退为从预铺 seed 模板重新整页填充。\n"
+                "⚠️ `seed_html` 仅用于约束骨架/Chrome/占位符边界；"
+                "`original_html` 才是当前页面已形成状态的来源。\n"
+            )
         if is_chart_candidate:
             if style_id == "custom":
                 rewrite_section += (
@@ -1329,6 +1358,14 @@ def _build_content_template_fill_prompt(
             seed_caption = (
                 "## 预铺模板 HTML（只填槽，勿重写；Chrome 必须与下方稿逐字节一致，除三处占位符外）\n"
             )
+    original_html_section = ""
+    if original_html:
+        original_html_section = (
+            "\n## 上次产物（原始 HTML，作为本轮定点修复基底）\n"
+            "```html\n"
+            f"{original_html}\n"
+            "```\n"
+        )
     return (
         f"{user_query_section}"
         f"{task_line}"
@@ -1347,6 +1384,7 @@ def _build_content_template_fill_prompt(
         f"{designer_section}"
         f"{layout_template}\n"
         f"{rewrite_section}"
+        f"{original_html_section}"
         f"{seed_caption}"
         f"{seed_html}\n"
     )
@@ -2115,6 +2153,20 @@ def _validate_slide_dom(html: str) -> bool:
 def _is_slide_exportable(html: str) -> bool:
     """P8.2 fix 后校验：仅确认导出边界内的结构未被破坏。"""
     return _main_inside_ppt_slide(html)
+
+
+def _is_tool_failure_envelope(result: Any) -> bool:
+    """识别 read_file 工具级失败信封（success=False）。"""
+    if hasattr(result, "success") and result.success is False:
+        return True
+    if isinstance(result, dict) and result.get("success") is False:
+        return True
+    if isinstance(result, str):
+        stripped = result.strip()
+        return stripped.startswith("success=False") or stripped.startswith(
+            "success= False"
+        )
+    return False
 
 
 _CHART_DIV_RE = re.compile(
@@ -4997,14 +5049,11 @@ class PageWorkerNode(DisableThinkingMixin, PlanNode):
                 sorted(vote_deviant),
             )
 
-        # agenda 条目数校验：目录页条目数必须等于大纲内容章节数
+        # agenda 条目数校验：仅记 warning，不把已生成的目录页打成 missing。
         agenda_deviant = _validate_agenda_item_count(outline_full, vote_pages)
         if agenda_deviant:
-            missing_pages.extend(
-                p for p in agenda_deviant if p not in missing_pages
-            )
             logger.warning(
-                "[P8.1] agenda 条目数与大纲内容章节数不匹配 pages=%s，转 missing 走补写",
+                "[P8.1] agenda 条目数与大纲内容章节数不匹配 pages=%s（仅警告，不进 missing）",
                 sorted(agenda_deviant),
             )
 
@@ -5454,7 +5503,7 @@ class PageWorkerNode(DisableThinkingMixin, PlanNode):
         )
 
     async def _generate_content_template_fill(
-        self, ctx: PageGenContext, *, rewrite_hint: str = ""
+        self, ctx: PageGenContext, *, rewrite_hint: str = "", original_html: str = ""
     ) -> tuple[str, str, str]:
         """四预设 ∪ custom 内容页：官方 content-template 预铺填槽。
 
@@ -5494,6 +5543,7 @@ class PageWorkerNode(DisableThinkingMixin, PlanNode):
                     user_query=ctx.user_query,
                     total_pages=ctx.total_pages,
                     rewrite_hint=rewrite_hint,
+                    original_html=original_html,
                 ),
                 system_prompt=_build_content_template_fill_system_prompt(
                     style_id=ctx.style_id,
@@ -5530,7 +5580,7 @@ class PageWorkerNode(DisableThinkingMixin, PlanNode):
             return (filled or "", "", "")
         if _uses_content_template_fill(ctx.style_id, page_type, ctx.outline_page):
             return await self._generate_content_template_fill(
-                ctx, rewrite_hint=rewrite_hint
+                ctx, rewrite_hint=rewrite_hint, original_html=original_html
             )
 
         try:
@@ -5714,14 +5764,23 @@ class QAFixNode(PlanNode):
             "fix_report": "; ".join(fix_report_parts),
         }
 
-    async def _read_page_file(self, path: str) -> str:
+    async def _read_page_file(self, path: str) -> str | None:
+        """读取页面文件；超时/异常/工具级失败信封返回 None，区别于「读到空内容」。"""
         if not path or not self.has_tool("read_file"):
-            return ""
+            return None
         try:
             result = await asyncio.wait_for(
                 self.call_tool("read_file", file_path=path),
                 timeout=_P82_READ_TIMEOUT_SECONDS,
             )
+            # 工具级失败信封：read_file 对路径错误/文件过大/token 超限等不抛异常，
+            # 而是返回 success=False（对象/dict）或 "success=False" 前缀 str。
+            # 必须归入 None：parse_tool_file_content 会把信封折叠成 ""，
+            # 而 "" 会伪装成「读到空内容」通过 after_html is not None 检查，
+            # 触发 backup 误回退，把 fix 成功的页面毁掉。
+            if _is_tool_failure_envelope(result):
+                logger.warning("[P8.2] 读取页面返回失败信封 path=%s", path)
+                return None
             return PptCommon.parse_tool_file_content(result)
         except TimeoutError:
             logger.warning(
@@ -5729,12 +5788,12 @@ class QAFixNode(PlanNode):
                 path,
                 _P82_READ_TIMEOUT_SECONDS,
             )
-            return ""
+            return None
         except Exception as e:
             if isinstance(e, AbortError):
                 raise
             logger.warning("[P8.2] 读取页面失败 %s: %s", path, e)
-            return ""
+            return None
 
     async def _write_page_file(self, path: str, content: str) -> bool:
         if not path or not self.has_tool("write_file"):
@@ -5785,7 +5844,11 @@ class QAFixNode(PlanNode):
         style_file_path: str,
     ) -> list[tuple[int, bool, str] | BaseException]:
         """仅对指定页面并发执行新版 pptx-craft fix。"""
-        sem = asyncio.Semaphore(10)
+        # fix（pptx-craft cli.js）是纯 Node CPU 密集任务：正则/HTML DOM/JS AST
+        # 全量重扫，stabilize 模式最多 12 轮收敛。并发过高会吃满宿主机 CPU，
+        # Python 服务进程被 OS 饿死（loop lag 6-8s，曾导致 read_file 60s 锁
+        # 等待超时）。3 路并发已接近桌面机吞吐上限。
+        sem = asyncio.Semaphore(3)
 
         async def _fix_one_body(page_num: int) -> tuple[int, bool, str]:
             page_path = f"{pages_dir}/page-{page_num}.pptx.html"
@@ -5818,8 +5881,10 @@ class QAFixNode(PlanNode):
                 )
 
             after_html = await self._read_page_file(page_path)
-            after_ok = bool(after_html) and _is_slide_exportable(after_html)
-            if before_ok and not after_ok:
+            after_ok = after_html is not None and _is_slide_exportable(after_html)
+            # 读失败（None）时无法判定 DOM 是否被破坏，禁止用 backup 覆盖 ——
+            # 否则会把 fix 成功的页面误回退。
+            if before_ok and after_html is not None and not after_ok:
                 backup_path = await self._find_latest_backup_path(pages_dir, page_num)
                 if backup_path:
                     backup_html = await self._read_page_file(backup_path)
@@ -6402,7 +6467,7 @@ class PPTPageGenNode(PlanNode):
                 check_ok = False
                 break
 
-        # agenda 条目数校验：读取生成的 agenda 页 HTML，比对大纲内容章节数
+        # agenda 条目数校验：仅记 warning，不把已生成的目录页打成 missing。
         agenda_page_num = _find_agenda_page_num(outline_text)
         if agenda_page_num and agenda_page_num not in missing_pages:
             agenda_path = f"{pages_dir}/page-{agenda_page_num}.pptx.html"
@@ -6412,10 +6477,9 @@ class PPTPageGenNode(PlanNode):
                 item_count = _count_agenda_items(agenda_html)
                 if content_chapters > 0 and item_count != content_chapters:
                     logger.warning(
-                        "[P8-TP] agenda 条目数(%d) ≠ 大纲内容章节数(%d) page=%d，转 missing 走补写",
+                        "[P8-TP] agenda 条目数(%d) ≠ 大纲内容章节数(%d) page=%d（仅警告，不进 missing）",
                         item_count, content_chapters, agenda_page_num,
                     )
-                    missing_pages.append(agenda_page_num)
 
         ppt_gen_status = "ok"
         if missing_pages:

@@ -515,3 +515,5 @@ class CronRunState:
     # ``cron.job.run_now`` 预分配 run 时使用当前时刻，与库表 ``next_run_at`` 不一致，
     # 不能走条件 UPDATE 认领（否则会静默跳过 wake）。
     manual_trigger: bool = False
+    # run_now 提前创建了真实执行会话（非 team 模式），_on_wake 复用而不再重复创建。
+    session_preallocated: bool = False

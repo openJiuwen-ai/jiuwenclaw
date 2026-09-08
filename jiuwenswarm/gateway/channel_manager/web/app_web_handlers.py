@@ -4417,7 +4417,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         """创建项目,指定工作目录。
 
         ``project_dir`` 为可选:传则指定工作目录绝对路径;不传或空串则在默认工作区
-        (``~/.jiuwenswarm/agent/workspace/{work|code}``)下按项目名自动新建文件夹作为工作目录。
+        (``~/.jiuwenswarm/agent/jiuwenclaw_workspace/{work|code}``)下按项目名自动新建文件夹作为工作目录。
         ``work_mode`` 为可选:``"code"`` / ``"work"``,默认按通道推断(Web→work,TUI→code)。
         项目名含文件系统非法字符(``<>:"/\\|?*`` 等)时返回 ``BAD_REQUEST``。
         自动恢复: 若 ``project_dir`` 命中已隐藏(``hidden:true``)**且同 work_mode**的项目,置
@@ -7160,8 +7160,9 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             if job is None:
                 await channel.send_response(ws, req_id, ok=False, error="job not found", code="NOT_FOUND")
                 return
-            run_info = await cc.run_now_info(job_id)
-            await cc.run_now(job_id, group_id=g, bot_id=b, user_id=u)
+            run_info = await cc.run_now_with_session(
+                job_id, group_id=g, bot_id=b, user_id=u
+            )
             await channel.send_response(
                 ws, req_id, ok=True,
                 payload={

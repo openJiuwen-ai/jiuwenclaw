@@ -744,7 +744,9 @@ class CronSchedulerService:
         info = await self.trigger_run_now_info(job_id)
         return str(info["run_id"])
 
-    async def trigger_run_now_info(self, job_id: str) -> dict[str, str]:
+    async def trigger_run_now_info(
+        self, job_id: str, *, preallocate: bool = False
+    ) -> dict[str, str]:
         job_id = str(job_id or "").strip()
         job = self._jobs.get(job_id) or await self._store.get_job(job_id)
         if job is None:
@@ -755,6 +757,30 @@ class CronSchedulerService:
         wake_dt = now
         run_id = f"{job.id}:{int(push_dt.timestamp())}"
         channel_id, exec_session_id = self._make_execution_context(job)
+        # 非 team 模式：web「立即执行」需要返回真实执行会话给前端跳转。
+        # 否则前端跳到占位 ``cron_<ts>_<job.id>``，该会话从未真正 session.create，
+        # 打开显示"没有可恢复的消息"，且不在 cron 轮询列表里，不会自动刷新。
+        # 仅 web 路径（preallocate=True）提前创建真实会话，_on_wake 检测到
+        # session_preallocated 后复用，避免重复创建。创建失败降级为占位 id，
+        # run_now 仍会调度，执行时再兜底创建。
+        session_preallocated = False
+        if preallocate:
+            mode = str(job.mode or CRON_JOB_DEFAULT_MODE).strip() or CRON_JOB_DEFAULT_MODE
+            if not is_team_cron_mode(mode):
+                try:
+                    exec_project_dir = self._resolve_cron_project_dir(job)
+                    exec_session_id = await self._allocate_single_agent_session(
+                        job,
+                        mode=mode,
+                        project_dir=exec_project_dir,
+                        run_id=run_id,
+                    )
+                    session_preallocated = True
+                except Exception as prealloc_exc:  # noqa: BLE001
+                    logger.warning(
+                        "[Cron] run_now preallocate session failed job=%s run_id=%s: %s",
+                        job.id, run_id, prealloc_exc,
+                    )
         state = CronRunState(
             run_id=run_id,
             job_id=job.id,
@@ -768,6 +794,7 @@ class CronSchedulerService:
             exec_channel_id=channel_id,
             exec_session_id=exec_session_id,
             manual_trigger=True,
+            session_preallocated=session_preallocated,
         )
         await self._assign_run(run_id, state)
         self._schedule_event(wake_dt, "wake", job.id, run_id)
@@ -785,6 +812,23 @@ class CronSchedulerService:
                 message_handler=self._message_handler,
             )
         return "__cron__", f"cron_{ts}_{job.id}"
+
+    @staticmethod
+    def _resolve_cron_project_dir(job: CronJob) -> str:
+        """解析 job.project_id 对应的项目目录，供 session.create 归属。
+
+        与 ``_on_wake`` 共享同一解析逻辑，避免 run_now 预分配会话与正常触发
+        两处各写一份。解析失败返回空串（AgentServer 侧按默认目录兜底）。
+        """
+        try:
+            from jiuwenswarm.server.runtime.session import project_store as _ps
+
+            return _ps.get_project_dir_by_id(job.project_id) or ""
+        except Exception as pdir_exc:  # noqa: BLE001
+            logger.warning(
+                "[Cron] resolve project_dir failed job=%s: %s", job.id, pdir_exc,
+            )
+            return ""
 
     async def _allocate_single_agent_session(
         self,
@@ -1325,35 +1369,38 @@ class CronSchedulerService:
                     state.exec_channel_id = channel_id
                     state.exec_session_id = exec_session_id
                 # 解析 project_dir 供 AgentServer 写入会话归属（与 project_id 联动）
-                try:
-                    from jiuwenswarm.server.runtime.session import project_store as _ps
-                    exec_project_dir = _ps.get_project_dir_by_id(job.project_id)
-                except Exception as pdir_exc:  # noqa: BLE001
-                    logger.warning(
-                        "[Cron] resolve project_dir failed job=%s: %s", job.id, pdir_exc,
-                    )
-                    exec_project_dir = ""
+                exec_project_dir = self._resolve_cron_project_dir(job)
                 if not is_team_cron_mode(mode):
-                    _log_cron_run_phase(
-                        "run_agent_before_session_create",
-                        run_id=run_id,
-                        job_id=job.id,
-                        mode=mode,
-                    )
-                    exec_session_id = await self._allocate_single_agent_session(
-                        job,
-                        mode=mode,
-                        project_dir=exec_project_dir,
-                        run_id=run_id,
-                    )
-                    state.exec_channel_id = "__cron__"
-                    state.exec_session_id = exec_session_id
-                    _log_cron_run_phase(
-                        "run_agent_after_session_create",
-                        run_id=run_id,
-                        job_id=job.id,
-                        exec_session_id=exec_session_id,
-                    )
+                    if state.session_preallocated and state.exec_session_id:
+                        # run_now 已提前创建真实会话，直接复用，避免重复 session.create。
+                        exec_session_id = state.exec_session_id
+                        _log_cron_run_phase(
+                            "run_agent_reuse_preallocated_session",
+                            run_id=run_id,
+                            job_id=job.id,
+                            exec_session_id=exec_session_id,
+                        )
+                    else:
+                        _log_cron_run_phase(
+                            "run_agent_before_session_create",
+                            run_id=run_id,
+                            job_id=job.id,
+                            mode=mode,
+                        )
+                        exec_session_id = await self._allocate_single_agent_session(
+                            job,
+                            mode=mode,
+                            project_dir=exec_project_dir,
+                            run_id=run_id,
+                        )
+                        state.exec_channel_id = "__cron__"
+                        state.exec_session_id = exec_session_id
+                        _log_cron_run_phase(
+                            "run_agent_after_session_create",
+                            run_id=run_id,
+                            job_id=job.id,
+                            exec_session_id=exec_session_id,
+                        )
                 cron_meta = {
                     "job_id": job.id,
                     "job_name": job.name,

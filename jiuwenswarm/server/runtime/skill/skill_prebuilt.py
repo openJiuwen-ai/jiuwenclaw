@@ -440,17 +440,18 @@ class SkillPrebuiltSynchronizer:
             if name in kept_prebuilt_names:
                 continue
             try:
-                self._remove_installed_dir(name)
-                removed = self._manager.remove_skill_installation(
+                removed = await asyncio.to_thread(
+                    self._manager.remove_skill_installation_entity,
                     name=name,
                     origin=str(row.get("origin") or "") or None,
                     expected_source_type=SOURCE_PREBUILT,
                 )
                 if not removed:
                     logger.warning(
-                        "[SkillPrebuilt] prebuilt record not found in workspace, disk already cleaned: %s",
+                        "[SkillPrebuilt] prebuilt record no longer matches workspace: %s",
                         name,
                     )
+                    continue
                 result.succeeded.append(f"removed:{name}")
                 installed_skills_map.pop(name, None)
             except Exception as exc:  # noqa: BLE001
@@ -523,6 +524,7 @@ class SkillPrebuiltSynchronizer:
                         True,
                         None,
                         item.sha256,
+                        protected_source_types=frozenset({SOURCE_USER}),
                     )
                 except Exception as exc:
                     return {
@@ -561,7 +563,7 @@ class SkillPrebuiltSynchronizer:
                 ),
             }
 
-        # 同名 user 记录视为"提升"为 prebuilt
+        # 预置同步不得改变用户自安装技能的身份或实体。
         existing_user = None
         for record in self._manager.list_skill_installations():
             if (
@@ -571,13 +573,12 @@ class SkillPrebuiltSynchronizer:
                 existing_user = record
                 break
         if existing_user is not None:
-            self._manager.remove_skill_installation(
-                name=installed_dir,
-                expected_source_type=SOURCE_USER,
-            )
-            logger.info(
-                "[SkillPrebuilt] promote user→prebuilt skill_name=%s", installed_dir
-            )
+            return {
+                "ok": False,
+                "skill_name": installed_dir,
+                "error_code": "skill_name_conflict",
+                "error_message": f"prebuilt skill conflicts with user skill: {installed_dir}",
+            }
 
         origin = (
             f"{item.source_id}:{item.id}"
@@ -585,7 +586,8 @@ class SkillPrebuiltSynchronizer:
             else item.package_url
         )
         try:
-            row = self._manager.record_skill_installation(
+            row = await asyncio.to_thread(
+                self._manager.record_skill_installation,
                 name=installed_dir,
                 source_type=SOURCE_PREBUILT,
                 source=item.source_id or "enterprise-prebuilt",
@@ -598,7 +600,6 @@ class SkillPrebuiltSynchronizer:
                 replace_by_name=True,
             )
         except SkillNameConflictError as exc:
-            self._restore_promoted_user(existing_user, installed_dir)
             if need_download and mode == "url":
                 self._remove_installed_dir(installed_dir)
             return {
@@ -608,7 +609,6 @@ class SkillPrebuiltSynchronizer:
                 "error_message": f"skill name conflict id={item.id} name={installed_dir}: {exc}",
             }
         except Exception as exc:
-            self._restore_promoted_user(existing_user, installed_dir)
             if need_download and mode == "url":
                 self._remove_installed_dir(installed_dir)
             return {
@@ -622,26 +622,3 @@ class SkillPrebuiltSynchronizer:
             installed_skills_map.pop(previous_skill_name, None)
 
         return {"ok": True, "skill_name": installed_dir, "row": row}
-
-    def _restore_promoted_user(
-        self, existing_user: dict[str, Any] | None, installed_dir: str
-    ) -> None:
-        """恢复"提升 user→prebuilt"失败时被删除的 user 记录，避免技能进入孤儿状态。"""
-        if not existing_user:
-            return
-        try:
-            self._manager.record_skill_installation(
-                name=installed_dir,
-                source_type=SOURCE_USER,
-                origin=str(existing_user.get("origin") or ""),
-                source=str(existing_user.get("source") or ""),
-                version=str(existing_user.get("version") or ""),
-            )
-        except Exception as exc:  # noqa: BLE001
-            logger.warning(
-                "[SkillPrebuilt] rollback user record failed skill_name=%s error=%s",
-                installed_dir,
-                exc,
-            )
-
-
