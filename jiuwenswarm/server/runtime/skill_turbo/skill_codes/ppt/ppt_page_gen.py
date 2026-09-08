@@ -297,6 +297,7 @@ def _build_structural_template_fill_prompt(
     outline_page: str,
     outline_full: str,
     seed_html: str,
+    image_map_page: str = "",
     user_query: str = "",
 ) -> str:
     """构造结构页官方模板填槽 prompt（仅替换 {{}}，不重写骨架）。"""
@@ -415,6 +416,41 @@ def _build_structural_template_fill_prompt(
             f"{_placeholder_common_tail}"
         )
 
+    # 对齐 skill 原文 slide-designer 任务清单的图片映射指令（imageMapLine）：
+    # 结构页映射存在图片时必须使用——custom 填 STRUCTURAL_IMAGE_* 槽，
+    # 预设按模板 <head> 注释的背景图方式插入全幅背景。否则 LLM 只看到
+    # 模板注释「背景图（可选）：默认纯黑底」会静默保留纯色底（bad case：
+    # cover 生成的图从未进 PPT）。
+    structural_image_section = ""
+    if image_map_page:
+        if style_id == "custom":
+            structural_image_section = (
+                "\n### 背景图素材（必须使用）\n"
+                f"{image_map_page}\n"
+                "- 本页存在映射图片：`STRUCTURAL_IMAGE_PRESENT` 必须填 `true`，"
+                "`STRUCTURAL_IMAGE_PATH` 必须原样使用上方 `path` 字段值，"
+                "`STRUCTURAL_IMAGE_ALT` 填图片描述\n"
+                "- 禁止把映射图片降级为卡片、角落点缀或低透明度小图；"
+                "背景图必须走模板 `data-pptx-role=\"structural-background\"` 全幅槽\n"
+            )
+        else:
+            structural_image_section = (
+                "\n### 背景图素材（必须使用）\n"
+                f"{image_map_page}\n"
+                "- 本页存在映射图片，**必须启用背景图**（模板 head 注释中的"
+                "「可选」对本任务不适用）：按下方模板 `<head>` 注释中的背景图"
+                "插入方式，在 `.ppt-slide` 内首位插入全幅背景 "
+                '`<img class="absolute inset-0 w-full h-full object-cover" '
+                "src=\"path值\">` 与模板指定的遮罩层，并给内容 stage 补 "
+                "`relative z-10`\n"
+                "- `src` 必须原样使用上方 `path` 字段值（相对路径，禁止改写、"
+                "禁止 background-image:url()）\n"
+                "- `usage=cover` 的图片必须用作全幅背景，不得保留模板默认"
+                "纯黑底/纯色底\n"
+                "- 除背景图与遮罩的插入、内容 stage 补 `relative z-10` 外，"
+                "骨架/CSS/装饰结构仍禁止改动\n"
+            )
+
     page_type_label = page_type or template_page_type
     return (
         f"{user_query_section}"
@@ -427,6 +463,7 @@ def _build_structural_template_fill_prompt(
         f"### 大纲 — 本页规划（{page_type_label}）\n"
         f"{outline_page}\n\n"
         f"{outline_full_section}"
+        f"{structural_image_section}"
         "### 预铺模板 HTML（只填槽，勿重写）\n"
         f"{seed_html}\n"
     )
@@ -573,8 +610,11 @@ def _extract_head_url_fingerprint(html: str) -> frozenset[str]:
     return frozenset(urls)
 
 
-# agenda 条目编号模式：>01< ~ >09<（模板内编号 span）
-_AGENDA_ITEM_NUM_RE = re.compile(r">0([1-9])<")
+# agenda 模板注释锚点：预设模板默认保留 `<!-- 条目 N -->` / `<!-- 01 -->` / `<!-- Ⅰ -->`
+_AGENDA_ITEM_COMMENT_RE = re.compile(
+    r"<!--\s*(?:条目\s*\d+|0*\d+|[ⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩ]+)\s*-->",
+    re.IGNORECASE,
+)
 # 大纲中研究需求 ✅ 行模式
 _OUTLINE_RESEARCH_REQ_RE = re.compile(r"\*\*研究需求\*\*.*?✅")
 
@@ -602,8 +642,26 @@ def _find_agenda_page_num(outline_text: str) -> int:
 
 
 def _count_agenda_items(html: str) -> int:
-    """从 agenda 页 HTML 中统计条目数（按编号 01-09 去重计数）。"""
-    return len(set(_AGENDA_ITEM_NUM_RE.findall(html or "")))
+    """从 agenda 页 HTML 中统计条目数。
+
+    对齐 pptx-craft：目录条目允许随风格使用 01/罗马数字/P03 等不同展示形式，
+    因此这里只按条目结构做宽松统计，不把编号字面量当作硬门禁。
+    """
+    if not html:
+        return 0
+
+    comment_hits = _AGENDA_ITEM_COMMENT_RE.findall(html)
+    if comment_hits:
+        return len(set(comment_hits))
+
+    main_match = _MAIN_BLOCK_RE.search(html)
+    scan_html = main_match.group(0) if main_match else html
+    item_count = 0
+    for match in _VISIBLE_TEXT_LEAF_RE.finditer(scan_html):
+        marker = _normalize_page_marker_text(match.group("text"))
+        if _VISIBLE_PAGE_MARKER_RE.fullmatch(marker):
+            item_count += 1
+    return item_count
 
 
 def _validate_agenda_item_count(
@@ -1084,6 +1142,7 @@ def _build_content_template_fill_prompt(
     user_query: str = "",
     total_pages: int = 0,
     rewrite_hint: str = "",
+    original_html: str = "",
 ) -> str:
     """内容页 content-template 预铺填槽 prompt（四预设三槽；custom 含 THEME_*）。"""
     user_query_section = ""
@@ -1130,6 +1189,13 @@ def _build_content_template_fill_prompt(
             f"{rewrite_hint}\n"
             "⚠️ 仅修复上述不通过项，不要改动其他正常部分。\n"
         )
+        if original_html:
+            rewrite_section += (
+                "⚠️ 本轮必须以“上次产物（原始 HTML）”为编辑基底做定点修复，"
+                "不要回退为从预铺 seed 模板重新整页填充。\n"
+                "⚠️ `seed_html` 仅用于约束骨架/Chrome/占位符边界；"
+                "`original_html` 才是当前页面已形成状态的来源。\n"
+            )
         if is_chart_candidate:
             if style_id == "custom":
                 rewrite_section += (
@@ -1292,6 +1358,14 @@ def _build_content_template_fill_prompt(
             seed_caption = (
                 "## 预铺模板 HTML（只填槽，勿重写；Chrome 必须与下方稿逐字节一致，除三处占位符外）\n"
             )
+    original_html_section = ""
+    if original_html:
+        original_html_section = (
+            "\n## 上次产物（原始 HTML，作为本轮定点修复基底）\n"
+            "```html\n"
+            f"{original_html}\n"
+            "```\n"
+        )
     return (
         f"{user_query_section}"
         f"{task_line}"
@@ -1310,6 +1384,7 @@ def _build_content_template_fill_prompt(
         f"{designer_section}"
         f"{layout_template}\n"
         f"{rewrite_section}"
+        f"{original_html_section}"
         f"{seed_caption}"
         f"{seed_html}\n"
     )
@@ -2078,6 +2153,20 @@ def _validate_slide_dom(html: str) -> bool:
 def _is_slide_exportable(html: str) -> bool:
     """P8.2 fix 后校验：仅确认导出边界内的结构未被破坏。"""
     return _main_inside_ppt_slide(html)
+
+
+def _is_tool_failure_envelope(result: Any) -> bool:
+    """识别 read_file 工具级失败信封（success=False）。"""
+    if hasattr(result, "success") and result.success is False:
+        return True
+    if isinstance(result, dict) and result.get("success") is False:
+        return True
+    if isinstance(result, str):
+        stripped = result.strip()
+        return stripped.startswith("success=False") or stripped.startswith(
+            "success= False"
+        )
+    return False
 
 
 _CHART_DIV_RE = re.compile(
@@ -4218,6 +4307,35 @@ def _build_image_section(image_map_page: str) -> str:
     )
 
 
+_MAPPED_IMAGE_PATH_LINE_RE = re.compile(r"- path: ([^,\n]+), usage:")
+
+
+def _missing_mapped_image_reason(html: str, ctx: PageGenContext) -> str:
+    """image_map 映射图片零引用检测（返回失败 reason；通过返回空串）。
+
+    P6.5 已为本页规划图片并写入 image_map.json，prompt 明确「必须使用」，
+    但 LLM 偶发忽略会导致生成的图从未进 PPT（bad case：page-5 一图未引）。
+    仅当本页映射图片全部未被引用时判失败，避免局部使用误伤。
+    """
+    if not ctx.image_map_page:
+        return ""
+    paths = [
+        p.strip()
+        for p in _MAPPED_IMAGE_PATH_LINE_RE.findall(ctx.image_map_page)
+        if p.strip()
+    ]
+    if not paths:
+        return ""
+    filenames = [p.rstrip("/").rsplit("/", 1)[-1] for p in paths]
+    text = html or ""
+    if any(name and name in text for name in filenames):
+        return ""
+    return (
+        "missing_mapped_image: 本页 image_map 映射的图片全部未被引用"
+        f"（{', '.join(filenames)}）；必须在 `<img src=\"...\">` 中原样使用映射 path"
+    )
+
+
 def _build_page_prompt(
     page_number: int,
     style_id: str,
@@ -4475,6 +4593,10 @@ def _postprocess_generated_html(raw_html: str, ctx: PageGenContext) -> tuple[str
         logger.warning("[P8.1] 页面 %d 图表容器高度链校验失败", ctx.page_num)
         return "", html, "invalid_chart_height_chain"
     _warn_chart_mount_mismatch_soft(html, page_num=ctx.page_num)
+    missing_image_reason = _missing_mapped_image_reason(html, ctx)
+    if missing_image_reason:
+        logger.warning("[P8.1] 页面 %d 映射图片未被引用，触发重试", ctx.page_num)
+        return "", html, missing_image_reason
     return html, "", ""
 
 
@@ -4546,6 +4668,10 @@ def _postprocess_content_template_fill(
         )
         return "", html, reason
     _warn_chart_mount_mismatch_soft(html, page_num=ctx.page_num)
+    missing_image_reason = _missing_mapped_image_reason(html, ctx)
+    if missing_image_reason:
+        logger.warning("[P8.1] 内容页映射图片未被引用，触发重试 page=%d", ctx.page_num)
+        return "", html, missing_image_reason
     logger.info(
         "[P8.1] 内容页官方模板填槽完成 page=%d style=%s",
         ctx.page_num,
@@ -4618,6 +4744,13 @@ def _postprocess_structural_template_fill(
             page_type,
         )
         return ""
+    if _missing_mapped_image_reason(html, ctx):
+        # 仅告警不硬失败：结构页路径无 reason 重试通道，强指令已在 prompt 注入
+        logger.warning(
+            "[P8.1] 结构页映射图片未被引用 page=%d type=%s（背景图未启用？）",
+            ctx.page_num,
+            page_type,
+        )
     logger.info(
         "[P8.1] 结构页官方模板填槽完成 page=%d style=%s type=%s",
         ctx.page_num,
@@ -4916,14 +5049,11 @@ class PageWorkerNode(DisableThinkingMixin, PlanNode):
                 sorted(vote_deviant),
             )
 
-        # agenda 条目数校验：目录页条目数必须等于大纲内容章节数
+        # agenda 条目数校验：仅记 warning，不把已生成的目录页打成 missing。
         agenda_deviant = _validate_agenda_item_count(outline_full, vote_pages)
         if agenda_deviant:
-            missing_pages.extend(
-                p for p in agenda_deviant if p not in missing_pages
-            )
             logger.warning(
-                "[P8.1] agenda 条目数与大纲内容章节数不匹配 pages=%s，转 missing 走补写",
+                "[P8.1] agenda 条目数与大纲内容章节数不匹配 pages=%s（仅警告，不进 missing）",
                 sorted(agenda_deviant),
             )
 
@@ -5244,6 +5374,33 @@ class PageWorkerNode(DisableThinkingMixin, PlanNode):
             final_html = html
             break
 
+        # 映射图片未被引用非致命：重试耗尽后兜底接受无图版本，避免整页丢失
+        if (
+            not final_html
+            and last_raw_html
+            and last_fail_reason.startswith("missing_mapped_image")
+        ):
+            fallback_html = last_raw_html
+            if (
+                needs_chart_gate
+                and pptx_root
+                and _html_requires_activate_template_chart(fallback_html)
+            ):
+                passed, _, chart_skipped = await _run_activate_template_chart_page(
+                    self,
+                    pages_dir=pages_dir,
+                    pptx_root=pptx_root,
+                    page_num=page_num,
+                )
+                if not chart_skipped and not passed:
+                    fallback_html = ""
+            if fallback_html and await self._write_file(path, fallback_html):
+                logger.warning(
+                    "[P8.1] 页面 %d 映射图片重试后仍未引用，兜底接受无图版本",
+                    page_num,
+                )
+                final_html = fallback_html
+
         if not final_html:
             await self._delete_page_file(path)
             return {"missing": True, "low_density": False, "report": {}}
@@ -5312,6 +5469,7 @@ class PageWorkerNode(DisableThinkingMixin, PlanNode):
             outline_page=ctx.outline_page,
             outline_full=ctx.outline_full,
             seed_html=seed_html,
+            image_map_page=ctx.image_map_page,
             user_query=ctx.user_query,
         )
         node_suffix = f"{template_page_type}_fill_{ctx.page_num}"
@@ -5345,7 +5503,7 @@ class PageWorkerNode(DisableThinkingMixin, PlanNode):
         )
 
     async def _generate_content_template_fill(
-        self, ctx: PageGenContext, *, rewrite_hint: str = ""
+        self, ctx: PageGenContext, *, rewrite_hint: str = "", original_html: str = ""
     ) -> tuple[str, str, str]:
         """四预设 ∪ custom 内容页：官方 content-template 预铺填槽。
 
@@ -5385,6 +5543,7 @@ class PageWorkerNode(DisableThinkingMixin, PlanNode):
                     user_query=ctx.user_query,
                     total_pages=ctx.total_pages,
                     rewrite_hint=rewrite_hint,
+                    original_html=original_html,
                 ),
                 system_prompt=_build_content_template_fill_system_prompt(
                     style_id=ctx.style_id,
@@ -5421,7 +5580,7 @@ class PageWorkerNode(DisableThinkingMixin, PlanNode):
             return (filled or "", "", "")
         if _uses_content_template_fill(ctx.style_id, page_type, ctx.outline_page):
             return await self._generate_content_template_fill(
-                ctx, rewrite_hint=rewrite_hint
+                ctx, rewrite_hint=rewrite_hint, original_html=original_html
             )
 
         try:
@@ -5605,14 +5764,23 @@ class QAFixNode(PlanNode):
             "fix_report": "; ".join(fix_report_parts),
         }
 
-    async def _read_page_file(self, path: str) -> str:
+    async def _read_page_file(self, path: str) -> str | None:
+        """读取页面文件；超时/异常/工具级失败信封返回 None，区别于「读到空内容」。"""
         if not path or not self.has_tool("read_file"):
-            return ""
+            return None
         try:
             result = await asyncio.wait_for(
                 self.call_tool("read_file", file_path=path),
                 timeout=_P82_READ_TIMEOUT_SECONDS,
             )
+            # 工具级失败信封：read_file 对路径错误/文件过大/token 超限等不抛异常，
+            # 而是返回 success=False（对象/dict）或 "success=False" 前缀 str。
+            # 必须归入 None：parse_tool_file_content 会把信封折叠成 ""，
+            # 而 "" 会伪装成「读到空内容」通过 after_html is not None 检查，
+            # 触发 backup 误回退，把 fix 成功的页面毁掉。
+            if _is_tool_failure_envelope(result):
+                logger.warning("[P8.2] 读取页面返回失败信封 path=%s", path)
+                return None
             return PptCommon.parse_tool_file_content(result)
         except TimeoutError:
             logger.warning(
@@ -5620,12 +5788,12 @@ class QAFixNode(PlanNode):
                 path,
                 _P82_READ_TIMEOUT_SECONDS,
             )
-            return ""
+            return None
         except Exception as e:
             if isinstance(e, AbortError):
                 raise
             logger.warning("[P8.2] 读取页面失败 %s: %s", path, e)
-            return ""
+            return None
 
     async def _write_page_file(self, path: str, content: str) -> bool:
         if not path or not self.has_tool("write_file"):
@@ -5676,7 +5844,11 @@ class QAFixNode(PlanNode):
         style_file_path: str,
     ) -> list[tuple[int, bool, str] | BaseException]:
         """仅对指定页面并发执行新版 pptx-craft fix。"""
-        sem = asyncio.Semaphore(10)
+        # fix（pptx-craft cli.js）是纯 Node CPU 密集任务：正则/HTML DOM/JS AST
+        # 全量重扫，stabilize 模式最多 12 轮收敛。并发过高会吃满宿主机 CPU，
+        # Python 服务进程被 OS 饿死（loop lag 6-8s，曾导致 read_file 60s 锁
+        # 等待超时）。3 路并发已接近桌面机吞吐上限。
+        sem = asyncio.Semaphore(3)
 
         async def _fix_one_body(page_num: int) -> tuple[int, bool, str]:
             page_path = f"{pages_dir}/page-{page_num}.pptx.html"
@@ -5709,8 +5881,10 @@ class QAFixNode(PlanNode):
                 )
 
             after_html = await self._read_page_file(page_path)
-            after_ok = bool(after_html) and _is_slide_exportable(after_html)
-            if before_ok and not after_ok:
+            after_ok = after_html is not None and _is_slide_exportable(after_html)
+            # 读失败（None）时无法判定 DOM 是否被破坏，禁止用 backup 覆盖 ——
+            # 否则会把 fix 成功的页面误回退。
+            if before_ok and after_html is not None and not after_ok:
                 backup_path = await self._find_latest_backup_path(pages_dir, page_num)
                 if backup_path:
                     backup_html = await self._read_page_file(backup_path)
@@ -6099,7 +6273,7 @@ class PPTPageGenNode(PlanNode):
             "__artifact__": {
                 "info": {
                     "ppt_gen_status": ppt_gen_status,
-                    "page_count": len(final_page_files),
+                    "total_pages": len(final_page_files),
                     "missing_count": len(missing_pages),
                 },
                 "files": [{"path": f, "desc": "PPT页面"} for f in final_page_files] if final_page_files else [],
@@ -6293,7 +6467,7 @@ class PPTPageGenNode(PlanNode):
                 check_ok = False
                 break
 
-        # agenda 条目数校验：读取生成的 agenda 页 HTML，比对大纲内容章节数
+        # agenda 条目数校验：仅记 warning，不把已生成的目录页打成 missing。
         agenda_page_num = _find_agenda_page_num(outline_text)
         if agenda_page_num and agenda_page_num not in missing_pages:
             agenda_path = f"{pages_dir}/page-{agenda_page_num}.pptx.html"
@@ -6303,10 +6477,9 @@ class PPTPageGenNode(PlanNode):
                 item_count = _count_agenda_items(agenda_html)
                 if content_chapters > 0 and item_count != content_chapters:
                     logger.warning(
-                        "[P8-TP] agenda 条目数(%d) ≠ 大纲内容章节数(%d) page=%d，转 missing 走补写",
+                        "[P8-TP] agenda 条目数(%d) ≠ 大纲内容章节数(%d) page=%d（仅警告，不进 missing）",
                         item_count, content_chapters, agenda_page_num,
                     )
-                    missing_pages.append(agenda_page_num)
 
         ppt_gen_status = "ok"
         if missing_pages:
@@ -6329,7 +6502,7 @@ class PPTPageGenNode(PlanNode):
             "__artifact__": {
                 "info": {
                     "ppt_gen_status": ppt_gen_status,
-                    "page_count": len(page_files),
+                    "total_pages": len(page_files),
                     "missing_count": len(missing_pages),
                 },
                 "files": [{"path": f, "desc": "PPT页面"} for f in page_files] if page_files else [],

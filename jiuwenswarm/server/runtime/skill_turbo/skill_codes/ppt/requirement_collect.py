@@ -136,7 +136,10 @@ research_depth 规则（与 search_mode、page_count 联动；L1/L2/L3 含义见
 - page_count 在 8~15 → L2
 - 其余（含 auto 且页数 ≤7）→ L1
 
-need_imagegen 规则：用户 query 明确要求 AI 生图/生成配图 → true，否则 → false
+need_imagegen 规则（本地图片之外是否需要 AI 生成配图）：
+- 用户明确要求 AI 生图/生成配图/插图/插画 → true
+- 用户描述了希望出现的具体画面/场景/元素（如"画面包含X、Y、Z""X组合画面""要配风电场景图"），或对画面内容有具体约束（如"不出现人像""背景必须是森林"）→ true
+- 仅泛泛的主题词或风格词（如"科技风""简约大气"），未描述任何具体画面 → false
 
 必须只输出 JSON，四个字段均必填且取值必须在枚举内：
 {"search_mode":"auto","source_type":"topic","research_depth":"L2","need_imagegen":false}"""
@@ -268,10 +271,16 @@ def _has_nonempty_topic(inputs: dict[str, Any]) -> bool:
 
 def _set_requirement_artifact(ctx: dict[str, Any]) -> None:
     """把 P2 需求收集的关键槽位写入 __artifact__，供跨请求复用。"""
+    content_pages = ctx.get("page_count")
+    total_pages = None
+    if isinstance(content_pages, int) and content_pages > 0:
+        # 默认封面+结束页；与 PptCommon.resolve_total_pages 的 +2 兜底一致。
+        total_pages = content_pages + 2
     ctx["__artifact__"] = {
         "info": {
             "topic": ctx.get("topic", ""),
-            "page_count": ctx.get("page_count"),
+            "content_pages": content_pages,
+            "total_pages": total_pages,
             "style_id": ctx.get("style_id", ""),
             "audience": ctx.get("audience", ""),
             "presentation_purpose": ctx.get("presentation_purpose", ""),

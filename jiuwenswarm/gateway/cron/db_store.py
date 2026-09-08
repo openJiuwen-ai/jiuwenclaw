@@ -162,7 +162,11 @@ def _row_to_job(row: Any) -> CronJob | None:
             "expired": bool(data.get("expired", False)),
             "cron_expr": str(data.get("cron_expr") or "").strip(),
             "timezone": str(data.get("timezone") or "").strip(),
-            "wake_offset_seconds": int(data.get("wake_offset_seconds") or 60),
+            "wake_offset_seconds": int(
+                data.get("wake_offset_seconds")
+                if data.get("wake_offset_seconds") is not None
+                else _DEFAULT_WAKE_OFFSET_SECONDS
+            ),
             "description": str(data.get("description") or ""),
             "targets": str(data.get("targets") or "").strip(),
             "session_id": data.get("session_id"),

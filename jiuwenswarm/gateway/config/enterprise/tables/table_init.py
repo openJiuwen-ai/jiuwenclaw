@@ -1,7 +1,7 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026-2026. All rights reserved
 
-"""Manager WS Client 同步所需的表初始化。"""
+"""企业版 Gateway 本地库表初始化。"""
 
 from __future__ import annotations
 
@@ -28,7 +28,7 @@ from .template_models import (
     EXTENSION_CONFIG_TEMPLATE_TABLE_DEF,
     MODEL_TEMPLATE_TABLE_DEF,
     PERMISSIONS_TEMPLATE_TABLE_DEF,
-    SKILL_WHITELIST_TEMPLATE_TABLE_DEF,
+    SKILL_PREBUILT_TEMPLATE_TABLE_DEF,
     MCP_TEMPLATE_TABLE_DEF,
 )
 
@@ -39,7 +39,7 @@ ALL_TABLE_DEFINITIONS: tuple[TableDefinition, ...] = (
     MODEL_TEMPLATE_TABLE_DEF,
     EMBEDDING_TEMPLATE_TABLE_DEF,
     EXTENSION_CONFIG_TEMPLATE_TABLE_DEF,
-    SKILL_WHITELIST_TEMPLATE_TABLE_DEF,
+    SKILL_PREBUILT_TEMPLATE_TABLE_DEF,
     MCP_TEMPLATE_TABLE_DEF,
     PERMISSIONS_TEMPLATE_TABLE_DEF,
     AGENT_TEMPLATE_TABLE_DEF,

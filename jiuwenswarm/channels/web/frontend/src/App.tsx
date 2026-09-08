@@ -1557,6 +1557,20 @@ function AppContent() {
     startBackgroundHistoryPrefetch,
   ]);
 
+  // 轮询兜底刷新：企业版 HTTP 无 cron 结果 push，立即执行跳转后 skipHistoryLoad，
+  // syncJobRuns 检测到「当前正打开会话 == 新 last_session_id」时投递刷新请求，
+  // 这里消费并触发一次完整的历史恢复（与首次点击激活会话的时机一逻辑一致）。
+  const pendingActiveHistoryRefresh = useCronStore((s) => s.pendingActiveHistoryRefresh);
+  useEffect(() => {
+    if (!pendingActiveHistoryRefresh) return;
+    // consume 物先置空再判断，保证 effect 幂等、不会因同一值重复触发
+    const sid = useCronStore.getState().consumeActiveHistoryRefresh();
+    if (!sid) return;
+    // 仅当该会话仍是当前激活会话时刷新，避免竞态下刷新到已切走的会话
+    if (useChatStore.getState().activeSessionId !== sid) return;
+    startHistoryRestore(sid);
+  }, [pendingActiveHistoryRefresh, startHistoryRestore]);
+
   // 当会话 ID 变化或页面加载时，自动加载历史会话
   useEffect(() => {
     if (!isConnected || !sessionId || sessionId === NEW_CONVERSATION_ID) return;

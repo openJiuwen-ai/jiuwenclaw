@@ -11,6 +11,10 @@ import {
 } from '../types';
 import { getGatewayHttpBase } from '../utils/env';
 import { isEnterprise } from '../edition';
+import {
+  hasManagerSessionCredentials,
+  managerAuthenticatedFetch,
+} from '../auth/manager/authSession';
 import i18n from '../i18n';
 import { buildRuntimeIdentityHeaders } from './runtimeScope';
 import { PauseBufferHook, PAUSABLE_STREAM_EVENTS } from './webClient';
@@ -673,7 +677,7 @@ export class WebHttpClient {
       if (assembled.jsonBody) {
         headers['Content-Type'] = 'application/json';
       }
-      const response = await fetch(appendQuery(assembled.url, assembled.query), {
+      const response = await this.authenticatedFetch(appendQuery(assembled.url, assembled.query), {
         method: assembled.verb,
         headers,
         body: assembled.jsonBody ? JSON.stringify(assembled.jsonBody) : undefined,
@@ -799,7 +803,7 @@ export class WebHttpClient {
     this.connectAbort = new AbortController();
     const url = `${getGatewayHttpBase().replace(/\/+$/, '')}/connection/status`;
     try {
-      const response = await fetch(url, {
+      const response = await this.authenticatedFetch(url, {
         method: 'GET',
         headers: this.identityHeaders(requestId, {}),
         signal: this.connectAbort.signal,
@@ -907,7 +911,7 @@ export class WebHttpClient {
       if (!assembled) {
         return;
       }
-      await fetch(appendQuery(assembled.url, assembled.query), {
+      await this.authenticatedFetch(appendQuery(assembled.url, assembled.query), {
         method: assembled.verb,
         headers: {
           ...this.identityHeaders(requestId, { session_id: sessionId }),
@@ -958,6 +962,13 @@ export class WebHttpClient {
     params: Record<string, unknown>
   ): Record<string, string> {
     return buildRuntimeIdentityHeaders(requestId, params);
+  }
+
+  private authenticatedFetch(input: RequestInfo | URL, init: RequestInit): Promise<Response> {
+    if (isEnterprise() && hasManagerSessionCredentials()) {
+      return managerAuthenticatedFetch(input, init);
+    }
+    return fetch(input, init);
   }
 
   private dispatchEvent(event: WsEvent): void {

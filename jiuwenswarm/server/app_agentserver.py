@@ -225,7 +225,7 @@ async def _run_with_telemetry(host: str, port: int, telemetry_lifecycle) -> None
     from jiuwenswarm.extensions.registry import ExtensionRegistry
     from jiuwenswarm.common.config import get_config
 
-    # 脱敏冷加载尽量提前：读库走 gateway_db/module_importer，不依赖扩展加载完成。
+    # 脱敏冷加载尽量提前：读库走 infrastructure.db，不依赖扩展加载完成。
     # 失败时仍保留内置规则；企业版 identity 在 import 阶段已可对 user_id= 等脱敏。
     try:
         from jiuwenswarm.infrastructure.log_masking.engine import LogMaskingEngine

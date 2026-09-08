@@ -141,11 +141,6 @@ MODEL_NAME=""
 API_BASE=""
 API_KEY=""
 
-"
-
-# Please configure an available pipy source
-PIP_EXTRA_ARGS="-i https://mirrors.aliyun.com/pypi/simple"
-
 #LOG_MASK_ENABLED=false
 APPLY_PATCH=true
 EOF

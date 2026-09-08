@@ -1698,7 +1698,7 @@ async def _run_with_telemetry(
     try:
         from jiuwenswarm.gateway.storage_assembly.setup import (
             ensure_enterprise_storage_context,
-            wire_enterprise_manager_ws_store_async,
+            wire_enterprise_persistent_repositories_async,
         )
 
         if is_enterprise():
@@ -1706,17 +1706,21 @@ async def _run_with_telemetry(
                 full_cfg,
                 existing=gateway_storage_ctx,
             )
-            await wire_enterprise_manager_ws_store_async(gateway_storage_ctx, full_cfg)
-            logger.info("[App] Manager WS write path wired to PersistentStore")
+            await wire_enterprise_persistent_repositories_async(
+                gateway_storage_ctx, full_cfg
+            )
+            logger.info(
+                "[App] enterprise PersistentStore repositories wired"
+            )
     except Exception as exc:  # noqa: BLE001
         if is_enterprise():
             logger.error(
-                "[App] enterprise Manager WS storage wiring failed (fail-fast): %s",
+                "[App] enterprise PersistentStore wiring failed (fail-fast): %s",
                 exc,
             )
             raise
         logger.warning(
-            "[App] enterprise Manager WS storage wiring failed: %s",
+            "[App] enterprise PersistentStore wiring failed: %s",
             exc,
         )
 

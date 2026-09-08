@@ -562,10 +562,10 @@ from jiuwenswarm.server.runtime.skill_turbo.plan_node import AbortError as _Skil
 from jiuwenswarm.gateway.cron import CronTargetChannel
 from jiuwenswarm.common.schema.agent import AgentRequest, AgentResponse, AgentResponseChunk
 from jiuwenswarm.common.schema.message import ReqMethod
-from jiuwenswarm.server.runtime.skill.skill_whitelist import (
-    SkillWhitelistSynchronizer,
-    is_skill_whitelist_tenant,
-    parse_agent_skill_whitelist,
+from jiuwenswarm.server.runtime.skill.skill_prebuilt import (
+    SkillPrebuiltSynchronizer,
+    is_skill_prebuilt_tenant,
+    parse_agent_skill_prebuilt,
 )
 from jiuwenswarm.common.utils import (
     DEFAULT_ENABLE_READ_IMAGE_MULTIMODAL,
@@ -2361,7 +2361,7 @@ class JiuWenSwarmDeepAdapter:
         (e.g. office-claw-skills), those roots are used instead of only the
         empty workspace skills folder.
         """
-        if is_skill_whitelist_tenant(self._agent_id, self._service_id):
+        if is_skill_prebuilt_tenant(self._agent_id, self._service_id):
             skills_dirs = [str(Path(self._workspace_dir) / "skills")]
         else:
             skills_dirs = [str(p) for p in resolve_agent_registered_skill_dirs()]
@@ -2394,7 +2394,7 @@ class JiuWenSwarmDeepAdapter:
 
     async def _refresh_skill_identity(self, skill_name: str) -> None:
         """按安装账本校准当前企业 Skill 的预置身份，不改变 Skill 加载集合。"""
-        if not is_skill_whitelist_tenant(self._agent_id, self._service_id):
+        if not is_skill_prebuilt_tenant(self._agent_id, self._service_id):
             return
         name = str(skill_name or "").strip()
         if not name or Path(name).name != name:
@@ -6174,7 +6174,7 @@ class JiuWenSwarmDeepAdapter:
             else []
         )
         enabled = self._enabled_skills
-        if is_skill_whitelist_tenant(self._agent_id, self._service_id) and enabled is None:
+        if is_skill_prebuilt_tenant(self._agent_id, self._service_id) and enabled is None:
             enabled = []
         elif enabled is None:
             raw = enabled_skills_from_environ()
@@ -6790,7 +6790,7 @@ class JiuWenSwarmDeepAdapter:
             logger.info("[JiuWenSwarmDeepAdapter] current skill_mode: %s", skill_mode)
             skills_dirs = self._resolve_skill_dirs(extra_skill_dir)
             enabled_skills = self._enabled_skills
-            if is_skill_whitelist_tenant(self._agent_id, self._service_id) and enabled_skills is None:
+            if is_skill_prebuilt_tenant(self._agent_id, self._service_id) and enabled_skills is None:
                 enabled_skills = []
             elif enabled_skills is None:
                 # OfficeClaw tip path: ENABLED_SKILLS from sync_agents_configs.
@@ -7057,7 +7057,7 @@ class JiuWenSwarmDeepAdapter:
 
     async def refresh_enabled_skills_from_db(self) -> None:
         """workspace Skill 状态变更后刷新启用集并热替换 ``SkillUseRail``。"""
-        if not is_skill_whitelist_tenant(self._agent_id, self._service_id):
+        if not is_skill_prebuilt_tenant(self._agent_id, self._service_id):
             return
         if self._instance is None:
             logger.debug(
@@ -8867,16 +8867,16 @@ class JiuWenSwarmDeepAdapter:
                 )
 
                 if (
-                    is_skill_whitelist_tenant(self._agent_id, self._service_id)
+                    is_skill_prebuilt_tenant(self._agent_id, self._service_id)
                     and self._enterprise_config is not None
                 ):
                     enterprise_skills: list[dict[str, Any]] = (
-                        getattr(self._enterprise_config, "skill_whitelist", None) or []
+                        getattr(self._enterprise_config, "skill_prebuilt", None) or []
                     )
-                    skill_config = parse_agent_skill_whitelist(
+                    skill_config = parse_agent_skill_prebuilt(
                         self._agent_id, self._service_id, enterprise_skills
                     )
-                    sync_result = await SkillWhitelistSynchronizer(
+                    sync_result = await SkillPrebuiltSynchronizer(
                         self._workspace_dir,
                         self._service_id,
                         self._agent_id,
@@ -8884,7 +8884,7 @@ class JiuWenSwarmDeepAdapter:
                     ).sync(skill_config)
                     if sync_result.errors:
                         logger.warning(
-                            "[SkillWhitelist] sync partial errors: agent_id=%s service_id=%s errors=%s",
+                            "[SkillPrebuilt] sync partial errors: agent_id=%s service_id=%s errors=%s",
                             self._agent_id,
                             self._service_id,
                             sync_result.errors,
@@ -11949,17 +11949,28 @@ class JiuWenSwarmDeepAdapter:
                     )
 
             def _finish_text(success: bool, detail: str = "") -> str:
-                # Fallback only (no DeepAgent interrupt): template text, not a new LLM call.
+                # HITL resume bypasses skill_acceleration_exec / DeliverySummaryRail.
+                # Emit the P10 skeleton (or a safe short sentence), never the
+                # machine artifact dump that used to land in the main bubble.
+                from jiuwenswarm.server.runtime.skill_turbo.skill_codes.ppt.delivery_summary import (
+                    DELIVERY_SUMMARY_START,
+                )
                 from jiuwenswarm.server.runtime.skill_turbo.skill_turbo_tools import (
-                    _build_artifact_summary,
+                    visible_ppt_turbo_finish_text,
                 )
-                summary = _build_artifact_summary(
-                    getattr(skill_turbo, "artifact_holder", None) or {}
+
+                text = visible_ppt_turbo_finish_text(
+                    getattr(skill_turbo, "artifact_holder", None) or {},
+                    success=success,
+                    detail=detail,
                 )
-                head = detail or ("任务已完成" if success else "任务未完成")
-                if summary:
-                    return f"{head}\n\n{summary}"
-                return head
+                if success and text.startswith(DELIVERY_SUMMARY_START):
+                    logger.info(
+                        "[SkillTurboResume] emitted PPT delivery summary via "
+                        "finish_text chars=%d",
+                        len(text),
+                    )
+                return text
 
             finish_text = ""
             try:
@@ -12021,10 +12032,12 @@ class JiuWenSwarmDeepAdapter:
                     payload={"event_type": "chat.delta", "content": finish_text},
                     is_complete=False,
                 )
+            # Body is already on delta. Empty final avoids RelayClaw
+            # computeFinalTextDelta appending a second copy.
             yield AgentResponseChunk(
                 request_id=rid,
                 channel_id=cid,
-                payload={"event_type": "chat.final", "content": finish_text or ""},
+                payload={"event_type": "chat.final", "content": ""},
                 is_complete=True,
             )
 
@@ -15851,6 +15864,33 @@ class JiuWenSwarmDeepAdapter:
         Returns:
             AgentResponse 包含执行结果
         """
+        # Symmetric with process_message_stream_impl: hosted approval answers
+        # must resolve the pending Future, not start a new agent round.
+        _params = request.params if isinstance(request.params, dict) else {}
+        _approval_id = str(_params.get("request_id") or "").strip()
+        if self._is_subagent_approval_answer(_approval_id, _params):
+            resolved = self._resolve_subagent_approval_answer(
+                request, _approval_id, _params.get("answers", [])
+            )
+            logger.info(
+                "[JiuWenSwarmDeepAdapter] subagent approval resolved via chat.send "
+                "(non-stream): request_id=%s approval_id=%s resolved=%s",
+                request.request_id,
+                _approval_id,
+                resolved,
+            )
+            return AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=True,
+                payload={
+                    "accepted": True,
+                    "resolved": resolved,
+                    "event_type": "runtime.accepted",
+                },
+                metadata=request.metadata,
+            )
+
         if not self._is_session_scoped_adapter:
             # 提前绑定 LLM trace ContextVar，使 supervisor task（由
             # _get_or_create_session_adapter → start_interaction →
@@ -16480,6 +16520,39 @@ class JiuWenSwarmDeepAdapter:
         # Start of this adapter's own share of the turn; reported on the
         # "entering runner streaming" line so the pre-dispatch work is visible.
         stream_impl_started_at = time.monotonic()
+        # OfficeClaw / relay resume hosted subagent cards as streaming chat.send
+        # (answers + source), not chat.user_answer. Resolve the pending Future
+        # here and ACK — never steal the parent output lease / start a new round.
+        _params = request.params if isinstance(request.params, dict) else {}
+        _approval_id = str(_params.get("request_id") or "").strip()
+        if self._is_subagent_approval_answer(_approval_id, _params):
+            resolved = self._resolve_subagent_approval_answer(
+                request, _approval_id, _params.get("answers", [])
+            )
+            logger.info(
+                "[JiuWenSwarmDeepAdapter] subagent approval resolved via chat.send: "
+                "request_id=%s approval_id=%s resolved=%s",
+                request.request_id,
+                _approval_id,
+                resolved,
+            )
+            yield AgentResponseChunk(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                payload={
+                    "event_type": "runtime.accepted",
+                    "request_id": request.request_id,
+                    "resolved": resolved,
+                },
+                is_complete=False,
+            )
+            yield AgentResponseChunk(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                payload=None,
+                is_complete=True,
+            )
+            return
         if not self._is_session_scoped_adapter:
             # 提前绑定 LLM trace ContextVar，使 supervisor task（由
             # _get_or_create_session_adapter → start_interaction →
@@ -18217,8 +18290,19 @@ class JiuWenSwarmDeepAdapter:
 
     @staticmethod
     def _is_ask_user_payload(payload: Any) -> bool:
-        """HITL 暂停判定：payload 是否为 ask_user 卡片事件。"""
-        return isinstance(payload, dict) and payload.get("event_type") == "chat.ask_user_question"
+        """HITL 暂停判定：是否为会打断外层流的 checkpoint ask_user 卡片。
+
+        子 Agent 托管审批（``subagent_tool_permission`` / ``subagent_skill_load``）
+        只是在父会话转发一张卡并 await Future，外层 round 仍在跑；不能置
+        ``suppress_stream_after_hitl`` / 发 ``chat.invocation_paused``，否则点击
+        作答后父流被误收口、任务看起来“直接结束”。
+        """
+        if not isinstance(payload, dict):
+            return False
+        if payload.get("event_type") != "chat.ask_user_question":
+            return False
+        source = str(payload.get("source") or "").strip()
+        return source not in {"subagent_skill_load", "subagent_tool_permission"}
 
     def _dedupe_ask_user_card(
         self,
@@ -18415,8 +18499,6 @@ class JiuWenSwarmDeepAdapter:
                     if inner_t is None and isinstance(payload, dict):
                         inner_t = payload.get("type")
                     inner_val = getattr(inner_t, "value", inner_t) if inner_t is not None else None
-                    if inner_val == "task_completion":
-                        return None
                     if inner_val == "task_failed":
                         data = getattr(payload, "data", None)
                         if data is None and isinstance(payload, dict):
@@ -18440,6 +18522,20 @@ class JiuWenSwarmDeepAdapter:
                                 "任务执行失败",
                             )
                         return {"event_type": "chat.error", "error": error or "任务执行失败"}
+                    # Close the controller_output enum: HITL cards are emitted via
+                    # ``__interaction__``; remaining types are control-plane metadata.
+                    # Never fall through to ``str(payload)`` → chat.delta (ISSUE #3892).
+                    if inner_val not in (
+                        "task_completion",
+                        "task_interaction",
+                        "processing",
+                        "all_tasks_processed",
+                    ):
+                        logger.debug(
+                            "[interface_deep] drop unhandled controller_output type=%r",
+                            inner_val,
+                        )
+                    return None
 
                 if chunk_type == "llm_output":
                     content = (
