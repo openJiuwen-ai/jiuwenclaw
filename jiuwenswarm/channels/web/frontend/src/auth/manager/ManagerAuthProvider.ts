@@ -5,24 +5,18 @@ import type {
   EnterpriseUser,
 } from '../../services/enterpriseContext';
 import { EnterpriseAuthError, type EnterpriseAuthProvider } from '../types';
-import { isAuthEntryPath } from '../config';
-
-const ACCESS_KEY = 'openjiuwen_access_token';
-const REFRESH_KEY = 'openjiuwen_refresh_token';
+import {
+  clearManagerTokens,
+  getManagerAccessToken,
+  getManagerRefreshToken,
+  managerAuthenticatedFetch,
+  redirectToManagerLogin,
+} from './authSession';
 
 interface ManagerResponse<T> {
   code: number;
   message?: string;
   data: T;
-}
-
-function accessToken(): string | null {
-  return typeof localStorage === 'undefined' ? null : localStorage.getItem(ACCESS_KEY);
-}
-
-function authHeaders(): HeadersInit {
-  const token = accessToken();
-  return token ? { Authorization: `Bearer ${token}` } : {};
 }
 
 function requestMessage(body: unknown, fallback: string): string {
@@ -37,7 +31,7 @@ function requestMessage(body: unknown, fallback: string): string {
 async function requestJson<T>(path: string): Promise<T> {
   let response: Response;
   try {
-    response = await fetch(path, { headers: authHeaders() });
+    response = await managerAuthenticatedFetch(path);
   } catch (error) {
     throw new EnterpriseAuthError(0, `网络请求失败：${error instanceof Error ? error.message : String(error)}`);
   }
@@ -51,25 +45,12 @@ async function requestJson<T>(path: string): Promise<T> {
   return body as T;
 }
 
-function clearLogin(): void {
-  if (typeof localStorage !== 'undefined') {
-    localStorage.removeItem(ACCESS_KEY);
-    localStorage.removeItem(REFRESH_KEY);
-  }
-  if (typeof document !== 'undefined') {
-    document.cookie = `${ACCESS_KEY}=; Path=/; Max-Age=0; SameSite=Strict`;
-  }
-}
-
 export const managerAuthProvider: EnterpriseAuthProvider = {
   id: 'manager',
   startupMessage: '【正式身份认证模式，依赖manager ID认证服务】',
-  isAuthenticated: () => Boolean(accessToken()),
+  isAuthenticated: () => Boolean(getManagerAccessToken()),
   redirectToLogin() {
-    clearLogin();
-    if (isAuthEntryPath(window.location.pathname)) return false;
-    window.location.replace('/auth');
-    return true;
+    return redirectToManagerLogin();
   },
   getCurrentUser: () => requestJson<EnterpriseUser>('/idp/v1/auth/me'),
   async listOrganizations() {
@@ -88,18 +69,24 @@ export const managerAuthProvider: EnterpriseAuthProvider = {
     return result.data?.agents ?? [];
   },
   async logout() {
-    const refreshToken = typeof localStorage === 'undefined' ? null : localStorage.getItem(REFRESH_KEY);
+    const refreshToken = getManagerRefreshToken();
     if (refreshToken) {
       try {
         await fetch('/idp/v1/auth/logout', {
           method: 'POST',
-          headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+          headers: {
+            ...(getManagerAccessToken()
+              ? { Authorization: `Bearer ${getManagerAccessToken()}` }
+              : {}),
+            'Content-Type': 'application/json',
+          },
           body: JSON.stringify({ refresh_token: refreshToken }),
         });
       } catch {
         // Local logout must still complete when the identity service is unavailable.
       }
     }
+    clearManagerTokens();
     this.redirectToLogin();
   },
 };

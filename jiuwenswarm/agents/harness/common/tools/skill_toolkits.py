@@ -12,7 +12,7 @@ from typing import Any, Callable
 from openjiuwen.core.foundation.tool import LocalFunction, Tool, ToolCard
 
 from jiuwenswarm.server.runtime.skill.skill_manager import SkillManager, SkillNameConflictError
-from jiuwenswarm.server.runtime.skill.skill_whitelist import is_skill_whitelist_tenant
+from jiuwenswarm.server.runtime.skill.skill_prebuilt import is_skill_prebuilt_tenant
 
 logger = logging.getLogger(__name__)
 
@@ -77,7 +77,7 @@ class SkillToolkit:
         self._on_installed_skills_changed = on_installed_skills_changed
 
     def _is_enterprise(self) -> bool:
-        return is_skill_whitelist_tenant(self._agent_id, self._service_id)
+        return is_skill_prebuilt_tenant(self._agent_id, self._service_id)
 
     async def _notify_installed_skills_changed(self) -> None:
         if self._on_installed_skills_changed is None:

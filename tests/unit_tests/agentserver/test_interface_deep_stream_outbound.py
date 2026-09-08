@@ -174,16 +174,22 @@ def test_same_round_streamed_answer_still_empty_final() -> None:
 
 
 def test_hitl_suppress_noise_keeps_flags() -> None:
-    """Pause-tail metadata must not clear suppress."""
+    """Pause-tail metadata must not clear suppress.
+
+    ``__interaction__`` is not noise: it is the ask_user card source after the
+    forced-emit revert and must be forwarded.
+    """
     for chunk_type in (
         "llm_usage",
         "context.usage",
-        "__interaction__",
         "controller_output",
     ):
         assert JiuWenSwarmDeepAdapter._is_hitl_suppress_noise_chunk(
             SimpleNamespace(type=chunk_type, payload={})
         )
+    assert not JiuWenSwarmDeepAdapter._is_hitl_suppress_noise_chunk(
+        SimpleNamespace(type="__interaction__", payload={})
+    )
 
 
 def test_hitl_suppress_task_failed_not_noise() -> None:

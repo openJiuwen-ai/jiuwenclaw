@@ -40,6 +40,11 @@ _PPT_DELIVERY_SUMMARY_POST_TOOL_HINT = (
     "send_file_to_user / skill_tool / skill_acceleration_exec。"
 )
 
+# HITL 续跑没有外层 tool_result / DeliverySummaryRail；可见终稿用骨架或安全短句，
+# 禁止把产物摘要账本发给用户。
+PPT_TURBO_SAFE_DELIVERY_SUMMARY = "PPT 已生成并交付。"
+_SKILL_TURBO_ARTIFACT_SUMMARY_MARKER = "[SkillAccelerationExec 产物摘要]"
+
 # 工具返回值会先被 AbilityManager 收成 ToolMessage。after_tool_call 再用
 # StreamEventRail._tool_interrupted_message（随 prompt 语言中/英）覆写 tool_msg。
 # _fix_incomplete_tool_context 认 rail 文案 + 中英文 legacy 模板，故本常量取中文
@@ -73,6 +78,7 @@ _SKILL_TURBO_EVENT_TYPE_TO_OUTPUT_TYPE: dict[str, str] = {
     "chat.tool_calls.delta": "tool_calls.delta",
     "chat.error": "error",
 }
+_BUBBLE_PROGRESS_FIELD = "_bubble_progress"
 
 # ── 不转发给父会话的事件类型 ──
 # plan/node 生命周期事件：前端无对应 handler，DeepAgent 也无显式处理。
@@ -105,6 +111,18 @@ def _without_inner_task_routing(payload: dict[str, Any]) -> dict[str, Any]:
     cleaned = dict(payload)
     cleaned.pop("task_id", None)
     return cleaned
+
+
+def _prepare_parent_stream_output(
+    event_type: str, payload: dict[str, Any]
+) -> tuple[str, dict[str, Any]]:
+    """Map a SkillTurbo event to the parent stream without delaying bubble progress."""
+    if event_type == "chat.delta" and payload.get(_BUBBLE_PROGRESS_FIELD):
+        cleaned = dict(payload)
+        cleaned.pop(_BUBBLE_PROGRESS_FIELD, None)
+        cleaned.pop("task_id", None)
+        return "content_chunk", cleaned
+    return _SKILL_TURBO_EVENT_TYPE_TO_OUTPUT_TYPE.get(event_type, event_type), payload
 
 
 # ── ContextVar：在 before_tool_call 中注入，供工具函数读取 ──
@@ -368,7 +386,7 @@ def _build_artifact_summary(holder: dict[str, Any]) -> str:
     """
     if not holder:
         return ""
-    lines = ["[SkillAccelerationExec 产物摘要]"]
+    lines = [_SKILL_TURBO_ARTIFACT_SUMMARY_MARKER]
     for plan_name, node_info in holder.items():
         if not isinstance(node_info, dict):
             continue
@@ -397,6 +415,32 @@ def _ppt_delivery_summary(artifact_holder: dict[str, Any] | None) -> str:
         return ""
     text = node.get("delivery_summary")
     return text.strip() if isinstance(text, str) else ""
+
+
+def visible_ppt_turbo_finish_text(
+    holder: dict[str, Any] | None,
+    *,
+    success: bool,
+    detail: str = "",
+) -> str:
+    """HITL 续跑的用户可见终稿（无外层 skill_acceleration_exec 工具循环）。
+
+    成功时优先发 P10 已填好的交付骨架；没有骨架则用安全短句。
+    失败只回可读错误。产物账本不得出现在返回值里。
+    """
+    from jiuwenswarm.server.runtime.skill_turbo.skill_codes.ppt.delivery_summary import (
+        DELIVERY_SUMMARY_START,
+    )
+
+    if success:
+        skeleton = _ppt_delivery_summary(holder)
+        if skeleton.startswith(DELIVERY_SUMMARY_START):
+            return skeleton
+        return PPT_TURBO_SAFE_DELIVERY_SUMMARY
+    text = str(detail or "").strip() or "任务未完成"
+    if _SKILL_TURBO_ARTIFACT_SUMMARY_MARKER in text:
+        return "任务未完成"
+    return text
 
 
 def _wrap_skill_turbo_result(
@@ -754,7 +798,9 @@ async def skill_turbo(query: str) -> dict[str, Any] | str:
                 # SkillTurbo executor 产出的 event_type 带 "chat." 前缀（如 "chat.tool_call"），
                 # 但 DeepAgent 的 _parse_stream_chunk 期望原始 OutputSchema.type（如 "tool_call"）。
                 # 若直接用 event_type 作 type，会因类型不匹配被静默丢弃，需反向映射回原始 type。
-                output_type = _SKILL_TURBO_EVENT_TYPE_TO_OUTPUT_TYPE.get(event_type, event_type)
+                output_type, payload = _prepare_parent_stream_output(
+                    event_type, payload
+                )
                 output = OutputSchema(
                     type=output_type,
                     index=0,

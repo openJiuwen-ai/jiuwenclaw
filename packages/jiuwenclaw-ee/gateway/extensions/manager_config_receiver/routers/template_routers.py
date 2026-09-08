@@ -14,7 +14,7 @@ from ..core.template.extension_config_template import ExtensionConfigTemplateSer
 from ..core.template.mcp_template import McpTemplateService
 from ..core.template.model_template import ModelTemplateService
 from ..core.template.permissions_template import PermissionsTemplateService
-from ..core.template.skill_whitelist_template import SkillWhitelistTemplateService
+from ..core.template.skill_prebuilt_template import SkillPrebuiltTemplateService
 from ..schemas.common_schemas import ResponseModel
 from ..schemas.sync_schemas import SyncEnvelopeOnlyBody, make_sync_body
 from ..schemas.template_schemas import (
@@ -30,8 +30,8 @@ from ..schemas.template_schemas import (
     McpTemplateUpdateRequest,
     PermissionsTemplateCreateRequest,
     PermissionsTemplateUpdateRequest,
-    SkillWhitelistTemplateCreateRequest,
-    SkillWhitelistTemplateUpdateRequest,
+    SkillPrebuiltTemplateCreateRequest,
+    SkillPrebuiltTemplateUpdateRequest,
 )
 from .deps import build_sync_context, sync_write_data
 from .runtime_notify import trigger_runtime_config_update
@@ -150,11 +150,11 @@ _add_template_crud(
     ExtensionConfigTemplateUpdateRequest,
 )
 _add_template_crud(
-    "/skill-whitelist-templates",
-    SkillWhitelistTemplateService,
-    "skill_whitelist",
-    SkillWhitelistTemplateCreateRequest,
-    SkillWhitelistTemplateUpdateRequest,
+    "/skill-prebuilt-templates",
+    SkillPrebuiltTemplateService,
+    "skill_prebuilt",
+    SkillPrebuiltTemplateCreateRequest,
+    SkillPrebuiltTemplateUpdateRequest,
 )
 _add_template_crud(
     "/permissions-templates",

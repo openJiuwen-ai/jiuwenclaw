@@ -22,6 +22,7 @@ from jiuwenswarm.server.runtime.skill_turbo.permission_bridge import (
     SKILL_TURBO_RESUME_CTX_KEY,
     load_resume_ctx,
     mark_resume_in_flight,
+    save_resume_ctx,
 )
 from jiuwenswarm.server.runtime.skill_turbo.skill_turbo_tools import (
     _SKILL_TURBO_HITL_PLACEHOLDER,
@@ -307,6 +308,83 @@ async def test_mark_resume_in_flight_persists_across_sessions():
     assert again is not None
     assert again.get("resume_in_flight") is True
     assert again.get("pending_tool_call_id") == "skill_turbo-tc-ask_user-1"
+
+
+@pytest.mark.asyncio
+async def test_save_resume_ctx_clears_stale_resume_in_flight():
+    """嵌套 ask_user 中断后 save_resume_ctx 必须清除上一轮 mark_resume_in_flight 残留标志。
+
+    场景：第一次 ask_user 中断→恢复时 mark_resume_in_flight 设置 resume_in_flight=True；
+    恢复过程中第二次 ask_user 中断→save_resume_ctx 保存新 resume_ctx。
+    openjiuwen session.update_state 使用 merge 语义（update_dict），新 entry 缺少
+    resume_in_flight 键不会触发删除。修复后 save_resume_ctx 显式置 None 让 merge
+    将其从持久化状态中移除，下一轮 load_resume_ctx 看不到残留标志。
+    """
+    from openjiuwen.core.session.utils import update_dict
+
+    checkpoint: dict = {}
+
+    class _MergeCheckpointSession:
+        """模拟 openjiuwen session + checkpointer 的 merge 语义。
+
+        update_state 走 update_dict（与真实 InMemoryStateLike.update 一致）：
+        值为 None 的键会被删除，而不是保留。
+        """
+
+        def __init__(self):
+            self._state: dict = {}
+
+        async def pre_run(self, inputs=None):
+            self._state = copy.deepcopy(checkpoint)
+
+        async def post_run(self):
+            checkpoint.clear()
+            checkpoint.update(copy.deepcopy(self._state))
+
+        def update_state(self, mapping):
+            update_dict(mapping, self._state)
+
+        def get_state(self, key):
+            return copy.deepcopy(self._state.get(key))
+
+    # 第一次中断：保存 resume_ctx（无 resume_in_flight）
+    writer1 = _MergeCheckpointSession()
+    await writer1.pre_run()
+    await save_resume_ctx(
+        writer1,
+        plan_code="plan-x",
+        inputs={},
+        pending_tool_call_id="skill_turbo-tc-ask_user-1",
+        task_states=None,
+    )
+    await writer1.post_run()
+
+    # 第一次恢复：mark_resume_in_flight 设置 resume_in_flight=True
+    marker = _MergeCheckpointSession()
+    loaded = await load_resume_ctx(marker)
+    assert loaded is not None
+    assert loaded.get("resume_in_flight") is not True
+    await mark_resume_in_flight(marker, loaded)
+
+    # 第二次中断：save_resume_ctx 保存新 resume_ctx（新 tcid）
+    writer2 = _MergeCheckpointSession()
+    await save_resume_ctx(
+        writer2,
+        plan_code="plan-x",
+        inputs={},
+        pending_tool_call_id="skill_turbo-tc-ask_user-2",
+        task_states=None,
+    )
+    await writer2.post_run()
+
+    # 下一轮恢复加载：resume_in_flight 必须为 False
+    reader = _MergeCheckpointSession()
+    again = await load_resume_ctx(reader)
+    assert again is not None
+    assert again.get("pending_tool_call_id") == "skill_turbo-tc-ask_user-2"
+    assert not again.get("resume_in_flight"), (
+        "save_resume_ctx 必须清除上一轮 mark_resume_in_flight 残留的 resume_in_flight 标志"
+    )
 
 
 @pytest.mark.asyncio

@@ -12,7 +12,7 @@
 Claw Manager 是 JiuwenClaw 的**企业级管理面**，用于：
 
 - 纳管与监控 JiuwenClaw **实例**（Gateway / AgentServer 组网状态）
-- 维护可复用的**全局配置模板**（模型、Embedding、Skill 白名单、扩展钩子、服务资源配置等）
+- 维护可复用的**全局配置模板**（模型、Embedding、预置 Skill、扩展钩子、服务资源配置等）
 - 为每个实例配置**策略**（默认模板映射 / 全局兜底 / 服务层 / Agent 层），经 WebSocket 下发到 Gateway 生效
 - 对实例做**运行时配置**（Channel、日志脱敏、日志级别、权限等）
 
@@ -27,7 +27,7 @@ Claw Manager 是 JiuwenClaw 的**企业级管理面**，用于：
 | **全局配置** | 模型模板 | LLM 模型模板 |
 | **全局配置** | Embedding 模板 | 向量模型模板 |
 | **全局配置** | 扩展配置模板 | 钩子 / 自定义扩展 |
-| **全局配置** | Skill 白名单模板 | Agent可调用的Skill白名单 |
+| **全局配置** | 预置Skill | Agent 可调用的预置 Skill |
 | **全局配置** | 服务配置模板 | AgentServer容器与会话参数 |
 
 
@@ -201,17 +201,17 @@ Claw Manager 是 JiuwenClaw 的**企业级管理面**，用于：
 |------|------|------|
 | 自定义配置 | 否 | 用户自定义配置项（JSON），如 `{"auth_header": "Authorization"}` |
 
-### 5.4 Skill 白名单模板
+### 5.4 预置 Skill 模板
 
-位置：**全局配置 → Skill 白名单模板**
+位置：**全局配置 → 预置Skill**
 
-![Skill 白名单模板](assets/manager/Skill白名单模板.png)
+![预置 Skill 模板](assets/manager/预置Skill模板.png)
 
-限制 Agent 可调用的 Skill，一条模板对应一个 Skill。策略中通过 `skill_whitelist` 槽位引用（可引用多条组成白名单列表）。
+为 Agent 预置可调用的 Skill，一条模板对应一个 Skill。策略中通过 `skill_prebuilt` 槽位引用（可引用多条组成预置列表）。
 
 | 字段 | 必填 | 说明 |
 |------|------|------|
-| 模板名称 | 是 | 自定义名称，如「销售组 Skill 白名单」 |
+| 模板名称 | 是 | 自定义名称，如「销售组预置 Skill」 |
 | 模板描述 | 否 | 用途说明 |
 | Skill 来源 | 是 | 制品源根 URL，如 `https://skillhub.example.com/` |
 | Skill ID | 是 | Skill 唯一路径标识，如 `search/weather` |
@@ -339,7 +339,7 @@ Claw Manager 是 JiuwenClaw 的**企业级管理面**，用于：
 | 视觉模型 (`vision_model`) | 5.1 模型模板 |
 | Embedding 模型 (`embedding_model`) | 5.2 Embedding 模板 |
 | 扩展配置 (`extension_config`) | 5.3 扩展配置模板 |
-| Skill 白名单 (`skill_whitelist`) | 5.4 Skill 白名单模板 |
+| 预置 Skill (`skill_prebuilt`) | 5.4 预置 Skill 模板 |
 | 服务配置 (`service_config`) | 5.5 服务配置模板 |
 
 引用方式支持**直接选模板**，或**用户 / 群组 / 机器人映射**（结合「默认模板映射」表解析，详见 6.5）。
@@ -432,7 +432,7 @@ Claw Manager 是 JiuwenClaw 的**企业级管理面**，用于：
 | 策略描述 | 否 | 用途说明 |
 | 作用域类型 | 是 | `用户` / `群组` / `机器人` |
 | 作用域 ID | 是 | 对应的用户 ID、群组 ID 或机器人 ID |
-| 模板类型 | 是 | 槽位键，如 `default_model`、`skill_whitelist`、`extension_config`、`service_config` 等 |
+| 模板类型 | 是 | 槽位键，如 `default_model`、`skill_prebuilt`、`extension_config`、`service_config` 等 |
 | 模板 | 是 | 目标模板 |
 | 优先级 | 是 | 数值越大越优先，同优先级修改时间越新越优先|
 
@@ -602,7 +602,7 @@ JSON 内容会下发到 Gateway。以飞书通道为例，常用字段如下：
 | Gateway 连通 | 总览 / 实例详情查看心跳 | Gateway 在线，最近心跳更新 |
 | 模型路由 | 用目标 user/group/bot 发对话 | 命中对应模型（可对比 API 日志或回复特征） |
 | Embedding | 触发记忆写入 / 检索 | 使用步骤 ③ 配置的 Embedding 端点 |
-| Skill 白名单 | 调用允许 / 禁止的 Skill | 白名单内可用，名单外被拒绝 |
+| 预置 Skill | 调用允许 / 禁止的 Skill | 预置列表内可用，列表外被拒绝 |
 | 服务池 | 观察 AgentServer 扩缩 | 符合服务配置模板的池参数 |
 | 实例配置（若已配） | 调整日志级别后观察日志 | Gateway 热更新生效 |
 
@@ -619,11 +619,11 @@ JSON 内容会下发到 Gateway。以飞书通道为例，常用字段如下：
 3. 步骤 ④：在 **Agent 层级**挂该服务策略，配置 `agent_id` / `workspace_dir`。  
 4. 步骤 ⑥：用该群/机器人发一条消息，确认路由与模型符合预期。
 
-**全实例统一 Skill 白名单**
+**全实例统一预置 Skill**
 
-1. 步骤 ③：新建 Skill 白名单模板，填入允许使用的 Skill 列表。  
-2. 步骤 ④：在**全局兜底**策略的 `template_ref` 中配置 `skill_whitelist` 槽位，引用该模板。  
-3. 步骤 ⑥：分别调用白名单内 / 外的 Skill，确认名单内可用、名单外被拒绝。
+1. 步骤 ③：新建预置 Skill 模板，填入允许使用的 Skill 列表。  
+2. 步骤 ④：在**全局兜底**策略的 `template_ref` 中配置 `skill_prebuilt` 槽位，引用该模板。  
+3. 步骤 ⑥：分别调用预置列表内 / 外的 Skill，确认列表内可用、列表外被拒绝。
 
 **临时调高 Gateway 日志级别排查问题**
 

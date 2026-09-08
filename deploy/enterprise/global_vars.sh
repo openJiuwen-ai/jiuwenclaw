@@ -109,7 +109,6 @@ declare -A DEPLOY_VARS=(
     ["RUNTIME_POD_PKG_PATH"]="/usr/local/lib/python3.11/site-packages/openjiuwen_runtime"
     ["CORE_POD_PKG_PATH"]="/usr/local/lib/python3.11/site-packages/openjiuwen"
     ["JIUWENBOX_POD_PKG_PATH"]="/usr/local/lib/python3.11/site-packages/jiuwenbox"
-    ["AGENT_BOT_ID_GROUP_NUM"]="0"
     ["CLAW_MOUNT_TYPE"]="pvc"
     ["CLAW_STORAGE_SIZE"]="1Gi"
     ["COLLECT_LOG_MASK_ENABLED"]="false"

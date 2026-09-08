@@ -1545,6 +1545,12 @@ class JiuWenSwarm:
             )
             if answers or is_explicit_ask_user_response:
                 request_id = params.get("request_id", "")
+                # ask_user 卡片序号后缀（{call_id}#{n}，区分同一外层调用的第 n 次
+                # 中断）在此剥掉，恢复 harness 原始 tool_call id 用于对齐
+                if isinstance(request_id, str):
+                    _m = re.search(r"^(?P<base>.+)#\d+$", request_id.strip())
+                    if _m and _m.group("base").strip():
+                        request_id = _m.group("base").strip()
                 raw_original_request = params.get("original_request") if source == "ask_user_interrupt" else ""
                 original_request = raw_original_request.strip() if isinstance(raw_original_request, str) else ""
                 interactive_input = self._build_interactive_input_from_answers(

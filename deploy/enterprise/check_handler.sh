@@ -248,7 +248,7 @@ check_if_obs_up() {
     fi
 
     info "Use built-in Minio server"
-    DEPLOY_VARS["OBS_URL"]="${name}-headless:9000"
+    DEPLOY_VARS["OBS_URL"]="${name}-headless.default:9000"
 }
 
 ensure_redis_up() {
