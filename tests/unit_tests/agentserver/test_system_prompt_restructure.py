@@ -47,6 +47,7 @@ from jiuwenswarm.agents.harness.common.rails.symphony import (
 from jiuwenswarm.agents.harness.common.tools.symphony_toolkits import (
     SymphonyToolkit,
 )
+from jiuwenswarm.symphony.llm import SYMPHONY_LLM_CONFIG_REF_KEY
 
 
 class _TestableJiuWenSwarmDeepAdapter(JiuWenSwarmDeepAdapter):
@@ -820,6 +821,105 @@ def test_deep_adapter_syncs_symphony_tools_from_config_snapshot(monkeypatch):
         "symphony_refresh_graph",
         "symphony_compose_graph",
     ]
+
+
+@pytest.mark.asyncio
+async def test_symphony_tool_model_is_isolated_from_interleaved_adapter_requests(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.harness.common.tools.symphony_toolkits.load_symphony_config",
+        lambda config=None: SimpleNamespace(enabled=True),
+    )
+    adapter = object.__new__(JiuWenSwarmDeepAdapter)
+
+    def runtime_model(name: str, api_key: str):
+        return SimpleNamespace(
+            model_client_config={
+                "api_base": "https://selected.example/v1",
+                "api_key": api_key,
+                "client_provider": "OpenAI",
+                "model_name": name,
+            },
+            model_config={"model": name},
+        )
+
+    model_a = runtime_model("model-a", "key-a")
+    model_b = runtime_model("model-b", "key-b")
+    inputs_a = adapter._with_symphony_request_model({"query": "a"}, model_a)
+    inputs_b = adapter._with_symphony_request_model({"query": "b"}, model_b)
+
+    # Only opaque references cross the interaction queue; credentials stay in
+    # the process-local registry.
+    assert "key-a" not in repr(inputs_a)
+    assert "key-b" not in repr(inputs_b)
+
+    seen: dict[str, str] = {}
+
+    async def plan(query, *, llm_config, **kwargs):
+        del kwargs
+        seen[query] = llm_config.model
+        return {
+            "success": True,
+            "planned_graph": {
+                "graph": {
+                    "metadata": {"status": "no_plan"},
+                    "nodes": {},
+                    "edges": [],
+                }
+            },
+        }
+
+    toolkit = SymphonyToolkit(SimpleNamespace(plan=plan))
+    rail = SymphonyOrchestrationRail()
+    a_bound = asyncio.Event()
+    b_bound = asyncio.Event()
+
+    def tool_context(inputs):
+        reference = inputs["run"]["context"]["extra"][
+            SYMPHONY_LLM_CONFIG_REF_KEY
+        ]
+        return AgentCallbackContext(
+            agent=SimpleNamespace(),
+            inputs=ToolCallInputs(
+                tool_call=SimpleNamespace(
+                    id=f"call-{reference[:8]}",
+                    name="symphony_compose_graph",
+                    arguments={},
+                ),
+                tool_name="symphony_compose_graph",
+                tool_args={},
+            ),
+            extra={"run_context": SimpleNamespace(extra={
+                SYMPHONY_LLM_CONFIG_REF_KEY: reference,
+            })},
+        )
+
+    async def invoke_a():
+        ctx = tool_context(inputs_a)
+        await rail.before_tool_call(ctx)
+        a_bound.set()
+        await b_bound.wait()
+        adapter._active_request_model = model_b
+        try:
+            return await toolkit.plan("a")
+        finally:
+            await rail.after_tool_call(ctx)
+
+    async def invoke_b():
+        await a_bound.wait()
+        ctx = tool_context(inputs_b)
+        await rail.before_tool_call(ctx)
+        b_bound.set()
+        try:
+            return await toolkit.plan("b")
+        finally:
+            await rail.after_tool_call(ctx)
+
+    results = await asyncio.gather(invoke_a(), invoke_b())
+
+    assert all(result["success"] is True for result in results)
+    assert seen == {"a": "model-a", "b": "model-b"}
 
 
 @pytest.mark.asyncio
