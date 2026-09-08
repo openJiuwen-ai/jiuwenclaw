@@ -1053,14 +1053,16 @@ def _uac_shell_execute_target(payload_exe: str, payload_args: list[str]) -> tupl
 def _elevate_and_run_install(
     force: bool = False,
     preinstall_paths: list[str] | None = None,
-    proxy_port_start: int = const.DEFAULT_PROXY_PORT_RANGE_START,
-    proxy_port_end: int = const.DEFAULT_PROXY_PORT_RANGE_END,
+    proxy_ports: tuple[int, int] = (
+        const.DEFAULT_PROXY_PORT_RANGE_START,
+        const.DEFAULT_PROXY_PORT_RANGE_END,
+    ),
     policy_path: str | None = None,
     recreate_user: bool = False,
 ) -> int:
     """通过 UAC 拉起提权子进程执行 install, 并同步阻塞等待其完成.
 
-    转发 force / recreate_user / preinstall_paths / proxy_port_* / policy_path
+    转发 force / recreate_user / preinstall_paths / proxy_ports / policy_path
     到提权子进程 (review MAJOR #9: 旧版只传 --install, force=True 会静默 no-op).
 
     同步机制: 沿用旧版能正常弹 UAC 的 ShellExecuteW (它返回 HINSTANCE, 拿不到
@@ -1101,9 +1103,9 @@ def _elevate_and_run_install(
     if recreate_user:
         parts.append("--recreate-user")
     parts.append("--proxy-port-start")
-    parts.append(str(proxy_port_start))
+    parts.append(str(proxy_ports[0]))
     parts.append("--proxy-port-end")
-    parts.append(str(proxy_port_end))
+    parts.append(str(proxy_ports[1]))
     # 把完成 Event 名传给子进程, 子进程 install 跑完后 SetEvent 通知本进程.
     parts.append("--install-done-event")
     parts.append(event_name)
@@ -1284,8 +1286,10 @@ PREINSTALL_JOIN_TIMEOUT_SECONDS = 120.0  # noqa: N816 - Win32 常量
 def install(
     force: bool = False,
     preinstall_paths: list[str] | None = None,
-    proxy_port_start: int = const.DEFAULT_PROXY_PORT_RANGE_START,
-    proxy_port_end: int = const.DEFAULT_PROXY_PORT_RANGE_END,
+    proxy_ports: tuple[int, int] = (
+        const.DEFAULT_PROXY_PORT_RANGE_START,
+        const.DEFAULT_PROXY_PORT_RANGE_END,
+    ),
     policy_path: str | None = None,
     recreate_user: bool = False,
 ) -> None:
@@ -1296,7 +1300,7 @@ def install(
         preinstall_paths: 读 ACL 预装路径 (来自根 policy 的
             ``windows.filesystem.read_acl_preinstall``). 为 None 时用
             默认 4 个系统目录.
-        proxy_port_start/end: WFP Permit filter 放行的 loopback 端口范围
+        proxy_ports: (start, end) WFP Permit filter 放行的 loopback 端口范围
             (来自根 policy 的 ``windows.proxy.port_range_*``). 必须与
             win_proxy 实际监听端口一致, 否则代理路径被 Block 拦截
             (review MAJOR #7: 旧版硬编码默认端口, 忽略 policy).
@@ -1321,8 +1325,7 @@ def install(
         _elevate_and_run_install(
             force=force,
             preinstall_paths=preinstall_paths,
-            proxy_port_start=proxy_port_start,
-            proxy_port_end=proxy_port_end,
+            proxy_ports=proxy_ports,
             policy_path=policy_path,
             recreate_user=recreate_user,
         )
@@ -1444,7 +1447,7 @@ def install(
         wfp_exc = None
         try:
             from jiuwenbox.supervisor import win_wfp
-            win_wfp.install_wfp_filters(sid, proxy_port_start, proxy_port_end)
+            win_wfp.install_wfp_filters(sid, proxy_ports[0], proxy_ports[1])
             network_isolation_ok = True
         except Exception as exc:  # noqa: BLE001
             wfp_exc = exc
@@ -1454,7 +1457,7 @@ def install(
             try:
                 from jiuwenbox.supervisor import win_wfp
                 fallback_ok = win_wfp.install_firewall_rule_fallback(
-                    const.SANDBOX_USER_NAME, proxy_port_start, proxy_port_end,
+                    const.SANDBOX_USER_NAME, proxy_ports[0], proxy_ports[1],
                     sandbox_user_sid=sid,
                 )
             except Exception as fallback_exc:  # noqa: BLE001
@@ -1731,7 +1734,12 @@ def ensure_acl_policy_paths_authorized(
     need_elevate: set[str] = set()
     skipped: list[str] = []
     for p in new_acl_paths:
-        if "{{" in p or (p.startswith("%") and "%" in p[1:] and not os.path.exists(p)):
+        # 占位未展开 (如 {{ workspace }}) 的路径无法判定, 跳过.
+        if "{{" in p:
+            skipped.append(p)
+            continue
+        # %VAR% 环境变量风格且未展开的路径 (expandvars 后不存在) 跳过.
+        if p.startswith("%") and "%" in p[1:] and not os.path.exists(p):
             skipped.append(p)
             continue
         if _path_owned_by_current_user(p):
@@ -1874,8 +1882,7 @@ def ensure_windows_setup(
                     install(
                         force=True,
                         preinstall_paths=sorted(new_paths),
-                        proxy_port_start=proxy_port_start,
-                        proxy_port_end=proxy_port_end,
+                        proxy_ports=(proxy_port_start, proxy_port_end),
                         policy_path=policy_path,
                     )
                 else:
@@ -1894,8 +1901,7 @@ def ensure_windows_setup(
         install(
             force=force,
             preinstall_paths=preinstall_paths,
-            proxy_port_start=proxy_port_start,
-            proxy_port_end=proxy_port_end,
+            proxy_ports=(proxy_port_start, proxy_port_end),
             policy_path=policy_path,
         )
     except Exception:  # noqa: BLE001
@@ -2436,8 +2442,7 @@ def _main(argv: list[str]) -> int:
             install(
                 force=args.force,
                 preinstall_paths=preinstall_paths,
-                proxy_port_start=args.proxy_port_start,
-                proxy_port_end=args.proxy_port_end,
+                proxy_ports=(args.proxy_port_start, args.proxy_port_end),
                 policy_path=args.policy_path,
                 recreate_user=args.recreate_user,
             )
