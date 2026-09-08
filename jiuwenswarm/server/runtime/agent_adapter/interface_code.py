@@ -62,9 +62,11 @@ from jiuwenswarm.agents.harness.common.browser_defaults import (
 )
 from jiuwenswarm.agents.harness.code.prompt.code_prompt_builder import (
     build_code_system_prompt,
+    build_code_system_prompt_sections,
 )
 from jiuwenswarm.agents.harness.design.prompt.design_prompt_builder import (
     build_design_system_prompt,
+    build_design_system_prompt_sections,
 )
 from jiuwenswarm.agents.harness.code.rails import (
     CodeTaskPlanningRail,
@@ -375,10 +377,6 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
         "FileSystemRail",  # 别名
     })
 
-    def _include_subagent_usage_rules(self) -> bool:
-        """Code and Design retain the shared subagent guidance."""
-        return True
-
     def __init__(self) -> None:
         super().__init__()
         # Code 模式专属 rails — 父类不定义这些属性
@@ -444,6 +442,12 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
             raw = "cn"
         return resolve_language(raw)
 
+    def _build_static_system_prompt_sections(self):  # type: ignore[override]
+        """Return the active Code or Design profile as real prompt sections."""
+        if self._static_prompt_profile == "design":
+            return build_design_system_prompt_sections()
+        return build_code_system_prompt_sections()
+
     # ─── 初始化 ──────────────────────────────
 
     async def create_instance(self, config: dict[str, Any] | None = None, *,
@@ -466,6 +470,7 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
         self._session_instance_config = dict(config or {}) if isinstance(config, dict) else None
         self._session_instance_mode = mode
         self._session_instance_sub_mode = sub_mode
+        self._static_prompt_profile = "design" if mode == "design" else "code"
 
         await self.set_checkpoint()
 
@@ -574,6 +579,7 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
             None,
             lambda: asyncio.run(self._instance.ensure_initialized()),
         )
+        self._install_structured_static_prompt_sections()
         # 修正 .agent_history 写入路径：openjiuwen 文件工具默认将
         # .agent_history 写到 Workspace.root_path（即项目目录），
         # 这里覆写为 agent 系统 workspace，避免污染用户项目目录。

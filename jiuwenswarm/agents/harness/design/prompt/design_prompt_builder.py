@@ -31,10 +31,12 @@ from jiuwenswarm.agents.harness.common.prompt.prompt_builder import (
 
 class DesignPromptPriority(IntEnum):
     SAFETY = 13
-    TONE_AND_STYLE = 15
-    INTRO = 16
+    # Runtime Tool Usage Rules has priority 30; mode-local static guidance
+    # follows it so the captured prompt order is stable across agent-core builds.
+    TONE_AND_STYLE = 31
+    INTRO = 32
     SYSTEM = 11
-    CORE_CAPABILITIES = 19
+    CORE_CAPABILITIES = 33
 
 
 # ─── Intro ────────────────────────────────────────
@@ -184,13 +186,19 @@ def build_design_system_prompt() -> str:
     """
     builder = SystemPromptBuilder(language="en")
 
-    for generator in _DESIGN_SECTION_GENERATORS:
-        builder.add_section(generator())
+    for section in build_design_system_prompt_sections():
+        builder.add_section(section)
 
     return builder.build()
 
 
+def build_design_system_prompt_sections() -> tuple[PromptSection, ...]:
+    """Return Design's static sections for registration on the runtime builder."""
+    return tuple(generator() for generator in _DESIGN_SECTION_GENERATORS)
+
+
 __all__ = [
     "DesignPromptPriority",
+    "build_design_system_prompt_sections",
     "build_design_system_prompt",
 ]

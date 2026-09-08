@@ -8,6 +8,8 @@ from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
 import openjiuwen.harness.prompts.sections.context as context_sections
 from openjiuwen.harness.rails.base import DeepAgentRail
 
+_TOOL_USAGE_SECTION_PRIORITY = 14
+
 
 class ToolUsagePromptRail(DeepAgentRail):
     """Render rules for the tools that are actually registered on this agent.
@@ -47,4 +49,7 @@ class ToolUsagePromptRail(DeepAgentRail):
         if section is None:
             self.system_prompt_builder.remove_section("tools")
             return
+        # This rail is the last writer for Code/Design.  Set the final object
+        # priority here rather than relying on an earlier builder monkey patch.
+        section.priority = _TOOL_USAGE_SECTION_PRIORITY
         self.system_prompt_builder.add_section(section)

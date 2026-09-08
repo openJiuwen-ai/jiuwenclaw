@@ -21,7 +21,10 @@ class PromptPriority(IntEnum):
     CONTENT_POLICY = 11
     REGIONAL_CONVENTIONS = 12
     SAFETY = 13
-    TASK_EXECUTION = 15
+    # Tool Usage Rules is materialized at runtime by agent-core with priority
+    # 30.  Keep Task Execution immediately after it rather than depending on
+    # a monkey-patch of that external runtime section.
+    TASK_EXECUTION = 31
     SKILLS = 40
     MEMORY = 55
     INPUT = 60
@@ -248,7 +251,8 @@ _SUBAGENT_USAGE_RULES_TEXT = """## Subagent Usage Rules
 def _runtime_env_message_rules_text(include_subagent_usage_rules: bool = True) -> str:
     """Return Input/Output rules and optional Subagent Usage Rules.
 
-    Office deliberately omits subagent guidance; Code and Design retain it.
+    Office, Code, and Design all retain this Runtime Environment subsection.
+    Office alone omits the separate top-level task-tool prompt section.
     subsections that are appended to the Runtime Environment (``env``) section
     by :class:`RuntimePromptRail`.
 
@@ -268,13 +272,27 @@ def build_agent_identity_prompt(language: str) -> str:
     """
     resolved_language = resolve_language(language)
     builder = SystemPromptBuilder(language=resolved_language)
-    builder.add_section(_identity_prompt())
-    builder.add_section(_content_policy_prompt())
-    builder.add_section(build_shared_system_section())
-    builder.add_section(_regional_conventions_prompt())
-    builder.add_section(_safety_prompt())
-    builder.add_section(_task_execution_prompt())
+    for section in build_work_system_prompt_sections():
+        builder.add_section(section)
     return builder.build()
+
+
+def build_work_system_prompt_sections() -> tuple[PromptSection, ...]:
+    """Return Work's static sections without flattening them into one string.
+
+    ``create_deep_agent(system_prompt=...)`` wraps a string as one ``identity``
+    section.  Adapters that need dynamic sections to interleave with static
+    ones use this function to register the returned sections on the final
+    runtime builder instead.
+    """
+    return (
+        _identity_prompt(),
+        _content_policy_prompt(),
+        build_shared_system_section(),
+        _regional_conventions_prompt(),
+        _safety_prompt(),
+        _task_execution_prompt(),
+    )
 
 
 def _read_file(file_path: str) -> Optional[str]:
@@ -307,5 +325,6 @@ __all__ = [
     "build_shared_content_policy_section",
     "build_shared_system_section",
     "build_shared_regional_conventions_section",
+    "build_work_system_prompt_sections",
     "build_agent_identity_prompt",
 ]

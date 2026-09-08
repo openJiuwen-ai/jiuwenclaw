@@ -295,8 +295,9 @@ def _build_auto_list_mode_skill_prompt(language: str = "en") -> str:
 # ---------------------------------------------------------------------------
 
 # Safety is static priority 13 in all three modes.  Priority 14 reserves its
-# immediate successor for this runtime-built section; Office task strategy and
-# Code/Design mode-specific guidance start at priority 15.
+# immediate successor for this runtime-built section.  Product static sections
+# that must follow Tools use 31+ so the ordering also stays correct when an
+# older agent-core writer leaves Tools at its upstream priority 30.
 _TOOL_USAGE_SECTION_PRIORITY = 14
 
 def _build_tools_content_with_find_skills(ability_manager, language: str = "cn") -> str | None:
@@ -325,12 +326,41 @@ def _build_tools_section_after_safety(ability_manager, language: str = "cn"):
 
 def _apply_tools_patch() -> None:
     """Patch tool text and placement without changing the public API."""
-    if getattr(_context.build_tools_content, "__skills_goal_override_wrapped__", False):
-        return
-    _build_tools_content_with_find_skills.__skills_goal_override_wrapped__ = True  # type: ignore[attr-defined]
-    _build_tools_section_after_safety.__skills_goal_override_wrapped__ = True  # type: ignore[attr-defined]
-    _context.build_tools_content = _build_tools_content_with_find_skills
-    _context.build_tools_section = _build_tools_section_after_safety
+    if not getattr(_context.build_tools_content, "__skills_goal_override_wrapped__", False):
+        _build_tools_content_with_find_skills.__skills_goal_override_wrapped__ = True  # type: ignore[attr-defined]
+        _build_tools_section_after_safety.__skills_goal_override_wrapped__ = True  # type: ignore[attr-defined]
+        _context.build_tools_content = _build_tools_content_with_find_skills
+        _context.build_tools_section = _build_tools_section_after_safety
+    # ContextAssembleRail imports build_tools_section directly at module-load
+    # time, so updating only context.py leaves its stale alias at priority 30.
+    # Patch that consumer too; Office and the configured Code/Design profiles
+    # use it to inject the actual runtime Tools section.
+    try:
+        from openjiuwen.harness.rails.context_engineer import context_assemble_rail
+
+        context_assemble_rail.build_tools_section = _build_tools_section_after_safety
+
+        # ContextAssembleRail is Office's runtime writer.  The agent-core rail
+        # can replace the tools section after its imported helper ran, so apply
+        # the priority to the *final builder section* after the original rail
+        # has completed its write.  This is intentionally separate from the
+        # function patch above: it is resilient to an upstream stale import.
+        original_before_model_call = context_assemble_rail.ContextAssembleRail.before_model_call
+        if not getattr(original_before_model_call, "__skills_goal_tools_order_wrapped__", False):
+            async def _ordered_before_model_call(self, ctx):  # type: ignore[no-untyped-def]
+                await original_before_model_call(self, ctx)
+                builder = getattr(self, "system_prompt_builder", None)
+                section = builder.get_section(SectionName.TOOLS) if builder is not None else None
+                if section is not None:
+                    section.priority = _TOOL_USAGE_SECTION_PRIORITY
+
+            _ordered_before_model_call.__skills_goal_tools_order_wrapped__ = True  # type: ignore[attr-defined]
+            context_assemble_rail.ContextAssembleRail.before_model_call = _ordered_before_model_call
+    except Exception:
+        logger.debug(
+            "[skills_goal_override] patch ContextAssembleRail tools section failed",
+            exc_info=True,
+        )
 
 
 # ---------------------------------------------------------------------------

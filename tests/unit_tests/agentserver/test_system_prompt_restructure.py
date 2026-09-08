@@ -183,8 +183,11 @@ def test_work_code_and_design_share_the_same_static_prefix():
 
     assert code_prompt.startswith(shared_prefix)
     assert design_prompt.startswith(shared_prefix)
-    assert code_prompt[len(shared_prefix) :].startswith("# Code mode")
-    assert design_prompt[len(shared_prefix) :].startswith("# Design mode")
+    # The mode-specific tone section is deliberately the first static section
+    # after Safety: the runtime Tools section (P30) is inserted between them
+    # in the fully assembled prompt.
+    assert code_prompt[len(shared_prefix) :].startswith("# Tone and style")
+    assert design_prompt[len(shared_prefix) :].startswith("# Tone and style")
 
 
 def test_all_modes_place_the_shared_system_section_before_regional_conventions():
@@ -229,8 +232,74 @@ def test_code_and_design_tone_follow_tool_usage_rules_priority():
 
     for priority in (CodePromptPriority, DesignPromptPriority):
         assert priority.SAFETY == 13
-        assert priority.TONE_AND_STYLE == 15
-        assert priority.INTRO == 16
+        # agent-core's runtime Tool Usage Rules is priority 30 in the packaged
+        # application.  Static guidance must follow it without relying on a
+        # monkey-patch of an external module.
+        assert priority.TONE_AND_STYLE == 31
+        assert priority.INTRO == 32
+
+    assert CodePromptPriority.DOING_TASKS == 33
+    assert CodePromptPriority.USING_YOUR_TOOLS == 34
+    assert CodePromptPriority.SESSION_GUIDANCE == 35
+    assert CodePromptPriority.ACTIONS_WITH_CARE == 36
+    assert DesignPromptPriority.CORE_CAPABILITIES == 33
+
+
+@pytest.mark.parametrize(
+    ("profile", "expected_after_tools"),
+    (
+        ("work", ("# Task Execution Strategy",)),
+        ("code", ("# Tone and style", "# Code mode")),
+        ("design", ("# Tone and style", "# Design mode")),
+    ),
+)
+def test_runtime_builder_keeps_tools_between_safety_and_profile_guidance(
+    profile, expected_after_tools
+):
+    """Guard the real DeepAgent path, not only a pre-flattened prompt string."""
+    from jiuwenswarm.agents.harness.code.prompt.code_prompt_builder import (
+        build_code_system_prompt,
+    )
+    from jiuwenswarm.agents.harness.design.prompt.design_prompt_builder import (
+        build_design_system_prompt,
+    )
+    from jiuwenswarm.server.runtime.agent_adapter.interface_code import (
+        JiuwenSwarmCodeAdapter,
+    )
+
+    initial_prompts = {
+        "work": build_agent_identity_prompt(language="en"),
+        "code": build_code_system_prompt(),
+        "design": build_design_system_prompt(),
+    }
+    builder = SystemPromptBuilder(language="en")
+    # This is exactly what agent-core does to a string passed as system_prompt:
+    # it makes the whole rendered prompt one priority-10 identity section.
+    builder.add_section(
+        PromptSection(name="identity", content={"en": initial_prompts[profile]}, priority=10)
+    )
+    applied = []
+    instance = SimpleNamespace(
+        system_prompt_builder=builder,
+        apply_prompt_builder_to_react_agent=lambda: applied.append(True),
+    )
+    if profile == "work":
+        adapter = object.__new__(JiuWenSwarmDeepAdapter)
+    else:
+        adapter = object.__new__(JiuwenSwarmCodeAdapter)
+        adapter._static_prompt_profile = profile
+    adapter._instance = instance
+
+    adapter._install_structured_static_prompt_sections()
+    builder.add_section(
+        PromptSection(name="tools", content={"en": "# Tool Usage Rules\n"}, priority=14)
+    )
+    prompt = builder.build()
+
+    assert applied == [True]
+    assert prompt.index("# Safety") < prompt.index("# Tool Usage Rules")
+    for heading in expected_after_tools:
+        assert prompt.index("# Tool Usage Rules") < prompt.index(heading)
 
 
 def test_code_session_guidance_precedes_executing_actions_with_care():
@@ -261,8 +330,8 @@ def test_find_skills_policy_lives_in_tool_usage_rules_not_skills_preamble():
     assert skills_goal_override._SKILLS_PREAMBLE_EN.startswith("# Skills")
 
 
-def test_tool_usage_section_priority_follows_shared_safety_for_office_mode():
-    """Office resolves the context section directly, without the narrow rail."""
+def test_office_static_task_execution_follows_agent_core_tools_priority():
+    """The real agent-core Tools section is P30 in the packaged application."""
     from openjiuwen.core.foundation.tool.base import ToolCard
     from openjiuwen.harness.prompts.sections import context
 
@@ -272,15 +341,39 @@ def test_tool_usage_section_priority_follows_shared_safety_for_office_mode():
     assert section is not None
     assert section.priority == 14
 
+    runtime_section = PromptSection(
+        name=section.name,
+        content=section.content,
+        priority=30,
+    )
+
     builder = SystemPromptBuilder(language="en")
     builder.add_section(PromptSection(name="safety", content={"en": "# Safety\n"}, priority=13))
-    builder.add_section(section)
-    builder.add_section(PromptSection(name="task", content={"en": "# Task\n"}, priority=15))
+    builder.add_section(runtime_section)
+    # Cover the real unpatched agent-core priority seen in capture files: Task
+    # Execution remains after Tools even when the optional P14 patch cannot
+    # apply to the runtime import path.
+    builder.add_section(PromptSection(name="task", content={"en": "# Task\n"}, priority=31))
     prompt = builder.build()
     assert prompt.index("# Safety") < prompt.index("# Tool Usage Rules") < prompt.index("# Task")
 
 
-def test_subagent_usage_rules_are_omitted_only_for_office_mode():
+def test_context_assemble_rail_uses_the_patched_tool_usage_priority():
+    from openjiuwen.core.foundation.tool.base import ToolCard
+    from openjiuwen.harness.rails.context_engineer.context_assemble_rail import (
+        build_tools_section,
+    )
+
+    section = build_tools_section(
+        SimpleNamespace(list=lambda: [ToolCard(name="read_file")]),
+        language="en",
+    )
+
+    assert section is not None
+    assert section.priority == 14
+
+
+def test_runtime_subagent_usage_rules_are_present_while_office_omits_outer_rules():
     from jiuwenswarm.agents.harness.common.prompt.prompt_builder import (
         _runtime_env_message_rules_text,
     )
@@ -288,8 +381,39 @@ def test_subagent_usage_rules_are_omitted_only_for_office_mode():
 
     assert "## Subagent Usage Rules" not in _runtime_env_message_rules_text(False)
     assert "## Subagent Usage Rules" in _runtime_env_message_rules_text(True)
-    assert JiuWenSwarmDeepAdapter._include_subagent_usage_rules(None) is False
-    assert JiuwenSwarmCodeAdapter._include_subagent_usage_rules(None) is True
+    # Runtime guidance is retained for every mode. Office alone omits the
+    # separate top-level task-tool section.
+    assert JiuWenSwarmDeepAdapter._include_runtime_subagent_usage_rules(None) is True
+    assert JiuWenSwarmDeepAdapter._include_outer_subagent_usage_rules(None) is False
+    assert JiuwenSwarmCodeAdapter._include_outer_subagent_usage_rules(None) is False
+
+
+@pytest.mark.asyncio
+async def test_office_subagent_rail_removes_only_the_prompt_section():
+    from openjiuwen.harness.prompts.sections import SectionName
+    from openjiuwen.harness.rails.subagent import SubagentRail
+    from jiuwenswarm.agents.harness.common.rails.browser_task_prompt_rail import (
+        BrowserTaskPromptRail,
+    )
+
+    async def inject_task_section(rail, ctx):
+        del rail, ctx
+        builder.add_section(
+            PromptSection(name=SectionName.TASK_TOOL, content={"en": "# Subagent Usage Rules\n"}, priority=85)
+        )
+
+    builder = SystemPromptBuilder(language="en")
+    office_rail = BrowserTaskPromptRail(include_usage_rules=False)
+    office_rail.system_prompt_builder = builder
+    with patch.object(SubagentRail, "before_model_call", inject_task_section):
+        await office_rail.before_model_call(SimpleNamespace())
+    assert "# Subagent Usage Rules" not in builder.build()
+
+    code_rail = BrowserTaskPromptRail(include_usage_rules=True)
+    code_rail.system_prompt_builder = builder
+    with patch.object(SubagentRail, "before_model_call", inject_task_section):
+        await code_rail.before_model_call(SimpleNamespace())
+    assert "# Subagent Usage Rules" in builder.build()
 
 
 @pytest.mark.asyncio
@@ -303,7 +427,7 @@ async def test_code_tool_usage_rail_injects_rules_after_safety():
     builder.add_section(
         PromptSection(name="safety", content={"en": "# Safety\n"}, priority=13)
     )
-    builder.add_section(PromptSection(name="intro", content={"en": "# Intro\n"}, priority=15))
+    builder.add_section(PromptSection(name="intro", content={"en": "# Intro\n"}, priority=31))
     agent = SimpleNamespace(
         system_prompt_builder=builder,
         ability_manager=SimpleNamespace(list=lambda: [ToolCard(name="read_file")]),
