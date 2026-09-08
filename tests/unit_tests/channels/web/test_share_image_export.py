@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pytest
 
+from jiuwenswarm.channels.web import share_image_export
 from jiuwenswarm.channels.web.share_image_export import (
     ShareImageExportManager,
     _validate_png,
@@ -44,6 +45,47 @@ def _wait_for_terminal_state(manager: ShareImageExportManager, job_id: str) -> d
             return status
         time.sleep(0.01)
     raise AssertionError("share image export job did not finish")
+
+
+@pytest.mark.parametrize("error", [None, "render_failed\n下一行"])
+def test_share_image_cli_flushes_json_protocol_events(monkeypatch, tmp_path: Path, error: str | None) -> None:
+    events: list[dict[str, str]] = []
+
+    class ProtocolOutput:
+        pending = ""
+
+        def write(self, text: str) -> int:
+            self.pending += text
+            return len(text)
+
+        def flush(self) -> None:
+            assert self.pending.endswith("\n")
+            assert len(self.pending.splitlines()) == 1
+            events.append(json.loads(self.pending))
+            self.pending = ""
+
+    def renderer(*, base_url, job_id, output_path, on_phase) -> Path:
+        assert base_url == "http://127.0.0.1:5173"
+        assert job_id == "job-1"
+        assert output_path == tmp_path / "share.png"
+        on_phase("rendering")
+        assert events == [{"phase": "rendering"}]
+        if error is not None:
+            raise RuntimeError(error)
+        return output_path.with_suffix(".zip")
+
+    monkeypatch.setattr(share_image_export.sys, "stdout", ProtocolOutput())
+    monkeypatch.setattr(share_image_export.sys, "argv", [
+        "share_image_export",
+        "--base-url", "http://127.0.0.1:5173",
+        "--job-id", "job-1",
+        "--output", str(tmp_path / "share.png"),
+    ])
+    monkeypatch.setattr(share_image_export, "render_share_image", renderer)
+
+    assert share_image_export._run_cli() == (1 if error is not None else 0)
+    expected_result = {"error": error} if error is not None else {"phase": "completed", "filename": "share.zip"}
+    assert events == [{"phase": "rendering"}, expected_result]
 
 
 def test_share_image_export_job_freezes_snapshot_and_publishes_result() -> None:

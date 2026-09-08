@@ -151,13 +151,11 @@ def _validate_zip(path: Path) -> None:
                 stem = match.group("stem")
                 part_text = match.group("part")
                 total_text = match.group("total")
-                if (
-                    expected_stem not in {None, stem}
-                    or len(part_text) != expected_width
-                    or len(total_text) != expected_width
-                    or int(part_text) != expected_part
-                    or int(total_text) != len(files)
-                ):
+                if expected_stem not in {None, stem}:
+                    raise RuntimeError("share_export_zip_part_invalid")
+                if len(part_text) != expected_width or len(total_text) != expected_width:
+                    raise RuntimeError("share_export_zip_part_invalid")
+                if int(part_text) != expected_part or int(total_text) != len(files):
                     raise RuntimeError("share_export_zip_part_invalid")
                 expected_stem = stem
                 with archive.open(info) as stream:
@@ -227,7 +225,9 @@ def render_share_image(
 
                 if state.get("status") == "error":
                     message = state.get("error")
-                    raise RuntimeError(message if isinstance(message, str) and message else "share_export_render_failed")
+                    raise RuntimeError(
+                        message if isinstance(message, str) and message else "share_export_render_failed"
+                    )
                 if page_errors:
                     raise RuntimeError(f"share_export_page_error: {page_errors[-1]}")
 
@@ -458,6 +458,12 @@ class ShareImageExportManager:
             shutil.rmtree(job.directory, ignore_errors=True)
 
 
+def _write_cli_event(event: dict[str, str]) -> None:
+    """Write one flushed JSONL protocol event for the Vite export manager."""
+    sys.stdout.write(json.dumps(event) + "\n")
+    sys.stdout.flush()
+
+
 def _run_cli() -> int:
     parser = argparse.ArgumentParser(description="Render a WorkSwarm share image in an isolated browser")
     parser.add_argument("--base-url", required=True)
@@ -466,7 +472,7 @@ def _run_cli() -> int:
     args = parser.parse_args()
 
     def report(phase: str) -> None:
-        print(json.dumps({"phase": phase}), flush=True)
+        _write_cli_event({"phase": phase})
 
     try:
         result_path = render_share_image(
@@ -475,9 +481,9 @@ def _run_cli() -> int:
             output_path=Path(args.output),
             on_phase=report,
         )
-        print(json.dumps({"phase": "completed", "filename": result_path.name}), flush=True)
+        _write_cli_event({"phase": "completed", "filename": result_path.name})
     except Exception as exc:  # noqa: BLE001
-        print(json.dumps({"error": str(exc)}), flush=True)
+        _write_cli_event({"error": str(exc)})
         return 1
     return 0
 

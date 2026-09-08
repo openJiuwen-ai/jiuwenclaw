@@ -1248,7 +1248,7 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
             self.end_headers()
             if self.command != "HEAD":
                 with file_path.open("rb") as stream:
-                    while chunk := stream.read(1024 * 1024):
+                    for chunk in iter(lambda: stream.read(1024 * 1024), b""):
                         self.wfile.write(chunk)
             return
 

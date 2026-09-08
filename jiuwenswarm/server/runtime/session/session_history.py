@@ -431,21 +431,18 @@ def _write_records_to_path(path: Path, records: list[dict[str, Any]]) -> None:
     else:
         payload = json.dumps(records, ensure_ascii=False, indent=2)
 
-    fd, temporary_name = tempfile.mkstemp(
+    with tempfile.TemporaryDirectory(
         dir=path.parent,
         prefix=f".{path.name}.",
         suffix=".tmp",
-    )
-    temporary_path = Path(temporary_name)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+    ) as temporary_dir:
+        temporary_path = Path(temporary_dir) / path.name
+        temporary_path.touch(mode=0o600, exist_ok=False)
+        with temporary_path.open("w", encoding="utf-8") as fh:
             fh.write(payload)
             fh.flush()
             os.fsync(fh.fileno())
         os.replace(temporary_path, path)
-    finally:
-        if temporary_path.exists():
-            temporary_path.unlink()
 
 
 def _append_record_jsonl(path: Path, record: dict[str, Any]) -> None:
