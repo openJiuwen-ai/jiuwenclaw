@@ -1355,19 +1355,29 @@ test('video generation reuses dedicated vendor presets instead of the chat model
     anthropic_base: 'https://dashscope.aliyuncs.com/apps/anthropic',
     anthropic_client_provider: 'Anthropic',
     video_gen_default_model: 'wan2.6-t2v',
-    video_gen_model_options: ['wan2.6-t2v'],
+    video_gen_model_options: ['wan3.0-video-prime', 'wan2.6-t2v', 'happyhorse-1.1-t2v'],
     video_gen_api_base: 'https://dashscope.aliyuncs.com/api/v1',
     image_gen_default_model: 'wanx-v1',
-    image_gen_model_options: ['wanx-v1', 'wan2.5-t2i-preview', 'qwen-image-plus'],
+    image_gen_model_options: [
+      'wanx-v1',
+      'wan2.7-image',
+      'qwen-image-3.0',
+      'z-image-turbo',
+    ],
     image_gen_api_base: 'https://dashscope.aliyuncs.com/api/v1',
   };
-  assert.deepEqual(mediaModelOptionsForPreset(alibaba, 'video_gen'), ['wan2.6-t2v']);
+  assert.deepEqual(mediaModelOptionsForPreset(alibaba, 'video_gen'), [
+    'wan3.0-video-prime',
+    'wan2.6-t2v',
+    'happyhorse-1.1-t2v',
+  ]);
   assert.equal(mediaDefaultModelForPreset(alibaba, 'video_gen'), 'wan2.6-t2v');
   assert.equal(shouldFetchRemoteMediaModels(alibaba, 'video_gen'), false);
   assert.deepEqual(mediaModelOptionsForPreset(alibaba, 'image_gen'), [
     'wanx-v1',
-    'wan2.5-t2i-preview',
-    'qwen-image-plus',
+    'wan2.7-image',
+    'qwen-image-3.0',
+    'z-image-turbo',
   ]);
   assert.equal(mediaDefaultModelForPreset(alibaba, 'image_gen'), 'wanx-v1');
   assert.equal(shouldFetchRemoteMediaModels(alibaba, 'image_gen'), false);
@@ -1431,12 +1441,14 @@ test('video generation reuses dedicated vendor presets instead of the chat model
     anthropic_client_provider: 'Anthropic',
     video_gen_default_model: 'MiniMax-H3-Max',
     video_gen_model_options: ['MiniMax-H3', 'MiniMax-H3-Max'],
+    image_gen_default_model: 'image-01',
+    image_gen_model_options: ['image-01', 'image-01-live'],
   };
   assert.deepEqual(mediaModelOptionsForPreset(minimax, 'video_gen'), ['MiniMax-H3', 'MiniMax-H3-Max']);
   assert.equal(mediaDefaultModelForPreset(minimax, 'video_gen'), 'MiniMax-H3-Max');
   assert.equal(shouldFetchRemoteMediaModels(minimax, 'video_gen'), false);
-  // Without dedicated image_gen options, never fall back to chat models.
-  assert.deepEqual(mediaModelOptionsForPreset(minimax, 'image_gen'), []);
+  assert.deepEqual(mediaModelOptionsForPreset(minimax, 'image_gen'), ['image-01', 'image-01-live']);
+  assert.equal(mediaDefaultModelForPreset(minimax, 'image_gen'), 'image-01');
   assert.equal(shouldFetchRemoteMediaModels(minimax, 'image_gen'), false);
   assert.deepEqual(mediaModelOptionsForPreset(minimax, 'vision'), ['MiniMax-M3', 'MiniMax-M2']);
   assert.equal(shouldFetchRemoteMediaModels(minimax, 'vision'), true);
@@ -1452,7 +1464,7 @@ test('video generation reuses dedicated vendor presets instead of the chat model
   );
   assert.deepEqual(
     filtered.custom_api.map((preset) => preset.vendor_key),
-    ['alibaba'],
+    ['alibaba', 'minimax'],
   );
   assert.deepEqual(
     filterVendorCatalogForModality(
