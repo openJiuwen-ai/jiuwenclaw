@@ -22,6 +22,7 @@ from jiuwenswarm.agents.harness.common.rails.symphony.retrieval_context_processo
     SymphonyRetrievalCompactProcessorConfig,
 )
 from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
+from jiuwenswarm.common.e2a.wire_codec import parse_agent_server_wire_unary
 from jiuwenswarm.common.schema.agent import AgentRequest
 from jiuwenswarm.common.schema.message import ReqMethod
 from jiuwenswarm.observability.session_delete import trajectory_session_accepts_records
@@ -1645,6 +1646,354 @@ async def test_handle_session_create_prepares_team_before_ack(monkeypatch, tmp_p
     assert fake_manager.claim_session_calls[0]["prewarm_eligible"] is False
     assert fake_team_manager.prepare_session_switch_calls == [
         {"session_id": "team_sess_001", "reason": "session.create switch: "}
+    ]
+
+
+@pytest.mark.asyncio
+async def test_handle_session_create_missing_token_preserves_legacy_error_wire(
+    monkeypatch, tmp_path
+):
+    server = AgentWebSocketServerHarness()
+    fake_manager = FakeAgentManager(session_id="unused-session")
+    server.set_agent_manager_for_test(fake_manager)
+    fake_ws = FakeWebSocket()
+
+    monkeypatch.setattr(
+        agent_ws_server_module,
+        "encode_agent_response_for_wire",
+        fake_encode_agent_response_for_wire,
+    )
+    patch_session_roots(monkeypatch, tmp_path / "sessions")
+
+    request = AgentRequest(
+        request_id="req-session-create-missing-token",
+        channel_id="web",
+        req_method=ReqMethod.SESSION_CREATE,
+        params={"mode": "agent"},
+    )
+
+    await server.handle_session_create_for_test(fake_ws, request, asyncio.Lock())
+
+    assert fake_manager.claim_session_calls == []
+    assert fake_ws.sent == [
+        {
+            "response_id": "req-session-create-missing-token",
+            "payload": {"error": "create_token is required"},
+            "ok": False,
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_handle_session_create_existing_metadata_fast_path_skips_owner_and_kvc(
+    monkeypatch, tmp_path
+):
+    server = AgentWebSocketServerHarness()
+    fake_manager = FakeAgentManager(session_id="existing-session")
+    server.set_agent_manager_for_test(fake_manager)
+    fake_ws = FakeWebSocket()
+    sessions_root = tmp_path / "sessions"
+    owner_calls = []
+    kvc_calls = []
+
+    monkeypatch.setattr(
+        agent_ws_server_module,
+        "encode_agent_response_for_wire",
+        fake_encode_agent_response_for_wire,
+    )
+    patch_session_roots(monkeypatch, sessions_root)
+    from jiuwenswarm.server.runtime.session.session_metadata import (
+        init_session_metadata,
+    )
+
+    init_session_metadata(
+        session_id="existing-session",
+        channel_id="web",
+        persist_session=True,
+        mode="agent.work.normal",
+    )
+
+    async def _prepare(**kwargs):
+        owner_calls.append(kwargs)
+
+    async def _dispatch(**kwargs):
+        kvc_calls.append(kwargs)
+
+    monkeypatch.setattr(server, "_prepare_session_switch_owner", _prepare)
+    monkeypatch.setattr(server, "_dispatch_session_switch_kvc", _dispatch)
+
+    request = AgentRequest(
+        request_id="req-session-create-existing",
+        channel_id="web",
+        req_method=ReqMethod.SESSION_CREATE,
+        params={"mode": "agent", "create_token": "existing-token"},
+    )
+
+    await server.handle_session_create_for_test(fake_ws, request, asyncio.Lock())
+
+    assert len(fake_manager.claim_session_calls) == 1
+    assert fake_manager.activated_sessions == ["existing-session"]
+    assert owner_calls == []
+    assert kvc_calls == []
+    assert fake_ws.sent[0]["ok"] is True
+    assert fake_ws.sent[0]["payload"]["session_id"] == "existing-session"
+    assert fake_ws.sent[0]["payload"]["persist_session"] is True
+
+
+@pytest.mark.asyncio
+async def test_handle_session_create_owner_error_releases_claim_and_uses_legacy_wire(
+    monkeypatch, tmp_path
+):
+    server = AgentWebSocketServerHarness()
+    fake_manager = FakeAgentManager(session_id="owner-error-session")
+    server.set_agent_manager_for_test(fake_manager)
+    fake_ws = FakeWebSocket()
+    kvc_calls = []
+
+    monkeypatch.setattr(
+        agent_ws_server_module,
+        "encode_agent_response_for_wire",
+        fake_encode_agent_response_for_wire,
+    )
+    patch_session_roots(monkeypatch, tmp_path / "sessions")
+
+    async def _prepare(**_kwargs):
+        raise RuntimeError("owner prepare failed")
+
+    async def _dispatch(**kwargs):
+        kvc_calls.append(kwargs)
+
+    monkeypatch.setattr(server, "_prepare_session_switch_owner", _prepare)
+    monkeypatch.setattr(server, "_dispatch_session_switch_kvc", _dispatch)
+
+    request = AgentRequest(
+        request_id="req-session-create-owner-error",
+        channel_id="web",
+        req_method=ReqMethod.SESSION_CREATE,
+        params={"mode": "agent", "create_token": "owner-error-token"},
+    )
+
+    await server.handle_session_create_for_test(fake_ws, request, asyncio.Lock())
+
+    assert fake_manager.released_sessions == ["owner-error-session"]
+    assert kvc_calls == []
+    assert fake_ws.sent == [
+        {
+            "response_id": "req-session-create-owner-error",
+            "payload": {"error": "owner prepare failed"},
+            "ok": False,
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_handle_session_create_metadata_is_visible_before_owner_prepare(
+    monkeypatch, tmp_path
+):
+    server = AgentWebSocketServerHarness()
+    fake_manager = FakeAgentManager(session_id="metadata-order-session")
+    server.set_agent_manager_for_test(fake_manager)
+    fake_ws = FakeWebSocket()
+    sessions_root = tmp_path / "sessions"
+    observed_metadata = []
+
+    monkeypatch.setattr(
+        agent_ws_server_module,
+        "encode_agent_response_for_wire",
+        fake_encode_agent_response_for_wire,
+    )
+    patch_session_roots(monkeypatch, sessions_root)
+
+    async def _prepare(**_kwargs):
+        from jiuwenswarm.server.runtime.session.session_metadata import (
+            get_session_metadata,
+        )
+
+        observed_metadata.append(
+            get_session_metadata("metadata-order-session", cache_bust=True)
+        )
+        return False, "agent", None, None, None
+
+    monkeypatch.setattr(server, "_prepare_session_switch_owner", _prepare)
+
+    request = AgentRequest(
+        request_id="req-session-create-metadata-order",
+        channel_id="acp",
+        req_method=ReqMethod.SESSION_CREATE,
+        params={
+            "mode": "agent",
+            "create_token": "metadata-order-token",
+            "persist_session": True,
+            "title": "characterization title",
+            "user_id": "characterization-user",
+            "model_name": "characterization-model",
+            "cron_id": "characterization-cron",
+        },
+    )
+
+    await server.handle_session_create_for_test(fake_ws, request, asyncio.Lock())
+
+    assert len(observed_metadata) == 1
+    metadata = observed_metadata[0]
+    assert metadata["session_id"] == "metadata-order-session"
+    assert metadata["channel_id"] == "acp"
+    assert metadata["user_id"] == "characterization-user"
+    assert metadata["title"] == "characterization title"
+    assert metadata["mode"] == "agent.work.normal"
+    assert metadata["project_id"] == "default"
+    assert metadata["project_dir"] == ""
+    assert metadata["persist_session"] is True
+    assert metadata["work_mode"] == "work"
+    assert metadata["model"] == "characterization-model"
+    assert metadata["cron_id"] == "characterization-cron"
+    assert fake_ws.sent[0]["ok"] is True
+
+
+@pytest.mark.asyncio
+async def test_handle_session_create_prewarm_miss_preserves_success_contract(
+    monkeypatch, tmp_path
+):
+    server = AgentWebSocketServerHarness()
+    fake_manager = FakeAgentManager(session_id="prewarm-miss-session")
+    server.set_agent_manager_for_test(fake_manager)
+    fake_ws = FakeWebSocket()
+    prepare_calls = []
+
+    async def _claim(**kwargs):
+        fake_manager.claim_session_calls.append(kwargs)
+        return types.SimpleNamespace(
+            session_id="prewarm-miss-session",
+            prewarm_hit=False,
+            prewarm_status="warming",
+        )
+
+    async def _prepare(**kwargs):
+        prepare_calls.append(kwargs)
+        return False, "agent", None, None, None
+
+    fake_manager.claim_prewarmed_session = _claim
+    monkeypatch.setattr(
+        agent_ws_server_module,
+        "encode_agent_response_for_wire",
+        fake_encode_agent_response_for_wire,
+    )
+    patch_session_roots(monkeypatch, tmp_path / "sessions")
+    monkeypatch.setattr(server, "_prepare_session_switch_owner", _prepare)
+
+    request = AgentRequest(
+        request_id="req-session-create-prewarm-miss",
+        channel_id="web",
+        req_method=ReqMethod.SESSION_CREATE,
+        params={"mode": "agent", "create_token": "prewarm-miss-token"},
+    )
+
+    await server.handle_session_create_for_test(fake_ws, request, asyncio.Lock())
+
+    assert fake_manager.claim_session_calls[0]["prewarm_eligible"] is True
+    assert fake_manager.activated_sessions == ["prewarm-miss-session"]
+    assert len(prepare_calls) == 1
+    assert prepare_calls[0]["target_session_id"] == "prewarm-miss-session"
+    assert fake_ws.sent == [
+        {
+            "response_id": "req-session-create-prewarm-miss",
+            "payload": {
+                "sessionId": "prewarm-miss-session",
+                "session_id": "prewarm-miss-session",
+                "projectId": "default",
+                "projectDir": "",
+                "workMode": "work",
+                "persist_session": False,
+                "prewarm_hit": False,
+                "prewarm_status": "warming",
+            },
+            "ok": True,
+        }
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("params", "expected_ok"),
+    [
+        ({"create_token": "metadata-wire-token"}, True),
+        ({}, False),
+    ],
+)
+async def test_handle_session_create_preserves_legacy_response_metadata_contract(
+    monkeypatch, tmp_path, params, expected_ok
+):
+    server = AgentWebSocketServerHarness()
+    fake_manager = FakeAgentManager(session_id="metadata-wire-session")
+    server.set_agent_manager_for_test(fake_manager)
+    fake_ws = FakeWebSocket()
+    patch_session_roots(monkeypatch, tmp_path / "sessions")
+
+    async def _prepare(**_kwargs):
+        return False, "agent", None, None, None
+
+    monkeypatch.setattr(server, "_prepare_session_switch_owner", _prepare)
+    request = AgentRequest(
+        request_id=f"req-session-create-metadata-{expected_ok}",
+        channel_id="web",
+        req_method=ReqMethod.SESSION_CREATE,
+        params=params,
+        metadata={"trace_id": "must-not-be-echoed"},
+    )
+
+    await server.handle_session_create_for_test(fake_ws, request, asyncio.Lock())
+
+    response = parse_agent_server_wire_unary(fake_ws.sent[0])
+    assert response.ok is expected_ok
+    assert response.metadata is None
+    if expected_ok:
+        assert response.payload["session_id"] == "metadata-wire-session"
+    else:
+        assert response.payload == {"error": "create_token is required"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("error", "code"),
+    [
+        ("project_dir requires a matching project_id", "BAD_REQUEST"),
+        ("project not found: missing-project", "NOT_FOUND"),
+    ],
+)
+async def test_handle_session_create_preserves_project_binding_error_wire(
+    monkeypatch, tmp_path, error, code
+):
+    server = AgentWebSocketServerHarness()
+    fake_manager = FakeAgentManager(session_id="project-error-session")
+    server.set_agent_manager_for_test(fake_manager)
+    fake_ws = FakeWebSocket()
+
+    monkeypatch.setattr(
+        agent_ws_server_module,
+        "encode_agent_response_for_wire",
+        fake_encode_agent_response_for_wire,
+    )
+    patch_session_roots(monkeypatch, tmp_path / "sessions")
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.session.project_store."
+        "resolve_session_project_binding",
+        lambda _project_id, _project_dir: ("", "", error, code),
+    )
+    request = AgentRequest(
+        request_id=f"req-session-create-project-error-{code.lower()}",
+        channel_id="web",
+        req_method=ReqMethod.SESSION_CREATE,
+        params={"create_token": "project-error-token"},
+    )
+
+    await server.handle_session_create_for_test(fake_ws, request, asyncio.Lock())
+
+    assert fake_manager.claim_session_calls == []
+    assert fake_ws.sent == [
+        {
+            "response_id": request.request_id,
+            "payload": {"error": error, "code": code},
+            "ok": False,
+        }
     ]
 
 
