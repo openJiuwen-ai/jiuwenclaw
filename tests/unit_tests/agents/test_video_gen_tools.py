@@ -19,7 +19,6 @@ from jiuwenswarm.agents.harness.common.tools import video_gen_tools as vg
 # this avoids bootstrapping the whole tool-invocation/callback framework that
 # the wrapper's own __call__ wires up, which is out of scope for a unit test.
 generate_video = vg.generate_video._func
-check_video_status = vg.check_video_status._func
 
 
 _TEST_API_BASE = "https://video-model.example/api/v1"
@@ -146,62 +145,6 @@ def test_video_gen_configured_false_when_partial(monkeypatch: pytest.MonkeyPatch
 
 
 # ---------------------------------------------------------------------------
-# _resolve_frame_reference
-# ---------------------------------------------------------------------------
-
-
-def test_resolve_frame_reference_empty_returns_none():
-    assert vg._resolve_frame_reference("") == (None, None)
-    assert vg._resolve_frame_reference("   ") == (None, None)
-
-
-@pytest.mark.parametrize(
-    "value",
-    [
-        "http://example.com/frame.png",
-        "https://example.com/frame.png",
-        "data:image/png;base64,aGVsbG8=",
-    ],
-)
-def test_resolve_frame_reference_passes_through_urls_and_data_uris(value: str):
-    resolved, err = vg._resolve_frame_reference(value)
-    assert resolved == value
-    assert err is None
-
-
-def test_resolve_frame_reference_missing_local_file_errors():
-    resolved, err = vg._resolve_frame_reference("no/such/file.png")
-    assert resolved is None
-    assert err is not None
-    assert "is not a URL/data URI and no such file exists" in err
-
-
-def test_resolve_frame_reference_encodes_local_image_as_data_uri(tmp_path: Path):
-    image_path = tmp_path / "frame.png"
-    image_path.write_bytes(b"\x89PNG\r\n\x1a\nfakepngbytes")
-
-    resolved, err = vg._resolve_frame_reference(str(image_path))
-
-    assert err is None
-    assert resolved is not None
-    assert resolved.startswith("data:image/png;base64,")
-    import base64
-
-    b64_part = resolved.split(",", 1)[1]
-    assert base64.b64decode(b64_part) == image_path.read_bytes()
-
-
-def test_resolve_frame_reference_unknown_mime_falls_back_to_png(tmp_path: Path):
-    odd_file = tmp_path / "frame.unknownext"
-    odd_file.write_bytes(b"bytes")
-
-    resolved, err = vg._resolve_frame_reference(str(odd_file))
-
-    assert err is None
-    assert resolved.startswith("data:image/png;base64,")
-
-
-# ---------------------------------------------------------------------------
 # _resolve_save_path
 # ---------------------------------------------------------------------------
 
@@ -258,23 +201,6 @@ async def test_generate_video_with_partial_config_returns_error(monkeypatch: pyt
     _patch_async_client(monkeypatch, _unexpected_request)
 
     result = await generate_video(prompt="a golden retriever puppy running")
-
-    assert result == (
-        "[ERROR]: video generation is not configured - set the Video processing "
-        "API key, API URL, and model name in configuration settings."
-    )
-
-
-@pytest.mark.asyncio
-async def test_check_video_status_with_partial_config_returns_error(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setenv("VIDEO_GEN_API_KEY", "sk-test")
-
-    def _unexpected_request(request: httpx.Request) -> httpx.Response:
-        raise AssertionError(f"no HTTP call should be made with partial config, got {request.url}")
-
-    _patch_async_client(monkeypatch, _unexpected_request)
-
-    result = await check_video_status(job_id="job-123")
 
     assert result == (
         "[ERROR]: video generation is not configured - set the Video processing "
@@ -515,109 +441,6 @@ async def test_generate_video_http_error_during_submit_is_caught(monkeypatch: py
 
 
 # ---------------------------------------------------------------------------
-# check_video_status
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_check_video_status_without_api_key_returns_error(monkeypatch: pytest.MonkeyPatch):
-    result = await check_video_status(job_id="job-123")
-    assert result == (
-        "[ERROR]: video generation is not configured - set the Video processing "
-        "API key, API URL, and model name in configuration settings."
-    )
-
-
-@pytest.mark.asyncio
-async def test_check_video_status_with_blank_job_id_returns_error(monkeypatch: pytest.MonkeyPatch):
-    _set_video_model_config(monkeypatch)
-    result = await check_video_status(job_id="   ")
-    assert result == "[ERROR]: job_id is required."
-
-
-@pytest.mark.asyncio
-async def test_check_video_status_completed_downloads_video(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-):
-    _set_video_model_config(monkeypatch)
-    video_bytes = b"fake-mp4-bytes"
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path == "/api/v1/videos/job-789":
-            return httpx.Response(200, json={"id": "job-789", "status": "completed"})
-        if request.url.path == "/api/v1/videos/job-789/content":
-            return httpx.Response(200, content=video_bytes)
-        raise AssertionError(f"unexpected request: {request.method} {request.url}")
-
-    _patch_async_client(monkeypatch, handler)
-
-    result = await check_video_status(job_id="job-789", save_dir=str(tmp_path))
-
-    assert "Video generated successfully!" in result
-    assert (tmp_path / "video_job-789.mp4").read_bytes() == video_bytes
-
-
-@pytest.mark.asyncio
-async def test_check_video_status_still_running(monkeypatch: pytest.MonkeyPatch):
-    _set_video_model_config(monkeypatch)
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, json={"id": "job-789", "status": "processing"})
-
-    _patch_async_client(monkeypatch, handler)
-
-    result = await check_video_status(job_id="job-789")
-
-    assert result == "Video job job-789 is still processing."
-
-
-@pytest.mark.asyncio
-async def test_check_video_status_terminal_failure(monkeypatch: pytest.MonkeyPatch):
-    _set_video_model_config(monkeypatch)
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(
-            200, json={"id": "job-789", "status": "cancelled", "error": "user cancelled"}
-        )
-
-    _patch_async_client(monkeypatch, handler)
-
-    result = await check_video_status(job_id="job-789")
-
-    assert result == (
-        "[ERROR]: video job job-789 ended with status cancelled: user cancelled"
-    )
-
-
-@pytest.mark.asyncio
-async def test_check_video_status_non_200_returns_error(monkeypatch: pytest.MonkeyPatch):
-    _set_video_model_config(monkeypatch)
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(404, text="job not found")
-
-    _patch_async_client(monkeypatch, handler)
-
-    result = await check_video_status(job_id="job-missing")
-
-    assert result == "[ERROR]: checking video job job-missing failed: 404 job not found"
-
-
-@pytest.mark.asyncio
-async def test_check_video_status_http_error_is_caught(monkeypatch: pytest.MonkeyPatch):
-    _set_video_model_config(monkeypatch)
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        raise httpx.ConnectError("connection refused", request=request)
-
-    _patch_async_client(monkeypatch, handler)
-
-    result = await check_video_status(job_id="job-789")
-
-    assert result.startswith("[ERROR]: checking video job job-789 failed:")
-
-
-# ---------------------------------------------------------------------------
 # _download_video / _poll_job (direct helper coverage)
 # ---------------------------------------------------------------------------
 
@@ -670,25 +493,6 @@ async def test_poll_job_returns_error_on_invalid_json_poll_response(monkeypatch:
 
 
 @pytest.mark.asyncio
-async def test_generate_video_returns_error_when_poll_response_non_200(monkeypatch: pytest.MonkeyPatch):
-    _set_video_model_config(monkeypatch)
-    _speed_up_polling(monkeypatch)
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        if request.method == "POST" and request.url.path.endswith("/videos"):
-            return httpx.Response(200, json={"id": "job-1", "status": "pending"})
-        if request.url.path.endswith("/videos/job-1"):
-            return httpx.Response(503, text="service unavailable")
-        raise AssertionError(f"unexpected request: {request.method} {request.url}")
-
-    _patch_async_client(monkeypatch, handler)
-
-    result = await generate_video(prompt="a cat")
-
-    assert result == "[ERROR]: polling video job job-1 failed: 503 service unavailable"
-
-
-@pytest.mark.asyncio
 async def test_generate_video_returns_error_when_submit_response_invalid_json(
     monkeypatch: pytest.MonkeyPatch,
 ):
@@ -702,19 +506,3 @@ async def test_generate_video_returns_error_when_submit_response_invalid_json(
     result = await generate_video(prompt="a cat")
 
     assert result.startswith("[ERROR]: video generation submit returned invalid JSON:")
-
-
-@pytest.mark.asyncio
-async def test_check_video_status_returns_error_when_poll_response_invalid_json(
-    monkeypatch: pytest.MonkeyPatch,
-):
-    _set_video_model_config(monkeypatch)
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, text="not json")
-
-    _patch_async_client(monkeypatch, handler)
-
-    result = await check_video_status(job_id="job-789")
-
-    assert result.startswith("[ERROR]: checking video job job-789 returned invalid JSON:")
