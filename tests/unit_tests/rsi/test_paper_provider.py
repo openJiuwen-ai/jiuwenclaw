@@ -73,6 +73,7 @@ def test_paper_provider_wires_the_bundled_autoresearch_runtime(tmp_path: Path):
         model=model,
         max_iterations=1,
         optimization_instruction="improve the paper",
+        web_proxy="http://proxy.example.test:7890",
     )
 
     provider = PaperProvider(tasks_root)
@@ -98,6 +99,10 @@ def test_paper_provider_wires_the_bundled_autoresearch_runtime(tmp_path: Path):
         "provider": "OpenAI",
         "timeout": 17.0,
     }
+    assert captured["config"]["topic_survey"]["web_proxy"] == (  # type: ignore[index]
+        "http://proxy.example.test:7890"
+    )
+    assert captured["config"]["topic_survey"]["search_scope"] == "global"  # type: ignore[index]
     assert captured["request"] == {  # type: ignore[index]
         "topic": "improve the paper",
         "research_paths": [],
