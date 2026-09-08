@@ -2203,8 +2203,10 @@ async def _process_team_message_stream(
             # Interactive Team input keeps its original direct delivery path.
             # Heartbeat admission tracks only the active-iteration fact; it
             # must not use TeamManager round ownership as a steer admission gate.
-            if is_first_request and admission is not None:
-                _ensure_interactive_round(terminal_armed=True)
+            # Register before delivery: a fast resume (e.g. plan skip) may
+            # emit its final before interact() acknowledges the submission.
+            if admission is not None:
+                _ensure_interactive_round(terminal_armed=is_first_request)
             return
         if is_cron_request and admission is not None:
             await admission.begin_bounded_team_user(session_id)
@@ -2246,15 +2248,13 @@ async def _process_team_message_stream(
             return
         if not accepted:
             await _complete_user_submission(accepted=False)
-            if is_first_request:
-                await team_manager.release_round(session_id, rid)
+            await team_manager.release_round(session_id, rid)
             return
-        if is_first_request:
-            round_is_live = team_manager.is_round_owner(session_id, rid)
-            await _complete_user_submission(accepted=round_is_live)
-            return
-        await _complete_user_submission(accepted=True)
-        _ensure_interactive_round(terminal_armed=False)
+        # Concurrent steers share the active round. If it already ended during
+        # delivery, a late acknowledgement must not restore its busy marker.
+        await _complete_user_submission(
+            accepted=team_manager.is_round_active(session_id),
+        )
 
     hide_dm = False
     debug = False
