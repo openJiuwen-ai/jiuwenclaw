@@ -521,7 +521,7 @@ def get_resolved_project_dir(
     Lookup order:
       1. ``{sessions_root}/{session_id}/metadata.json`` when ``sessions_root`` given
       2. Global ``get_agent_sessions_dir()`` (where dig-stable chat sync writes today)
-      3. ``default`` (typically tenant ``…/agent/workspace``), else ``get_agent_workspace_dir()``
+      3. ``default`` (typically tenant ``…/agent/jiuwenclaw_workspace``), else ``get_agent_workspace_dir()``
 
     Does not write defaults back into metadata (writers stay on chat sync path).
     """
