@@ -125,6 +125,73 @@ def _prepare_parent_stream_output(
     return _SKILL_TURBO_EVENT_TYPE_TO_OUTPUT_TYPE.get(event_type, event_type), payload
 
 
+async def _push_task_event_out_of_band(
+    event_type: str,
+    payload: dict[str, Any],
+    *,
+    request_id: str,
+    channel_id: str,
+    session_id: str,
+) -> None:
+    """Bypass the parent stream FIFO so task lists do not stall behind P8 chunks.
+
+    ``chat.file`` already uses PushRegistry, so PPT can appear while
+    ``write_stream`` is still draining thousands of page-gen deltas. Task
+    start/complete/update used only that FIFO, leaving both side panels on
+    Stage 11 after delivery. Push the same payload out-of-band; the later
+    FIFO snapshot is idempotent.
+    """
+    if event_type not in _SKILL_TURBO_TASK_EVENT_TYPES:
+        return
+    if not request_id or not channel_id or not session_id:
+        logger.debug(
+            "[SkillTurboTool] skip send_push %s: missing ids request_id=%s "
+            "channel_id=%s session_id=%s",
+            event_type,
+            bool(request_id),
+            bool(channel_id),
+            bool(session_id),
+        )
+        return
+    try:
+        from jiuwenswarm.server.agent_ws_server import AgentWebSocketServer
+
+        server = AgentWebSocketServer.get_instance()
+    except Exception:
+        logger.debug(
+            "[SkillTurboTool] skip send_push %s: AgentWebSocketServer unavailable",
+            event_type,
+            exc_info=True,
+        )
+        return
+
+    push_payload = dict(payload)
+    push_payload.setdefault("event_type", event_type)
+    msg = {
+        "request_id": request_id,
+        "channel_id": channel_id,
+        "session_id": session_id,
+        "payload": push_payload,
+        "is_complete": False,
+    }
+    try:
+        delivered = await server.send_push(msg)
+        logger.info(
+            "[SkillTurboTool] send_push %s delivered=%s request_id=%s session_id=%s",
+            event_type,
+            delivered,
+            request_id,
+            session_id,
+        )
+    except Exception:
+        logger.warning(
+            "[SkillTurboTool] send_push %s failed request_id=%s",
+            event_type,
+            request_id,
+            exc_info=True,
+        )
+
+
 # ── ContextVar：在 before_tool_call 中注入，供工具函数读取 ──
 _current_skill_turbo_adapter: ContextVar[Any] = ContextVar(
     "current_skill_turbo_adapter", default=None
@@ -818,6 +885,17 @@ async def skill_turbo(query: str) -> dict[str, Any] | str:
                             output_type,
                             n_tasks,
                             type(parent_session).__name__,
+                        )
+                        push_session_id = (
+                            str(external_session_id).strip()
+                            or str(parent_session.get_session_id() or "").strip()
+                        )
+                        await _push_task_event_out_of_band(
+                            event_type,
+                            payload,
+                            request_id=str(request_id or ""),
+                            channel_id=str(channel_id or ""),
+                            session_id=push_session_id,
                         )
                 except Exception:
                     logger.warning(
