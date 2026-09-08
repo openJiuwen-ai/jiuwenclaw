@@ -89,9 +89,31 @@ async def test_model_scope_fans_out_to_all_channels_even_with_target_channel(mon
 
 
 @pytest.mark.asyncio
+async def test_multimodal_scope_fans_out_to_all_channels_even_with_target_channel(
+    monkeypatch,
+):
+    web_agent = FakeAgent()
+    xiaoyi_agent = FakeAgent()
+    manager, _ = _build_manager(
+        monkeypatch,
+        agents={"web": {"agent": web_agent}, "xiaoyi": {"agent": xiaoyi_agent}},
+    )
+
+    await manager.reload_agents_config(
+        {"models": {"vision": {}}},
+        {"VISION_ENABLED": "true"},
+        target_channel_id="web",
+        reload_scopes={"multimodal"},
+    )
+
+    assert len(web_agent.reload_calls) == 1
+    assert len(xiaoyi_agent.reload_calls) == 1
+
+
+@pytest.mark.asyncio
 async def test_non_model_scope_still_narrows_to_target_channel(monkeypatch):
     """Non-model scopes (e.g. permissions/agent_runtime) keep the old target-channel
-    narrowing — model is the only global scope that must fan out."""
+    narrowing; only global model and multimodal scopes fan out."""
     web_agent = FakeAgent()
     xiaoyi_agent = FakeAgent()
     manager, _ = _build_manager(

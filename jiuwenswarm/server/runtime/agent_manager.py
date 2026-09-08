@@ -10,12 +10,17 @@ import logging
 import os
 import time
 import uuid
-from typing import Any, TYPE_CHECKING
+from typing import Any, NamedTuple, TYPE_CHECKING
 from weakref import WeakValueDictionary
 
 from jiuwenswarm.common.e2a.acp.protocol import build_acp_initialize_result
 from jiuwenswarm.agents.harness.team import get_team_manager
 from jiuwenswarm.common.config import get_config, get_default_models
+from jiuwenswarm.common.mode_matrix import (
+    NEW_AGENT_WORK_NORMAL,
+    NEW_AGENT_WORK_PLAN,
+    deprecate_mode,
+)
 
 if TYPE_CHECKING:
     from jiuwenswarm.server.runtime.agent_adapter.interface import JiuWenSwarm
@@ -44,7 +49,7 @@ def _normalize_project_dir(project_dir: str | None) -> str:
     if not raw:
         return ""
     try:
-        return os.path.normcase(os.path.abspath(os.path.expanduser(raw)))
+        return os.path.normcase(os.path.abspath(os.path.expanduser(raw))).casefold()
     except Exception:
         return raw
 
@@ -129,6 +134,7 @@ class AgentManager:
         # disconnect cleanup cannot tear it down in that gap.
         self._agent_borrowers: dict[int, set[asyncio.Task]] = {}
         self._agent_pins: dict[int, int] = {}
+        self._heartbeat_service: Any | None = None
         self._pending_tui_retirements: set[int] = set()
         self._retirement_tasks: dict[int, asyncio.Task] = {}
         self._agent_create_locks: WeakValueDictionary[
@@ -142,6 +148,16 @@ class AgentManager:
         from jiuwenswarm.server.runtime.agent_warm_pool import AgentWarmPool
 
         self.warm_pool = AgentWarmPool(self)
+
+    def set_heartbeat_service(self, service: Any | None) -> None:
+        """Inject the process-owned Heartbeat service into single and Team agents."""
+        self._heartbeat_service = service
+        from jiuwenswarm.agents.swarm.context import set_heartbeat_job_service
+
+        set_heartbeat_job_service(service)
+        for agents in self.agents.values():
+            for agent in agents.values():
+                agent.set_heartbeat_service(service)
 
     def _get_agent_create_lock(
         self,
@@ -450,6 +466,7 @@ class AgentManager:
             project_dir or None,
         )
         agent = JiuWenSwarm()
+        agent.set_heartbeat_service(self._heartbeat_service)
         setter = getattr(agent, "set_personal_context_runtime_enabled", None)
         if callable(setter):
             setter(self._personal_context_runtime_enabled)
@@ -540,12 +557,20 @@ class AgentManager:
             return ACP_DEFAULT_CAPABILITIES.copy()
         return None
 
-    async def cancel_all_inflight_work(self, reason: str = "[gateway ws disconnect] ") -> None:
+    async def cancel_all_inflight_work(
+        self,
+        reason: str = "[gateway ws disconnect] ",
+        *,
+        exclude_session_ids: set[str] | None = None,
+    ) -> None:
         """Gateway 与 AgentServer 的 WebSocket 断开时：取消所有已创建 Agent 实例上的在途任务。"""
         for modes in list(self.agents.values()):
             for agent in list(modes.values()):
                 try:
-                    await agent.cancel_inflight_work(reason)
+                    await agent.cancel_inflight_work(
+                        reason,
+                        exclude_session_ids=exclude_session_ids,
+                    )
                 except Exception:
                     logger.exception("[AgentManager] cancel_inflight_work failed")
 
@@ -645,6 +670,45 @@ class AgentManager:
                 f"session_id={sid}"
             )
         return cleaned
+
+    async def release_subagent_runtime_for_session(
+        self,
+        *,
+        channel_id: str | None,
+        session_id: str,
+        reason: str = "session_deleted",
+    ) -> bool:
+        """Release subagent control owned by the channel's existing Agent.
+
+        Product Session deletion historically performed this lookup in
+        AgentServer.  Keeping it here preserves the same first-Agent lookup and
+        adapter selection while hiding Agent/Adapter internals behind the
+        Runtime-owned manager boundary.
+        """
+        agent = self.get_agent_nowait(channel_id=channel_id or "")
+        adapter = self._resolve_runtime_adapter(agent)
+        release_runtime = getattr(
+            adapter,
+            "release_subagent_runtime_for_session",
+            None,
+        )
+        if not callable(release_runtime):
+            return False
+        await release_runtime(session_id, reason=reason)
+        return True
+
+    @staticmethod
+    def _resolve_runtime_adapter(agent: Any) -> Any:
+        """Resolve the same adapter shape used by the legacy Server path."""
+        if agent is None:
+            return None
+        for attr in ("_adapter", "adapter", "_active_adapter"):
+            inner = getattr(agent, attr, None)
+            if inner is not None and hasattr(inner, "apply_sandbox_runtime_patch"):
+                return inner
+        if hasattr(agent, "apply_sandbox_runtime_patch"):
+            return agent
+        return None
 
     async def apply_mcp_change(
         self, name: str, action: str, *, enabled: bool = True,
@@ -1040,7 +1104,13 @@ class AgentManager:
 
         if mode is None and project_dir is None and sub_mode is None:
             for agent in channel_agents.values():
-                if getattr(agent, "_jiuwenswarm_agent_mode", "") == "agent":
+                # 默认回落优先取"普通 agent"实例：旧串 "agent" 与新 canonical
+                # agent.work.* 都要命中。deprecate 归一把新旧形式统一成
+                # agent.work.normal / agent.work.plan 再判定。
+                if deprecate_mode(getattr(agent, "_jiuwenswarm_agent_mode", "")) in (
+                    NEW_AGENT_WORK_NORMAL,
+                    NEW_AGENT_WORK_PLAN,
+                ):
                     return self._borrow_agent(agent)
             agent = next(iter(channel_agents.values()), None)
             return self._borrow_agent(agent) if agent is not None else None
@@ -1152,11 +1222,10 @@ class AgentManager:
         使用 ``self._reload_lock`` 串行化, 避免高频触发(如批量 MCP 增删)时多个
         reload 并发叠加, 同时重建大量 agent 实例导致内存暴涨被 OOM kill.
 
-        ``reload_scopes`` 含 ``"model"`` 时, 模型配置属于所有 channel 共享的
-        全局配置段, 此时忽略 ``target_channel_id`` 的窄化, fan-out 到全部
-        channel——否则 web 保存模型后只有 web 通道被热更新, IM 长连接通道
-        (xiaoyi 等)的 session adapter 会继续用旧错误模型, 直到用户手动
-        /new_session 才恢复.
+        ``reload_scopes`` 含 ``"model"`` 或 ``"multimodal"`` 时, 配置属于所有
+        channel 共享的全局配置段, 此时忽略 ``target_channel_id`` 的窄化,
+        fan-out 到全部 channel。否则 web 保存后只有 web 通道被热更新,
+        IM 长连接通道的 session adapter 会继续使用旧配置。
         """
         async with self._reload_lock:
             self._latest_env_overrides = dict(env) if isinstance(env, dict) else {}
@@ -1169,15 +1238,16 @@ class AgentManager:
 
             target_channel = str(target_channel_id or "").strip() or None
             target_session = str(target_session_id or "").strip() or None
-            # model 是全局共享配置: 变更时必须广播到所有 channel, 否则非触发
-            # 通道(如 IM 长连接 xiaoyi)的 agent 不会收到热更新, 旧模型残留。
+            # 对话模型和多模态工具都是全局共享配置，必须广播到所有 channel。
             scope_set = set(reload_scopes) if reload_scopes else set()
             model_scope = "model" in scope_set
-            effective_target_channel = None if model_scope else target_channel
-            if target_channel and model_scope:
+            global_scope = bool(scope_set & {"model", "multimodal"})
+            effective_target_channel = None if global_scope else target_channel
+            if target_channel and global_scope:
                 logger.info(
-                    "[AgentManager] model config changed via channel=%s; fan-out reload "
-                    "to all channels (model is global)",
+                    "[AgentManager] global config scopes=%s changed via channel=%s; "
+                    "fan-out reload to all channels",
+                    sorted(scope_set & {"model", "multimodal"}),
                     target_channel,
                 )
             effective_config = config
@@ -1225,6 +1295,8 @@ class AgentManager:
                     }
                     if target_session:
                         reload_kwargs["target_session_id"] = target_session
+                    if scope_set:
+                        reload_kwargs["reload_scopes"] = scope_set
                     await agent.reload_agent_config(**reload_kwargs)
                 try:
                     team_config = effective_config if isinstance(effective_config, dict) else get_config()
@@ -1275,8 +1347,31 @@ class AgentManager:
             logger.warning("[AgentManager] LLM client evict skipped (import failed): %s", exc)
             return
 
-        def _diff_key(cfg: Any) -> tuple:
-            return (str(cfg.client_provider), cfg.api_key, cfg.api_base, cfg.verify_ssl, cfg.ssl_cert)
+        class _ConnDiffKey(NamedTuple):
+            # 新声明下同一 api_base 可能对应不同 endpoint_profile / auth_mode / api_mode，
+            # 这些会影响连接身份(如 affinity 走 custom_headers 不带 Authorization)。
+            # 纳入 diff key 避免误关/漏关连接池。core 侧 connection_key 已按归一 api_base
+            # + 鉴权分桶，此处 diff 至少不比 Client 更粗。
+            client_provider: str
+            endpoint_profile: Any
+            auth_mode: Any
+            api_mode: Any
+            api_key: str
+            api_base: str
+            verify_ssl: bool
+            ssl_cert: Any
+
+        def _diff_key(cfg: Any) -> _ConnDiffKey:
+            return _ConnDiffKey(
+                client_provider=str(cfg.client_provider),
+                endpoint_profile=getattr(cfg, "endpoint_profile", None),
+                auth_mode=getattr(cfg, "auth_mode", None),
+                api_mode=getattr(cfg, "api_mode", None),
+                api_key=cfg.api_key,
+                api_base=cfg.api_base,
+                verify_ssl=cfg.verify_ssl,
+                ssl_cert=cfg.ssl_cert,
+            )
 
         new_configs: dict[tuple, Any] = {}
         try:
@@ -1403,12 +1498,12 @@ class AgentManager:
             params = getattr(request, "params", {}) if isinstance(getattr(request, "params", {}), dict) else {}
             mode_full = params.get("mode", "agent")
             mode = str(mode_full).split(".")[0] if mode_full else "agent"
-            workspace_dir = params.get("workspace_dir")
+            project_dir = params.get("project_dir")
 
             agent = await self.get_agent(
                 channel_id=channel_id,
                 mode=mode,
-                project_dir=workspace_dir,
+                project_dir=project_dir,
             )
             if agent is None:
                 raise RuntimeError(f"[AgentManager] No agent available for channel {channel_id}")
@@ -1433,12 +1528,12 @@ class AgentManager:
             params = getattr(request, "params", {}) if isinstance(getattr(request, "params", {}), dict) else {}
             mode_full = params.get("mode", "agent")
             mode = str(mode_full).split(".")[0] if mode_full else "agent"
-            workspace_dir = params.get("workspace_dir")
+            project_dir = params.get("project_dir")
 
             agent = await self.get_agent(
                 channel_id=channel_id,
                 mode=mode,
-                project_dir=workspace_dir,
+                project_dir=project_dir,
             )
             if agent is None:
                 raise RuntimeError(f"[AgentManager] No agent available for channel {channel_id}")

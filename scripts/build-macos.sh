@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# Copyright (c) Huawei Technologies Co., Ltd. 2025-2026. All rights reserved.
 # macOS .app + .dmg build script
 #
 # 签名/公证是可选的，按机器是否配置了 Developer ID 身份自动决定：
@@ -26,9 +27,6 @@ PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BUILD_CONFIG_SHELL="$(uv run --no-project --python 3.11 python \
   "$PROJECT_ROOT/scripts/build_config.py" --sync --emit-shell)"
 eval "$BUILD_CONFIG_SHELL"
-
-printf '[1/9] Install Python dependencies (uv sync --extra dev --extra codex)...\n'
-uv sync --extra dev --extra codex
 
 APP_NAME="$BUILD_APP_BUNDLE_NAME"
 APP_PATH="$PROJECT_ROOT/dist/$APP_NAME"
@@ -178,8 +176,8 @@ elif ! security find-identity -v -p codesigning | grep -q "$SIGN_IDENTITY"; then
   exit 1
 fi
 
-printf '[1/9] Install Python dependencies (uv sync --extra dev --extra claude --extra codex)...\n'
-uv sync --extra dev --extra claude --extra codex
+printf '[1/9] Install Python dependencies (uv sync --extra dev)...\n'
+uv sync --extra dev
 
 printf '\n[2/9] Build frontend (jiuwenswarm/channels/web/frontend)...\n'
 rm -rf "$PROJECT_ROOT/jiuwenswarm/web/dist"
@@ -218,6 +216,22 @@ if [[ ! -d "$APP_PATH" ]]; then
   exit 1
 fi
 
+PLIST_PATH="$APP_PATH/Contents/Info.plist"
+BUNDLE_EXECUTABLE="$(
+  /usr/libexec/PlistBuddy -c "Print :CFBundleExecutable" "$PLIST_PATH"
+)"
+
+if [[ "$BUNDLE_EXECUTABLE" != "$BUILD_EXECUTABLE_NAME" ]]; then
+  printf 'Error: bundle executable mismatch: expected=%s actual=%s\n' \
+    "$BUILD_EXECUTABLE_NAME" "$BUNDLE_EXECUTABLE" >&2
+  exit 1
+fi
+
+if [[ ! -x "$APP_PATH/Contents/MacOS/$BUILD_EXECUTABLE_NAME" ]]; then
+  printf 'Error: bundle main executable missing or not executable\n' >&2
+  exit 1
+fi
+
 printf 'Verifying frozen A2UI v0.8 bundle...\n'
 "$APP_PATH/Contents/MacOS/$BUILD_EXECUTABLE_NAME" "$PROJECT_ROOT/scripts/verify_a2ui_bundle.py"
 
@@ -233,6 +247,9 @@ if [[ "$BUNDLE_NODE" == "1" ]]; then
   printf '\n[5/9] Bundle Node.js runtime (single arch, M-series first)...\n'
   NODE_SRC="$(resolve_node_dir)" || exit 1
   copy_node_into_app "$NODE_SRC"
+  printf 'Verifying frozen Playwright MCP bundle and bundled Node...\n'
+  "$APP_PATH/Contents/MacOS/$BUILD_EXECUTABLE_NAME" \
+    "$PROJECT_ROOT/scripts/verify_playwright_mcp_bundle.py"
 fi
 
 # 注意：--deep 会打印 deprecation 警告，但对 PyInstaller 应用（含大量嵌套 .so/.dylib、

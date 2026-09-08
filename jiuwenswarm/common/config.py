@@ -18,7 +18,9 @@ import yaml
 import portalocker
 
 from jiuwenswarm.common.kv_cache_affinity_config import (
-    ASCEND_AFFINITY_PROVIDER,
+    APPLICATION_KV_CACHE_CONFIG_KEY,
+    KV_CACHE_AFFINITY_ENABLED_KEY,
+    get_kv_cache_affinity_application_config,
     get_default_model_provider as resolve_default_model_provider,
     set_default_model_provider_in_entries,
     validate_affinity_invariant,
@@ -41,7 +43,7 @@ EXTERNAL_TRANSPORT_CONFIG_PATH = ("modes", "team", "jiuwen_team", "external_tran
 _ALLOWED_EXTERNAL_CLI_AGENTS = {"claude", "codex"}
 # Keep progressive tool search enabled by default for existing user workspaces
 # whose config.yaml predates this switch.
-DEFAULT_PROGRESSIVE_TOOL_ENABLED = True
+DEFAULT_PROGRESSIVE_TOOL_ENABLED = False
 # Check if user workspace exists and use it if configured via env
 _user_config = os.getenv("JIUWENSWARM_CONFIG_DIR")
 if _user_config:
@@ -143,18 +145,17 @@ def _normalize_config(config: dict[str, Any] | None) -> None:
         mcc = react.get("model_client_config")
         if isinstance(mcc, dict) and "custom_headers" in mcc:
             mcc["custom_headers"] = _parse_custom_headers(mcc["custom_headers"])
-        kv_cfg = react.get("kv_cache_affinity_config")
-        if isinstance(kv_cfg, dict) and kv_cfg.get("enable_kv_cache_affinity", False):
-            provider = get_default_model_provider(config)
-            if provider != ASCEND_AFFINITY_PROVIDER:
-                logger.warning(
-                    "KV cache affinity configuration failed closed: default provider=%s requires=%s",
-                    provider or "<empty>",
-                    ASCEND_AFFINITY_PROVIDER,
-                )
-                # Runtime-only normalization: preserve the user's file for
-                # diagnosis, but never activate an inconsistent configuration.
-                kv_cfg["enable_kv_cache_affinity"] = False
+    kv_cfg = get_kv_cache_affinity_application_config(config)
+    if kv_cfg.get(KV_CACHE_AFFINITY_ENABLED_KEY, False):
+        valid, failures = validate_affinity_invariant(config)
+        if not valid:
+            logger.warning(
+                "KV cache affinity configuration failed closed: %s",
+                "; ".join(failures),
+            )
+            # Runtime-only normalization: preserve the user's file for
+            # diagnosis, but never activate an inconsistent configuration.
+            kv_cfg[KV_CACHE_AFFINITY_ENABLED_KEY] = False
     # send_file 工具默认开关：web/feishu/xiaoyi 顶层缺 send_file_allowed 时兜底 True。
     channels = config.get("channels", {})
     for _ch in ("web", "feishu", "xiaoyi"):
@@ -299,6 +300,14 @@ def get_skill_evolution_enabled(config: dict[str, Any] | None) -> bool:
     return _get_evolution_config(config).get("skill_evolution") is True
 
 
+def is_subagent_runtime_enabled(config: dict[str, Any] | None = None) -> bool:
+    """Return ``react.subagent_runtime.enabled`` for persistent subagent tools."""
+    cfg = config or get_config()
+    react = cfg.get("react") if isinstance(cfg, dict) else None
+    runtime_cfg = react.get("subagent_runtime") if isinstance(react, dict) else None
+    return bool(runtime_cfg.get("enabled")) if isinstance(runtime_cfg, dict) else False
+
+
 def get_progressive_tool_enabled(config: dict[str, Any] | None = None) -> bool:
     """Return whether the ProgressiveToolRail is enabled for an agent.
 
@@ -315,6 +324,38 @@ def get_progressive_tool_enabled(config: dict[str, Any] | None = None) -> bool:
     if isinstance(value, str):
         return value.strip().lower() in {"1", "true", "yes", "on", "enabled"}
     return bool(value)
+
+
+def get_endpoint_profile_overrides(config: dict[str, Any] | None = None) -> dict[str, str]:
+    """Return the user-configured ``api_base host -> endpoint_profile`` map.
+
+    Read from the top-level ``endpoint_profile_overrides`` key in
+    ``config.yaml``. Used for self-hosted gateways whose thinking-control
+    dialect (e.g. DashScope-style ``enable_thinking``) cannot be inferred
+    from the host name; no host is built into the source code. Hosts are
+    normalized to lowercase; blank entries are dropped.
+    """
+    cfg = config if isinstance(config, dict) else get_config()
+    raw = cfg.get("endpoint_profile_overrides")
+    if not isinstance(raw, dict):
+        return {}
+    overrides: dict[str, str] = {}
+    for host, profile in raw.items():
+        host_key = str(host or "").strip().lower()
+        profile_value = str(profile or "").strip()
+        if host_key and profile_value:
+            overrides[host_key] = profile_value
+    return overrides
+
+
+def get_evolution_review_feedback_min_confidence(config: dict[str, Any] | None) -> float:
+    """Return the minimum confidence required for reviewer-driven evolution."""
+
+    raw = _get_evolution_config(config).get("review_feedback_min_confidence", 0.7)
+    try:
+        return max(0.0, min(1.0, float(raw)))
+    except (TypeError, ValueError):
+        return 0.7
 
 
 def get_evolution_auto_save_enabled(config: dict[str, Any] | None = None) -> bool:
@@ -438,19 +479,48 @@ _load_yaml_round_trip = load_yaml_round_trip
 _dump_yaml_round_trip = dump_yaml_round_trip
 
 
-def update_heartbeat_in_config(payload: dict[str, Any]) -> None:
-    """只更新 heartbeat 段并写回。"""
-    data = load_yaml_round_trip(CONFIG_YAML_PATH)
-    if "heartbeat" not in data:
-        data["heartbeat"] = {}
-    hb = data["heartbeat"]
-    if "every" in payload:
-        hb["every"] = payload["every"]
-    if "target" in payload:
-        hb["target"] = payload["target"]
-    if "active_hours" in payload:
-        hb["active_hours"] = payload["active_hours"]
-    dump_yaml_round_trip(CONFIG_YAML_PATH, data)
+def update_health_check_in_config(payload: dict[str, Any]) -> None:
+    """只更新 health_check 段并写回。"""
+    def _mutate(data: dict[str, Any]) -> dict[str, Any]:
+        current = data.get("health_check")
+        if not isinstance(current, dict):
+            current = {}
+            data["health_check"] = current
+        for key in ("every", "target", "active_hours"):
+            if key in payload:
+                current[key] = payload[key]
+        return data
+
+    update_config(_mutate)
+
+
+def migrate_legacy_heartbeat_probe_config() -> bool:
+    """Move legacy probe keys to health_check without touching heartbeat.jobs."""
+    changed = False
+    probe_keys = ("every", "target", "active_hours")
+
+    def _mutate(data: dict[str, Any]) -> dict[str, Any] | None:
+        nonlocal changed
+        legacy = data.get("heartbeat")
+        if not isinstance(legacy, dict):
+            return None
+        present = [key for key in probe_keys if key in legacy]
+        if not present:
+            return None
+        current = data.get("health_check")
+        if not isinstance(current, dict):
+            current = {}
+            data["health_check"] = current
+        for key in present:
+            current.setdefault(key, legacy[key])
+            legacy.pop(key, None)
+        if not legacy:
+            data.pop("heartbeat", None)
+        changed = True
+        return data
+
+    update_config(_mutate)
+    return changed
 
 
 def update_channel_in_config(channel_id: str, conf: dict[str, Any]) -> None:
@@ -665,31 +735,20 @@ def update_context_engine_enabled_in_config(value: bool) -> None:
 
 
 def update_kv_cache_affinity_enabled_in_config(value: bool) -> None:
-    """更新 react.kv_cache_affinity_config.enable_kv_cache_affinity 并写回。"""
-    data = load_yaml_round_trip(CONFIG_YAML_PATH)
-    if "react" not in data:
-        data["react"] = {}
-    react = data["react"]
-    if "kv_cache_affinity_config" not in react:
-        react["kv_cache_affinity_config"] = {}
-    react["kv_cache_affinity_config"]["enable_kv_cache_affinity"] = value
-    if value:
-        react["kv_cache_affinity_config"]["enable_kv_cache_release"] = False
-    dump_yaml_round_trip(CONFIG_YAML_PATH, data)
+    """更新 Application 级 KVC 开关，并清理旧 ReAct 配置。"""
+    def _mutate(data: dict[str, Any]) -> dict[str, Any]:
+        kv_config = data.get(APPLICATION_KV_CACHE_CONFIG_KEY)
+        if not isinstance(kv_config, dict):
+            kv_config = {}
+            data[APPLICATION_KV_CACHE_CONFIG_KEY] = kv_config
+        kv_config[KV_CACHE_AFFINITY_ENABLED_KEY] = value
 
+        react = data.get("react")
+        if isinstance(react, dict):
+            react.pop(APPLICATION_KV_CACHE_CONFIG_KEY, None)
+        return data
 
-def update_kv_cache_release_enabled_in_config(value: bool) -> None:
-    """更新 react.kv_cache_affinity_config.enable_kv_cache_release 并写回。"""
-    data = load_yaml_round_trip(CONFIG_YAML_PATH)
-    if "react" not in data:
-        data["react"] = {}
-    react = data["react"]
-    if "kv_cache_affinity_config" not in react:
-        react["kv_cache_affinity_config"] = {}
-    react["kv_cache_affinity_config"]["enable_kv_cache_release"] = value
-    if value:
-        react["kv_cache_affinity_config"]["enable_kv_cache_affinity"] = False
-    dump_yaml_round_trip(CONFIG_YAML_PATH, data)
+    update_config(_mutate)
 
 
 def _merge_config_dict(target: dict[str, Any], patch: dict[str, Any]) -> None:
@@ -778,6 +837,15 @@ def update_proactive_recommendation_in_config(updates: dict[str, Any]) -> None:
         data["proactive_recommendation"] = {}
     section = data["proactive_recommendation"]
     _merge_config_dict(section, updates)
+    dump_yaml_round_trip(CONFIG_YAML_PATH, data)
+
+
+def update_trajectory_ui_in_config(enabled: bool) -> None:
+    """Update the trajectory UI feature switch and persist config.yaml."""
+    data = load_yaml_round_trip(CONFIG_YAML_PATH)
+    if "trajectory_ui" not in data or data["trajectory_ui"] is None:
+        data["trajectory_ui"] = {}
+    data["trajectory_ui"]["enabled"] = bool(enabled)
     dump_yaml_round_trip(CONFIG_YAML_PATH, data)
 
 
@@ -1221,11 +1289,61 @@ def _decrypt_model_entries(entries: list[dict[str, Any]]) -> list[dict[str, Any]
     return result
 
 
+def get_agentos_models(config: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+    """读取 models.agentos 备份模型列表，返回带标记的条目。
+
+    与 ``get_default_models`` 的 defaults 条目并列、同等可选可切换，但：
+    - ``is_default`` 始终为 ``False``：绝不抢启动主对话默认（``_create_model``
+      选默认时只取 ``is_default=True`` 的条目作为 ``self._model``）。
+    - ``model_config_obj._source = "agentos"``：仅供前端 ``is_agentos`` 置灰只读
+      展示用。``context_window``（模型支持的上下文总长度）每个模型条目均可配
+      （defaults / agentos / video / audio / vision / image_gen 均可），放进 core 的
+      ``ModelRequestConfig`` 供 core 人员取值。是否在 jiuwenswarm 出口 pop 由
+      ``reasoning_injector.core_has_context_window_field`` 自动适配 core 字段状态：
+      core 未加 context_window 正式字段时 pop 防发厂商，加字段后停止 pop 留给 core。
+
+    仅当 ``models.agentos`` 是 list 且每条 ``model_client_config.model_name`` 非空
+    （即用户已手动在 config.yaml 填入凭证）时才追加；非 list 视为未配置返回空。
+    config.yaml 模板不预置 agentos 字段，需用户手动添加——此函数即"运行时检测
+    config.yaml 是否有 agentos 字段"的落点。
+    """
+    if config is None:
+        config = get_config()
+    models = config.get("models", {})
+    agentos_raw = models.get("agentos")
+    agentos_list = agentos_raw if isinstance(agentos_raw, list) else []
+    entries: list[dict[str, Any]] = []
+    for agentos_block in agentos_list:
+        if not isinstance(agentos_block, dict):
+            continue
+        mcc = agentos_block.get("model_client_config")
+        if not (isinstance(mcc, dict) and mcc.get("model_name")):
+            # model_name 为空 = 该条未配置，跳过不入缓存
+            continue
+        agentos_entry = deepcopy(agentos_block)
+        agentos_entry["is_default"] = False
+        # _source 注入到 model_config_obj 内部，仅供前端 is_agentos 置灰只读展示
+        # （不再参与 context_window 出口判断——所有条目一视同仁）。context_window
+        # 每个模型条目均可配，随之进入 kwargs，是否由 reasoning_injector
+        # _build_model_request_kwargs 公共出口 pop 取决于 core 是否已把 context_window
+        # 加为 ModelRequestConfig 正式字段（core_has_context_window_field 自动适配）：
+        # core 未加字段时 pop 防发厂商，加字段后停止 pop，context_window 留在
+        # ModelRequestConfig 供 core 读取。
+        agentos_mco = agentos_entry.setdefault("model_config_obj", {})
+        if isinstance(agentos_mco, dict):
+            agentos_mco["_source"] = "agentos"
+        entries.append(agentos_entry)
+    return entries
+
+
 def get_default_models(config: dict[str, Any] | None = None) -> list[dict[str, Any]]:
     """获取默认模型列表，兼容新旧格式。
 
     优先级：models.defaults（列表） > models.default（单对象） > 环境变量回退
     返回的 api_key 已解密。每个条目可能含顶层 alias 字段。
+
+    无论走哪个分支，最后都会追加 ``models.agentos`` 备份模型条目（若有）。
+    agentos 与 defaults 并列、同等可选可切换，但 ``is_default=False`` 不抢启动默认。
     """
     if config is None:
         config = get_config()
@@ -1234,37 +1352,14 @@ def get_default_models(config: dict[str, Any] | None = None) -> list[dict[str, A
     # 新格式：已有 defaults 列表
     if "defaults" in models and isinstance(models["defaults"], list) and models["defaults"]:
         entries = _decrypt_model_entries(models["defaults"])
-        # AgentOS 备份模型：作为额外条目进入缓存（可在 models.list 中按名切换），
-        # 但绝不抢主对话——故显式置 is_default=False（覆盖 _infer_is_default 的"组内唯一=默认"推断）。
-        # 仅在 model_name 非空（即用户已在 YAML 填入凭证）时追加，并打 _source 标记供下游识别。
-        # 列表语义：models.agentos 是列表，可配多个备份模型（同名/异名皆可，填写约束为
-        # (model_name, api_base, api_key) 三元组唯一）。非 list 视为未配置。
-        agentos_raw = models.get("agentos")
-        agentos_list = agentos_raw if isinstance(agentos_raw, list) else []
-        for agentos_block in agentos_list:
-            if not isinstance(agentos_block, dict):
-                continue
-            mcc = agentos_block.get("model_client_config")
-            if not (isinstance(mcc, dict) and mcc.get("model_name")):
-                continue
-            agentos_entry = deepcopy(agentos_block)
-            agentos_entry["is_default"] = False
-            # _source 注入到 model_config_obj 内部，使其经
-            # build_reasoning_model_request_kwargs -> _model_config_to_dict
-            # 展开后进入 kwargs，供 build_model_from_entry 识别该条目为 agentos，
-            # 进而把其 max_tokens（输入侧别名）从 ModelRequestConfig 的输出侧
-            # kwargs 里挪到 extra 键 _agentos_ctx_window（随选中 Model 带入缓存，
-            # 供 _deep_agent_context_engine_config 从选中条目精确取值），绝不作为
-            # 输出上限发往厂商。
-            agentos_mco = agentos_entry.setdefault("model_config_obj", {})
-            if isinstance(agentos_mco, dict):
-                agentos_mco["_source"] = "agentos"
-            entries.append(agentos_entry)
+        entries.extend(get_agentos_models(config))
         return entries
 
     # 旧格式：单个 default 对象 → 包装为列表
     if "default" in models and isinstance(models["default"], dict):
-        return _decrypt_model_entries([models["default"]])
+        entries = _decrypt_model_entries([models["default"]])
+        entries.extend(get_agentos_models(config))
+        return entries
 
     # 回退：从环境变量构造（env var 已在 resolve_env_vars 中解密）
     alias = os.getenv("MODEL_ALIAS", "")
@@ -1274,6 +1369,8 @@ def get_default_models(config: dict[str, Any] | None = None) -> list[dict[str, A
             "api_key": os.getenv("API_KEY", ""),
             "model_name": os.getenv("MODEL_NAME", ""),
             "client_provider": os.getenv("MODEL_PROVIDER", ""),
+            # endpoint_profile：仅 OpenAI 协议生效的端点方言；Anthropic 时忽略。
+            "endpoint_profile": os.getenv("ENDPOINT_PROFILE", "") or "",
             "custom_headers": _parse_custom_headers(os.getenv("CUSTOM_HEADERS", None)),
             "timeout": 1800,
             "verify_ssl": False,
@@ -1282,7 +1379,9 @@ def get_default_models(config: dict[str, Any] | None = None) -> list[dict[str, A
     }
     if alias:
         entry["alias"] = alias
-    return [entry]
+    entries = [entry]
+    entries.extend(get_agentos_models(config))
+    return entries
 
 
 def update_default_models_in_config(models_list: list[dict[str, Any]]) -> None:
@@ -1361,6 +1460,7 @@ def ensure_defaults_list_in_config() -> list[dict[str, Any]]:
                     "api_key": "${API_KEY}",
                     "model_name": "${MODEL_NAME}",
                     "client_provider": "${MODEL_PROVIDER}",
+                    "endpoint_profile": "${ENDPOINT_PROFILE:-openai}",
                 },
                 "model_config_obj": {"temperature": 0.95},
                 "is_default": True,
@@ -1433,6 +1533,19 @@ def _transform_front_team_model_config(model_raw: dict[str, Any]) -> dict[str, A
             model_request_config["model"] = raw_model[:raw_model.rfind("#")]
         else:
             model_request_config["model"] = raw_model
+
+    if model_request_config:
+        from jiuwenswarm.common.reasoning_injector import build_reasoning_model_request_kwargs
+
+        model_request_config = build_reasoning_model_request_kwargs(
+            model_client_config=model_client_config,
+            model_config_obj=model_request_config,
+            model_name=str(
+                model_request_config.get("model")
+                or model_client_config.get("model_name")
+                or ""
+            ),
+        )
 
     transformed: dict[str, Any] = {}
     if model_client_config:
@@ -1771,6 +1884,23 @@ def update_external_cli_agents_in_config(agents: list[str | dict[str, Any]], pub
         current.pop(EXTERNAL_TRANSPORT_CONFIG_PATH[-1], None)
 
     dump_yaml_round_trip(CONFIG_YAML_PATH, data)
+
+
+def reset_external_cli_agents_in_config() -> None:
+    """Disable all external CLI agents and clear their transport configuration."""
+    def _mutate(data: dict[str, Any]) -> dict[str, Any] | None:
+        current = data
+        for segment in EXTERNAL_CLI_AGENTS_CONFIG_PATH[:-1]:
+            nested = current.get(segment)
+            if not isinstance(nested, dict):
+                return None
+            current = nested
+
+        agents_removed = current.pop(EXTERNAL_CLI_AGENTS_CONFIG_PATH[-1], None) is not None
+        transport_removed = current.pop(EXTERNAL_TRANSPORT_CONFIG_PATH[-1], None) is not None
+        return data if agents_removed or transport_removed else None
+
+    update_config(_mutate)
 
 
 def update_swarmflow_budget_in_config(budget: str) -> None:
@@ -2216,6 +2346,26 @@ def _migrate_legacy_agent_submode_memory(user_data: dict[str, Any]) -> None:
         flat_memory["enabled"] = all(legacy_enabled_values)
 
 
+def _migrate_legacy_kv_cache_affinity_config(user_data: dict[str, Any]) -> None:
+    """Move the former ReAct-local KVC switch to Application scope."""
+    react = user_data.get("react")
+    if not isinstance(react, dict):
+        return
+    legacy = react.pop(APPLICATION_KV_CACHE_CONFIG_KEY, None)
+    canonical = user_data.get(APPLICATION_KV_CACHE_CONFIG_KEY)
+    if isinstance(canonical, dict):
+        if (
+            KV_CACHE_AFFINITY_ENABLED_KEY not in canonical
+            and isinstance(legacy, dict)
+            and KV_CACHE_AFFINITY_ENABLED_KEY in legacy
+        ):
+            canonical[KV_CACHE_AFFINITY_ENABLED_KEY] = legacy[
+                KV_CACHE_AFFINITY_ENABLED_KEY
+            ]
+    elif isinstance(legacy, dict):
+        user_data[APPLICATION_KV_CACHE_CONFIG_KEY] = deepcopy(legacy)
+
+
 def migrate_config_from_template(
     template_path: Path,
     user_config_path: Path,
@@ -2257,6 +2407,7 @@ def migrate_config_from_template(
     # 结构性迁移：plan/fast 子模式 memory 配置 -> 合并后的 modes.agent.memory
     # 必须在 _deep_merge 之前执行，否则旧子节点会被静默丢弃而非迁移。
     _migrate_legacy_agent_submode_memory(user_data)
+    _migrate_legacy_kv_cache_affinity_config(user_data)
 
     # Deep merge: template provides defaults, user values preserved
     merged_data = _deep_merge(template_data, user_data)
@@ -2264,6 +2415,12 @@ def migrate_config_from_template(
     # Guard against empty merged_data overwriting valid user config
     if merged_data is None or not merged_data:
         return False
+
+    # 写回程序版本号，与合并内容原子落盘；放在 diff 判断之前，
+    # 使旧 config（无版本号或版本号旧）必走写盘分支把版本号写回，
+    # 已写回的最新 config 下次启动被 ensure_config_migrated_from_template 短路。
+    from jiuwenswarm.common._build_config import VERSION
+    merged_data["config_version"] = VERSION
 
     # Only write if there are actual changes
     if merged_data != user_data:

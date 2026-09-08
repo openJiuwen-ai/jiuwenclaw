@@ -8,6 +8,7 @@ import type { ProjectInfo } from '../../features/workspace/projectTypes';
 import type { Session } from '../../types';
 import type { CronJobDTO, CronTaskUI, CronTemplateUI } from '../../types/cron';
 import { CRON_TEMPLATES } from './constants';
+import { isTeamCronModeValue } from './cronMode';
 import { normalizeWakeOffsetSeconds } from './cronWakeOffset';
 import { cronExprToSchedule, summarizeSchedule } from './scheduleConvert';
 import StatusBadge, { BoldRingIcon, RunningIcon } from './StatusBadge';
@@ -191,11 +192,7 @@ function cronJobToUI(job: CronJobDTO, projects: ProjectInfo[]): CronTaskUI {
     projectName,
     description: job.description,
     modelName: job.model_name ?? null,
-    // 后端 mode 归一：team/team.plan/code.team 等都算集群模式，其余（agent/plan/agent.plan/
-    // agent.fast）归一成单 Agent。后端 normalize_cron_job_mode 在落库时已把 legacy 别名
-    // （plan/agent.plan/agent.fast）归一到 "agent"，但 proactive.tick 这类特殊值以及历史存量
-    // 仍可能存在，这里用 isTeamCronModeValue 做兜底归一，避免界面看到陌生值。前端表单只在
-    // 'agent' | 'team' 两态之间切换，提交时也只下发这两个值（见 handleCreateSubmit/handleEditSubmit）。
+    // 统一识别后端规范模式和历史别名，表单只展示 agent / team 两态。
     mode: isTeamCronModeValue(job.mode) ? 'team' : 'agent',
     cronExpr: job.cron_expr,
     timezone: job.timezone,
@@ -204,21 +201,6 @@ function cronJobToUI(job: CronJobDTO, projects: ProjectInfo[]): CronTaskUI {
     expired: job.expired,
     deliveryChannel: job.targets,
   };
-}
-
-// 后端 CronJob.mode 合法值集合（对齐 jiuwenswarm/gateway/cron/models.py 的 _TEAM_CRON_MODES）。
-// 用于 cronJobToUI 把后端的 mode 字段归一成 UI 的 AgentMode 二态——只有 'team' 这一类算集群，
-// 其余一律按单 Agent 处理。inline 在这里而不是放到 types/cron.ts 是因为它只服务于本文件的归一逻辑，
-// 跟 CronTaskUI.mode 这个已经归一过的 UI 字段语义不同。
-function isTeamCronModeValue(raw: string | undefined | null): boolean {
-  const value = String(raw ?? '').trim().toLowerCase();
-  return (
-    value === 'team' ||
-    value === 'team.plan' ||
-    value === 'team.plan.normal' ||
-    value === 'team.plan.code' ||
-    value === 'code.team'
-  );
 }
 
 type StatusFilterKey = 'running' | 'paused' | 'expired';
@@ -546,6 +528,9 @@ export default function CronPanel({ sessionId, onCreateViaChat, onSelectSession 
         // 优先信任显式 project_id，只传 project_dir 需要多一层反查（见 CronTaskFormValue.projectId 注释）。
         // 未选项目（projectId 为 null）时不传这个 key，走 project_dir 空串的既有归默认项目逻辑。
         ...(value.projectId ? { project_id: value.projectId } : {}),
+        // 一并带上 work_mode：AgentOS 多用户下 Gateway 不再本地反查项目表，work_mode
+        // 需由前端（project.list 已含 work_mode）随 project_id 下发，保证归属/展示正确。
+        ...(value.projectId && value.workMode ? { work_mode: value.workMode } : {}),
         ...(value.modelName ? { model_name: value.modelName } : {}),
         mode: value.mode,
         session_id: sessionId,
@@ -554,7 +539,7 @@ export default function CronPanel({ sessionId, onCreateViaChat, onSelectSession 
       setDrawer(null);
       setActiveTab('list');
       await loadJobs(projects);
-      // 新任务按 updated_at 倒序会排到列表最前面（见 gateway/cron/store.py:179 的排序规则），
+      // 新任务按 updated_at 倒序会排到列表最前面（见 gateway/cron/store.py 的 jobs.sort 排序规则），
       // 跳回第 1 页并滚到表格顶部，让用户直接看到刚创建的任务，不用自己翻页去找
       goToPage(1);
       void reloadCronStore();
@@ -575,7 +560,7 @@ export default function CronPanel({ sessionId, onCreateViaChat, onSelectSession 
     try {
       const isProactive = jobId === PROACTIVE_AUTO_JOB_ID;
       // proactive 自动维护 job 只允许改 cron_expr 和 timezone；enabled/mode/name/description/
-      // targets/model_name 由 ConfigPanel/cron_sync 管理，不能带，否则会跟 proactive.tick 的
+      // targets/model_name 由 Settings/cron_sync 管理，不能带，否则会跟 proactive.tick 的
       // 调度逻辑冲突（沿用 upstream 提交 e64dcf51/59cf6de7 的约束）。
       const patch = isProactive
         ? { cron_expr: value.cronExpr.trim(), timezone: value.timezone }

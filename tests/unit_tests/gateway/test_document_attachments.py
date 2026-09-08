@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from jiuwenswarm.gateway.document_attachments import (
+from jiuwenswarm.server.runtime.attachments.document_attachments import (
     FORBIDDEN_DOCUMENT_EXTENSIONS,
     forbidden_formats,
     is_forbidden_document,
@@ -28,7 +28,7 @@ async def test_persist_accepts_many_documents_without_count_limit(tmp_path: Path
                 "path": str(doc),
             }
         )
-    result = await persist_and_parse_documents({"documents": documents})
+    result = persist_and_parse_documents({"documents": documents})
 
     items = result.get("media_items") or []
     assert len(items) == 25
@@ -69,7 +69,7 @@ async def test_persist_documents_returns_original_path_without_writing(tmp_path:
             }
         ]
     }
-    result = await persist_and_parse_documents(payload)
+    result = persist_and_parse_documents(payload)
 
     items = result.get("media_items") or []
     assert len(items) == 1
@@ -85,7 +85,7 @@ async def test_persist_documents_returns_original_path_without_writing(tmp_path:
 async def test_persist_rejects_forbidden_extension(tmp_path: Path):
     exe = tmp_path / "setup.exe"
     exe.write_bytes(b"MZ")
-    result = await persist_and_parse_documents(
+    result = persist_and_parse_documents(
         {
             "documents": [
                 {
@@ -103,7 +103,7 @@ async def test_persist_rejects_forbidden_extension(tmp_path: Path):
 
 @pytest.mark.asyncio
 async def test_persist_rejects_missing_path():
-    result = await persist_and_parse_documents(
+    result = persist_and_parse_documents(
         {
             "documents": [
                 {

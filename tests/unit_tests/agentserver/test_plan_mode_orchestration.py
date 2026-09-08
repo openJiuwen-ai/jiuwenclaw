@@ -12,13 +12,15 @@ The server-side pending-approval gate has been removed.
 
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from jiuwenswarm.common.schema.agent import AgentRequest
+from jiuwenswarm.common.schema.agent import AgentRequest, AgentResponseChunk
 from jiuwenswarm.common.schema.message import ReqMethod
+from jiuwenswarm.runtime.events import RuntimeEvent
 from jiuwenswarm.server import agent_ws_server as agent_ws_server_module
 from jiuwenswarm.server.agent_ws_server import AgentWebSocketServer
 
@@ -105,6 +107,164 @@ async def test_prepare_chat_normalizes_agent_request_for_code_workspace() -> Non
         mode="code",
         project_dir="/tmp/code-project",
         sub_mode="normal",
+    )
+
+
+@pytest.mark.asyncio
+async def test_prepare_chat_without_mode_restores_locked_session_mode() -> None:
+    """Heartbeat CHAT_SEND without mode continues in the original session mode."""
+    agent = MagicMock()
+    manager = MagicMock()
+    manager.get_agent = AsyncMock(return_value=agent)
+    manager.wait_for_session_prewarm = AsyncMock()
+    server = AgentWebSocketServer.__new__(AgentWebSocketServer)
+    server._agent_manager = manager
+    request = AgentRequest(
+        request_id="heartbeat-run-1",
+        channel_id="web",
+        session_id="heartbeat-session",
+        req_method=ReqMethod.CHAT_SEND,
+        params={
+            "query": "continue",
+            "automation": {
+                "kind": "heartbeat",
+                "job_id": "hb-1",
+                "run_id": "run-1",
+            },
+        },
+        metadata={
+            "automation": {
+                "kind": "heartbeat",
+                "job_id": "hb-1",
+                "run_id": "run-1",
+            }
+        },
+    )
+
+    with (
+        patch(
+            "jiuwenswarm.server.runtime.session.session_metadata.get_session_metadata",
+            return_value={"mode": "code.normal"},
+        ),
+        patch.object(
+            agent_ws_server_module,
+            "_sync_chat_request_metadata",
+            return_value=None,
+        ),
+    ):
+        mode, sub_mode, resolved = await server._prepare_code_mode_chat_turn(
+            request, "web"
+        )
+
+    assert (mode, sub_mode, resolved) == ("code", "normal", agent)
+    assert request.params["mode"] == "code.normal"
+    assert request.params["work_mode"] == "code"
+    manager.get_agent.assert_awaited_once_with(
+        channel_id="web",
+        mode="code",
+        project_dir=None,
+        sub_mode="normal",
+    )
+
+
+@pytest.mark.asyncio
+async def test_prepare_heartbeat_chat_without_mode_restores_locked_team_session() -> None:
+    """A mode-less Heartbeat must re-enter the Session's Team runtime."""
+    agent = MagicMock()
+    manager = MagicMock()
+    manager.get_agent = AsyncMock(return_value=agent)
+    manager.wait_for_session_prewarm = AsyncMock()
+    server = AgentWebSocketServer.__new__(AgentWebSocketServer)
+    server._agent_manager = manager
+    request = AgentRequest(
+        request_id="heartbeat-team-run",
+        channel_id="web",
+        session_id="heartbeat-team-session",
+        req_method=ReqMethod.CHAT_SEND,
+        params={"query": "continue the team task"},
+        metadata={
+            "automation": {
+                "kind": "heartbeat",
+                "job_id": "hb-team",
+                "run_id": "heartbeat-team-run",
+            }
+        },
+    )
+
+    with (
+        patch(
+            "jiuwenswarm.server.runtime.session.session_metadata.get_session_metadata",
+            return_value={"mode": "team.work.normal", "work_mode": "work"},
+        ),
+        patch.object(
+            agent_ws_server_module,
+            "_sync_chat_request_metadata",
+            return_value=None,
+        ) as sync_metadata,
+    ):
+        mode, sub_mode, resolved = await server._prepare_code_mode_chat_turn(
+            request, "web"
+        )
+
+    assert (mode, sub_mode, resolved) == ("team", None, agent)
+    assert request.params["mode"] == "team.work.normal"
+    assert request.params["work_mode"] == "work"
+    manager.get_agent.assert_awaited_once_with(
+        channel_id="web",
+        mode="team",
+        project_dir=None,
+        sub_mode=None,
+    )
+    assert sync_metadata.call_args.kwargs["explicit_mode_provided"] is False
+
+
+@pytest.mark.asyncio
+async def test_prepare_chat_without_mode_restores_locked_work_session_on_tui() -> None:
+    """A legacy work session must not inherit TUI's code default on resume."""
+    agent = MagicMock()
+    manager = MagicMock()
+    manager.get_agent = AsyncMock(return_value=agent)
+    manager.wait_for_session_prewarm = AsyncMock()
+    server = AgentWebSocketServer.__new__(AgentWebSocketServer)
+    server._agent_manager = manager
+    request = AgentRequest(
+        request_id="heartbeat-work-run",
+        channel_id="tui",
+        session_id="heartbeat-work-session",
+        req_method=ReqMethod.CHAT_SEND,
+        params={"query": "continue work session"},
+        metadata={
+            "automation": {
+                "kind": "heartbeat",
+                "job_id": "hb-work",
+                "run_id": "heartbeat-work-run",
+            }
+        },
+    )
+
+    with (
+        patch(
+            "jiuwenswarm.server.runtime.session.session_metadata.get_session_metadata",
+            return_value={"mode": "agent"},
+        ),
+        patch.object(
+            agent_ws_server_module,
+            "_sync_chat_request_metadata",
+            return_value=None,
+        ),
+    ):
+        mode, sub_mode, resolved = await server._prepare_code_mode_chat_turn(
+            request, "tui"
+        )
+
+    assert (mode, sub_mode, resolved) == ("agent", None, agent)
+    assert request.params["mode"] == "agent"
+    assert request.params["work_mode"] == "work"
+    manager.get_agent.assert_awaited_once_with(
+        channel_id="tui",
+        mode="agent",
+        project_dir=None,
+        sub_mode=None,
     )
 
 
@@ -437,6 +597,156 @@ async def test_plan_mode_exited_push_uses_the_session_profile_mode() -> None:
 
     pushed = server.send_push.await_args.args[0]
     assert pushed["payload"]["mode"] == "agent"
+
+
+def _install_internal_heartbeat_runtime(server, agent) -> None:
+    manager = object()
+
+    class Runtime:
+        agent_manager = manager
+
+        def stream(
+            self,
+            request,
+            *,
+            trigger_hook,
+            background,
+            on_agent_ready,
+        ):
+            assert trigger_hook is False
+            assert background is True
+            assert on_agent_ready is not None
+
+            async def _events():
+                on_agent_ready(agent)
+                async for chunk in agent.process_message_stream(request):
+                    yield RuntimeEvent.from_agent_message(
+                        chunk,
+                        request_id=request.request_id,
+                        channel_id=request.channel_id,
+                        session_id=request.session_id,
+                        default_agent_ref=request.agent_ref,
+                    )
+
+            return _events()
+
+    server._agent_manager = manager
+    server._runtime = Runtime()
+
+
+@pytest.mark.asyncio
+async def test_internal_heartbeat_pushes_visible_prompt_before_stream() -> None:
+    automation = {
+        "kind": "heartbeat",
+        "job_id": "hb-1",
+        "run_id": "run-1",
+        "triggered_at": 123.0,
+    }
+
+    async def response_stream():
+        yield AgentResponseChunk(
+            request_id="run-1",
+            channel_id="web",
+            payload={
+                "event_type": "chat.processing_status",
+                "is_processing": True,
+                "is_complete": False,
+            },
+            is_complete=False,
+        )
+        yield AgentResponseChunk(
+            request_id="run-1",
+            channel_id="web",
+            payload={"event_type": "chat.final", "content": "apple"},
+            is_complete=False,
+        )
+
+    agent = MagicMock()
+    agent.process_message_stream.return_value = response_stream()
+    server = AgentWebSocketServer.__new__(AgentWebSocketServer)
+    server._heartbeat_runtime = SimpleNamespace(retain_agent=MagicMock())
+    _install_internal_heartbeat_runtime(server, agent)
+    server.send_push = AsyncMock(return_value=True)
+    request = AgentRequest(
+        request_id="run-1",
+        channel_id="web",
+        session_id="sess-1",
+        req_method=ReqMethod.CHAT_SEND,
+        params={"query": "say a fruit", "content": "say a fruit", "automation": automation},
+        metadata={"automation": automation},
+    )
+
+    await server.execute_internal_heartbeat(request)
+
+    pushes = [call.args[0] for call in server.send_push.await_args_list]
+    assert pushes[0]["payload"] == {
+        "event_type": "chat.processing_status",
+        "session_id": "sess-1",
+        "is_processing": True,
+        "is_complete": False,
+        "content": "say a fruit",
+    }
+    assert pushes[0]["metadata"] == {"automation": automation}
+    assert pushes[1]["payload"]["content"] == "say a fruit"
+    assert pushes[2]["payload"]["content"] == "apple"
+    assert pushes[-1]["payload"] == {
+        "event_type": "chat.processing_status",
+        "session_id": "sess-1",
+        "is_processing": False,
+        "is_complete": True,
+    }
+    server._heartbeat_runtime.retain_agent.assert_called_once_with("sess-1", agent)
+
+
+@pytest.mark.asyncio
+async def test_internal_heartbeat_cancel_closes_processing_status() -> None:
+    automation = {
+        "kind": "heartbeat",
+        "job_id": "hb-1",
+        "run_id": "run-cancelled",
+        "triggered_at": 123.0,
+    }
+
+    async def response_stream():
+        yield AgentResponseChunk(
+            request_id="run-cancelled",
+            channel_id="web",
+            payload={
+                "event_type": "chat.processing_status",
+                "is_processing": True,
+                "is_complete": False,
+            },
+            is_complete=False,
+        )
+        raise asyncio.CancelledError
+
+    agent = MagicMock()
+    agent.process_message_stream.return_value = response_stream()
+    server = AgentWebSocketServer.__new__(AgentWebSocketServer)
+    server._heartbeat_runtime = SimpleNamespace(retain_agent=MagicMock())
+    _install_internal_heartbeat_runtime(server, agent)
+    server.send_push = AsyncMock(return_value=True)
+    request = AgentRequest(
+        request_id="run-cancelled",
+        channel_id="web",
+        session_id="sess-1",
+        req_method=ReqMethod.CHAT_SEND,
+        params={"query": "say a fruit", "content": "say a fruit", "automation": automation},
+        metadata={"automation": automation},
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        await server.execute_internal_heartbeat(request)
+
+    pushes = [call.args[0] for call in server.send_push.await_args_list]
+    assert pushes[-1]["payload"] == {
+        "event_type": "chat.processing_status",
+        "session_id": "sess-1",
+        "is_processing": False,
+        "is_complete": True,
+    }
+    assert pushes[-1]["metadata"] == {"automation": automation}
+    server._heartbeat_runtime.retain_agent.assert_called_once_with("sess-1", agent)
 
 
 @pytest.mark.asyncio

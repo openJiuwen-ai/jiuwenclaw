@@ -81,6 +81,11 @@ export interface CommandContext {
   setMode: (mode: ClientMode) => void;
   markPlanEntryFromSlashCommand?: () => void;
   setModel: (name: string) => void;
+  /** 全局选中 agentos 备份模型（请求级注入）；传 null 清空，恢复启动默认。
+   *  provider 可选，仅用于头部 Provider 行展示。
+   *  key 可选，为后端 model_key（model_name#global_idx），供 chat.send 精确
+   *  注入同名 agentos 条目；缺省时回退到 name。 */
+  setSelectedAgentosModel?: (name: string | null, provider?: string, key?: string | null) => void;
   setPreferredLanguage: (language: PreferredLanguage) => void;
   setThemeName: (theme: ThemeName) => void;
   setAccentColor: (color: AccentColorName) => void;
@@ -145,6 +150,26 @@ export interface CommandContext {
   hasServerTask?: () => boolean;
   /** TaskLifecyclePort：等待型取消；只供 /switch 等生命周期动作使用。 */
   cancelAndWaitForIdle?: (options?: CancelAndWaitOptions) => Promise<void>;
+  /** Start a TUI-side PR watch: re-run /autofix-pr on an interval until green.
+   *  `autoApprove` grants run-scoped auto-approval; it must be applied inside
+   *  startPrWatch (after the prior watch's onStopped clears it, before the first
+   *  round is sent) so round 1 is auto-approved too. `preferredLanguage` localizes
+   *  the watch's own user-visible messages. */
+  startPrWatch?: (config: {
+    repo: string;
+    prNumber: string;
+    platform: string;
+    intervalMs?: number;
+    autoApprove?: boolean;
+    preferredLanguage?: PreferredLanguage;
+  }) => void;
+  /** Stop the active PR watch; returns true if one was running. */
+  stopPrWatch?: () => boolean;
+  /** Whether a PR watch is currently active. */
+  isPrWatchActive?: () => boolean;
+  /** Grant/revoke run-scoped auto-approval of tool-permission prompts (used by
+   *  /autofix-pr to auto-approve commands for the duration of a run). */
+  setAutofixAutoApprove?: (on: boolean) => void;
 }
 
 export interface SlashCommand {

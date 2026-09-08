@@ -23,7 +23,6 @@ from openjiuwen.agent_teams.harness.manifest import register_from_catalog
 from openjiuwen.agent_teams.rails.builtin_elements import (
     AUDIO as _OJ_AUDIO,
     CONFIRM_INTERRUPT as _OJ_CONFIRM_INTERRUPT,
-    HEARTBEAT as _OJ_HEARTBEAT,
     LSP as _OJ_LSP,
     SECURITY as _OJ_SECURITY,
     SUBAGENT as _OJ_SUBAGENT,
@@ -129,7 +128,7 @@ SYS_OPERATION = _OJ_SYS_OPERATION
 TASK_PLANNING = _OJ_TASK_PLANNING
 SUBAGENT = _OJ_SUBAGENT
 SECURITY = _OJ_SECURITY
-HEARTBEAT = _OJ_HEARTBEAT
+HEARTBEAT = _member_rails.HEARTBEAT
 CODE_LSP = _OJ_LSP
 CODE_CONFIRM_INTERRUPT = _OJ_CONFIRM_INTERRUPT
 CODE_WORKTREE = _OJ_WORKTREE
@@ -146,7 +145,7 @@ def _build_swarm_context_from_seed(seed: dict[str, Any]) -> SwarmBuildContext:
     Registered with openjiuwen so ``from_spawn_payload`` / ``recover_from_session``
     restore the provider build context after deserialization.
     """
-    from jiuwenswarm.agents.harness.observability_runtime import (
+    from openjiuwen.extensions.observability.demand import (
         get_trajectory_span_processor,
     )
 

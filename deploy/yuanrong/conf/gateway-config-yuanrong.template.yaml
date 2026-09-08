@@ -195,6 +195,8 @@ models:
         api_key: ${API_KEY}
         model_name: ${MODEL_NAME}
         client_provider: ${MODEL_PROVIDER}
+        # endpoint_profile：仅 OpenAI 协议生效的端点方言；Anthropic 时忽略。
+        endpoint_profile: ${ENDPOINT_PROFILE:-openai}
         timeout: 1800
         verify_ssl: false
         custom_headers: {}
@@ -237,6 +239,8 @@ models:
         api_key: ${IMAGE_GEN_API_KEY}
         model_name: ${IMAGE_GEN_MODEL_NAME}
         client_provider: ${IMAGE_GEN_PROVIDER}
+        # 多模态生图走 DashScope SDK 需 endpoint_profile=dashscope。
+        endpoint_profile: ${IMAGE_GEN_ENDPOINT_PROFILE:-dashscope}
         verify_ssl: false
         timeout: 1800
       model_config_obj:
@@ -371,7 +375,6 @@ react:
   stream_chunk_threshold: 50
   stream_character_threshold: 2000
   context_engine_config:
-    enable_kv_cache_release: false
     enable_openrouter_model_context_window_tokens: true
     enable_reload: true
     enabled: true
@@ -395,6 +398,7 @@ react:
   evolution:
     skill_evolution: false     # true = 启用技能演进与创建（自动及手动）
     auto_save: false           # true = 自演进审批无需用户点击自动通过
+    review_feedback_min_confidence: 0.70
   a2x_registry:
     base_url: "http://127.0.0.1:8000"
     timeout: 30.0
@@ -468,6 +472,10 @@ gateway:
     agent_key_fields:
       - user_id
       - agent_type
+    # Web/TUI 连接建立后后台预热内置 jiuwenswarm 沙箱并打通 instance WS，
+    # 避免首条 chat 卡在 create + 冷启动 502 重试。失败不影响连接。
+    # agent_key_fields 含 session_id 时无法在握手阶段确定 key，自动跳过。
+    connect_warmup_enabled: true
     # 空闲沙箱回收：agent 无持有任务（chat/SSH 均已结束）且空闲超过该时长后，
     # 自动 DELETE /api/agent 释放 YuanRong 实例；<= 0 表示不回收。
     # 存活的 SSH 连接（即使不发消息）全程持有任务计数，不会被回收。
@@ -700,9 +708,10 @@ permissions:
     "*": "allow"
 
   tools:
-    bash: ask
-    mcp_exec_command: ask
-    create_terminal: ask
+    bash: allow
+    powershell: allow
+    mcp_exec_command: allow
+    create_terminal: allow
     write: ask
     write_file: ask
     edit_file: ask
@@ -748,87 +757,168 @@ permissions:
 
   rules:
     - id: shell_allow_dir
-      tools: [bash, mcp_exec_command, create_terminal]
+      tools: [bash, powershell, mcp_exec_command, create_terminal]
       pattern: "dir *"
       severity: LOW
     - id: shell_allow_ls
-      tools: [bash, mcp_exec_command, create_terminal]
+      tools: [bash, powershell, mcp_exec_command, create_terminal]
       pattern: "ls *"
       severity: LOW
     - id: shell_allow_pwd
-      tools: [bash, mcp_exec_command, create_terminal]
+      tools: [bash, powershell, mcp_exec_command, create_terminal]
       pattern: "pwd *"
       severity: LOW
     - id: shell_allow_cd
-      tools: [bash, mcp_exec_command, create_terminal]
+      tools: [bash, powershell, mcp_exec_command, create_terminal]
       pattern: "cd *"
       severity: LOW
     - id: shell_allow_echo
-      tools: [bash, mcp_exec_command, create_terminal]
+      tools: [bash, powershell, mcp_exec_command, create_terminal]
       pattern: "echo *"
       severity: LOW
     - id: shell_allow_cat
-      tools: [bash, mcp_exec_command, create_terminal]
+      tools: [bash, powershell, mcp_exec_command, create_terminal]
       pattern: "cat *"
       severity: LOW
     - id: shell_allow_type
-      tools: [bash, mcp_exec_command, create_terminal]
+      tools: [bash, powershell, mcp_exec_command, create_terminal]
       pattern: "type *"
       severity: LOW
     - id: shell_allow_head
-      tools: [bash, mcp_exec_command, create_terminal]
+      tools: [bash, powershell, mcp_exec_command, create_terminal]
       pattern: "head *"
       severity: LOW
     - id: shell_allow_tail
-      tools: [bash, mcp_exec_command, create_terminal]
+      tools: [bash, powershell, mcp_exec_command, create_terminal]
       pattern: "tail *"
       severity: LOW
     - id: shell_allow_git_status
-      tools: [bash, mcp_exec_command, create_terminal]
+      tools: [bash, powershell, mcp_exec_command, create_terminal]
       pattern: "git status *"
       severity: LOW
     - id: shell_allow_git_log
-      tools: [bash, mcp_exec_command, create_terminal]
+      tools: [bash, powershell, mcp_exec_command, create_terminal]
       pattern: "git log *"
       severity: LOW
     - id: shell_allow_git_diff
-      tools: [bash, mcp_exec_command, create_terminal]
+      tools: [bash, powershell, mcp_exec_command, create_terminal]
       pattern: "git diff *"
       severity: LOW
     - id: shell_allow_git_branch
-      tools: [bash, mcp_exec_command, create_terminal]
+      tools: [bash, powershell, mcp_exec_command, create_terminal]
       pattern: "git branch *"
       severity: LOW
+    # PowerShell cmdlet / alias counterparts of cd, pwd, ls/dir, cat/type, echo, head/tail
+    - id: shell_allow_set_location
+      tools: [bash, powershell, mcp_exec_command, create_terminal]
+      pattern: "Set-Location *"
+      severity: LOW
+    - id: shell_allow_push_location
+      tools: [bash, powershell, mcp_exec_command, create_terminal]
+      pattern: "Push-Location *"
+      severity: LOW
+    - id: shell_allow_pop_location
+      tools: [bash, powershell, mcp_exec_command, create_terminal]
+      pattern: "Pop-Location *"
+      severity: LOW
+    - id: shell_allow_sl
+      tools: [bash, powershell, mcp_exec_command, create_terminal]
+      pattern: "sl *"
+      severity: LOW
+    - id: shell_allow_chdir
+      tools: [bash, powershell, mcp_exec_command, create_terminal]
+      pattern: "chdir *"
+      severity: LOW
+    - id: shell_allow_get_location
+      tools: [bash, powershell, mcp_exec_command, create_terminal]
+      pattern: "Get-Location *"
+      severity: LOW
+    - id: shell_allow_gl
+      tools: [bash, powershell, mcp_exec_command, create_terminal]
+      pattern: "gl *"
+      severity: LOW
+    - id: shell_allow_get_childitem
+      tools: [bash, powershell, mcp_exec_command, create_terminal]
+      pattern: "Get-ChildItem *"
+      severity: LOW
+    - id: shell_allow_gci
+      tools: [bash, powershell, mcp_exec_command, create_terminal]
+      pattern: "gci *"
+      severity: LOW
+    - id: shell_allow_get_item
+      tools: [bash, powershell, mcp_exec_command, create_terminal]
+      pattern: "Get-Item *"
+      severity: LOW
+    - id: shell_allow_gi
+      tools: [bash, powershell, mcp_exec_command, create_terminal]
+      pattern: "gi *"
+      severity: LOW
+    - id: shell_allow_get_content
+      tools: [bash, powershell, mcp_exec_command, create_terminal]
+      pattern: "Get-Content *"
+      severity: LOW
+    - id: shell_allow_gc
+      tools: [bash, powershell, mcp_exec_command, create_terminal]
+      pattern: "gc *"
+      severity: LOW
+    - id: shell_allow_write_output
+      tools: [bash, powershell, mcp_exec_command, create_terminal]
+      pattern: "Write-Output *"
+      severity: LOW
+    - id: shell_allow_write_host
+      tools: [bash, powershell, mcp_exec_command, create_terminal]
+      pattern: "Write-Host *"
+      severity: LOW
+    - id: shell_allow_select_object
+      tools: [bash, powershell, mcp_exec_command, create_terminal]
+      pattern: 're:(?i)^Select-Object\b'
+      severity: LOW
     - id: shell_ask_rm
-      tools: [bash, mcp_exec_command, create_terminal]
+      tools: [bash, powershell, mcp_exec_command, create_terminal]
       pattern: "rm *"
       severity: HIGH
     - id: shell_ask_del
-      tools: [bash, mcp_exec_command, create_terminal]
+      tools: [bash, powershell, mcp_exec_command, create_terminal]
       pattern: "del *"
       severity: HIGH
     - id: shell_ask_rd
-      tools: [bash, mcp_exec_command, create_terminal]
+      tools: [bash, powershell, mcp_exec_command, create_terminal]
       pattern: "rd *"
       severity: HIGH
+    - id: shell_ask_remove_item
+      tools: [bash, powershell, mcp_exec_command, create_terminal]
+      pattern: "Remove-Item *"
+      severity: HIGH
+    - id: shell_ask_ri
+      tools: [bash, powershell, mcp_exec_command, create_terminal]
+      pattern: "ri *"
+      severity: HIGH
+    - id: shell_ask_rmdir
+      tools: [bash, powershell, mcp_exec_command, create_terminal]
+      pattern: "rmdir *"
+      severity: HIGH
+    - id: shell_ask_erase
+      tools: [bash, powershell, mcp_exec_command, create_terminal]
+      pattern: "erase *"
+      severity: HIGH
     - id: shell_ask_mv
-      tools: [bash, mcp_exec_command, create_terminal]
+      tools: [bash, powershell, mcp_exec_command, create_terminal]
       pattern: "mv *"
       severity: HIGH
     - id: shell_ask_cp
-      tools: [bash, mcp_exec_command, create_terminal]
+      tools: [bash, powershell, mcp_exec_command, create_terminal]
       pattern: "cp *"
       severity: HIGH
     - id: shell_ask_chmod
-      tools: [bash, mcp_exec_command, create_terminal]
+      tools: [bash, powershell, mcp_exec_command, create_terminal]
       pattern: "chmod *"
       severity: HIGH
     - id: shell_ask_chown
-      tools: [bash, mcp_exec_command, create_terminal]
+      tools: [bash, powershell, mcp_exec_command, create_terminal]
       pattern: "chown *"
       severity: HIGH
     - id: shell_ask_sensitive_file_reads
-      tools: [bash, mcp_exec_command, create_terminal]
+      tools: [bash, powershell, mcp_exec_command, create_terminal]
       pattern: 're:(?i)(^|[\s;&|()])((cat|type|less|more|head|tail|grep|find|Get-Content|Select-String)\b[^;&|]*(id_rsa|id_ed25519|\.pem\b|\.pfx\b|\.key\b|\.kube/config|\.aws/(credentials|config)|\.npmrc\b|\.env(\.[A-Za-z0-9_-]+)?\b|authorized_keys|\.ssh/))'
       severity: HIGH
     - id: path_ask_ssh

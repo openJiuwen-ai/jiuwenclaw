@@ -24,6 +24,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -141,6 +142,113 @@ _LANDLOCK_LAUNCHER_BYTES = LANDLOCK_LAUNCHER_SOURCE.read_bytes()
 _SANDBOX_DAEMON_BYTES = SANDBOX_DAEMON_SOURCE.read_bytes()
 PYTHON_EXECUTABLE = "python3"
 
+# Python ForkServer fast path (transparent optimisation, default ON).
+# Exec requests whose command is the simple ``python3 -c CODE``
+# shape are marked ``python_fastpath: true`` in the daemon IPC payload (when
+# the fast path is enabled, which it is unless ``JIUWENBOX_PYTHON_FASTPATH=0``
+# opts out). The in-sandbox daemon routes those to a persistent ForkServer
+# (see ``sandbox_daemon.py``) instead of spawning a fresh interpreter per
+# call. The flag is inherited into the sandbox daemon via the bwrap process
+# env, so both sides agree (``_python_fastpath_enabled`` here mirrors
+# ``sandbox_daemon._fastpath_enabled``). This does not change the HTTP API or
+# the default ``/exec`` path.
+FASTPATH_ENV = "JIUWENBOX_PYTHON_FASTPATH"
+
+# Global fast-path admission cap: at most this many sandboxes in a single
+# server process may activate their worker pools. Once the cap is reached,
+# further ``python3 -c`` requests are served by the normal ``/exec`` path.
+# This bounds the machine-wide worst-case worker count (cap × per-sandbox
+# cap) and the cold-start blast radius when many sandboxes start together.
+FASTPATH_MAX_SANDBOXES_ENV = "JIUWENBOX_PYTHON_FASTPATH_MAX_SANDBOXES"
+FASTPATH_DEFAULT_MAX_SANDBOXES = 50
+
+
+def _fastpath_max_sandboxes() -> int:
+    raw = os.environ.get(FASTPATH_MAX_SANDBOXES_ENV)
+    if raw:
+        try:
+            value = int(raw)
+        except ValueError:
+            value = 0
+        if value >= 1:
+            return min(value, 1000)
+    return FASTPATH_DEFAULT_MAX_SANDBOXES
+
+
+def _python_fastpath_enabled() -> bool:
+    """Whether the server marks exec requests as FastPath candidates.
+
+    The fast path is a **transparent optimisation** and is ON by
+    default. Mirrors ``sandbox_daemon._fastpath_enabled`` so both sides agree
+    (the flag is inherited into the sandbox daemon via the bwrap env, so the
+    two must read it identically):
+
+    * unset  -> ON  (default-on; the user does nothing and still gets it)
+    * ``"1"`` -> ON  (explicit enable, equivalent to the new default)
+    * ``"0"`` -> OFF (explicit opt-out)
+    * any other value -> OFF, fail-safe, with a warning.
+
+    Default-on only marks simple ``python3 -c CODE`` candidates; everything
+    else is served by the unchanged ``subprocess.Popen`` path, so the contract
+    for non-candidates is unaffected.
+    """
+    raw = os.environ.get(FASTPATH_ENV)
+    if raw is None or raw == "1":
+        return True
+    if raw == "0":
+        return False
+    logger.warning(
+        "unrecognised %s=%r; expected '0' or '1'; defaulting fast path OFF",
+        FASTPATH_ENV, raw,
+    )
+    return False
+
+
+def _python_fastpath_candidate(command: list[str]) -> bool:
+    """Whether ``command`` may be worth offering to the in-sandbox fast path.
+
+    Narrow, explicit trigger only (applied solely when the feature flag is
+    on); it is not a general auto-detector of arbitrary Python invocations.
+
+    This is a cheap *pre-filter*, not the decision. The authoritative
+    eligibility check runs inside the sandbox daemon (``_fastpath_plan``),
+    which is the only side that can see the filesystem the script and its
+    imports live on. Marking a request merely lets the daemon consider it;
+    the daemon still falls back on anything it does not fully understand.
+
+    Recognised shapes:
+      * ``python|python3 -c CODE``                    (bare ``-c`` only)
+      * ``python|python3 <script>.py [args]``          (direct script)
+      * ``bash -lc|-c '<small payload>'``              (real EDPA wrapper)
+
+    Only a *bare* ``-c`` right after the interpreter is offered: any
+    interpreter flag (``-I``/``-S``/``-E``/``-u``/``-B``) changes ``sys.flags``
+    or startup the warm worker cannot reproduce, so the daemon would reject it
+    anyway -- skipping the candidate mark sends it straight to ``subprocess``.
+    The daemon is still authoritative: for ``python -c`` it applies the
+    interpreter-identity check (``python`` must resolve to the worker), and it
+    re-checks the bare-``-c`` shape, so this pre-filter never causes a wrong
+    conversion on its own.
+    """
+    if not command:
+        return False
+    head = command[0]
+    if head in (PYTHON_EXECUTABLE, "python"):
+        if len(command) < 2:
+            return False
+        # Bare ``-c`` right after the interpreter: offer to the daemon.
+        if command[1] == "-c":
+            return len(command) >= 3
+        # Direct script form: first token after the interpreter is a .py file.
+        return not command[1].startswith("-") and command[1].endswith(".py")
+    if head == "bash" and len(command) == 3 and command[1] in ("-lc", "-c"):
+        # Only bother the daemon when the payload mentions a Python
+        # interpreter at all; the daemon does the strict recognition.
+        payload = command[2]
+        return "python" in payload and len(payload) <= 4096
+    return False
+
+
 # Per-sandbox control socket: box-server ``bind()``s a Unix socket on its
 # own host filesystem inside a per-sandbox control directory, then passes
 # the listener fd into bubblewrap via ``subprocess.Popen(pass_fds=...)``.
@@ -227,6 +335,7 @@ class _DaemonExecCall:
     """
 
     socket_path: Path
+    sandbox_id: str
     command: list[str]
     env: dict[str, str] | None
     workdir: str | None
@@ -582,6 +691,12 @@ class ProcessRuntime(RuntimeAdapter):
         # outside the asyncio loop in some startup paths (CLI, tests).
         self._exec_concurrency_limit: int = _resolve_exec_concurrency()
         self._exec_semaphore: asyncio.Semaphore | None = None
+        # Global fast-path admission: bounds how many sandboxes in this
+        # process may activate their worker pools (see ``_fastpath_admit``).
+        # Released on sandbox delete via ``cleanup``.
+        self._fastpath_activated: set[str] = set()
+        self._fastpath_admit_lock = threading.Lock()
+        self._fastpath_max_sandboxes = _fastpath_max_sandboxes()
         # Zombie reaper plumbing. Plumbed in via ``register_zombie_reaper``
         # once an event loop is available (lifespan startup); we cannot
         # install a signal handler / create a Task before the loop exists.
@@ -2328,6 +2443,28 @@ class ProcessRuntime(RuntimeAdapter):
         blob = recv_frame(sock, DAEMON_MAX_RESPONSE_BYTES)
         return json.loads(blob.decode("utf-8"))
 
+    def _fastpath_admit(self, sandbox_id: str) -> bool:
+        """Whether ``sandbox_id`` may use the Python fast path (global cap).
+
+        The first fast-path *candidate* request from a sandbox activates that
+        sandbox's worker pool inside its daemon. Callers must have already
+        confirmed the command is a fast-path candidate before admitting, so
+        the quota is only consumed by commands that will actually take the fast
+        path (not by e.g. ``ls``). Once ``_fastpath_max_sandboxes`` sandboxes
+        have activated in this process, further sandboxes are not marked and
+        their ``python3 -c`` requests take the normal ``/exec`` path.
+        ``cleanup`` (sandbox delete) releases the slot. This yields a hard
+        worst-case worker bound of ``cap × per-sandbox cap`` and bounds the
+        startup-storm blast radius when many sandboxes cold-start together.
+        """
+        if sandbox_id in self._fastpath_activated:
+            return True
+        with self._fastpath_admit_lock:
+            if len(self._fastpath_activated) >= self._fastpath_max_sandboxes:
+                return False
+            self._fastpath_activated.add(sandbox_id)
+            return True
+
     def _exec_via_daemon_blocking(self, call: _DaemonExecCall) -> ExecResult:
         """Run one ``exec`` over the IPC channel and return an ``ExecResult``.
 
@@ -2340,6 +2477,18 @@ class ProcessRuntime(RuntimeAdapter):
             "command": list(call.command),
             "stdin_size": len(call.stdin_bytes or b""),
         }
+        if (
+            _python_fastpath_enabled()
+            # Candidate check BEFORE admit: the global admit quota must only be
+            # consumed by commands that will actually take the fast path. A
+            # non-candidate command (e.g. ``ls``) reaching here first used to
+            # activate the sandbox and consume an admit slot, so a mixed load
+            # could fill ``_fastpath_activated`` with sandboxes that never use
+            # the fast path and silently degrade later Python requests.
+            and _python_fastpath_candidate(list(call.command))
+            and self._fastpath_admit(call.sandbox_id)
+        ):
+            request_payload["python_fastpath"] = True
         if call.env:
             request_payload["env"] = dict(call.env)
         if call.workdir:
@@ -2507,6 +2656,7 @@ class ProcessRuntime(RuntimeAdapter):
                 self._exec_via_daemon_blocking,
                 _DaemonExecCall(
                     socket_path=socket_path,
+                    sandbox_id=sandbox_id,
                     command=list(request.command),
                     env=dict(request.env) if request.env else None,
                     workdir=request.workdir,
@@ -3187,6 +3337,7 @@ class ProcessRuntime(RuntimeAdapter):
             shutil.rmtree(control_dir, ignore_errors=True)
         self._background_processes.pop(sandbox_id, None)
         self._daemon_socket_ready.pop(sandbox_id, None)
+        self._fastpath_activated.discard(sandbox_id)
         # Runtime log files used to live here too; they were removed in
         # favour of the single ``audit.log`` written by ``AuditLogger``.
         # Nothing extra to clean up on this side any more.

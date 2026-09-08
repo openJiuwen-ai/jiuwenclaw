@@ -13,8 +13,15 @@ def test_personal_context_api_inventory_and_legacy_removal() -> None:
         item.value for item in ReqMethod if item.value.startswith("personal_context.")
     }
     legacy_prefix = "p" + "cs."
+    removed_methods = {
+        "personal_context.runtime." + "start",
+        "personal_context.runtime." + "stop",
+        "personal_context.fetch.start_" + "scheduler",
+        "personal_context.fetch.stop_" + "scheduler",
+    }
 
-    assert len(methods) == 22
+    assert len(methods) == 24
+    assert methods.isdisjoint(removed_methods)
     assert not any(item.value.startswith(legacy_prefix) for item in ReqMethod)
 
 

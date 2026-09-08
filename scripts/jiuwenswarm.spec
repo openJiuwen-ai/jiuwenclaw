@@ -1,14 +1,14 @@
 # -*- mode: python ; coding: utf-8 -*-
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 r"""JiuwenSwarm PyInstaller 打包配置。
 
 构建前请先：
-1. 安装依赖: uv sync --extra dev --extra claude --extra codex
+1. 安装依赖: uv sync --extra dev
 2. 构建前端: cd jiuwenswarm/channels/web/frontend && npm run build
 3. 执行平台 wrapper: .\scripts\build-exe.ps1 或 bash scripts/build-macos.sh
 """
 
 import glob
-import importlib.util
 import os
 import runpy
 import sys
@@ -47,25 +47,6 @@ OPENJIUWEN_DATA_EXCLUDES = [
     "**/deepagents/tools/browser_move/logs/**",
     "**/deepagents/tools/browser_move/.env",
 ]
-CollectedPackage = tuple[list[tuple[str, str]], list[tuple[str, str]], list[str]]
-
-
-def collect_required_all(
-    import_name: str,
-    install_hint: str,
-) -> CollectedPackage:
-    """Collect a package and fail with an actionable build hint when missing."""
-    if importlib.util.find_spec(import_name) is None:
-        raise SystemExit(f"ERROR: missing required desktop dependency '{import_name}'. {install_hint}")
-    return collect_all(import_name)
-
-
-def copy_required_metadata(distribution_name: str, install_hint: str) -> list[tuple[str, str]]:
-    """Copy distribution metadata and fail with an actionable build hint when missing."""
-    try:
-        return copy_metadata(distribution_name, recursive=True)
-    except Exception as exc:
-        raise SystemExit(f"ERROR: missing metadata for '{distribution_name}'. {install_hint}") from exc
 
 
 def collect_tree_data_files(source_dir, target_dir, patterns):
@@ -164,9 +145,53 @@ if not os.path.isdir(web_dist) or not os.listdir(web_dist):
 datas = webview_datas + [
     (os.path.join(project_root, "jiuwenswarm", "channels", "web", "frontend", "dist"), "jiuwenswarm/channels/web/frontend/dist"),
 ]
-datas += collect_resources_data_files(
+_playwright_mcp_resource_dir = os.path.join(
+    project_root,
+    "jiuwenswarm",
+    "resources",
+    "runtime",
+    "playwright-mcp",
+)
+_playwright_mcp_zip = os.path.join(
+    _playwright_mcp_resource_dir,
+    "playwright-mcp-0.0.78.zip",
+)
+_playwright_mcp_manifest = os.path.join(_playwright_mcp_resource_dir, "manifest.json")
+for _required_playwright_resource in (_playwright_mcp_zip, _playwright_mcp_manifest):
+    if not os.path.isfile(_required_playwright_resource):
+        raise SystemExit(
+            "ERROR: bundled Playwright MCP resource is missing: "
+            f"{_required_playwright_resource}. Run scripts/update_playwright_mcp_runtime.py."
+        )
+
+_resource_datas = collect_resources_data_files(
     os.path.join(project_root, "jiuwenswarm", "resources"),
     "jiuwenswarm/resources",
+)
+# Keep the ZIP explicit: generic PyInstaller resource patterns historically
+# covered only text data, while the browser runtime must remain a real file.
+datas += [
+    (
+        _playwright_mcp_zip,
+        "jiuwenswarm/resources/runtime/playwright-mcp",
+    )
+]
+datas += [
+    item
+    for item in _resource_datas
+    if os.path.normcase(os.path.abspath(item[0]))
+    != os.path.normcase(os.path.abspath(_playwright_mcp_zip))
+]
+datas += [
+    (
+        os.path.join(project_root, "OPEN_SOURCE_SOFTWARE_NOTICE.md"),
+        ".",
+    )
+]
+datas += collect_data_files(
+    "certifi",
+    include_py_files=False,
+    includes=["cacert.pem"],
 )
 datas += copy_metadata("fastmcp", recursive=True)
 datas += copy_metadata("mcp", recursive=True)
@@ -187,6 +212,13 @@ datas += collect_data_files(
     include_py_files=False,
     includes=DATA_FILE_PATTERNS,
 )
+# DesignRail 的 config.yaml + skills/ 树（SKILL.md / workflows / references / scripts）
+# 含 .mjs 脚本和 _templates/ 模板（脚本运行时读取），需额外 pattern
+datas += collect_data_files(
+    "jiuwenswarm.agents.harness.code.rails.sdd.design_rail",
+    include_py_files=False,
+    includes=["**/*.yaml", "**/*.yml", "**/*.json", "**/*.md", "**/*.mjs"],
+)
 for package_root in DISPATCH_PACKAGE_ROOTS:
     datas += collect_tree_data_files(
         os.path.join(symphony_root, package_root),
@@ -197,11 +229,35 @@ for package_root in DISPATCH_PACKAGE_ROOTS:
 # openjiuwen 使用动态导入，需要收集全部子模块
 openjiuwen_submodules = collect_submodules("openjiuwen")
 symphony_submodules = collect_submodules("jiuwenswarm.symphony")
+# TeamManager imports this lifecycle hook while its parent package is being
+# initialized.  Keep it explicit because PyInstaller cannot reliably infer
+# this package-attribute import from the frozen entry point.
+team_kv_cache_hiddenimports = [
+    "jiuwenswarm.agents.harness.team.kv_cache_team_delete_guard",
+]
 dispatch_submodules = collect_tree_python_modules(symphony_root, DISPATCH_PACKAGE_ROOTS)
+http2_submodules = [
+    *collect_submodules("h2"),
+    *collect_submodules("hpack"),
+    *collect_submodules("hyperframe"),
+]
 
 # 部分包需要显式声明隐藏导入
-hiddenimports = webview_hiddenimports + [
+hiddenimports = webview_hiddenimports + http2_submodules + [
     "pandas",  # pymilvus 依赖
+    # ``--doctor`` imports these targets dynamically before business imports.
+    # Keep them explicit so the installed executable can diagnose a broken
+    # native dependency instead of reporting a PyInstaller collection gap.
+    "tiktoken._tiktoken",
+    "grpc._cython.cygrpc",
+    "cryptography.hazmat.bindings._rust",
+    "numpy",
+    "pandas._libs.lib",
+    "lxml.etree",
+    "PIL._imaging",
+    "bcrypt._bcrypt",
+    "faiss",
+    "chromadb_rust_bindings",
     "tiktoken_ext",  # tiktoken 编码插件（cl100k_base 等）
     "tiktoken_ext.openai_public",
     "ruamel.yaml",
@@ -218,7 +274,7 @@ hiddenimports = webview_hiddenimports + [
     "webview",
     "jiuwenswarm.channels.web.app_web",  # 静态文件服务
     "jiuwenswarm.channels.web.desktop_app",  # 桌面入口
-] + openjiuwen_submodules + symphony_submodules + dispatch_submodules
+] + openjiuwen_submodules + symphony_submodules + team_kv_cache_hiddenimports + dispatch_submodules
 
 # 排除不需要的模块以减小体积（pandas 为 pymilvus/openjiuwen 所需，不可排除）
 excludes = [
@@ -226,6 +282,12 @@ excludes = [
     "matplotlib",
     "scipy",
     "numpy.tests",
+    # External CLI SDKs and their native executables are optional runtimes.
+    # Frozen Windows builds install verified wheels under the application directory on demand.
+    # Other platforms keep their managed optional runtimes in the user data directory.
+    "claude_agent_sdk",
+    "openai_codex",
+    "codex_cli_bin",
     # 测试框架辅助包（pytest 本体已 collect 进 PYZ）
     "tox",
     "hypothesis",
@@ -277,39 +339,6 @@ _py_datas, _py_binaries, _py_hidden = collect_all("py")
 datas += _pytest_datas + _pa_datas + _py_datas
 hiddenimports += _pytest_hidden + _pa_hidden + _py_hidden
 _bundled_binaries = _bundled_binaries + _pytest_binaries + _pa_binaries + _py_binaries
-
-# Bundle external CLI SDKs. The Python modules may live in the PYZ archive, but
-# their bundled CLI executables must be present as real files for SDK path
-# discovery. External CLI SDKs are required for desktop builds because frozen
-# executables do not ship pip and cannot install optional dependencies after
-# release.
-_desktop_external_cli_hint = (
-    "Run `scripts\\build-exe.ps1`, or run `uv sync --extra dev --extra claude --extra codex` "
-    "before invoking PyInstaller directly."
-)
-_claude_datas, _claude_binaries, _claude_hidden = collect_required_all(
-    "claude_agent_sdk",
-    _desktop_external_cli_hint,
-)
-datas += _claude_datas
-datas += copy_required_metadata("claude-agent-sdk", _desktop_external_cli_hint)
-hiddenimports += _claude_hidden
-_bundled_binaries = _bundled_binaries + _claude_binaries
-
-_codex_datas, _codex_binaries, _codex_hidden = collect_required_all(
-    "openai_codex",
-    _desktop_external_cli_hint,
-)
-_codex_cli_datas, _codex_cli_binaries, _codex_cli_hidden = collect_required_all(
-    "codex_cli_bin",
-    _desktop_external_cli_hint,
-)
-datas += _codex_datas + _codex_cli_datas
-datas += collect_data_files("codex_cli_bin", include_py_files=False, includes=["**/*"])
-datas += copy_required_metadata("openai-codex", _desktop_external_cli_hint)
-datas += copy_required_metadata("openai-codex-cli-bin", _desktop_external_cli_hint)
-hiddenimports += _codex_hidden + _codex_cli_hidden
-_bundled_binaries = _bundled_binaries + _codex_binaries + _codex_cli_binaries
 
 # Bundle mypy so that `python -m mypy` works inside the frozen exe.
 # `sys.executable -m mypy`. mypy ships mypyc-compiled .pyd extensions plus
@@ -456,6 +485,7 @@ if sys.platform == "darwin":
         info_plist={
             "CFBundleName": build_config.display_name,
             "CFBundleDisplayName": build_config.display_name,
+            "CFBundleExecutable": build_config.executable_name,
             "CFBundleShortVersionString": build_config.version,
             "CFBundleVersion": build_config.version,
             "NSHighResolutionCapable": "True",

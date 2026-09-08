@@ -27,7 +27,7 @@ from __future__ import annotations
 import logging
 import os
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from openjiuwen.agent_teams.harness.manifest import (
     ConstructionInput,
@@ -36,19 +36,20 @@ from openjiuwen.agent_teams.harness.manifest import (
     harness_element,
     param_field,
 )
-
 from jiuwenswarm.agents.harness.common.tools.image_tools import generate_image
 from jiuwenswarm.agents.harness.common.tools.multimodal_config import (
     apply_audio_model_config_from_yaml,
     apply_image_gen_model_config_from_yaml,
     apply_video_model_config_from_yaml,
     apply_vision_model_config_from_yaml,
-    dedicated_multimodal_model_configured,
     complete_multimodal_model_configured,
+    multimodal_model_enabled,
 )
 from jiuwenswarm.agents.harness.common.tools.skill_retrieval_toolkits import (
     SkillRetrievalToolkit,
+    build_model_discovery_settings,
     is_skill_retrieval_enabled,
+    skill_sources_from_manager,
 )
 from jiuwenswarm.agents.harness.common.tools.skill_toolkits import SkillToolkit
 from jiuwenswarm.agents.harness.common.tools.symphony_toolkits import SymphonyToolkit
@@ -87,6 +88,7 @@ from jiuwenswarm.agents.harness.team.team_runtime_inheritance import TOOL_WHITEL
 from jiuwenswarm.agents.swarm.context import SwarmBuildContext
 from jiuwenswarm.common.config import get_config
 from jiuwenswarm.common.tool_ownership import mark_stateless
+from jiuwenswarm.server.runtime.skill import load_execution_disabled_skills
 from jiuwenswarm.server.runtime.skill.skill_manager import SkillManager
 
 logger = logging.getLogger(__name__)
@@ -224,7 +226,9 @@ def visible_skill_names_for_list_skill(ctx: SwarmBuildContext) -> set[str]:
     Returns:
         The Skill names visible to this member.
     """
-    from jiuwenswarm.agents.swarm.providers.skills import compose_member_skill_visibility
+    from jiuwenswarm.agents.swarm.providers.skills import (
+        compose_member_skill_visibility,
+    )
 
     names = _scan_library_skill_names(_skill_library_dir(ctx))
     enabled_skills, disabled_skills = compose_member_skill_visibility(ctx)
@@ -253,7 +257,10 @@ def vision_model_config_params(config: dict[str, Any]) -> dict[str, Any]:
     Requires a dedicated ``models.vision`` key and a complete ``VISION_*`` env
     mapping after applying the yaml config (mirrors the single-agent build).
     """
-    if not dedicated_multimodal_model_configured(config, "vision"):
+    if not (
+        multimodal_model_enabled(config, "vision")
+        and complete_multimodal_model_configured(config, "vision")
+    ):
         return {}
     apply_vision_model_config_from_yaml(config)
     api_key = str(os.getenv("VISION_API_KEY", "")).strip()
@@ -275,12 +282,14 @@ def vision_model_config_params(config: dict[str, Any]) -> dict[str, Any]:
 
 def audio_dedicated_configured(config: dict[str, Any]) -> bool:
     """Return whether a complete dedicated audio model is configured."""
-    return complete_multimodal_model_configured(config, "audio")
+    return multimodal_model_enabled(config, "audio") and complete_multimodal_model_configured(
+        config, "audio"
+    )
 
 
 def audio_model_config_params(config: dict[str, Any]) -> dict[str, Any]:
     """Return ``AudioModelConfig`` constructor kwargs, or {} when incomplete."""
-    if not complete_multimodal_model_configured(config, "audio"):
+    if not audio_dedicated_configured(config):
         return {}
     apply_audio_model_config_from_yaml(config)
     api_key = str(os.getenv("AUDIO_API_KEY", "")).strip()
@@ -345,26 +354,39 @@ def _build_skill_toolkit_tools() -> list[Any]:
         return []
 
 
-VisibleSkillNamesProvider = Callable[[], set[str] | frozenset[str] | None]
+def skill_retrieval_toolkit_for_context(
+    ctx: SwarmBuildContext,
+) -> SkillRetrievalToolkit:
+    """Return the member runtime shared by skill_index and its prompt rail."""
 
+    existing = getattr(ctx, "skill_retrieval_toolkit", None)
+    if isinstance(existing, SkillRetrievalToolkit):
+        return existing
 
-def _build_skill_retrieval_tools(
-    visible_skill_names: set[str] | frozenset[str] | VisibleSkillNamesProvider | None = None,
-) -> list[Any]:
-    """Build installed-skill retrieval tools against the global installed skill root."""
-    if not is_skill_retrieval_enabled():
-        logger.info("[swarm.skill_retrieval] skipped: disabled")
-        return []
-    try:
-        manager = SkillManager()
-        if visible_skill_names is None:
-            toolkit = SkillRetrievalToolkit(manager=manager)
-        else:
-            toolkit = SkillRetrievalToolkit(manager=manager, visible_skill_names=visible_skill_names)
-        return list(toolkit.get_tools())
-    except Exception as exc:
-        logger.warning("[swarm.skill_retrieval] construction failed: %s", exc)
-        return []
+    member_scope = str(
+        getattr(ctx, "member_card_id", None)
+        or getattr(ctx, "member_name", None)
+        or getattr(ctx, "role", None)
+        or "member"
+    )
+    source_manager = SkillManager()
+    toolkit = SkillRetrievalToolkit(
+        skill_directories=lambda: [str(_skill_library_dir(ctx))],
+        disabled_skills=load_execution_disabled_skills,
+        visible_skill_names=lambda: visible_skill_names_for_list_skill(ctx),
+        source_by_name=lambda: skill_sources_from_manager(source_manager),
+        session_scope=(
+            f"{ctx.session_id or 'default'}:{ctx.team_id or 'team'}:{member_scope}"
+        ),
+        config_base=ctx.config,
+        settings=build_model_discovery_settings(
+            ctx.config,
+            model=(getattr(ctx, "extras", None) or {}).get("_parent_model"),
+        ),
+        auto_build_index=True,
+    )
+    ctx.skill_retrieval_toolkit = toolkit
+    return toolkit
 
 
 def _build_user_todo_tools() -> list[Any]:
@@ -379,9 +401,12 @@ def _build_user_todo_tools() -> list[Any]:
 def _build_video_tools(ctx: SwarmBuildContext) -> list[Any]:
     """Build the video understanding tool when ``models.video`` is complete."""
     config = ctx.config or {}
-    apply_video_model_config_from_yaml(config)
-    if not complete_multimodal_model_configured(config, "video"):
+    if not (
+        multimodal_model_enabled(config, "video")
+        and complete_multimodal_model_configured(config, "video")
+    ):
         return []
+    apply_video_model_config_from_yaml(config)
     video_api_key = str(os.getenv("VIDEO_API_KEY", "")).strip()
     video_api_base = str(os.getenv("VIDEO_API_BASE", "")).strip()
     video_model_name = str(os.getenv("VIDEO_MODEL_NAME", "")).strip()
@@ -457,15 +482,22 @@ def build_skill_toolkit(params: dict[str, Any], ctx: SwarmBuildContext) -> list[
 @harness_element(
     kind=ElementKind.TOOL,
     name=SKILL_RETRIEVAL,
-    description="Agentic installed skill tree retrieval tools for globally installed skills.",
+    description="Flat-or-indexed directory retrieval for visible installed Skills.",
     input_model=SkillRetrievalInput,
 )
 def build_skill_retrieval(params: dict[str, Any], ctx: SwarmBuildContext) -> list[Any]:
-    """Build the whitelist-filtered installed-skill retrieval tools."""
+    """Build the whitelist-filtered installed-Skill directory tool."""
     SkillRetrievalInput.resolve(params, ctx)
-    return _filter_whitelist(
-        _build_skill_retrieval_tools(lambda: visible_skill_names_for_list_skill(ctx))
-    )
+    if not is_skill_retrieval_enabled(ctx.config):
+        logger.info("[swarm.skill_retrieval] skipped: disabled")
+        return []
+    try:
+        return _filter_whitelist(
+            list(skill_retrieval_toolkit_for_context(ctx).get_tools())
+        )
+    except Exception as exc:
+        logger.warning("[swarm.skill_retrieval] construction failed: %s", exc)
+        return []
 
 
 @harness_element(
@@ -561,4 +593,6 @@ __all__ = [
     "audio_model_config_params",
     "build_symphony_toolkit",
     "build_code_extra_tools",
+    "skill_retrieval_toolkit_for_context",
+    "visible_skill_names_for_list_skill",
 ]

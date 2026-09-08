@@ -12,7 +12,7 @@ import {
   filterJobsForProject,
   type SidebarCronJob,
 } from '../../stores';
-import type { ProjectInfo, Session } from '../../types';
+import type { AgentMode, ProjectInfo, Session } from '../../types';
 import {
   getConversationMenuItems,
   getProjectNewLabel,
@@ -49,6 +49,7 @@ import NewTaskIcon from '../../assets/work-mode/new-task.svg?react';
 import PinIcon from '../../assets/work-mode/pin.svg?react';
 import PlusIcon from '../../assets/work-mode/plus.svg?react';
 import UnpinIcon from '../../assets/work-mode/unpin.svg?react';
+import SidebarCollapseIcon from '../../assets/sidebar/collapse.svg?react';
 
 const UNREAD_KEY = 'jiuwenswarm_session_unread';
 const RELATIVE_TIME_REFRESH_MS = 60_000;
@@ -58,6 +59,18 @@ export type NewConversationOptions = {
   project?: Pick<ProjectInfo, 'project_id' | 'project_dir'>;
   /** 进入新对话时预填到输入框的文本（例如"通过聊天创建定时任务"引导语），见 App.tsx enterNewConversation */
   initialInputValue?: string;
+  /** 进入新对话时一次性预选的技能，随首条消息迁移到真实会话。 */
+  initialSelectedSkills?: string[];
+  /** 扩展详情页"使用"按钮跳转——进入新对话时顺带打开这些插件/MCP 的会话内启用开关，
+   * 见 App.tsx enterNewConversation。 */
+  initialEnabledPlugins?: string[];
+  initialEnabledMcps?: string[];
+  /**
+   * 强制新会话进入指定模式，覆盖"继承当前活动会话模式"的默认行为，也覆盖未发送的临时新会话
+   * 草稿里残留的模式。用于扩展页"使用插件/使用 MCP/试试这样用"这类入口——插件/MCP 不支持
+   * 集群模式，跳转会话时必须回到单 agent 模式（bug003）。见 App.tsx enterNewConversation。
+   */
+  forceMode?: AgentMode;
 };
 
 function isDefaultProject(project: ProjectInfo): boolean {
@@ -73,6 +86,12 @@ interface ConversationSidebarProps {
   onOpenCron: () => void;
   /** 当前是否正停留在定时任务面板，用于给下面这个入口按钮加选中态 */
   isCronActive: boolean;
+  /** 侧边栏是否收起 */
+  collapsed?: boolean;
+  /** 小屏下侧边栏脱离文档流浮动 */
+  floating?: boolean;
+  /** 切换侧边栏收起/展开 */
+  onToggleCollapse?: () => void;
 }
 
 interface ConversationListItemProps {
@@ -310,8 +329,8 @@ function ConversationListItem({
             }
           }}
         />
-      ) : null}
-    </div>
+        ) : null}
+      </div>
   );
 }
 
@@ -320,6 +339,7 @@ function ProjectEntityRow({
   path,
   isExpanded,
   isPinned,
+  hasUnreadCronResult = false,
   hideActions = false,
   onToggle,
   onNew,
@@ -333,6 +353,7 @@ function ProjectEntityRow({
   path?: string;
   isExpanded: boolean;
   isPinned?: boolean;
+  hasUnreadCronResult?: boolean;
   hideActions?: boolean;
   onToggle: () => void;
   onNew: () => void;
@@ -404,6 +425,13 @@ function ProjectEntityRow({
         <span className="conversation-entity-row__text">
           <span className="conversation-entity-row__title" data-testid="multi-session-project-row-title">{title}</span>
         </span>
+        {hasUnreadCronResult ? (
+          <span
+            className="conversation-list-item__status-dot"
+            aria-hidden="true"
+            data-testid="multi-session-project-row-cron-unread"
+          />
+        ) : null}
         {isExpanded ? <CollapseIcon className="conversation-entity-row__chevron" aria-hidden /> : <ArrowRightIcon className="conversation-entity-row__chevron" aria-hidden />}
         {isPinned ? <PinIcon className="conversation-entity-row__pin" aria-hidden /> : null}
       </button>
@@ -730,6 +758,9 @@ export function ConversationSidebar({
   onDelete,
   onOpenCron,
   isCronActive,
+  collapsed = false,
+  floating = false,
+  onToggleCollapse,
 }: ConversationSidebarProps) {
   const { t } = useTranslation();
   const runtimes = useChatStore((state) => state.runtimes);
@@ -879,7 +910,7 @@ export function ConversationSidebar({
 
   useEffect(() => {
     for (const projectId of projectIdSnapshot.split('\0')) {
-      if (projectId && (expandedProjectIds[projectId] ?? true)) {
+      if (projectId && expandedProjectIds[projectId]) {
         void loadProjectSessions(projectId);
       }
     }
@@ -1177,7 +1208,10 @@ export function ConversationSidebar({
 
   function renderProject(project: ProjectInfo) {
     const sessionsForProject = sortedProjectSessions[project.project_id] || [];
-    const expanded = expandedProjectIds[project.project_id] ?? true;
+    const expanded = Boolean(expandedProjectIds[project.project_id]);
+    const hasUnreadCronResult = (jobsByProject.get(project.project_id) || []).some(
+      (job) => Boolean(unreadCronJobs[job.id]),
+    );
     return (
       <div key={project.project_id} className="conversation-sidebar__group" data-testid="multi-session-project-group" data-variant={project.project_id}>
         <ProjectEntityRow
@@ -1185,6 +1219,7 @@ export function ConversationSidebar({
           path={project.project_dir || undefined}
           isExpanded={expanded}
           isPinned={project.pinned}
+          hasUnreadCronResult={hasUnreadCronResult}
           hideActions={isDefaultProject(project)}
           newLabel={getProjectNewLabel(project.name, t)}
           projectId={project.project_id}
@@ -1223,9 +1258,16 @@ export function ConversationSidebar({
 
   const hasPinnedSection = pinnedProjects.length > 0 || orderedPinnedSessions.length > 0;
 
+  const showOverlay = floating && !collapsed;
+
   return (
-    <aside className="conversation-sidebar" aria-label={t('multiSession.conversations')} data-testid="multi-session-sidebar">
-      <div ref={workModeMenuRef} className="conversation-sidebar__mode" data-testid="multi-session-work-mode">
+    <>
+    {showOverlay && (
+      <div className="conversation-sidebar__overlay" data-testid="multi-session-sidebar-overlay" onClick={onToggleCollapse} />
+    )}
+    <aside className={`conversation-sidebar${floating ? ' is-floating' : ''}${collapsed ? ' is-collapsed' : ''}`} aria-label={t('multiSession.conversations')} data-testid="multi-session-sidebar">
+      <div className="conversation-sidebar__inner">
+        <div ref={workModeMenuRef} className="conversation-sidebar__mode" data-testid="multi-session-work-mode">
         <button
           type="button"
           className="conversation-sidebar__mode-trigger"
@@ -1271,8 +1313,17 @@ export function ConversationSidebar({
             </button>
           </div>
         ) : null}
-      </div>
-      <div className="conversation-sidebar__operations" data-testid="multi-session-operations">
+        <button
+          type="button"
+          className="conversation-sidebar__mode-collapse"
+          onClick={onToggleCollapse}
+          aria-label={t('common.collapse') || 'Collapse'}
+          data-testid="multi-session-sidebar-collapse"
+        >
+          <SidebarCollapseIcon aria-hidden />
+        </button>
+        </div>
+        <div className="conversation-sidebar__operations" data-testid="multi-session-operations">
         <button type="button" className="conversation-sidebar__new" onClick={() => {
           setSelectedProject(null);
           setPinError(null);
@@ -1291,8 +1342,8 @@ export function ConversationSidebar({
           <CronIcon aria-hidden />
           <span data-testid="multi-session-open-cron-label">{t('nav.cron')}</span>
         </button>
-      </div>
-      <div className="conversation-sidebar__body" data-testid="multi-session-sidebar-body">
+        </div>
+        <div className="conversation-sidebar__body" data-testid="multi-session-sidebar-body">
         {hasPinnedSection ? (
           <div className="conversation-sidebar__group conversation-sidebar__group--pinned" data-testid="multi-session-pinned-group">
             <div className="conversation-sidebar__section-heading" data-testid="multi-session-pinned-group-heading">
@@ -1390,6 +1441,7 @@ export function ConversationSidebar({
             {defaultProject ? renderSessionPagination(defaultProject.project_id, false) : null}
           </div>
         </div>
+        </div>
       </div>
       {pathDialogOpen ? (
         <ProjectCreateDialog
@@ -1431,5 +1483,6 @@ export function ConversationSidebar({
         />
       ) : null}
     </aside>
+    </>
   );
 }
