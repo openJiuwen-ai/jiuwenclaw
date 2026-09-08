@@ -793,6 +793,19 @@ def test_deep_adapter_syncs_symphony_tools_from_config_snapshot(monkeypatch):
     ]
     assert fake_instance.ability_manager.added == fake_resource.added
 
+    # Re-applying the same enabled snapshot is idempotent. Code cold start and
+    # reload both use this path, so neither cards nor registrations may grow.
+    adapter._sync_symphony_tools_for_runtime({"symphony": {"enabled": True}})
+
+    assert len(seen_configs) == 1
+    assert len(adapter._tool_cards) == 3
+    assert fake_resource.added == [
+        "symphony_read_graph",
+        "symphony_refresh_graph",
+        "symphony_compose_graph",
+    ]
+    assert fake_instance.ability_manager.added == fake_resource.added
+
     adapter._sync_symphony_tools_for_runtime({"symphony": {"enabled": False}})
 
     assert adapter._symphony_tools == []
