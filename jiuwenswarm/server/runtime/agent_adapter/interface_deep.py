@@ -223,6 +223,10 @@ from jiuwenswarm.agents.harness.common.rails.execution_guard import (
     CircuitBreakerConfig,
 )
 from jiuwenswarm.common.context_window import parse_positive_int, resolve_context_window_tokens
+from jiuwenswarm.symphony.llm import (
+    SYMPHONY_LLM_CONFIG_REF_KEY,
+    register_request_model,
+)
 
 from jiuwenswarm.common.hooks_config import load_hooks_config
 from jiuwenswarm.common.log_preview import preview_text
@@ -5507,6 +5511,34 @@ class JiuWenSwarmDeepAdapter:
         if model is None:
             raise RuntimeError("No model configured for request")
         return model
+
+    @staticmethod
+    def _with_symphony_request_model(
+        inputs: dict[str, Any],
+        model: Model,
+    ) -> dict[str, Any]:
+        """Carry the selected model into the exact DeepAgent round.
+
+        DeepAgent's interaction supervisor runs outside the host request task,
+        so a ContextVar set here would not reach tool execution. Instead, only
+        a non-secret registry reference travels through ``run.context.extra``;
+        the Symphony rail binds its process-local config immediately around
+        each graph tool call.
+        """
+
+        updated = dict(inputs)
+        raw_run = updated.get("run")
+        run = dict(raw_run) if isinstance(raw_run, Mapping) else {}
+        raw_context = run.get("context")
+        context = dict(raw_context) if isinstance(raw_context, Mapping) else {}
+        raw_extra = context.get("extra")
+        extra = dict(raw_extra) if isinstance(raw_extra, Mapping) else {}
+        extra[SYMPHONY_LLM_CONFIG_REF_KEY] = register_request_model(model)
+        context["extra"] = extra
+        run["context"] = context
+        run.setdefault("kind", "normal")
+        updated["run"] = run
+        return updated
 
     @staticmethod
     def _prepare_multimodal_image_inputs(
@@ -11924,6 +11956,7 @@ class JiuWenSwarmDeepAdapter:
         from jiuwenswarm.agents.harness.agent_observability import (  # noqa: E402
             sync_agent_observability,
         )
+        inputs = self._with_symphony_request_model(inputs, resolved_model)
         try:
             await self._update_runtime_config(
                 self._RuntimeConfig(
@@ -12603,6 +12636,7 @@ class JiuWenSwarmDeepAdapter:
         from jiuwenswarm.agents.harness.agent_observability import (  # noqa: E402
             sync_agent_observability,
         )
+        inputs = self._with_symphony_request_model(inputs, resolved_model)
         try:
             await self._update_runtime_config(
                 self._RuntimeConfig(
