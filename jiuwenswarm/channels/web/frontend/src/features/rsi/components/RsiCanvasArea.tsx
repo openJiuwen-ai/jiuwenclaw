@@ -168,13 +168,17 @@ function RsiCanvasStatusBar({
             {candidate && <span className="rsi-canvas-statusbar__weak">{candidate}</span>}
           </span>
           <span className="rsi-canvas-statusbar__divider" />
-          <span className="rsi-canvas-statusbar__item">
-            <CostIcon title={costTitle} />
-            <span className="rsi-canvas-statusbar__weak">
-              {t('rsi.detail.estimatedCost', { cost: formatCost(cost) })}
-            </span>
-          </span>
-          <span className="rsi-canvas-statusbar__divider" />
+          {false && (
+            <>
+              <span className="rsi-canvas-statusbar__item">
+                <CostIcon title={costTitle} />
+                <span className="rsi-canvas-statusbar__weak">
+                  {t('rsi.detail.estimatedCost', { cost: formatCost(cost) })}
+                </span>
+              </span>
+              <span className="rsi-canvas-statusbar__divider" />
+            </>
+          )}
           <span className="rsi-canvas-statusbar__item">
             <span className="rsi-canvas-statusbar__weak">{t('rsi.detail.progress', { defaultValue: '进度' })}</span>
             <span className="rsi-canvas-statusbar__strong">{progressPct}%</span>

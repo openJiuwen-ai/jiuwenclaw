@@ -164,6 +164,7 @@ class HarnessProvider:
 
     supports_pause = False
     supports_resume = True
+    supports_terminate = False
 
     def __init__(
         self,

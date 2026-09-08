@@ -76,6 +76,7 @@ class RsiWorker:
         self._last_enqueued: str | None = None
         self._resume_task_ids: set[str] = set()
         self._control_tasks: dict[str, asyncio.Task[Any]] = {}
+        self._execution_tasks: dict[str, asyncio.Task[Any]] = {}
         # 请求 pause/terminate 时用来提前让出执行位；见 ``_run_until_slot_free``。
         self._slot_released: dict[str, asyncio.Future[None]] = {}
         self._winding_down: set[asyncio.Task[Any]] = set()
@@ -151,11 +152,19 @@ class RsiWorker:
                 )
                 return result.status
             if task.status in {TaskStatus.RUNNING.value, TaskStatus.PAUSED.value} and adapter is not None:
-                # Keep the public state unchanged until the Provider confirms
-                # termination, including the PAUSED -> TERMINATED path.
-                self._schedule_provider_control(task_id, adapter, "terminate")
-                self._release_slot(task_id)
-                return task.status
+                if getattr(adapter, "supports_terminate", True):
+                    # Keep the public state unchanged until the Provider confirms
+                    # termination, including the PAUSED -> TERMINATED path.
+                    self._schedule_provider_control(task_id, adapter, "terminate")
+                    self._release_slot(task_id)
+                    return task.status
+                # Providers without a terminate hook (the production Harness
+                # engine) are stopped by cancelling the running coroutine.
+                exec_task = self._execution_tasks.get(task_id)
+                if exec_task is not None and not exec_task.done():
+                    exec_task.cancel()
+                self._mark_terminated(task_id)
+                return self.store.get(task_id).status
             result = self.store.update_status(
                 task_id, [task.status], TaskStatus.TERMINATED.value, cause=f"cancel({mode})"
             )
@@ -213,10 +222,17 @@ class RsiWorker:
                 )
                 resume = task_id in self._resume_task_ids
                 self._resume_task_ids.discard(task_id)
-                await self._run_until_slot_free(task_id, resume=resume)
+                exec_task = asyncio.create_task(self._run_until_slot_free(task_id, resume=resume))
+                self._execution_tasks[task_id] = exec_task
+                if self.store.get(task_id).status != TaskStatus.RUNNING.value:
+                    # A terminate request won the race between RUNNING and
+                    # task registration; cancel the fresh execution immediately.
+                    exec_task.cancel()
+                await exec_task
             except Exception:  # noqa: BLE001 - 单任务状态冲突/异常不拖垮 worker
                 logger.exception("[RSI] 任务执行异常 task=%s，跳过继续取下一个", task_id)
             finally:
+                self._execution_tasks.pop(task_id, None)
                 self._running_task_id = None
                 self._queue.task_done()
 
@@ -275,6 +291,7 @@ class RsiWorker:
         )
         consume_task = asyncio.create_task(consume_queue(queue, consumer))
         result: Any = None
+        cancelled = False
         try:
             if hasattr(adapter, "validate_input"):
                 input_path = (
@@ -309,20 +326,65 @@ class RsiWorker:
                     timeout=self._provider_poll_timeout_for(task_view),
                 )
             self._apply_result_status(task_id, result)
+        except asyncio.CancelledError:
+            cancelled = True
+            logger.info("[RSI] 任务执行被终止 task=%s", task_id)
+            self._mark_terminated(task_id)
+            result = None
         except Exception as exc:  # noqa: BLE001
             logger.exception("[RSI] 任务执行失败 task=%s: %s", task_id, exc)
             self._mark_failed_if_running(task_id, str(exc)[:200])
         finally:
             try:
-                await queue.join()
-            except Exception:  # noqa: BLE001
-                pass
-            queue.put_nowait(None)
-            try:
-                await consume_task
-            except Exception:  # noqa: BLE001
-                logger.exception("[RSI] 事件消费协程退出异常 task=%s", task_id)
-            self._persist_results(task_id, result)
+                if cancelled:
+                    # Release the single-worker queue immediately.  Remaining
+                    # engine events are discarded rather than draining them on
+                    # the critical path.
+                    queue.put_nowait(None)
+                    consume_task.cancel()
+                    try:
+                        await consume_task
+                    except asyncio.CancelledError:
+                        pass
+                    except Exception:  # noqa: BLE001
+                        logger.exception("[RSI] 事件消费协程退出异常 task=%s", task_id)
+                else:
+                    try:
+                        await queue.join()
+                    except Exception:  # noqa: BLE001
+                        pass
+                    queue.put_nowait(None)
+                    try:
+                        await consume_task
+                    except Exception:  # noqa: BLE001
+                        logger.exception("[RSI] 事件消费协程退出异常 task=%s", task_id)
+                self._persist_results(task_id, result)
+            except asyncio.CancelledError:
+                # A late cancellation arriving during cleanup must not kill the
+                # single-worker loop; the public state is already TERMINATED.
+                logger.info("[RSI] 任务清理阶段被取消 task=%s", task_id)
+                self._mark_terminated(task_id)
+
+    def _mark_terminated(self, task_id: str) -> None:
+        """将运行中的任务落到 TERMINATED（冲突时由其它控制路径持有终态）。"""
+        try:
+            current = self.store.get(task_id).status
+            if current == TaskStatus.TERMINATED.value:
+                return
+            if current in {
+                TaskStatus.CREATED.value,
+                TaskStatus.QUEUED.value,
+                TaskStatus.RUNNING.value,
+                TaskStatus.PAUSED.value,
+            }:
+                self.store.update_status(
+                    task_id,
+                    [current],
+                    TaskStatus.TERMINATED.value,
+                    cause="worker.cancelled",
+                )
+        except RsiTaskStateConflict:
+            logger.debug("[RSI] task state changed while marking terminated: %s", task_id)
 
     def _adapter_for(self, scenario: str | None, artifact_type: str | None) -> Any:
         scenario_key = str(scenario or "").strip().upper()
