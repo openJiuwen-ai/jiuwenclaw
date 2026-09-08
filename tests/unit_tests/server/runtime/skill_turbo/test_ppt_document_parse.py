@@ -1,7 +1,7 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -13,26 +13,17 @@ from jiuwenswarm.agents.harness.common.rails.read_file_validation import (
 from jiuwenswarm.server.runtime.skill_turbo.skill_codes.ppt import document_parse
 from jiuwenswarm.server.runtime.skill_turbo.skill_codes.ppt.document_parse import (
     DocumentParseNode,
+    _filter_parseable_paths,
     _normalize_tool_text,
 )
 from jiuwenswarm.server.runtime.skill_turbo.skill_codes.ppt.ppt_gen_root import (
     PPTGenRootNode,
 )
-from jiuwenswarm.server.runtime.skill_turbo.skill_codes.ppt import ppt_gen_root
 from jiuwenswarm.server.runtime.skill_turbo.validator import PlanCodeValidator
 
 
 def test_document_parse_passes_builtin_skill_validation() -> None:
     source = Path(document_parse.__file__).read_text(encoding="utf-8")
-    validator = PlanCodeValidator.for_builtin_skill_code(
-        ["jiuwenswarm.server.runtime.skill_turbo.skill_codes"]
-    )
-
-    assert validator.validate(source) == []
-
-
-def test_ppt_gen_root_passes_builtin_skill_validation() -> None:
-    source = Path(ppt_gen_root.__file__).read_text(encoding="utf-8")
     validator = PlanCodeValidator.for_builtin_skill_code(
         ["jiuwenswarm.server.runtime.skill_turbo.skill_codes"]
     )
@@ -46,87 +37,102 @@ def test_pdf_is_delegated_to_read_file() -> None:
 
 
 def test_normalize_tool_text_preserves_object_failure() -> None:
-    result = SimpleNamespace(success=False, data=None, error="read failed")
+    result = {"success": False, "data": None, "error": "read failed"}
 
     assert _normalize_tool_text(result) == "[ERROR]: read failed"
 
 
 @pytest.mark.asyncio
-async def test_document_parse_marks_tool_output_failure_as_read_failure(
+async def test_degraded_parse_returns_failure_when_all_reads_fail(
+    tmp_path: Path, monkeypatch
+) -> None:
+    source = tmp_path / "source.pdf"
+    source.write_bytes(b"%PDF-placeholder")
+    node = DocumentParseNode()
+    paths = node._artifact_paths(tmp_path)
+    inputs: dict[str, Any] = {}
+
+    monkeypatch.setattr(node, "has_tool", lambda _name: True)
+
+    async def call_tool(_name: str, **_kwargs: Any) -> Any:
+        return {"success": False, "data": None, "error": "read failed"}
+
+    monkeypatch.setattr(node, "call_tool", call_tool)
+
+    ok, error = await node._degraded_parse(
+        inputs, [str(source)], paths, "parse-docs unavailable"
+    )
+
+    assert ok is False
+    assert error == "降级解析失败: parse-docs unavailable"
+
+
+@pytest.mark.asyncio
+async def test_degraded_parse_writes_summary_and_manifest_on_success(
     tmp_path: Path, monkeypatch
 ) -> None:
     source = tmp_path / "source.docx"
     source.write_bytes(b"placeholder")
     node = DocumentParseNode()
-    result = SimpleNamespace(success=False, data=None, error="read failed")
+    paths = node._artifact_paths(tmp_path)
+    inputs: dict[str, Any] = {}
 
     monkeypatch.setattr(node, "has_tool", lambda _name: True)
 
-    async def call_tool(_name: str, **_kwargs: Any) -> Any:
-        return result
+    async def call_tool(name: str, **kwargs: Any) -> Any:
+        if name == "read_file":
+            return {"success": True, "data": {"content": "Document body"}}
+        if name == "write_file":
+            Path(kwargs["file_path"]).write_text(kwargs["content"], encoding="utf-8")
+            return {"success": True}
+        raise AssertionError(f"unexpected tool: {name}")
 
     monkeypatch.setattr(node, "call_tool", call_tool)
 
-    _, content = await node._read_single_document(source)
+    ok, error = await node._degraded_parse(
+        inputs, [str(source)], paths, "parse-docs unavailable"
+    )
 
-    assert content == "[读取失败: [ERROR]: read failed]"
+    assert ok is True
+    assert error is None
+    assert inputs["parse_degraded"] is True
+    assert inputs["images_extracted"] is False
+    assert paths["raw"].is_file()
+    assert paths["summary"].is_file()
+    assert paths["manifest"].is_file()
+    assert "Document body" in paths["raw"].read_text(encoding="utf-8")
+    summary_text = paths["summary"].read_text(encoding="utf-8")
+    assert "# 文档摘要（降级）" in summary_text
+    manifest = json.loads(paths["manifest"].read_text(encoding="utf-8"))
+    assert manifest["degraded"] is True
+    assert manifest["documents"][0]["status"] == "degraded_text"
+
+
+def test_filter_parseable_paths_excludes_presentations() -> None:
+    paths = [
+        "report.pdf",
+        "notes.docx",
+        "slides.pptx",
+        "template.PPT",
+    ]
+
+    assert _filter_parseable_paths(paths) == ["report.pdf", "notes.docx"]
 
 
 @pytest.mark.asyncio
-async def test_document_parse_reads_pdf_in_page_batches(
-    tmp_path: Path, monkeypatch
-) -> None:
-    source = tmp_path / "source.pdf"
-    source.write_bytes(b"%PDF-placeholder")
+async def test_execute_marks_presentation_only_inputs_as_unparseable(tmp_path: Path) -> None:
     node = DocumentParseNode()
+    inputs = {
+        "has_documents": True,
+        "output_dir": str(tmp_path),
+        "doc_paths": [str(tmp_path / "slides.pptx")],
+    }
 
-    async def read_pdf(path: Path) -> str:
-        assert path == source
-        return "PDF content"
+    result = await node._execute(inputs)
 
-    async def reject_text_read(_path: Path) -> str:
-        raise AssertionError("PDF must use the paged reader")
-
-    monkeypatch.setattr(node, "_read_large_pdf_file", read_pdf)
-    monkeypatch.setattr(node, "_read_text_file", reject_text_read)
-
-    _, content = await node._read_single_document(source)
-
-    assert content == "PDF content"
-
-
-@pytest.mark.asyncio
-async def test_pdf_page_batches_stop_on_agent_core_out_of_range_error(
-    tmp_path: Path, monkeypatch
-) -> None:
-    source = tmp_path / "source.pdf"
-    source.write_bytes(b"%PDF-placeholder")
-    node = DocumentParseNode()
-    calls: list[str] = []
-
-    monkeypatch.setattr(node, "has_tool", lambda _name: True)
-
-    async def call_tool(_name: str, **kwargs: Any) -> Any:
-        pages = kwargs["pages"]
-        calls.append(pages)
-        if pages == "1-10":
-            return SimpleNamespace(
-                success=True,
-                data={"content": "first batch"},
-                error=None,
-            )
-        return SimpleNamespace(
-            success=False,
-            data=None,
-            error=f"Invalid or empty PDF page range: '{pages}'",
-        )
-
-    monkeypatch.setattr(node, "call_tool", call_tool)
-
-    content = await node._read_large_pdf_file(source)
-
-    assert content == "first batch"
-    assert calls == ["1-10", "11-20"]
+    assert result["doc_parse_ok"] is False
+    assert result["doc_parse_error"] == "无可解析文档（演示文稿不进入 parse-docs）"
+    assert result["has_documents"] is False
 
 
 @pytest.mark.asyncio

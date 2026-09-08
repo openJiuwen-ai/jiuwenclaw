@@ -108,6 +108,7 @@ class StylePrepareNode(PlanNode):
             return {
                 "style_file_path": "",
                 "pack_dir": pack_dir,
+                "style_constraints": str(inputs.get("style_constraints") or "").strip(),
                 "__artifact__": {"files": [{"path": pack_dir, "desc": "PPT模板包目录"}]},
             }
 
@@ -123,6 +124,7 @@ class StylePrepareNode(PlanNode):
                     logger.info("[P7] 模板包降级模式，使用模板 md 内容作为风格描述")
 
         style_content = ""
+        style_constraints = str(inputs.get("style_constraints") or "").strip()
         if style_id in _PRESET_STYLES:
             style_content = await self._load_preset_style(style_id, pptx_root)
 
@@ -135,6 +137,7 @@ class StylePrepareNode(PlanNode):
                 style_id,
                 style_description,
                 user_query,
+                style_constraints=style_constraints,
             )
 
         if not style_content:
@@ -142,13 +145,15 @@ class StylePrepareNode(PlanNode):
                 "[P7] 预设加载与 LLM 自定义生成均失败 style_id=%s，返回空 style_file_path",
                 style_id,
             )
-            return {"style_file_path": ""}
+            return {"style_file_path": "", "style_constraints": style_constraints}
 
         style_file_path = f"{output_dir}/style-{style_id}.md"
         await self._write_style_file(style_file_path, style_content)
 
+        # preset：不改写 style.md；constraints 原样透传给 P8
         return {
             "style_file_path": style_file_path,
+            "style_constraints": style_constraints,
             "__artifact__": {"files": [{"path": style_file_path, "desc": "PPT风格文件"}]},
         }
 
@@ -208,10 +213,22 @@ class StylePrepareNode(PlanNode):
         style_id: str,
         style_description: str,
         user_query: str = "",
+        style_constraints: str = "",
     ) -> str:
         user_query_clause = ""
         if user_query:
             user_query_clause = f"用户原始 query：{user_query}\n"
+        constraints_clause = ""
+        if style_constraints.strip():
+            constraints_clause = (
+                "### 用户显式版式要求（必须烘焙进本文件，优先级最高）\n"
+                f"{style_constraints.strip()}\n"
+                "- 将上述约束写入排版与组件规范 / CSS 变量 / 设计禁忌中对应字段\n"
+                "- 若点名字号：写死具体 px，禁止用区间敷衍\n"
+                "- 若点名页码：必须在规范中二选一写死「保留页码（含格式）」或「不显示页码」；"
+                "禁止并列两种方案\n"
+                "- 未点名的维度仍按主题与风格描述推断\n\n"
+            )
         prompt = (
             "你是 PPT 视觉设计师。请根据主题和风格描述生成一份风格规范 Markdown 文件，"
             "供后续 HTML 幻灯片生成使用。\n\n"
@@ -219,7 +236,8 @@ class StylePrepareNode(PlanNode):
             f"目标受众：{audience or '（未提供）'}\n"
             f"风格标识：{style_id}\n"
             f"用户风格描述：{style_description or '（未提供，请根据主题自由发挥）'}\n"
-            f"{user_query_clause}\n"
+            f"{user_query_clause}"
+            f"{constraints_clause}"
             "### 输出要求（严格按以下结构生成，不得省略 frontmatter 或 CSS 变量）\n"
             "---\n"
             "font-family:\n"
