@@ -2,7 +2,8 @@
 """沙箱配置 RPC: E2A / AgentRequest 入口, 返回 AgentResponse.
 
 与 :mod:`jiuwenclaw.agentserver.permissions.config_rpc` 同形态. 对外暴露 8 个
-``sandbox.*`` WS 方法 (经 ``agent_ws_server._handle_agent_request_body`` 派发):
+``sandbox.*`` WS 方法 (经 ``agent_ws_server._handle_message`` 尾部
+``_handle_sandbox_config`` 二级分支派发):
 
   - ``sandbox.enabled.get/set``        沙箱开关 (config.yaml::sandbox.enabled, 基础配置)
   - ``sandbox.startup_mode.get/set``   沙箱启动方式 (config.yaml::sandbox.startup_mode)
