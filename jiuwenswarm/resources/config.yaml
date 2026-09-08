@@ -14,7 +14,7 @@ auto_recap:
 
 # 沙箱
 sandbox:
-  enabled: true
+  enabled: false
   startup_mode: internal
   url: http://127.0.0.1:8321
   type: jiuwenbox
