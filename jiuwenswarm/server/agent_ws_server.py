@@ -344,9 +344,10 @@ _CODE_MODE_SYNC_METHODS = frozenset({
     ReqMethod.CHAT_ANSWER,
 })
 
-# ── 流式处理心跳间隔：当 Agent 处理时间超过此阈值时，发送心跳 chunk 保持 WebSocket 连接活跃 --
+# ── 流式连接保活间隔：当 Agent 处理时间超过此阈值时，发送 keepalive chunk --
 # 避免 ping_timeout 导致连接关闭。默认 10 秒，小于服务端 ping_timeout=20s。
-_STREAM_HEARTBEAT_INTERVAL_SECONDS = 10.0
+_STREAM_KEEPALIVE_INTERVAL_SECONDS = 10.0
+_STREAM_KEEPALIVE_STOP_TIMEOUT_SECONDS = 1.0
 from jiuwenswarm.server.wire_truncate import (  # noqa: F401  — re-exported for tests / handlers
     _HISTORY_PAGE_SIZE,
     _HISTORY_WIRE_STRING_LIMIT,
@@ -391,6 +392,174 @@ from jiuwenswarm.server.wire_truncate import (  # noqa: F401  — re-exported fo
     _build_agent_detail,
 )
 
+
+def _consume_keepalive_task_result(
+    keepalive_task: asyncio.Task,
+    request_id: str,
+) -> None:
+    """Observe an auxiliary keepalive result without replacing stream errors."""
+    try:
+        keepalive_task.result()
+    except asyncio.CancelledError:
+        return
+    except WebSocketConnectionClosed:
+        logger.info(
+            "[AgentWebSocketServer] keepalive task stopped after connection closed: "
+            "request_id=%s",
+            request_id,
+        )
+    except Exception:  # pylint: disable=broad-exception-caught
+        logger.exception(
+            "[AgentWebSocketServer] keepalive task failed: request_id=%s",
+            request_id,
+        )
+
+
+async def _stop_stream_keepalive(
+    keepalive_task: asyncio.Task,
+    keepalive_stop_event: asyncio.Event,
+    stream_activity_event: asyncio.Event,
+    request_id: str,
+) -> None:
+    """Stop an owned stream keepalive without blocking its owner indefinitely."""
+    keepalive_stop_event.set()
+    stream_activity_event.set()
+    phase_timeout = _STREAM_KEEPALIVE_STOP_TIMEOUT_SECONDS / 2.0
+    try:
+        done, _ = await asyncio.wait(
+            {keepalive_task},
+            timeout=phase_timeout,
+        )
+        if keepalive_task not in done:
+            logger.warning(
+                "[AgentWebSocketServer] keepalive task did not stop cooperatively; "
+                "cancelling: request_id=%s",
+                request_id,
+            )
+            keepalive_task.cancel()
+            done, _ = await asyncio.wait(
+                {keepalive_task},
+                timeout=phase_timeout,
+            )
+    except asyncio.CancelledError:
+        if keepalive_task.done():
+            _consume_keepalive_task_result(keepalive_task, request_id)
+        else:
+            keepalive_task.add_done_callback(
+                lambda finished: _consume_keepalive_task_result(
+                    finished,
+                    request_id,
+                )
+            )
+            keepalive_task.cancel()
+        raise
+    if keepalive_task not in done:
+        logger.error(
+            "[AgentWebSocketServer] keepalive task did not stop after bounded cleanup: "
+            "request_id=%s timeout=%.3fs",
+            request_id,
+            _STREAM_KEEPALIVE_STOP_TIMEOUT_SECONDS,
+        )
+        keepalive_task.add_done_callback(
+            lambda finished: _consume_keepalive_task_result(
+                finished,
+                request_id,
+            )
+        )
+        return
+    _consume_keepalive_task_result(keepalive_task, request_id)
+
+
+class _StreamKeepalive:
+    """Own the transport keepalive task for one streaming request."""
+
+    def __init__(
+        self,
+        ws: Any,
+        request: AgentRequest,
+        send_lock: asyncio.Lock,
+    ) -> None:
+        self._ws = ws
+        self._request = request
+        self._send_lock = send_lock
+        self._channel_id = request.channel_id or "default"
+        self._stop_event = asyncio.Event()
+        self._activity_event = asyncio.Event()
+        self._task: asyncio.Task[None] | None = None
+
+    def start(self) -> None:
+        """Start sending keepalives while the stream is idle."""
+        self._task = asyncio.create_task(
+            self._run(),
+            name=f"stream-keepalive:{self._request.request_id}",
+        )
+
+    def notify_activity(self, *, terminal: bool = False) -> None:
+        """Restart the idle timer and optionally prevent future keepalives."""
+        self._activity_event.set()
+        if terminal:
+            self._stop_event.set()
+
+    def signal_stop(self) -> None:
+        """Prevent new sends and wake an idle keepalive immediately."""
+        self._stop_event.set()
+        self._activity_event.set()
+
+    async def stop(self) -> None:
+        """Join the owned task within the configured total time budget."""
+        self.signal_stop()
+        if self._task is None:
+            return
+        await _stop_stream_keepalive(
+            self._task,
+            self._stop_event,
+            self._activity_event,
+            self._request.request_id,
+        )
+
+    async def _run(self) -> None:
+        try:
+            while not self._stop_event.is_set():
+                try:
+                    await asyncio.wait_for(
+                        self._activity_event.wait(),
+                        timeout=_STREAM_KEEPALIVE_INTERVAL_SECONDS,
+                    )
+                    self._activity_event.clear()
+                except asyncio.TimeoutError:
+                    if self._stop_event.is_set():
+                        break
+                    if self._activity_event.is_set():
+                        continue
+                    keepalive_chunk = AgentResponseChunk(
+                        request_id=self._request.request_id,
+                        channel_id=self._channel_id,
+                        payload={"event_type": "keepalive"},
+                        is_complete=False,
+                    )
+                    if keepalive_chunk.agent_ref is None:
+                        keepalive_chunk.agent_ref = self._request.agent_ref
+                    wire = encode_agent_chunk_for_wire(
+                        keepalive_chunk,
+                        response_id=self._request.request_id,
+                        sequence=-1,
+                    )
+                    async with self._send_lock:
+                        if self._stop_event.is_set():
+                            break
+                        if self._activity_event.is_set():
+                            continue
+                        await send_wire_payload(self._ws, wire)
+                    logger.info(
+                        "[AgentWebSocketServer] keepalive chunk 发送: request_id=%s",
+                        self._request.request_id,
+                    )
+        except WebSocketConnectionClosed:
+            logger.info(
+                "[AgentWebSocketServer] keepalive 停止，WebSocket 已关闭: "
+                "request_id=%s",
+                self._request.request_id,
+            )
 
 
 def _request_query_text(request: AgentRequest) -> str:
@@ -3816,62 +3985,18 @@ class AgentWebSocketServer:
                     await self._push_plan_mode_exited(request)
 
         chunk_count = 0
-        # 心跳控制：当有真实 chunk 发送时重置，空闲时发送心跳
-        heartbeat_event = asyncio.Event()
-        heartbeat_task: asyncio.Task | None = None
-
-        async def _heartbeat_loop() -> None:
-            """后台心跳任务：在空闲期间定期发送 keepalive chunk."""
-            try:
-                while True:
-                    # 等待心跳间隔，如果期间有真实 chunk 发送则 heartbeat_event 被设置，重置等待
-                    try:
-                        await asyncio.wait_for(
-                            heartbeat_event.wait(),
-                            timeout=_STREAM_HEARTBEAT_INTERVAL_SECONDS,
-                        )
-                        # 有真实 chunk 发送，重置 event 继续等待
-                        heartbeat_event.clear()
-                    except asyncio.TimeoutError:
-                        # 超时：空闲超过心跳间隔，发送 keepalive chunk
-                        heartbeat_chunk = AgentResponseChunk(
-                            request_id=request.request_id,
-                            channel_id=channel_id,
-                            payload={"event_type": "keepalive"},
-                            is_complete=False,
-                        )
-                        # V2: 心跳 chunk 也回带 agent_ref，避免切换 mode 后
-                        # 旧 session 心跳错路由到新 agent 窗口（设计 §5.2 场景 2）。
-                        if heartbeat_chunk.agent_ref is None:
-                            heartbeat_chunk.agent_ref = request.agent_ref
-                        wire = encode_agent_chunk_for_wire(
-                            heartbeat_chunk,
-                            response_id=request.request_id,
-                            sequence=-1,  # 心跳使用特殊序列号 -1
-                        )
-                        async with send_lock:
-                            await send_wire_payload(ws, wire)
-                        logger.info(
-                            "[AgentWebSocketServer] keepalive chunk 发送: request_id=%s",
-                            request.request_id,
-                        )
-            except asyncio.CancelledError:
-                pass
-            except WebSocketConnectionClosed:
-                logger.info(
-                    "[AgentWebSocketServer] keepalive 停止，WebSocket 已关闭: request_id=%s",
-                    request.request_id,
-                )
-
-        # 启动心跳任务
-        heartbeat_task = asyncio.create_task(_heartbeat_loop())
-
+        keepalive = _StreamKeepalive(
+            ws,
+            request,
+            send_lock,
+        )
         response_stream = agent.process_message_stream(request)
+        keepalive.start()
         try:
             async for chunk in response_stream:
                 chunk_count += 1
-                # 通知心跳任务有真实 chunk 发送，重置心跳计时
-                heartbeat_event.set()
+                # 通知 keepalive 有真实 chunk 发送，重置空闲计时。
+                keepalive.notify_activity(terminal=chunk.is_complete)
                 # V2: chunk 回带请求侧 agent_ref，供 gateway 3 元组精确路由
                 # （设计 §6.3）。is None 守卫：保留 team 模式由事件派生的 agent_ref
                 # （_build_team_event_chunk_meta 已设值），不覆盖。
@@ -3909,47 +4034,27 @@ class AgentWebSocketServer:
                         request.request_id,
                     )
                     return
-                # 清除 event，让心跳任务重新开始计时
-                heartbeat_event.clear()
         finally:
-            close_stream = getattr(response_stream, "aclose", None)
-            if callable(close_stream):
-                await close_stream()
-            # 停止心跳任务
-            if heartbeat_task is not None:
-                logger.info(
-                    "[AgentWebSocketServer] cancelling heartbeat_task: request_id=%s",
-                    request.request_id,
-                )
-                heartbeat_task.cancel()
+            # 尽早阻止新的 keepalive；Agent 流清理仍先完成以释放其资源。
+            keepalive.signal_stop()
+            try:
+                close_stream = getattr(response_stream, "aclose", None)
+                if callable(close_stream):
+                    await close_stream()
+            finally:
                 try:
-                    await heartbeat_task
-                    logger.info(
-                        "[AgentWebSocketServer] heartbeat_task cancelled cleanly: request_id=%s",
-                        request.request_id,
-                    )
-                except asyncio.CancelledError:
-                    logger.info(
-                        "[AgentWebSocketServer] heartbeat_task cancelled (CancelledError): request_id=%s",
-                        request.request_id,
-                    )
-                    pass
-                except WebSocketConnectionClosed:
-                    logger.info(
-                        "[AgentWebSocketServer] heartbeat_task cancelled (ConnectionClosed): request_id=%s",
-                        request.request_id,
-                    )
-                    pass
-            # 清除自身的宿主生命周期记录；同 session 的其它请求不受影响。
-            entries = self._session_stream_tasks.get(session_id)
-            if entries is not None and current_task is not None:
-                entries.pop(current_task, None)
-                if not entries:
-                    self._session_stream_tasks.pop(session_id, None)
+                    # 显式停止并唤醒 keepalive；Task.cancel 只作为有界的兜底。
+                    await keepalive.stop()
+                finally:
+                    # 清除自身的宿主生命周期记录；同 session 的其它请求不受影响。
+                    entries = self._session_stream_tasks.get(session_id)
+                    if entries is not None and current_task is not None:
+                        entries.pop(current_task, None)
+                        if not entries:
+                            self._session_stream_tasks.pop(session_id, None)
             # Push plan.mode_exited if exit_plan_mode restored mode during processing
             if not readonly_goal_get:
                 await self._check_post_process_plan_exit(request, agent)
-
         logger.info(
             "[AgentWebSocketServer] 流式响应已发送: request_id=%s 共 %s 个 chunk",
             request.request_id,
