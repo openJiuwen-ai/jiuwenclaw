@@ -107,6 +107,10 @@ function ProactiveLimitsDialog({
               label: t('settingsPanel.fields.proactive_recommendation_max_recommend_per_day.title'),
               component: 'input',
               type: 'number',
+              min: 1,
+              max: 50,
+              step: 1,
+              changeOnBlur: true,
               required: true,
             },
             {
@@ -114,6 +118,10 @@ function ProactiveLimitsDialog({
               label: t('settingsPanel.fields.proactive_recommendation_max_rounds_per_tick.title'),
               component: 'input',
               type: 'number',
+              min: 1,
+              max: 50,
+              step: 1,
+              changeOnBlur: true,
               required: true,
             },
           ]}
