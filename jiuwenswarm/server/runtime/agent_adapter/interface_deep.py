@@ -2171,6 +2171,8 @@ class JiuWenSwarmDeepAdapter:
         self._skill_evolution_rail: SkillEvolutionRail | None = None
         self._evolution_interrupt_rail: EvolutionInterruptRail | None = None
         self._pending_auto_rebuild_skills: list[str] = []
+        self._auto_rebuild_lock = asyncio.Lock()
+        self._auto_rebuild_task: asyncio.Task | None = None
         self._skill_create_rail: SkillCreateRail | None = None
         self._subagent_rail: SubagentRail | None = None
         self._ask_user_rail: StructuredAskUserRail | None = None
@@ -14215,7 +14217,7 @@ class JiuWenSwarmDeepAdapter:
 
         ns_token, overlay_token, wk_token = self._bind_request_env_overlay()
         try:
-            if self._instance is None:
+            if self._model is None:
                 await self.ensure_instance()
             store = (
                 evolution_version_ctl.get_disk_evolution_store(store_dirs)
@@ -14238,11 +14240,26 @@ class JiuWenSwarmDeepAdapter:
 
             rebuild_context = prepared.get("rebuild_context") or {}
             skill_md_path = rebuild_context.get("skill_md_path") or resolved_skill_md
-            self._apply_rebuild_permission_trusted_dirs(skill_md_path)
+            if not skill_md_path:
+                raise ValueError(f"Skill '{name}' 重建失败：缺少 skill_md_path。")
             before_fp = evolution_version_ctl.skill_md_fingerprint(skill_md_path)
-            prompt = str(prepared.get("followup_prompt") or "")
+            subject_kind = str(
+                rebuild_context.get("subject_kind")
+                or rebuild_context.get("kind")
+                or "skill"
+            )
+            ctx_subject = rebuild_context.get("subject")
+            if isinstance(ctx_subject, dict) and ctx_subject.get("name"):
+                rewrite_subject: dict[str, Any] = dict(ctx_subject)
+            else:
+                rewrite_subject = {"kind": subject_kind, "name": name}
             rebuild_ok = await self._execute_merge_version_rewrite(
-                prompt,
+                skill_md_path=str(skill_md_path),
+                rebuild_context=rebuild_context
+                if isinstance(rebuild_context, dict)
+                else {},
+                subject=rewrite_subject,
+                user_intent=user_intent,
                 stream_ctx=stream_ctx,
             )
             after_fp = evolution_version_ctl.skill_md_fingerprint(skill_md_path)
@@ -14287,11 +14304,10 @@ class JiuWenSwarmDeepAdapter:
             self._reset_request_env_bindings(ns_token, overlay_token, wk_token)
 
     def _apply_rebuild_permission_trusted_dirs(self, skill_md_path: str | None) -> None:
-        """Allow write_file/edit_file on the rebuild SKILL.md even without HITL.
+        """Deprecated for direct-LLM rebuild; kept for compatibility with older tests.
 
-        Rebuild RPC often has ``session_id=None``. Path-layer write defaults to
-        ask outside workspace; ASK without HITL becomes interrupt and leaves
-        SKILL.md unchanged.
+        Agent-path write_file previously needed trusted_dirs. Direct LLM rebuild
+        writes via ``Path.write_text`` and does not call this.
         """
         permission_rail = getattr(self, "_permission_rail", None)
         setter = getattr(permission_rail, "set_trusted_dirs", None)
@@ -14312,34 +14328,96 @@ class JiuWenSwarmDeepAdapter:
                 exc_info=True,
             )
 
+    @staticmethod
+    def _strip_skill_md_fence(text: str) -> str:
+        """Remove optional markdown code fences around a SKILL.md body."""
+        content = str(text or "").strip()
+        if not content.startswith("```"):
+            return content
+        lines = content.split("\n")
+        if lines and lines[0].lstrip().startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        return "\n".join(lines).strip()
+
     async def _execute_merge_version_rewrite(
         self,
-        prompt: str,
+        prompt: str | None = None,
         *,
+        skill_md_path: str | None = None,
+        rebuild_context: dict[str, Any] | None = None,
+        subject: dict[str, Any] | None = None,
+        user_intent: str | None = None,
         stream_ctx: Any = None,
     ) -> bool:
-        """Run LLM rewrite for merge-version; return True when agent call succeeds."""
+        """Rewrite SKILL.md via direct LLM invoke + Path.write_text (no agent)."""
+        _ = prompt
         _ = stream_ctx
-        if self._instance is None:
+        if self._model is None:
+            logger.warning(
+                "[JiuWenSwarmDeepAdapter] merge-version rewrite skipped: no model"
+            )
             return False
+        path_text = str(skill_md_path or "").strip()
+        if not path_text:
+            logger.warning(
+                "[JiuWenSwarmDeepAdapter] merge-version rewrite skipped: empty skill_md_path"
+            )
+            return False
+        path = Path(path_text)
         try:
-            from openjiuwen.core.session.agent import create_agent_session
+            old_body = path.read_text(encoding="utf-8")
+        except OSError as exc:
+            logger.warning(
+                "[JiuWenSwarmDeepAdapter] merge-version rewrite read failed: %s",
+                exc,
+            )
+            return False
 
-            # Fresh session so default_session checkpoint HITL is not treated as resume.
-            session = create_agent_session(
-                session_id=f"evolution-rebuild-{uuid.uuid4().hex[:12]}",
-                card=getattr(self._instance, "card", None),
+        from openjiuwen.core.foundation.llm.schema.message import (
+            SystemMessage,
+            UserMessage,
+        )
+        from openjiuwen.harness.rails.evolution.commands import (
+            build_rebuild_llm_direct_prompt,
+        )
+
+        subject_payload = subject if isinstance(subject, dict) else {}
+        if not subject_payload.get("name"):
+            subject_payload = {
+                "kind": str(subject_payload.get("kind") or "skill"),
+                "name": path.parent.name or "skill",
+            }
+        system_prompt, user_prompt = build_rebuild_llm_direct_prompt(
+            subject=subject_payload,
+            current_skill_md=old_body,
+            user_intent=user_intent,
+            rebuild_context=rebuild_context if isinstance(rebuild_context, dict) else {},
+            language=self._resolve_runtime_language(),
+        )
+        try:
+            result = await self._model.invoke(
+                [
+                    SystemMessage(content=system_prompt),
+                    UserMessage(content=user_prompt),
+                ],
+                temperature=0,
             )
-            result = await Runner.run_agent(
-                agent=self._instance,
-                inputs={"query": prompt},
-                session=session,
+            content = self._strip_skill_md_fence(
+                getattr(result, "content", None) or ""
             )
-            if isinstance(result, dict) and result.get("result_type") == "interrupt":
+            if not content:
                 logger.warning(
-                    "[JiuWenSwarmDeepAdapter] merge-version rewrite interrupted"
+                    "[JiuWenSwarmDeepAdapter] merge-version rewrite empty model content"
                 )
                 return False
+            if "---" not in content[:200]:
+                logger.warning(
+                    "[JiuWenSwarmDeepAdapter] merge-version rewrite missing frontmatter"
+                )
+                return False
+            path.write_text(content, encoding="utf-8")
             return True
         except Exception as exc:
             logger.warning(
@@ -14351,8 +14429,12 @@ class JiuWenSwarmDeepAdapter:
         """Fire-and-forget version merge for skills queued after experience persist."""
         if not self._pending_auto_rebuild_skills:
             return
+        existing = self._auto_rebuild_task
+        if existing is not None and not existing.done():
+            # In-flight runner drains pending under the lock (and re-checks after).
+            return
         rid = str(request_id or "auto-rebuild").strip() or "auto-rebuild"
-        asyncio.create_task(
+        self._auto_rebuild_task = asyncio.create_task(
             self._run_auto_rebuild_skills_detached(request_id=rid),
             name=f"auto-rebuild-{rid}",
         )
@@ -14380,34 +14462,46 @@ class JiuWenSwarmDeepAdapter:
 
     async def _run_auto_rebuild_skills_detached(self, *, request_id: str | None = None) -> None:
         """Background auto version merge gated by per-skill selfEvolution=auto."""
-        skills = self._take_pending_auto_rebuild_skills()
-        for skill_name in skills:
-            if not self._should_auto_merge_evolved_skill(skill_name):
-                logger.info(
-                    "[JiuWenSwarmDeepAdapter] skip auto rebuild: request_id=%s "
-                    "skill=%s reason=selfEvolution_not_auto",
-                    request_id,
-                    skill_name,
-                )
-                continue
-            if not await self._skill_has_live_evolution_records(skill_name):
-                logger.info(
-                    "[JiuWenSwarmDeepAdapter] skip auto rebuild: request_id=%s "
-                    "skill=%s reason=no_evolution_records",
-                    request_id,
-                    skill_name,
-                )
-                continue
-            try:
-                await self.generate_evolution_merge_version(skill_name=skill_name)
-            except Exception as exc:
-                logger.warning(
-                    "[JiuWenSwarmDeepAdapter] auto rebuild failed: request_id=%s "
-                    "skill=%s error=%s",
-                    request_id,
-                    skill_name,
-                    exc,
-                )
+        try:
+            async with self._auto_rebuild_lock:
+                while True:
+                    skills = self._take_pending_auto_rebuild_skills()
+                    if not skills:
+                        break
+                    for skill_name in skills:
+                        if not self._should_auto_merge_evolved_skill(skill_name):
+                            logger.info(
+                                "[JiuWenSwarmDeepAdapter] skip auto rebuild: request_id=%s "
+                                "skill=%s reason=selfEvolution_not_auto",
+                                request_id,
+                                skill_name,
+                            )
+                            continue
+                        if not await self._skill_has_live_evolution_records(skill_name):
+                            logger.info(
+                                "[JiuWenSwarmDeepAdapter] skip auto rebuild: request_id=%s "
+                                "skill=%s reason=no_evolution_records",
+                                request_id,
+                                skill_name,
+                            )
+                            continue
+                        try:
+                            await self.generate_evolution_merge_version(
+                                skill_name=skill_name
+                            )
+                        except Exception as exc:
+                            logger.warning(
+                                "[JiuWenSwarmDeepAdapter] auto rebuild failed: "
+                                "request_id=%s skill=%s error=%s",
+                                request_id,
+                                skill_name,
+                                exc,
+                            )
+        finally:
+            # Close race: skills queued after last empty take while this task was
+            # still marked running (coalesced schedule). Re-arm if needed.
+            if self._pending_auto_rebuild_skills:
+                self._schedule_pending_auto_rebuild(request_id)
 
     @staticmethod
     def _followup_response(action: str, followup_prompt: str, skill_name: str) -> dict[str, Any]:
@@ -20024,19 +20118,22 @@ class JiuWenSwarmDeepAdapter:
                                 f"{event_timeout_sec:.0f}s without host events"
                             )
                             await _push_status("end", "hidden", message)
+                        # Drain any queued auto rebuilds before abandoning the watcher.
+                        self._schedule_pending_auto_rebuild(rid)
                         await _cleanup_evolution_rail(cancel=True)
                         return
                     await asyncio.sleep(TEAM_EVOLUTION_IDLE_SLEEP_SEC)
                     continue
                 last_event_at = time.monotonic()
 
-                # Queue skills for auto version merge only when experiences were
-                # persisted this cycle (``auto_approved``). Do not treat
-                # ``completed`` as persist: SDK may emit stage=completed with
-                # skill_name for ``no_evolution_no_records``, and team rail emits
-                # completed when a request is merely ready. Per-skill gate:
-                # only selfEvolution=auto is queued inside
-                # ``_queue_auto_rebuild_skill``.
+                # Queue + schedule on persist (``auto_approved``) immediately.
+                # Direct-LLM rebuild does not share DeepAgent, so do not wait for
+                # watcher terminal. Do not treat ``completed`` as persist: SDK may
+                # emit stage=completed with skill_name for ``no_evolution_no_records``,
+                # and team rail emits completed when a request is merely ready.
+                # Per-skill gate: only selfEvolution=auto is queued inside
+                # ``_queue_auto_rebuild_skill``. Terminal paths still schedule as a
+                # no-op-safe safety net when pending is empty.
                 for evt in events:
                     payload = event_payload_dict(evt)
                     meta = evolution_meta_from_payload(payload) or {}
@@ -20050,6 +20147,7 @@ class JiuWenSwarmDeepAdapter:
                     ).strip().lower()
                     if skill_name and raw_stage == "auto_approved":
                         self._queue_auto_rebuild_skill(skill_name)
+                        self._schedule_pending_auto_rebuild(rid)
 
                 visible_progress_statuses = visible_evolution_progress_from_events(events)
                 just_started_with_progress = None
@@ -20117,6 +20215,7 @@ class JiuWenSwarmDeepAdapter:
                             or end_stage in TEAM_EVOLUTION_NOOP_STAGES
                         )
                     ):
+                        self._schedule_pending_auto_rebuild(rid)
                         await _cleanup_evolution_rail()
                         return
                     if not active:
@@ -20128,6 +20227,7 @@ class JiuWenSwarmDeepAdapter:
                         message or "Evolution analysis completed",
                     )
                     await _cleanup_evolution_rail()
+                    # Safety net: primary schedule is on auto_approved (direct LLM).
                     self._schedule_pending_auto_rebuild(rid)
                     return
 
@@ -20164,8 +20264,7 @@ class JiuWenSwarmDeepAdapter:
                         str(terminal.get("message") or ""),
                     )
                     await _cleanup_evolution_rail()
-                    # auto_approved maps to terminal "completed"; must schedule here
-                    # (outcome events are not emitted on the rail auto-save path).
+                    # Safety net: primary schedule is on auto_approved (direct LLM).
                     self._schedule_pending_auto_rebuild(rid)
                     return
         except asyncio.CancelledError:
