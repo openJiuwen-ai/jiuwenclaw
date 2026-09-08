@@ -977,6 +977,7 @@ def get_permissions_tools() -> dict[str, Any]:
 def replace_permissions_tools_in_config(tools: Any) -> None:
     """整表替换 ``permissions.tools``；值仅允许 ``allow|ask|deny``（或 legacy ``{\"*\": level}``）。"""
     normalized = _validate_tools_map(tools)
+
     def _mutate(data):
         if "permissions" not in data:
             data["permissions"] = {}

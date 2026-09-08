@@ -64,10 +64,10 @@ _SMART_GLOB_MAX_COMMAS = 6
 
 def _validate_smart_glob_pattern(pattern: Any) -> None:
     """Bound the SDK expansion before calling it, then check every branch."""
+    if not isinstance(pattern, str) or not pattern or len(pattern) > _SMART_GLOB_MAX_LENGTH:
+        raise ValueError("native_glob_expansion_limit")
     if (
-        not isinstance(pattern, str) or not pattern
-        or len(pattern) > _SMART_GLOB_MAX_LENGTH
-        or pattern.count("{") > _SMART_GLOB_MAX_GROUPS
+        pattern.count("{") > _SMART_GLOB_MAX_GROUPS
         or pattern.count("}") > _SMART_GLOB_MAX_GROUPS
         or pattern.count(",") > _SMART_GLOB_MAX_COMMAS
     ):
@@ -75,10 +75,12 @@ def _validate_smart_glob_pattern(pattern: Any) -> None:
     # Each expansion consumes a brace pair. With <=6 pairs and <=6 commas,
     # recursion depth is <=6 and the product of branch factors is <=2**6.
     # Validate the returned branches, not just the pre-expansion spelling.
-    for branch in GlobTool._expand_brace_pattern(pattern):
+    # SDK has no public expander; reuse the executor's grammar, not a copy.
+    for branch in GlobTool._expand_brace_pattern(pattern):  # pylint: disable=protected-access
         windows = PureWindowsPath(branch)
+        invalid_root = not branch or Path(branch).is_absolute() or windows.drive
         if (
-            not branch or Path(branch).is_absolute() or windows.drive or windows.root
+            invalid_root or windows.root
             or ".." in branch.replace("\\", "/").split("/")
         ):
             raise ValueError("native_glob_scope_invalid:put_parent_directory_in_path")
@@ -101,6 +103,8 @@ def _normalize_native_path_invocation_for_execution(
         resource = Runner.resource_mgr.get_tool(card.id, session=None) if card else None
     except (AttributeError, KeyError, TypeError, ValueError):
         return invocation, "native_path_binding_unavailable"
+    # Executor identity, not polymorphism: subclasses may change path semantics.
+    # pylint: disable-next=huawei-unidiomatic-typecheck
     if type(resource) is not expected or resource.card is not card:
         # Same-name MCP/other providers retain their existing permission owner.
         return invocation, ""

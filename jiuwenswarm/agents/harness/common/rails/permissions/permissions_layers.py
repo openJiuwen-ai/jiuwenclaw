@@ -347,6 +347,11 @@ def save_user_permissions(data: dict[str, Any]) -> bool:
     return update_user_permissions(lambda _: dict(data) if isinstance(data, dict) else {})
 
 
+def save_user_permissions_locked(data: dict[str, Any]) -> bool:
+    """Save a validated User overlay; caller must hold permission_storage_lock."""
+    return _dump_yaml_dict(user_permissions_path(), data)
+
+
 def update_user_permissions(mutator) -> bool:
     """Apply a User overlay mutation to the latest document under the shared locks."""
     try:
@@ -369,6 +374,7 @@ __all__ = [
     "persist_session_overlay_from_effective",
     "persist_user_overlay_from_effective",
     "save_user_permissions",
+    "save_user_permissions_locked",
     "update_user_permissions",
     "session_permissions_path",
     "user_permissions_path",

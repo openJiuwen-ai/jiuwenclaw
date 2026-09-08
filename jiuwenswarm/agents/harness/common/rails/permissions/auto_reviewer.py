@@ -523,6 +523,7 @@ def _intent_view(
     if evidence is None:
         return {"trusted_user_turns": []}
     turns: list[dict[str, str]] = []
+
     def intent_text(value: Any, *, max_length: int) -> str:
         return redact_reviewer_intent(
             value, workspace_root=facts.workspace_root,

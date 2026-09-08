@@ -987,11 +987,11 @@ def convert_interactions_to_ask_user_question(
             if has_permission_locator
             else _classify_structured_approval(value_obj, question_data)
         )
+        unbound_permission = source == "permission_interrupt" and not has_permission_locator
         if (
             root_permission_queue is not None
-            and source == "permission_interrupt"
+            and unbound_permission
             and structured_approval is None
-            and "card_id" not in question_data
         ):
             return None
 

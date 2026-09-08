@@ -55,9 +55,10 @@ class JiuwenSwarmPermissionInterruptRail(PermissionInterruptRail):
     def _project_native_path_guard(self) -> None:
         if getattr(self, "_exact_persist_callback", None) is None:
             return
-        checker = self._engine._file_guard
+        # SDK exposes no guard injection API; preserve its checker on each rebuild.
+        checker = self._engine._file_guard  # pylint: disable=protected-access
         if checker is not None and not isinstance(checker, NativePathGuardProjection):
-            self._engine._file_guard = NativePathGuardProjection(checker)
+            self._engine._file_guard = NativePathGuardProjection(checker)  # pylint: disable=protected-access
 
     def update_config(self, *args: Any, **kwargs: Any) -> None:
         super().update_config(*args, **kwargs)

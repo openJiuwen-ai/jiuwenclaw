@@ -218,9 +218,9 @@ def _sensitive_location(value: str) -> bool:
         return True
     for part in value.replace("\\", "/").split("/"):
         name = part.casefold()
+        sensitive_name = name in _SENSITIVE_LOCATION_PARTS or name == ".env" or name.startswith(".env.")
         if (
-            name in _SENSITIVE_LOCATION_PARTS
-            or name == ".env" or name.startswith(".env.")
+            sensitive_name
             or name.endswith((".key", ".pem", ".p12", ".pfx"))
             or any(token in name for token in _SENSITIVE_LOCATION_TOKENS)
         ):

@@ -114,6 +114,7 @@ def dispatch_permissions_config_request(request: AgentRequest) -> AgentResponse:
                     ask.append(name.strip())
                 elif lv == "allow":
                     allow.append(name.strip())
+
             def _mutate(overlay):
                 overlay["deny_tools"] = deny
                 overlay["ask_tools"] = ask

@@ -234,7 +234,7 @@ def persist_exact_permission_allow_rule(
                 return False
             if updated == user:
                 return True
-            return layers._dump_yaml_dict(layers.user_permissions_path(), updated)
+            return layers.save_user_permissions_locked(updated)
     except Exception:
         logger.exception("[PermissionPersist] exact permission persist failed")
         return False
@@ -284,6 +284,7 @@ def persist_external_directory_allow(
         if actions is not None and i < len(actions) and actions[i]:
             act = str(actions[i])
         access_list.append((path_str, act))
+
     def _mutate(data):
         merged, wrote = merge_file_guard_access_allows(_ensure_permissions_dict(data), access_list)
         if not wrote:
