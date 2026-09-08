@@ -383,20 +383,21 @@ def _agent_bot_id_group_num() -> int:
     return n if n > 0 else 0
 
 
-def _routing_bot_id(bot_id: str, group_num: int | None = None) -> str:
+def _routing_bot_id(value: str, group_num: int | None = None) -> str:
     """与 RuntimeManagement ``_routing_bot_id`` 一致。"""
     n = _agent_bot_id_group_num() if group_num is None else group_num
     if n <= 0:
-        return bot_id
-    digest = hashlib.sha256(bot_id.encode("utf-8")).hexdigest()
+        return value
+    digest = hashlib.sha256(value.encode("utf-8")).hexdigest()
     bucket = int(digest, 16) % n
     return f"b{bucket}"
 
 
 def _default_invoke_ids(group_id: str, bot_id: str, user_id: str) -> tuple[str, str]:
     """企业策略未配置 service_id/agent_id 时的默认拼接（与 RuntimeManagement 同源）。"""
-    routed_bot = _routing_bot_id(bot_id)
-    return f"{group_id}{routed_bot}", f"{group_id}{routed_bot}{user_id}"
+    default_svc = f"{group_id}{bot_id}"
+    default_ag = f"{group_id}{bot_id}{user_id}"
+    return _routing_bot_id(default_svc), default_ag
 
 
 def _default_logical_invoke_ids(
