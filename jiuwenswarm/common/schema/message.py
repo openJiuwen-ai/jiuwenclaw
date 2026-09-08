@@ -179,6 +179,8 @@ class ReqMethod(Enum):
     # mcp management.
     MCP_LIST = "mcp.list"
     MCP_SHOW = "mcp.show"
+    MCP_INSTALL = "mcp.install"
+    MCP_UNINSTALL = "mcp.uninstall"
     MCP_CONNECT = "mcp.connect"
     MCP_WAIT_AUTH = "mcp.wait_auth"
     MCP_DISCONNECT = "mcp.disconnect"
@@ -210,6 +212,7 @@ class ReqMethod(Enum):
     SKILLS_MARKETPLACE_TOGGLE = "skills.marketplace.toggle"
     SKILLS_UNINSTALL = "skills.uninstall"
     SKILLS_ONLINE_SEARCH = "skills.online_search.search"
+    SKILLS_ONLINE_SEARCH_INSTALL = "skills.online_search.install"
     SKILLS_SKILLNET_SEARCH = "skills.skillnet.search"
     SKILLS_SKILLNET_INSTALL = "skills.skillnet.install"
     SKILLS_SKILLNET_INSTALL_STATUS = "skills.skillnet.install_status"

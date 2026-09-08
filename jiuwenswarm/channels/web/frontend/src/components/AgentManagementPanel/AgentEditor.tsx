@@ -1,4 +1,4 @@
-import { ArrowLeft, Check, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Minus, X } from 'lucide-react';
+import { Check, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Minus, X } from 'lucide-react';
 import { createPortal } from 'react-dom';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -7,6 +7,7 @@ import DeleteIcon from '../../assets/agent-management/remove.svg?react';
 import PlusIcon from '../../assets/agent-management/agent-plus.svg?react';
 import SearchIcon from '../../assets/agent-management/agent-search.svg?react';
 import UninstallIcon from '../../assets/agent-management/uninstall.svg?react';
+import BackIcon from '../../assets/work-mode/arrow-left.svg?react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import type { AgentDraft, McpOption, RequestStatus, SkillOption } from '../../features/agentManagement';
@@ -26,6 +27,9 @@ type AgentEditorProps = {
   onCancel: () => void;
   onSave: () => void;
 };
+
+const AGENT_NAME_MAX_LENGTH = 50;
+const AGENT_DESCRIPTION_MAX_LENGTH = 2000;
 
 const MCP_TYPE_OPTIONS = [
   ['stdio-mcp', 'connectorMarket.detail.integrationType.stdioMcp'],
@@ -233,11 +237,13 @@ export function AgentEditor({
 
   return (
     <form className="agent-management-editor" onSubmit={handleSubmit} data-testid="agent-editor">
-      <button type="button" className="agent-management-back" onClick={onCancel}>
-        <ArrowLeft size={16} aria-hidden="true" />
+      <button type="button" className="detail-back mb-[35px]" onClick={onCancel}>
+        <BackIcon aria-hidden="true" />
         {t('agentManagement.actions.back')}
       </button>
 
+      <div className="detail-body flex-1 min-h-0 overflow-y-auto">
+      <div className="agent-management-editor__inner">
       <header className="agent-management-editor__header">
         <h1>{t('agentManagement.form.title')}</h1>
         <div className="agent-management-editor__tabs" role="tablist" aria-label={t('agentManagement.form.createTabsLabel')}>
@@ -250,27 +256,49 @@ export function AgentEditor({
       <section className="agent-management-form-section">
         <h2>{t('agentManagement.form.basic')}</h2>
         <div className="agent-management-form-grid">
-          <label className="agent-management-form-field--wide">
-            <span>{t('agentManagement.form.nameLabel')}</span>
+          <div className="agent-management-form-field--wide">
+            <div className="agent-management-form-field__label-row">
+              <label htmlFor="agent-management-agent-name">{t('agentManagement.form.nameLabel')}</label>
+              <span
+                aria-hidden="true"
+                className={`agent-management-field-counter${draft.name.length >= AGENT_NAME_MAX_LENGTH ? ' is-limit' : ''}`}
+                data-testid="agent-editor-name-counter"
+              >
+                {t('agentManagement.form.charCount', { count: draft.name.length, max: AGENT_NAME_MAX_LENGTH })}
+              </span>
+            </div>
             <input
+              id="agent-management-agent-name"
               value={draft.name}
               onChange={event => update({ name: event.target.value })}
               placeholder={t('agentManagement.form.namePlaceholder')}
+              maxLength={AGENT_NAME_MAX_LENGTH}
               aria-invalid={Boolean(touched && errors.name)}
             />
             {touched && errors.name ? <small className="agent-management-field-error">{errors.name}</small> : null}
-          </label>
-          <label className="agent-management-form-field--wide">
-            <span>{t('agentManagement.form.descriptionLabel')}</span>
+          </div>
+          <div className="agent-management-form-field--wide">
+            <div className="agent-management-form-field__label-row">
+              <label htmlFor="agent-management-agent-description">{t('agentManagement.form.descriptionLabel')}</label>
+              <span
+                aria-hidden="true"
+                className={`agent-management-field-counter${draft.description.length >= AGENT_DESCRIPTION_MAX_LENGTH ? ' is-limit' : ''}`}
+                data-testid="agent-editor-description-counter"
+              >
+                {t('agentManagement.form.charCount', { count: draft.description.length, max: AGENT_DESCRIPTION_MAX_LENGTH })}
+              </span>
+            </div>
             <textarea
+              id="agent-management-agent-description"
               rows={2}
               value={draft.description}
               onChange={event => update({ description: event.target.value })}
               placeholder={t('agentManagement.form.descriptionPlaceholder')}
+              maxLength={AGENT_DESCRIPTION_MAX_LENGTH}
               aria-invalid={Boolean(touched && errors.description)}
             />
             {touched && errors.description ? <small className="agent-management-field-error">{errors.description}</small> : null}
-          </label>
+          </div>
           <div className="agent-management-form-field--wide agent-management-form-field--tag-picker" ref={tagPickerRef}>
             <span>{t('agentManagement.form.tagLabel')}</span>
             <div className="agent-management-tag-picker">
@@ -588,6 +616,8 @@ export function AgentEditor({
         </div>,
         document.body,
       ) : null}
+      </div>
+      </div>
     </form>
   );
 }

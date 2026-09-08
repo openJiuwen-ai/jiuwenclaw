@@ -26,6 +26,7 @@ from jiuwenswarm.agents.harness.code.rails.heartbeat.models import (
     SOURCE_SCHEDULE_RECOVERY,
     STATUS_COMPLETED,
     STATUS_DISABLED,
+    STATUS_EXPIRED,
     STATUS_SCHEDULED,
 )
 from jiuwenswarm.agents.harness.code.rails.heartbeat.execution import (
@@ -665,6 +666,53 @@ async def test_two_real_heartbeats_share_sixty_second_busy_deadline(
     assert len(requests) == 1
 
 
+async def test_real_execution_timeout_finishes_persisted_run(
+    tmp_path: Path,
+) -> None:
+    cancelled = asyncio.Event()
+
+    class Server:
+        async def execute_internal_heartbeat(self, request) -> None:  # noqa: ANN001
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cancelled.set()
+
+    store = HeartbeatJobStore(path=tmp_path / "execution-timeout.json")
+    admission = SessionRunAdmission()
+    execution = HeartbeatExecutionService(
+        Server(), admission, execution_timeout_seconds=0.02
+    )
+    scheduler = HeartbeatSchedulerService(
+        store=store,
+        execution_service=execution,
+        session_resolver=_FakeResolver(),
+        now_fn=lambda: 1.0,
+    )
+    execution.set_scheduler(scheduler)
+    job = await store.create_job(
+        name="timeout", channel_id="web", session_id="s1", prompt="continue",
+        schedule=HeartbeatSchedule.from_dict(
+            {"type": "interval", "interval_seconds": 120}
+        ),
+        source="web_rpc", next_run_at=1.0, now=0.0,
+    )
+
+    await scheduler._tick_once()
+    await asyncio.gather(*list(execution._tasks.values()))
+
+    finished = await store.get_job(job.id)
+    assert finished is not None
+    assert cancelled.is_set()
+    assert finished.run_state.current_run_id is None
+    assert finished.run_state.last_run_status == "failed"
+    assert finished.run_state.last_error == (
+        "heartbeat execution timed out after 0.02 seconds"
+    )
+    assert finished.run_count == 1
+    assert execution.active_session_ids() == set()
+
+
 async def test_run_now_rejects_busy_manual_session(setup) -> None:
     store, mh, sched = setup
     mh.busy_sessions.add("s1")
@@ -893,6 +941,205 @@ def test_preview_once_returns_one_or_empty(setup) -> None:
 # ---------------------------------------------------------------------------
 # cancel_run
 # ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("cancel_delivery", ["ack", "callback", "not_found"])
+@pytest.mark.parametrize("pause_schedule", [False, True])
+@pytest.mark.parametrize("concurrency_policy", ["skip", "queue"])
+async def test_cancel_once_run_now_after_scheduled_tick(
+    tmp_path: Path, cancel_delivery: str, pause_schedule: bool,
+    concurrency_policy: str,
+) -> None:
+    """Cancelling an early manual run must persist after its once slot is consumed."""
+    now = [1000.0]
+    store = HeartbeatJobStore(path=tmp_path / "hb.json")
+    execution = _FakeExecution()
+    sched = HeartbeatSchedulerService(
+        store=store, execution_service=execution, now_fn=lambda: now[0],
+    )
+    sched._session_resolver = _FakeResolver()
+    job = await store.create_job(
+        name="once", channel_id="web", session_id="s1", prompt="p",
+        schedule=HeartbeatSchedule.from_dict({"type": "once", "run_at": 1100.0}),
+        source="web_rpc", now=now[0], concurrency_policy=concurrency_policy,
+    )
+    started = await sched.trigger_run_now(job.id, reschedule=False)
+    run_id = started["run_id"]
+    assert started["accepted"] is True
+    now[0] = 1110.0
+    await sched._tick_once()
+    running = await store.get_job(job.id)
+    assert running.next_run_at is None
+    assert running.run_state.skipped_count == (1 if concurrency_policy == "skip" else 0)
+    assert running.run_state.current_run_id == run_id
+    if concurrency_policy == "queue":
+        assert running.run_state.queued_run_id is not None
+
+    async def cancel(request_id: str) -> bool:
+        await _FakeExecution.cancel(execution, request_id)
+        if cancel_delivery == "callback":
+            await sched.on_run_finished(job.id, request_id, outcome="cancelled")
+        return cancel_delivery != "not_found"
+
+    execution.cancel = cancel
+    result = await sched.cancel_run(job.id, pause_schedule=pause_schedule)
+
+    # Read through a new Store, so an in-memory-only cleanup cannot pass.
+    persisted = await HeartbeatJobStore(path=store.path).get_job(job.id)
+    assert result["cancel_status"] == (
+        "not_found" if cancel_delivery == "not_found" else "cancelled"
+    )
+    assert persisted.status == (STATUS_DISABLED if pause_schedule else STATUS_EXPIRED)
+    assert persisted.enabled is False
+    assert persisted.next_run_at is None
+    assert persisted.run_count == 0
+    assert persisted.run_state.current_run_id is None
+    assert persisted.run_state.resume_status is None
+    assert persisted.run_state.last_run_status == "cancelled"
+    assert persisted.run_state.last_cancel_status == result["cancel_status"]
+    assert persisted.run_state.queued_run_id is None
+    assert run_id not in sched._active_runs
+    assert run_id not in sched._cancel_intents
+    assert execution.active_runs == set()
+    assert await sched.on_run_finished(job.id, run_id, outcome="succeeded") is False
+    await sched._tick_once()
+    assert len(execution.messages) == 1
+    assert (await store.get_job(job.id)).to_dict() == persisted.to_dict()
+
+
+@pytest.mark.parametrize("schedule_data", [
+    {"type": "once", "run_at": 1100.0},
+    {"type": "interval", "interval_seconds": 120},
+    {"type": "cron", "cron_expr": "* * * * *"},
+])
+@pytest.mark.parametrize("cancel_at", [1099.0, 1100.0, 1110.0])
+async def test_cancel_run_now_preserves_unconsumed_schedule(
+    tmp_path: Path, schedule_data: dict, cancel_at: float,
+) -> None:
+    """A due timestamp is still runnable until the scheduler consumes it."""
+    now = [1000.0]
+    store = HeartbeatJobStore(path=tmp_path / "hb.json")
+    sched = HeartbeatSchedulerService(
+        store=store, execution_service=_FakeExecution(), now_fn=lambda: now[0],
+    )
+    sched._session_resolver = _FakeResolver()
+    job = await store.create_job(
+        name="pending", channel_id="web", session_id="s1", prompt="p",
+        schedule=HeartbeatSchedule.from_dict(schedule_data),
+        source="web_rpc", now=now[0], next_run_at=1100.0,
+    )
+    await sched.trigger_run_now(job.id, reschedule=False)
+    now[0] = cancel_at
+    await sched.cancel_run(job.id)
+    restored = await store.get_job(job.id)
+    assert restored.status == STATUS_SCHEDULED
+    assert restored.enabled is True
+    assert restored.next_run_at == 1100.0
+    assert restored.run_count == 0
+    assert restored.run_state.current_run_id is None
+
+
+async def test_cancel_consumed_once_with_real_execution(tmp_path: Path) -> None:
+    """Exercise the actual task cancellation, admission release and finally callback."""
+    entered = asyncio.Event()
+
+    class Server:  # pylint: disable=too-few-public-methods
+        """Keep execution active until its real task receives cancellation."""
+
+        async def execute_internal_heartbeat(self, _request) -> None:
+            """Signal dispatch and wait without invoking an LLM."""
+            entered.set()
+            await asyncio.Event().wait()
+
+    now = [1000.0]
+    admission = SessionRunAdmission()
+    execution = HeartbeatExecutionService(Server(), admission)
+    store = HeartbeatJobStore(path=tmp_path / "hb.json")
+    sched = HeartbeatSchedulerService(
+        store=store, execution_service=execution, now_fn=lambda: now[0],
+    )
+    sched._session_resolver = _FakeResolver()
+    execution.set_scheduler(sched)
+    job = await store.create_job(
+        name="once", channel_id="web", session_id="s1", prompt="p",
+        schedule=HeartbeatSchedule.from_dict({"type": "once", "run_at": 1100.0}),
+        source="web_rpc", now=now[0],
+    )
+    try:
+        started = await sched.trigger_run_now(job.id)
+        await asyncio.wait_for(entered.wait(), timeout=2.0)
+        now[0] = 1110.0
+        await sched._tick_once()
+        result = await sched.cancel_run(job.id)
+        persisted = await HeartbeatJobStore(path=store.path).get_job(job.id)
+        assert result["cancel_status"] == "cancelled"
+        assert persisted.status == STATUS_EXPIRED
+        assert persisted.run_state.last_run_status == "cancelled"
+        assert persisted.run_state.current_run_id is None
+        assert persisted.run_count == 0
+        assert not execution.has_active_run(started["run_id"])
+        assert not admission.is_heartbeat_active(job.session_id)
+        assert started["run_id"] not in sched._active_runs
+    finally:
+        await execution.stop()
+
+
+@pytest.mark.parametrize("schedule_data", [
+    {"type": "once", "run_at": 1200.0},
+    {"type": "interval", "interval_seconds": 120},
+])
+async def test_cancel_consumed_once_preserves_edited_schedule(tmp_path: Path, schedule_data: dict):
+    """A newer plan must outrank the original once run's resume snapshot."""
+    now = [1000.0]
+    store = HeartbeatJobStore(path=tmp_path / "hb.json")
+    sched = HeartbeatSchedulerService(
+        store=store, execution_service=_FakeExecution(), now_fn=lambda: now[0],
+    )
+    sched._session_resolver = _FakeResolver()
+    job = await store.create_job(
+        name="once", channel_id="web", session_id="s1", prompt="p",
+        schedule=HeartbeatSchedule.from_dict({"type": "once", "run_at": 1100.0}),
+        source="web_rpc", now=now[0],
+    )
+    await sched.trigger_run_now(job.id)
+    now[0] = 1110.0
+    await sched._tick_once()
+    await store.update_job(job.id, {"schedule": schedule_data, "next_run_at": 1200.0})
+    await sched.cancel_run(job.id)
+    restored = await store.get_job(job.id)
+    assert restored.status == STATUS_SCHEDULED
+    assert restored.enabled is True
+    assert restored.next_run_at == 1200.0
+    assert restored.schedule.type == schedule_data["type"]
+    assert restored.run_state.current_run_id is None
+
+
+async def test_once_due_replacement_preserves_reserved_run(tmp_path: Path) -> None:
+    """Cancelling for replacement must not expire a still-pending once slot."""
+    now = [1000.0]
+    store = HeartbeatJobStore(path=tmp_path / "hb.json")
+    execution = _FakeExecution()
+    sched = HeartbeatSchedulerService(
+        store=store, execution_service=execution, now_fn=lambda: now[0],
+    )
+    sched._session_resolver = _FakeResolver()
+    job = await store.create_job(
+        name="once", channel_id="web", session_id="s1", prompt="p",
+        schedule=HeartbeatSchedule.from_dict({"type": "once", "run_at": 1100.0}),
+        source="web_rpc", now=now[0], concurrency_policy="replace",
+    )
+    started = await sched.trigger_run_now(job.id)
+    now[0] = 1110.0
+    await sched._tick_once()
+    current = await store.get_job(job.id)
+    assert current.status == "running"
+    assert current.run_state.current_run_id != started["run_id"]
+    assert current.run_state.current_trigger == "scheduler"
+    assert current.run_state.queued_run_id is None
+    assert execution.cancelled_request_ids == [started["run_id"]]
+    assert len(execution.messages) == 2
+    await sched.cancel_run(job.id)
+    assert (await store.get_job(job.id)).status == STATUS_EXPIRED
 
 
 async def test_cancel_run_pause_schedule(setup) -> None:

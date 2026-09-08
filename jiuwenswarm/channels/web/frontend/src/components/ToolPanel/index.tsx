@@ -465,6 +465,7 @@ export function ToolPanel({
                   members={teamMembers}
                   totalTasks={teamTotalTasks}
                   completedTasks={teamCompletedTasks}
+                  statusIconAtEnd={isTeam}
                 />
               ) : (
                 <TaskPlanningPanel
@@ -524,6 +525,7 @@ export function ToolPanel({
           maxCollapsedCount={4}
           onExpand={() => expandTo('planning')}
           onExpandAll={() => (isTeam ? setTeamPlanningExpanded(true) : setPlanningExpanded(true))}
+          expanded={isTeam ? teamPlanningExpanded : planningExpanded}
           dataTestId={isTeam ? 'tool-panel-team-planning' : 'tool-panel-planning'}
         >
           <TaskPlanningPanel
@@ -533,6 +535,7 @@ export function ToolPanel({
             hideHeader
             hideExpandButton
             hideAssignee={!isTeam}
+            statusIconAtEnd={isTeam}
             title={t('chat.recentTasks')}
             maxCollapsedCount={4}
             {...planningProps}
@@ -552,6 +555,7 @@ export function ToolPanel({
           maxCollapsedCount={4}
           onExpand={() => expandTo('team')}
           onExpandAll={() => setTeamMembersExpanded(true)}
+          expanded={teamMembersExpanded}
           dataTestId="tool-panel-team-members"
           defaultCollapsed
           autoExpandOnContent
@@ -586,6 +590,7 @@ export function ToolPanel({
             expandTo('subagents');
           }}
           onExpandAll={() => setSubagentsExpanded(true)}
+          expanded={subagentsExpanded}
           dataTestId="tool-panel-subagents"
           defaultCollapsed
           autoExpandOnContent
@@ -594,6 +599,7 @@ export function ToolPanel({
             tasks={subagentTasks}
             members={[]}
             hideAssignee
+            statusIconAtEnd
             maxCollapsedCount={4}
             expanded={subagentsExpanded}
             emptyText={t('subagent.empty')}
@@ -659,6 +665,7 @@ export function ToolPanel({
           maxCollapsedCount={4}
           onExpand={() => expandTo('artifacts')}
           onExpandAll={() => setArtifactsExpanded(true)}
+          expanded={artifactsExpanded}
           dataTestId="tool-panel-artifacts"
           defaultCollapsed
           autoExpandOnContent

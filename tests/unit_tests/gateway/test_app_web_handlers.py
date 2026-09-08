@@ -25,6 +25,7 @@ from jiuwenswarm.gateway.channel_manager.web.app_web_handlers import (
     _validate_wechat_numeric_params,
 )
 from jiuwenswarm.gateway.heartbeat import HeartbeatServiceUnavailableError
+from jiuwenswarm.gateway.routing.agent_client import WebSocketAgentServerClient
 
 
 class FakeWebChannel:
@@ -71,6 +72,21 @@ class FakeAgentClient:
             self.reload_finished.set()
 
 
+class _FakeModelsResponse:
+    def __init__(self, model_ids):
+        self.status_code = 200
+        self._model_ids = model_ids
+
+    def json(self):
+        return {
+            "object": "list",
+            "data": [
+                {"id": model_id, "object": "model", "owned_by": "system"}
+                for model_id in self._model_ids
+            ],
+        }
+
+
 class _CapturingSessionListAgentClient:
     """捕获 E2A 信封并返回标准 session.list 响应（供 Web 转发断言）。"""
 
@@ -109,7 +125,87 @@ class _CapturingSessionListAgentClient:
         )()
 
 
-from jiuwenswarm.gateway.routing.agent_client import WebSocketAgentServerClient
+@pytest.mark.asyncio
+async def test_vendors_fetch_models_applies_alibaba_allowlist(monkeypatch):
+    channel = FakeWebChannel()
+    _register_web_handlers(WebHandlersBindParams(channel=channel))
+    monkeypatch.setattr(
+        "httpx.get",
+        lambda *args, **kwargs: _FakeModelsResponse(
+            [
+                "qwen-turbo-0919",
+                "MiniMax-M2.5",
+                "MiniMax/MiniMax-M2.5",
+                "qwen3.8-max",
+                "kimi/kimi-k3",
+            ]
+        ),
+    )
+
+    await channel.methods["vendors.fetch_models"](
+        object(),
+        "req-fetch-models",
+        {"vendor_key": "alibaba", "plan": "custom_api", "api_key": "secret"},
+        "sess-1",
+    )
+
+    response = channel.responses[-1]
+    assert response["ok"] is True
+    assert response["payload"] == {
+        "models": ["qwen3.8-max", "MiniMax-M2.5"],
+        "source": "remote",
+    }
+
+
+@pytest.mark.asyncio
+async def test_vendors_fetch_models_keeps_namespaced_models_for_other_vendors(monkeypatch):
+    channel = FakeWebChannel()
+    _register_web_handlers(WebHandlersBindParams(channel=channel))
+    monkeypatch.setattr(
+        "httpx.get",
+        lambda *args, **kwargs: _FakeModelsResponse(
+            ["deepseek-chat", "vendor/deepseek-chat"]
+        ),
+    )
+
+    await channel.methods["vendors.fetch_models"](
+        object(),
+        "req-fetch-models",
+        {"vendor_key": "deepseek", "plan": "custom_api", "api_key": "secret"},
+        "sess-1",
+    )
+
+    response = channel.responses[-1]
+    assert response["ok"] is True
+    assert response["payload"] == {
+        "models": ["deepseek-chat", "vendor/deepseek-chat"],
+        "source": "remote",
+    }
+
+
+@pytest.mark.asyncio
+async def test_vendors_fetch_models_falls_back_when_all_alibaba_models_are_namespaced(monkeypatch):
+    channel = FakeWebChannel()
+    _register_web_handlers(WebHandlersBindParams(channel=channel))
+    monkeypatch.setattr(
+        "httpx.get",
+        lambda *args, **kwargs: _FakeModelsResponse(["MiniMax/MiniMax-M2.5"]),
+    )
+
+    await channel.methods["vendors.fetch_models"](
+        object(),
+        "req-fetch-models",
+        {"vendor_key": "alibaba", "plan": "custom_api", "api_key": "secret"},
+        "sess-1",
+    )
+
+    response = channel.responses[-1]
+    assert response["ok"] is True
+    assert response["payload"]["source"] == "preset"
+    assert response["payload"]["models"]
+    assert response["payload"]["reason"] == (
+        "no remote models matched the Alibaba plan allowlist"
+    )
 
 
 class _OfflineRemoteAgentClient:
@@ -1990,7 +2086,7 @@ def test_optional_dependency_install_times_out_after_one_hour(
     monkeypatch.setattr(
         app_web_handlers,
         "_build_optional_dependency_install_args",
-        lambda _package: ["installer"],
+        lambda _package, _cli_agent: ["installer"],
     )
     monkeypatch.setattr(
         app_web_handlers.subprocess,

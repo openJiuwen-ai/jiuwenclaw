@@ -410,12 +410,23 @@ function ProjectEntityRow({
         type="button"
         ref={mainRef}
         className="conversation-entity-row__main"
-        onClick={onToggle}
+        onClick={(event) => {
+          onToggle();
+          // 鼠标点击（detail>0）展开/收起后立即收起路径提示，避免浮层残留；键盘触发的点击保留 focus 提示
+          if (event.detail > 0) {
+            hoverRef.current = false;
+            setTooltipPos(null);
+          }
+        }}
         title={path ? undefined : title}
         aria-describedby={path ? tooltipId : undefined}
         onMouseEnter={() => showTooltip('hover')}
         onMouseLeave={() => hideTooltip('hover')}
-        onFocus={() => showTooltip('focus')}
+        onFocus={() => {
+          // 仅键盘导航（:focus-visible）显示 focus 提示；鼠标点击也会触发 focus，
+          // 若不区分会导致点击后 focusRef 残留为 true，鼠标移出时 tooltip 无法消失
+          if (mainRef.current?.matches(':focus-visible')) showTooltip('focus');
+        }}
         onBlur={() => hideTooltip('focus')}
         data-testid="multi-session-project-row-main"
       >
@@ -1266,7 +1277,8 @@ export function ConversationSidebar({
       <div className="conversation-sidebar__overlay" data-testid="multi-session-sidebar-overlay" onClick={onToggleCollapse} />
     )}
     <aside className={`conversation-sidebar${floating ? ' is-floating' : ''}${collapsed ? ' is-collapsed' : ''}`} aria-label={t('multiSession.conversations')} data-testid="multi-session-sidebar">
-      <div ref={workModeMenuRef} className="conversation-sidebar__mode" data-testid="multi-session-work-mode">
+      <div className="conversation-sidebar__inner">
+        <div ref={workModeMenuRef} className="conversation-sidebar__mode" data-testid="multi-session-work-mode">
         <button
           type="button"
           className="conversation-sidebar__mode-trigger"
@@ -1321,8 +1333,8 @@ export function ConversationSidebar({
         >
           <SidebarCollapseIcon aria-hidden />
         </button>
-      </div>
-      <div className="conversation-sidebar__operations" data-testid="multi-session-operations">
+        </div>
+        <div className="conversation-sidebar__operations" data-testid="multi-session-operations">
         <button type="button" className="conversation-sidebar__new" onClick={() => {
           setSelectedProject(null);
           setPinError(null);
@@ -1341,8 +1353,8 @@ export function ConversationSidebar({
           <CronIcon aria-hidden />
           <span data-testid="multi-session-open-cron-label">{t('nav.cron')}</span>
         </button>
-      </div>
-      <div className="conversation-sidebar__body" data-testid="multi-session-sidebar-body">
+        </div>
+        <div className="conversation-sidebar__body" data-testid="multi-session-sidebar-body">
         {hasPinnedSection ? (
           <div className="conversation-sidebar__group conversation-sidebar__group--pinned" data-testid="multi-session-pinned-group">
             <div className="conversation-sidebar__section-heading" data-testid="multi-session-pinned-group-heading">
@@ -1439,6 +1451,7 @@ export function ConversationSidebar({
             )}
             {defaultProject ? renderSessionPagination(defaultProject.project_id, false) : null}
           </div>
+        </div>
         </div>
       </div>
       {pathDialogOpen ? (
