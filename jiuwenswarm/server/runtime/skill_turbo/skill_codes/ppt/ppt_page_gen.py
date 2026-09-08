@@ -655,17 +655,17 @@ def _validate_agenda_item_count(
     if not agenda_page:
         return []
 
-    content_chapters = _count_outline_content_chapters(outline_text)
-    if content_chapters == 0:
+    expected_count = _count_outline_content_chapters(outline_text)
+    if expected_count == 0:
         return []
 
     for p in page_htmls:
         if int(p.get("page_num", 0)) == agenda_page:
             item_count = _count_agenda_items(str(p.get("html") or ""))
-            if item_count != content_chapters:
+            if item_count != expected_count:
                 logger.warning(
                     "[P8.1] agenda 条目数(%d) ≠ 大纲内容章节数(%d) page=%d",
-                    item_count, content_chapters, agenda_page,
+                    item_count, expected_count, agenda_page,
                 )
                 return [agenda_page]
             break
