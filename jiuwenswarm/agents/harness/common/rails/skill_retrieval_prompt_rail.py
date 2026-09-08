@@ -437,21 +437,12 @@ class SkillRetrievalPromptRail(DeepAgentRail):
         lines.extend([
             "",
             (
-                "For finding, comparing, or recommending Skills, select exact Skill names from the "
-                "available descriptions, not categories. Stay at the discovery level: do not load "
-                "SKILL.md, inspect implementation files, or build orchestration graphs just to verify "
-                "recommendations. Mark details not established by descriptions as unverified. "
-                "Before another lookup, identify a required capability still missing from the candidates. "
-                "If none is missing, answer now; optional supporting capabilities, better alternatives, "
-                "and filling a maximum quota are not reasons for another lookup. "
-                "For actual execution or questions about usage details, read the selected Skill's "
-                "instructions first. Choose navigation or search freely from the available information."
+                "Each Skill is an installed package with SKILL.md instructions and optional supporting files. "
+                "Browse or search as needed for the task. Use descriptions for initial selection; "
+                "read instructions when details are needed or before execution. Stop discovery when you have enough information."
             ) if english else (
-                "仅查找、比较或推荐技能时，根据已有名称和描述选择具体 Skill，不要把分类当成技能。"
-                "保持在发现阶段：不要为了验证推荐而读取 SKILL.md、检查实现文件或构建编排图；"
-                "描述未能确认的细节，注明尚未验证即可。再次检索前，判断已有候选还缺哪项必要的核心能力；"
-                "没有缺项就立即回答，不为可选配套能力、寻找更优替代或凑足数量上限继续检索。"
-                "实际执行技能或询问使用细节时，再读取所选技能的说明。根据现有信息自由选择导航或搜索。"
+                "每个 Skill 是已安装的技能包，包含 SKILL.md 使用说明及可选的辅助文件。"
+                "按任务需要自行导航或搜索，用描述初筛；需要细节或实际执行前再读说明，信息足够即可停止发现。"
             ),
         ])
 
@@ -459,7 +450,7 @@ class SkillRetrievalPromptRail(DeepAgentRail):
             lines.extend(
                 [
                     "",
-                    "Categories (folders, not Skills):" if english else "分类（目录，不是 Skill）：",
+                    "Categories (virtual groups):" if english else "分类（虚拟目录）：",
                     *_render_prompt_branches(snapshot.branches),
                 ]
             )
