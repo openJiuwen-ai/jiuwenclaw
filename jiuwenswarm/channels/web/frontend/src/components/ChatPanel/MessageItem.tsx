@@ -1032,6 +1032,8 @@ function FileDownloadList({
         const downloadToken = resolveFileDownloadToken(file);
         const isSaving = savingIndex === index;
         const isSaved = savedIndex.has(index);
+        const isImage = !isSkill && Boolean(file.mime_type && file.mime_type.startsWith('image/')) && Boolean(file.download_url);
+        const showImagePreview = isImage && !expired;
         return (
           <div
             key={`${file.name}-${index}`}
@@ -1039,6 +1041,7 @@ function FileDownloadList({
             data-variant={file.name}
             className={clsx(
               'chat-panel-file-download-item group',
+              showImagePreview && 'chat-panel-file-download-item--with-preview',
               expired
                 ? 'chat-panel-file-download-item--expired'
                 : !onPreview && 'chat-panel-file-download-item--no-preview',
@@ -1047,6 +1050,7 @@ function FileDownloadList({
               if (!expired) onPreview?.(index);
             }}
           >
+            <div className="chat-panel-file-download-item__row">
             <button
               type="button"
               data-testid="chat-panel-file-download-preview"
@@ -1138,6 +1142,16 @@ function FileDownloadList({
                   </svg>
                 )}
               </button>
+            )}
+            </div>
+            {showImagePreview && (
+              <img
+                src={file.download_url}
+                alt={displayName}
+                className="chat-panel-file-download-image-preview"
+                data-testid="chat-panel-file-download-image-preview"
+                loading="lazy"
+              />
             )}
           </div>
         );
