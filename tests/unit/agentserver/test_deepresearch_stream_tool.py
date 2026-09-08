@@ -3710,6 +3710,9 @@ def test_child_env_enables_hitl_for_interactive_request(monkeypatch):
         "TOOL_SSL_VERIFY": "false",
         "PYTHONUNBUFFERED": "1",
         "PYTHONUTF8": "1",
+        # 子进程以脚本模式启动且 spawn 白名单不含 PYTHONPATH，模块解析全靠
+        # 主进程 sys.path 下传（vendor 树 + site-packages）。
+        "PYTHONPATH": os.pathsep.join(p for p in sys.path if p),
     }
 
 
