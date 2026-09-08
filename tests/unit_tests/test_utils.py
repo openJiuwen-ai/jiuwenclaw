@@ -495,7 +495,7 @@ class TestAdditionalHardcodedPaths:
 
     @staticmethod
     def test_multi_tenant_workspace_dir_edition_layout(monkeypatch, tmp_path):
-        """个人版固定 service_default/agent_default；企业版按 workspace_key 分桶。"""
+        """个人版按 service_{sid}/agent_{aid} 分桶；企业版按 workspace_key 分桶。"""
         from jiuwenswarm.common.utils import get_multi_tenant_user_workspace_dir
 
         monkeypatch.setattr(
@@ -509,6 +509,10 @@ class TestAdditionalHardcodedPaths:
         assert get_multi_tenant_user_workspace_dir("anything") == (
             tmp_path / "service_default" / "agent_default"
         )
+        assert get_multi_tenant_user_workspace_dir(
+            service_id="default",
+            agent_id="office",
+        ) == (tmp_path / "service_default" / "agent_office")
 
         monkeypatch.setattr(
             "jiuwenswarm.common.utils.is_enterprise",
