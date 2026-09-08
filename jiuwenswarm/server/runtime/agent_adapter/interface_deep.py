@@ -141,12 +141,16 @@ from jiuwenswarm.agents.harness.common.tools.todo_compat import (
     CompatibleTodoModifyTool,
     install_todo_modify_compat_patch,
 )
-from jiuwenswarm.agents.harness.common.prompt.prompt_builder import build_agent_identity_prompt
+from jiuwenswarm.agents.harness.common.prompt.prompt_builder import (
+    build_agent_identity_prompt,
+    build_work_system_prompt_sections,
+)
 from jiuwenswarm.agents.harness.common.rails import (
     BrowserTaskPromptRail,
     JiuSwarmStreamEventRail,
     InvocationContextRail,
     MultimodalImageRail,
+    OrderedContextAssembleRail,
     ResponsePromptRail,
     RuntimePromptRail,
     StructuredAskUserRail,
@@ -884,7 +888,7 @@ def _deep_agent_kv_cache_affinity_config(
 def _build_context_assemble_rail() -> ContextAssembleRail | None:
     """Build ContextAssembleRail."""
     try:
-        context_assemble_rail = ContextAssembleRail()
+        context_assemble_rail = OrderedContextAssembleRail()
         logger.info("[JiuWenSwarmDeepAdapter] ContextAssembleRail create success")
     except Exception as exc:
         logger.warning("[JiuWenSwarmDeepAdapter] ContextAssembleRail create failed: %s", exc)
@@ -1224,6 +1228,9 @@ class JiuWenSwarmDeepAdapter(ExpertCapabilityMixin):
         # response Language section (see ``_resolve_output_language``).
         self._runtime_language_override: str | None = None
         self._force_english_runtime_prompt: bool = True
+        # The configured string is only a bootstrap value for agent-core.  Its
+        # final builder receives the individual static sections after startup.
+        self._static_prompt_profile: str = "work"
         self._parent_session_id: str | None = None
         # Root-adapter-only: its own DeepAgent is built on demand (see
         # ``ensure_instance``), so the chat path does not pay for an instance it
@@ -2164,6 +2171,45 @@ class JiuWenSwarmDeepAdapter(ExpertCapabilityMixin):
         ``preferred_language`` while scaffolding stays English.
         """
         return self._runtime_language_override or "en"
+
+    def _build_static_system_prompt_sections(self) -> tuple[PromptSection, ...]:
+        """Return Work sections for the *final* runtime prompt builder.
+
+        Subclasses select their own profile.  This must not return a rendered
+        string: agent-core wraps a ``system_prompt`` string into one identity
+        section, preventing runtime sections such as Tools from being ordered
+        between Safety and later static guidance.
+        """
+        return build_work_system_prompt_sections()
+
+    def _install_structured_static_prompt_sections(self) -> None:
+        """Replace agent-core's flattened bootstrap prompt with real sections."""
+        instance = self._instance
+        if instance is None:
+            return
+        builder = getattr(instance, "system_prompt_builder", None)
+        if builder is None:
+            logger.warning(
+                "[JiuWenSwarmDeepAdapter] structured static prompt skipped: no builder"
+            )
+            return
+
+        sections = self._build_static_system_prompt_sections()
+        # ``create_deep_agent(system_prompt=...)`` has stored the full static
+        # prompt under this name at P10.  Replacing it is what allows dynamic
+        # Tools (P14) to sit immediately after Safety (P13).
+        for section in sections:
+            builder.remove_section(section.name)
+        for section in sections:
+            builder.add_section(section)
+
+        # ReActAgent re-reads prompt_template each turn.  Refresh it after the
+        # identity section above is reduced from the old flattened blob to the
+        # identity section alone; all remaining sections stay on the shared
+        # builder and are rendered once by the normal rail path.
+        apply_builder = getattr(instance, "apply_prompt_builder_to_react_agent", None)
+        if callable(apply_builder):
+            apply_builder()
 
     def _resolve_output_language(self) -> str:
         """Resolve user-facing output language for the Language section and
@@ -4572,11 +4618,12 @@ class JiuWenSwarmDeepAdapter(ExpertCapabilityMixin):
             task_planning_rail = None
         return task_planning_rail
 
-    @staticmethod
-    def _build_subagent_rail() -> SubagentRail | None:
+    def _build_subagent_rail(self) -> SubagentRail | None:
         """Build SubagentRail for subagent delegation."""
         try:
-            subagent_rail = BrowserTaskPromptRail()
+            subagent_rail = BrowserTaskPromptRail(
+                include_usage_rules=self._include_outer_subagent_usage_rules()
+            )
             logger.info("[JiuWenSwarmDeepAdapter] SubagentRail create success")
         except Exception as exc:
             logger.warning("[JiuWenSwarmDeepAdapter] SubagentRail create failed: %s", exc)
@@ -4838,6 +4885,18 @@ class JiuWenSwarmDeepAdapter(ExpertCapabilityMixin):
             logger.warning("[JiuWenSwarmDeepAdapter] CsplSentinelRail create failed: %s", exc)
             return None
 
+    def _include_outer_subagent_usage_rules(self) -> bool:
+        """Whether to include the standalone ``# Subagent Usage Rules`` section.
+
+        All three first-party modes keep the concise runtime subsection, but
+        omit this separate task-tool prompt section.
+        """
+        return False
+
+    def _include_runtime_subagent_usage_rules(self) -> bool:
+        """Whether Runtime Environment includes its ``## Subagent`` subsection."""
+        return True
+
     def _build_runtime_prompt_rail(self) -> RuntimePromptRail | None:
         """Build RuntimePromptRail for per-model-call time/channel/runtime injection."""
         try:
@@ -4849,6 +4908,7 @@ class JiuWenSwarmDeepAdapter(ExpertCapabilityMixin):
             rail = RuntimePromptRail(
                 language=self._resolve_runtime_language(),
                 channel=default_channel,
+                include_subagent_usage_rules=self._include_runtime_subagent_usage_rules(),
             )
             logger.info("[JiuWenSwarmDeepAdapter] RuntimePromptRail create success")
         except Exception as exc:
@@ -5838,6 +5898,7 @@ class JiuWenSwarmDeepAdapter(ExpertCapabilityMixin):
 
         await asyncio.sleep(0)
         await self._instance.ensure_initialized()
+        self._install_structured_static_prompt_sections()
         self._bind_invoke_workspace_context()
         initial_runtime_workspace = self._project_dir or str(
             get_default_project_session_workspace_dir()
@@ -6185,6 +6246,7 @@ class JiuWenSwarmDeepAdapter(ExpertCapabilityMixin):
         finally:
             self._restore_omitted_reload_fields(deep_cfg, omitted_fields)
         if "system_prompt" not in omitted_fields:
+            self._install_structured_static_prompt_sections()
             await self._reapply_expert_after_prompt_rebuild()
         self._commit_reload_fingerprints(reload_fingerprints)
         self._sync_active_evolution_review_agent_after_reload()
