@@ -27,6 +27,7 @@ const SWITCH_CANCEL_TIMEOUT_MS = 5000;
 /** 3rdagent.list 响应中的 agent 条目。 */
 interface ThirdAgentEntry {
   agent_type: string;
+  name?: string;
   image_name?: string;
   image_uri?: string;
   metadata?: Record<string, unknown>;
@@ -176,7 +177,7 @@ async function listAndSelectAgent(ctx: CommandContext): Promise<void> {
     "Registered third-party agents:",
     ...agents.map((a, i) => {
       const marker = a.agent_type === currentAgentType ? " (current)" : "";
-      const desc = a.image_name || a.agent_type;
+      const desc = a.name || a.image_name || a.agent_type;
       return `${i + 1}. ${a.agent_type}${marker} — ${desc}`;
     }),
   ];
@@ -185,7 +186,7 @@ async function listAndSelectAgent(ctx: CommandContext): Promise<void> {
   // 构造选择选项
   const options = agents.map((a) => ({
     label: a.agent_type,
-    description: a.image_name || a.image_uri || a.agent_type,
+    description: a.name || a.image_name || a.image_uri || a.agent_type,
   }));
   options.push({
     label: "取消切换",

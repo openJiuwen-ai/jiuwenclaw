@@ -125,11 +125,17 @@ def compute_backoff_delay(
     return min(initial_delay * (multiplier**exponent), max_delay)
 
 
+def _image_list_name(payload: dict[str, Any]) -> str:
+    """Registry image identity for TUI list: prefer ``name``, fall back to ``framework``."""
+    return str(payload.get("name") or payload.get("framework") or "").strip()
+
+
 @dataclass(frozen=True)
 class ImageEntry:
-    """One row from registry ``GET /api/images`` (flat: one framework version)."""
+    """One row from registry ``GET /api/images`` (flat: one version)."""
 
     framework: str
+    name: str = ""
     framework_version: str = ""
     is_default: bool = False
     imageurl: str = ""
@@ -144,14 +150,21 @@ class ImageEntry:
     created_at: str = ""
     raw: dict[str, Any] = field(default_factory=dict)
 
+    @property
+    def list_name(self) -> str:
+        """Identity used by ``3rdagent.list`` (registry ``name``, else ``framework``)."""
+        return str(self.name or self.framework or "").strip()
+
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> ImageEntry:
         payload = dict(data or {})
         mounts = payload.get("mounts")
         ports = payload.get("ports")
         env = payload.get("env")
+        identity = _image_list_name(payload)
         return cls(
-            framework=str(payload.get("framework") or "").strip(),
+            framework=str(payload.get("framework") or identity).strip(),
+            name=identity,
             framework_version=str(payload.get("framework_version") or "").strip(),
             is_default=bool(payload.get("is_default")),
             imageurl=str(payload.get("imageurl") or "").strip(),
@@ -352,6 +365,7 @@ class RegistryClient:
             return [
                 ImageEntry(
                     framework=name,
+                    name=name,
                     framework_version="default",
                     is_default=True,
                     imageurl=f"local/stub/{name}:latest",
@@ -574,33 +588,33 @@ class RegistryClient:
         )
 
     async def list_user_images(self, user_id: str) -> list[ImageInfo]:
-        """List switchable frameworks; one ``ImageInfo`` per framework.
+        """List switchable images; one ``ImageInfo`` per registry ``name``.
 
         ``GET /api/images`` is flat (one row per version). For UI listing we
-        keep a single entry per framework, preferring ``is_default=true``.
+        keep a single entry per ``name``, preferring ``is_default=true``.
         """
         uid = str(user_id or "").strip()
         entries = await self.list_images()
-        by_framework: dict[str, ImageEntry] = {}
+        by_name: dict[str, ImageEntry] = {}
         for entry in entries:
-            framework = str(entry.framework or "").strip()
-            if not framework:
+            name = entry.list_name
+            if not name:
                 continue
-            existing = by_framework.get(framework)
+            existing = by_name.get(name)
             if existing is None or (entry.is_default and not existing.is_default):
-                by_framework[framework] = entry
+                by_name[name] = entry
 
         images: list[ImageInfo] = []
-        for framework, entry in by_framework.items():
+        for name, entry in by_name.items():
             imageurl = str(entry.imageurl or "").strip() or None
             images.append(
                 ImageInfo(
-                    image_name=framework,
+                    image_name=name,
                     image_uri=imageurl,
                     metadata={
-                        "agent_type": framework,
+                        "agent_type": name,
                         "user_id": uid,
-                        "framework": framework,
+                        "name": name,
                         "framework_version": entry.framework_version,
                         "is_default": entry.is_default,
                         "imageurl": entry.imageurl,
