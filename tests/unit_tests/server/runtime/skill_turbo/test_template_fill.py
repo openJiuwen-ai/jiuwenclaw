@@ -131,3 +131,10 @@ def test_resolve_skill_root():
 
     assert Path(resolve_skill_root(r"D:\skills\pptx-craft")) == Path(r"D:\skills")
     assert Path(resolve_skill_root(r"D:\skills\pptx-craft")).name == "skills"
+
+
+def test_resolve_skill_root_posix_path():
+    from pathlib import Path
+
+    assert Path(resolve_skill_root("/skills/pptx-craft")) == Path("/skills")
+    assert Path(resolve_skill_root("/skills/pptx-craft")).name == "skills"

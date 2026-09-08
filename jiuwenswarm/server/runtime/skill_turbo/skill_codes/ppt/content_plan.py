@@ -62,18 +62,25 @@ _P41_SYSTEM_PROMPT = pipeline_role_boundary("P4.1") + """你是 PPT 内容策划
 必须只输出 JSON：
 {"material_richness":"empty","focus_areas":"..."}"""
 
-_P42A_SYSTEM_PROMPT = pipeline_role_boundary("P4.2") + """你是 PPT 快速调研助手。根据主题、用户维度/结构、研究重点与用户素材，生成固定批次的网页搜索查询（outline-planner §1.4）。
-
-规则：
-1. **维度优先级（强制）**：`user_dimensions` 非空时，每个用户维度先生成 1 条 query（首要）；剩余预算再从「领域现状/关键维度/最新动态/核心玩家/争议热点」中选补充，总 query 数 ≤8。`user_dimensions` 为空且 `user_structure` 非空时，从结构要点各生成 1 条 query。两者都为空时，围绕 topic 本身生成 5–8 条 query。
-2. **禁止偏题改写**：不得把 topic 改写成相邻行业/宏观报告（如把具体产品写成「教育行业报告」「年度报告」）；query 必须直接服务 topic、user_dimensions 或 user_structure。
-3. 有用户素材时，聚焦素材未覆盖的维度，避免重复已有信息。
-4. 中文主题可在同一逻辑主题下搭配中英 query，但中英文属于同一主题，不得重复计数突破预算。
-5. 仅在 topic/维度确实需要时效信息时，才加当前年份或 latest/report/statistics 等词；不要为了凑可信来源词而稀释实体名。
-6. 只输出搜索 query，不写结论，不编造已确认事实。
-
-必须只输出 JSON：
-{"entity":"主题核心实体名,无明确实体填 null","queries":[{"dimension":"...","query":"..."}]}"""
+_P42A_SYSTEM_PROMPT = pipeline_role_boundary("P4.2") + (
+    "你是 PPT 快速调研助手。根据主题、用户维度/结构、研究重点与用户素材，"
+    "生成固定批次的网页搜索查询（outline-planner §1.4）。\n\n"
+    "规则：\n"
+    "1. **维度优先级（强制）**：`user_dimensions` 非空时，每个用户维度先生成 1 条 "
+    "query（首要）；剩余预算再从「领域现状/关键维度/最新动态/核心玩家/争议热点」中选补充，"
+    "总 query 数 ≤8。`user_dimensions` 为空且 `user_structure` 非空时，从结构要点各生成 "
+    "1 条 query。两者都为空时，围绕 topic 本身生成 5–8 条 query。\n"
+    "2. **禁止偏题改写**：不得把 topic 改写成相邻行业/宏观报告（如把具体产品写成"
+    "「教育行业报告」「年度报告」）；query 必须直接服务 topic、user_dimensions 或 "
+    "user_structure。\n"
+    "3. 有用户素材时，聚焦素材未覆盖的维度，避免重复已有信息。\n"
+    "4. 中文主题可在同一逻辑主题下搭配中英 query，但中英文属于同一主题，不得重复计数突破预算。\n"
+    "5. 仅在 topic/维度确实需要时效信息时，才加当前年份或 latest/report/statistics 等词；"
+    "不要为了凑可信来源词而稀释实体名。\n"
+    "6. 只输出搜索 query，不写结论，不编造已确认事实。\n\n"
+    "必须只输出 JSON：\n"
+    '{"entity":"主题核心实体名,无明确实体填 null","queries":[{"dimension":"...","query":"..."}]}'
+)
 
 _P42A_RESPONSE_MAX_CHARS = 4096
 _P42_MAX_RETRIES = 2
@@ -97,30 +104,37 @@ _P42_RELEVANCE_SYSTEM_PROMPT = pipeline_role_boundary("P4.2") + """你是 PPT �
 {"relevance":"sufficient|insufficient","reason":"...","retry_queries":[{"dimension":"...","query":"..."}]}
 相关性 sufficient 时 retry_queries 为空数组。不要编造 query。"""
 
-_P43_COMMON_RULES = pipeline_role_boundary("P4.3") + """大纲格式要求（必须严格遵守）：
-
-1. 文件以 `# 大纲：{topic}` 开头，随后元信息行：
-   **受众**、**总页数**、**叙事主线**、**输入类型**、**搜索模式**
-2. 若需写入已搜索来源，在 `## 已搜索来源` 下用表格列出 URL 与覆盖维度（不写正式评分，评分留给 P6）。
-   无需搜索时删除整个 `## 已搜索来源` 章节。
-3. `## 页面规划` 下每页一个 `### P{N}:` 块，字段齐全：
-   - **类型**：cover/ending/agenda/section/chapter/trend/data/case/comparison/technology 等
-   - **研究需求**：cover/ending/agenda/section/chapter 标 ❌，其余标 ✅
-   - **标题**：结论性完整句（Action + Result）；结构性页面（cover/ending/agenda/section/chapter）可使用描述性标题
-   - **内容概要**：具体有信息量
-   - **研究查询**：✅ 页 2-4 个精准查询；❌ 页填 `-`
-   - **数据需求**：✅ 页写具体数据类型和维度，数据需求必须具体化；❌ 页填 `-`
-4. 内容页数（研究需求：✅）：
-   - 严格模式（用户已指定页数）：必须等于 page_count
-   - 扩展模式（用户给出维度/结构意图且未指定页数）：必须 ≥ page_count
-   封面（cover）、结束页（ending）及用户明确要求的结构页（section/agenda/chapter 等）标 ❌，其余页必须标 ✅。
-   中间结构页的添加规则见下方「中间结构页」指令（由系统根据用户需求动态注入）。
-   **页面顺序**：cover 必须是 P1（首页），ending 必须是末页（P{总页数}）。
-   **ending 页约束**：标题优先「感谢聆听」或 ≤16 字简短收束语；全文总结、数据回响、趋势展望必须放在最后一个内容页（✅），不得把长总结句写入 ending 页标题；ending 页内容概要只描述结束页展示（感谢语、可选一句总结语、汇报人/日期），不得复制正文页大纲。
-   **agenda 页内容**：内容概要只列内容页（✅）章节标题与导航，不得列入 cover/ending/agenda 等结构页本身。
-5. **内容概要禁止**出现「演讲备注 / 讲稿 / 讲者备注 / speaker notes / 口播稿」等备注通道内容——备注另有通道，写入概要会被渲染成可见正文。
-6. 基于给定素材与搜索结果，不编造不存在的趋势或数据。
-7. 只输出 Markdown 正文，不要 JSON，不要代码围栏。"""
+_P43_COMMON_RULES = pipeline_role_boundary("P4.3") + (
+    "大纲格式要求（必须严格遵守）：\n\n"
+    "1. 文件以 `# 大纲：{topic}` 开头，随后元信息行：\n"
+    "   **受众**、**总页数**、**叙事主线**、**输入类型**、**搜索模式**\n"
+    "2. 若需写入已搜索来源，在 `## 已搜索来源` 下用表格列出 URL 与覆盖维度"
+    "（不写正式评分，评分留给 P6）。\n"
+    "   无需搜索时删除整个 `## 已搜索来源` 章节。\n"
+    "3. `## 页面规划` 下每页一个 `### P{N}:` 块，字段齐全：\n"
+    "   - **类型**：cover/ending/agenda/section/chapter/trend/data/case/comparison/technology 等\n"
+    "   - **研究需求**：cover/ending/agenda/section/chapter 标 ❌，其余标 ✅\n"
+    "   - **标题**：结论性完整句（Action + Result）；结构性页面（cover/ending/agenda/section/chapter）可使用描述性标题\n"
+    "   - **内容概要**：具体有信息量\n"
+    "   - **研究查询**：✅ 页 2-4 个精准查询；❌ 页填 `-`\n"
+    "   - **数据需求**：✅ 页写具体数据类型和维度，数据需求必须具体化；❌ 页填 `-`\n"
+    "4. 内容页数（研究需求：✅）：\n"
+    "   - 严格模式（用户已指定页数）：必须等于 page_count\n"
+    "   - 扩展模式（用户给出维度/结构意图且未指定页数）：必须 ≥ page_count\n"
+    "   封面（cover）、结束页（ending）及用户明确要求的结构页（section/agenda/chapter 等）标 ❌，"
+    "其余页必须标 ✅。\n"
+    "   中间结构页的添加规则见下方「中间结构页」指令（由系统根据用户需求动态注入）。\n"
+    "   **页面顺序**：cover 必须是 P1（首页），ending 必须是末页（P{总页数}）。\n"
+    "   **ending 页约束**：标题优先「感谢聆听」或 ≤16 字简短收束语；全文总结、数据回响、趋势展望必须"
+    "放在最后一个内容页（✅），不得把长总结句写入 ending 页标题；ending 页内容概要只描述结束页展示"
+    "（感谢语、可选一句总结语、汇报人/日期），不得复制正文页大纲。\n"
+    "   **agenda 页内容**：内容概要只列内容页（✅）章节标题与导航，不得列入 cover/ending/agenda 等"
+    "结构页本身。\n"
+    "5. **内容概要禁止**出现「演讲备注 / 讲稿 / 讲者备注 / speaker notes / 口播稿」等备注通道内容"
+    "——备注另有通道，写入概要会被渲染成可见正文。\n"
+    "6. 基于给定素材与搜索结果，不编造不存在的趋势或数据。\n"
+    "7. 只输出 Markdown 正文，不要 JSON，不要代码围栏。"
+)
 
 _P43_TOPIC_SYSTEM_PROMPT = f"""你是 PPT 大纲策划师（source_type=topic）。基于搜索结果与用户素材，生成结构化 outline.md。
 
@@ -133,19 +147,21 @@ _P43_TOPIC_SYSTEM_PROMPT = f"""你是 PPT 大纲策划师（source_type=topic）
 - 禁止输出 {_INSUFFICIENT_INFO_MARKER} 或拒绝成稿
 """
 
-_P43_OUTLINE_SYSTEM_PROMPT = f"""你是 PPT 大纲策划师（source_type=outline）。用户已提供结构化大纲，**必须保留原文**。
-
-核心规则：
-1. **禁止修改**用户原文的任何内容
-2. **禁止添加**原文中没有的新内容
-3. **禁止删除**原文中的任何内容
-4. 只做结构化重组，映射为 `### P{{N}}:` 页面块
-5. 保留用户原文标题与要点，整合到内容概要中，不重新措辞
-6. 为每页推断类型与研究需求标记；用户原文中明确标注为目录页、章节页的页面按结构页保留，**否则中间页一律按内容页处理**；研究查询基于各页主题自动生成
-7. 当 structural_page_request=agenda 时：用户结构中的「目录/议程」→ 唯一 1 页 agenda（❌）；其余条目 → 内容页（✅）；禁止将 user_dimensions 中的维度标为 section/chapter
-8. 仅当 structural_page_request=section/chapter/auto 时，才允许章节分隔页（section/chapter）
-
-{_P43_COMMON_RULES}"""
+_P43_OUTLINE_SYSTEM_PROMPT = (
+    "你是 PPT 大纲策划师（source_type=outline）。用户已提供结构化大纲，**必须保留原文**。\n\n"
+    "核心规则：\n"
+    "1. **禁止修改**用户原文的任何内容\n"
+    "2. **禁止添加**原文中没有的新内容\n"
+    "3. **禁止删除**原文中的任何内容\n"
+    "4. 只做结构化重组，映射为 `### P{N}:` 页面块\n"
+    "5. 保留用户原文标题与要点，整合到内容概要中，不重新措辞\n"
+    "6. 为每页推断类型与研究需求标记；用户原文中明确标注为目录页、章节页的页面按结构页保留，"
+    "**否则中间页一律按内容页处理**；研究查询基于各页主题自动生成\n"
+    "7. 当 structural_page_request=agenda 时：用户结构中的「目录/议程」→ 唯一 1 页 agenda（❌）；"
+    "其余条目 → 内容页（✅）；禁止将 user_dimensions 中的维度标为 section/chapter\n"
+    "8. 仅当 structural_page_request=section/chapter/auto 时，才允许章节分隔页（section/chapter）\n\n"
+    f"{_P43_COMMON_RULES}"
+)
 
 _P43_DESCRIPTION_SYSTEM_PROMPT = f"""你是 PPT 大纲策划师（source_type=description）。从用户详细描述文本中提取页面结构。
 

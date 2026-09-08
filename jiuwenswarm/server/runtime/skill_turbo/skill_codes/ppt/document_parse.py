@@ -244,15 +244,15 @@ class DocumentParseNode(PlanNode):
         *,
         expect_images: bool,
     ) -> tuple[bool, str | None, dict[str, Any]]:
-        missing = [
-            name
-            for name, path in (
-                ("doc_summary.md", paths["summary"]),
-                ("doc_raw.md", paths["raw"]),
-                ("doc_manifest.json", paths["manifest"]),
-            )
-            if not path.is_file()
-        ]
+        missing: list[str] = []
+        required_paths = (
+            ("doc_summary.md", paths["summary"]),
+            ("doc_raw.md", paths["raw"]),
+            ("doc_manifest.json", paths["manifest"]),
+        )
+        for name, path in required_paths:
+            if not path.is_file():
+                missing.append(name)
         if missing:
             return False, f"缺少产物: {', '.join(missing)}", {}
 

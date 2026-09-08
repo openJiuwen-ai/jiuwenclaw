@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import AsyncIterator
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -12,6 +13,16 @@ logger = logging.getLogger(__name__)
 
 
 _PRESET_STYLES = {"business-classic", "tech-minimal", "elegant-narrative", "industrial-tech"}
+
+
+@dataclass(frozen=True)
+class CustomStyleRequest:
+    topic: str
+    audience: str
+    style_id: str
+    style_description: str
+    user_query: str = ""
+    style_constraints: str = ""
 
 
 class StylePrepareNode(PlanNode):
@@ -132,12 +143,14 @@ class StylePrepareNode(PlanNode):
             if style_id in _PRESET_STYLES:
                 logger.warning("[P7] 预设风格 %s 加载失败，降级为自定义生成", style_id)
             style_content = await self._generate_custom_style(
-                topic,
-                audience,
-                style_id,
-                style_description,
-                user_query,
-                style_constraints=style_constraints,
+                CustomStyleRequest(
+                    topic=topic,
+                    audience=audience,
+                    style_id=style_id,
+                    style_description=style_description,
+                    user_query=user_query,
+                    style_constraints=style_constraints,
+                )
             )
 
         if not style_content:
@@ -206,23 +219,15 @@ class StylePrepareNode(PlanNode):
                 logger.warning("[P7] 读取预设风格失败 %s: %s", preset_path, e)
         return ""
 
-    async def _generate_custom_style(
-        self,
-        topic: str,
-        audience: str,
-        style_id: str,
-        style_description: str,
-        user_query: str = "",
-        style_constraints: str = "",
-    ) -> str:
+    async def _generate_custom_style(self, request: CustomStyleRequest) -> str:
         user_query_clause = ""
-        if user_query:
-            user_query_clause = f"用户原始 query：{user_query}\n"
+        if request.user_query:
+            user_query_clause = f"用户原始 query：{request.user_query}\n"
         constraints_clause = ""
-        if style_constraints.strip():
+        if request.style_constraints.strip():
             constraints_clause = (
                 "### 用户显式版式要求（必须烘焙进本文件，优先级最高）\n"
-                f"{style_constraints.strip()}\n"
+                f"{request.style_constraints.strip()}\n"
                 "- 将上述约束写入排版与组件规范 / CSS 变量 / 设计禁忌中对应字段\n"
                 "- 若点名字号：写死具体 px，禁止用区间敷衍\n"
                 "- 若点名页码：必须在规范中二选一写死「保留页码（含格式）」或「不显示页码」；"
@@ -232,10 +237,10 @@ class StylePrepareNode(PlanNode):
         prompt = (
             "你是 PPT 视觉设计师。请根据主题和风格描述生成一份风格规范 Markdown 文件，"
             "供后续 HTML 幻灯片生成使用。\n\n"
-            f"PPT 主题：{topic or '（未提供）'}\n"
-            f"目标受众：{audience or '（未提供）'}\n"
-            f"风格标识：{style_id}\n"
-            f"用户风格描述：{style_description or '（未提供，请根据主题自由发挥）'}\n"
+            f"PPT 主题：{request.topic or '（未提供）'}\n"
+            f"目标受众：{request.audience or '（未提供）'}\n"
+            f"风格标识：{request.style_id}\n"
+            f"用户风格描述：{request.style_description or '（未提供，请根据主题自由发挥）'}\n"
             f"{user_query_clause}"
             f"{constraints_clause}"
             "### 输出要求（严格按以下结构生成，不得省略 frontmatter 或 CSS 变量）\n"

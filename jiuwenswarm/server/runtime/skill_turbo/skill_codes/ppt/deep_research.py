@@ -1176,7 +1176,7 @@ class PageWorkerNode(DisableThinkingMixin, PlanNode):
         if start < 0 or end <= start:
             return [], {}
         try:
-            payload = json.loads(text[start : end + 1])
+            payload = json.loads(text[start:end + 1])
         except json.JSONDecodeError:
             return [], {}
         if not isinstance(payload, dict):
@@ -2061,6 +2061,11 @@ class PageWorkerNode(DisableThinkingMixin, PlanNode):
                 f"\n\n### documents/*.md 摘录（数值须逐字 data_ref，禁止改写）\n"
                 f"{config.documents_excerpt}\n"
             )
+        research_density_rule = (
+            "no_search：标注「数据有限，基于用户素材」，关键数据 ≥3 行、主轴可降为 ≥3×2"
+            if config.search_mode == "no_search"
+            else "关键数据尽量 ≥5 行、≥2 种数据类型；主轴 ≥4×3"
+        )
 
         prompt = (
             "你是素材分支内容研究员。主数据源是用户文档；外搜仅作缺口补充，"
@@ -2084,7 +2089,7 @@ class PageWorkerNode(DisableThinkingMixin, PlanNode):
             f"{_RESEARCH_PREWRITE_CHECKLIST}\n"
             "8. 用户素材数值逐字优先；外部搜索值仅作对比/背景并分别标注\n"
             "9. 匹配到 documents 表/图时必须写 data_ref 块；匹配不到不强行编造\n"
-            f"10. {'no_search：标注「数据有限，基于用户素材」，关键数据 ≥3 行、主轴可降为 ≥3×2' if config.search_mode == 'no_search' else '关键数据尽量 ≥5 行、≥2 种数据类型；主轴 ≥4×3'}\n\n"
+            f"10. {research_density_rule}\n\n"
             f"### 快搜补充内容（不得覆盖用户数值）\n{extraction_summary or '（无）'}"
             f"{material_section}"
             f"{docs_section}"
@@ -2280,11 +2285,15 @@ class PageWorkerNode(DisableThinkingMixin, PlanNode):
                 return section, False
 
         precheck_issues = _precheck_research_section(section, config)
-        blocking = [
-            i for i in precheck_issues
-            if i.startswith(("axis_table_too_small:", "missing:", "forbidden_top_slot:"))
-            or i == "missing_evidence_limited_annotation"
-        ]
+        blocking: list[str] = []
+        blocking_prefixes = (
+            "axis_table_too_small:",
+            "missing:",
+            "forbidden_top_slot:",
+        )
+        for issue in precheck_issues:
+            if issue.startswith(blocking_prefixes) or issue == "missing_evidence_limited_annotation":
+                blocking.append(issue)
         if blocking:
             logger.warning(
                 "[P6.1] 页面 P%d 程序化预检未通过: %s",

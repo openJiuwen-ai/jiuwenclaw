@@ -196,6 +196,7 @@ def _postprocess_generated_html(
     _warn_chart_mount_mismatch_soft(html, page_num=ctx.page_num)
     return html, "", ""
 
+
 def _extract_bounded_section(text: str, header: str, end_markers: tuple[str, ...]) -> str:
     """提取指定标题到最近结束标记之间的内容。"""
     if not text or not header:
@@ -897,7 +898,7 @@ def _merge_chart_scaffold_from_filled(seed_html: str, filled_html: str) -> str:
         return seed_html
     match = _COMMENTED_CHART_SCAFFOLD_BLOCK_RE.search(seed_html)
     if match:
-        return seed_html[: match.start()] + filled_scaffold + seed_html[match.end() :]
+        return seed_html[:match.start()] + filled_scaffold + seed_html[match.end():]
     body_close = seed_html.lower().rfind("</body>")
     if body_close == -1:
         return seed_html
@@ -906,9 +907,9 @@ def _merge_chart_scaffold_from_filled(seed_html: str, filled_html: str) -> str:
         body = script_match.group(1) or ""
         if "echarts.init" in body.lower():
             return (
-                seed_html[: script_match.start()]
+                seed_html[:script_match.start()]
                 + filled_scaffold
-                + seed_html[script_match.end() :]
+                + seed_html[script_match.end():]
             )
     return seed_html[:body_close] + filled_scaffold + seed_html[body_close:]
 
@@ -2320,7 +2321,7 @@ def _fix_chart_scaffold_activation(html: str) -> str:
     last = 0
     for match in _COMMENTED_CHART_SCAFFOLD_BLOCK_RE.finditer(html):
         body = match.group(2) or ""
-        pieces.append(html[last : match.start()])
+        pieces.append(html[last:match.start()])
         target_id = _chart_scaffold_target_id(body)
         if _chart_scaffold_option_populated(body) and _html_has_element_id(html, target_id):
             pieces.append(body.strip())
@@ -3505,15 +3506,16 @@ def _layout_fix_hint_from_cli_output(cli_issues_text: str) -> str:
     if "[whitespace]" in text or "whitespace" in lower:
         hints.append("whitespace：扩大主视觉容器面积，禁止调字号/行高填空白")
     # 空白落在图表容器时，优先怀疑 option=null（只调 flex 救不了空图）
-    if (
-        ("[whitespace]" in text or "[v-gap]" in text or "whitespace" in lower or "v-gap" in lower)
-        and (
-            "chart" in lower
-            or "echarts" in lower
-            or 'id="chart' in lower
-            or "id='chart" in lower
-        )
-    ):
+    has_spacing_issue = (
+        "[whitespace]" in text or "[v-gap]" in text or "whitespace" in lower or "v-gap" in lower
+    )
+    mentions_chart = (
+        "chart" in lower
+        or "echarts" in lower
+        or 'id="chart' in lower
+        or "id='chart" in lower
+    )
+    if has_spacing_issue and mentions_chart:
         hints.append(
             "图表容器空白：先检查可执行 const option 是否仍为 null；"
             "未填则先写 option，禁止只靠 flex/gap 填白"
@@ -5016,6 +5018,102 @@ class PageWorkerNode(DisableThinkingMixin, PlanNode):
             log_prefix="[P8.1]",
         )
 
+    async def read_file_for_worker(self, path: str) -> str:
+        return await self._read_file(path)
+
+    async def write_file_for_worker(
+        self,
+        path: str,
+        content: str,
+        *,
+        already_locked: bool = False,
+    ) -> bool:
+        return await self._write_file(path, content, already_locked=already_locked)
+
+    async def generate_structural_template_fill_for_worker(
+        self,
+        ctx: PageGenContext,
+        page_type: str,
+        *,
+        seed_html_override: str = "",
+        rewrite_hint: str = "",
+    ) -> str:
+        return await self._generate_structural_template_fill(
+            ctx,
+            page_type,
+            seed_html_override=seed_html_override,
+            rewrite_hint=rewrite_hint,
+        )
+
+    async def generate_content_template_fill_for_worker(
+        self,
+        ctx: PageGenContext,
+        *,
+        rewrite_hint: str = "",
+        original_html: str = "",
+        seed_html_override: str = "",
+    ) -> tuple[str, str, str]:
+        return await self._generate_content_template_fill(
+            ctx,
+            rewrite_hint=rewrite_hint,
+            original_html=original_html,
+            seed_html_override=seed_html_override,
+        )
+
+    async def generate_layout_patch_for_worker(
+        self,
+        ctx: PageGenContext,
+        *,
+        current_html: str,
+        seed_html: str,
+        fix_hint: str,
+    ) -> tuple[str, str, str]:
+        return await self._generate_layout_patch(
+            ctx,
+            current_html=current_html,
+            seed_html=seed_html,
+            fix_hint=fix_hint,
+        )
+
+    async def generate_one_for_worker(
+        self,
+        ctx: PageGenContext,
+        *,
+        rewrite_hint: str = "",
+        original_html: str = "",
+    ) -> tuple[str, str, str]:
+        return await self._generate_one(
+            ctx,
+            rewrite_hint=rewrite_hint,
+            original_html=original_html,
+        )
+
+    def normalize_template_whitespace_for_worker(self, html: str) -> str:
+        return _normalize_template_whitespace(html)
+
+    def post_check_layout_hints_for_worker(self, html: str) -> list[str]:
+        return _post_check_layout_hints(html)
+
+    def layout_fix_hint_from_cli_output_for_worker(self, text: str) -> str:
+        return _layout_fix_hint_from_cli_output(text)
+
+    def fix_chart_scaffold_activation_for_worker(self, html: str) -> str:
+        return _fix_chart_scaffold_activation(html)
+
+    def layout_patch_regressed_chart_options_for_worker(
+        self,
+        before_html: str,
+        after_html: str,
+    ) -> bool:
+        return _layout_patch_regressed_chart_options(before_html, after_html)
+
+    def layout_patch_still_unfilled_chart_options_for_worker(
+        self,
+        before_html: str,
+        after_html: str,
+    ) -> bool:
+        return _layout_patch_still_unfilled_chart_options(before_html, after_html)
+
     def page_path_lock(self, path: str):
         """Expose per-path lock for SlideDesignerWorker layout/write critical sections."""
         return PptCommon.page_path_lock(path)
@@ -5683,10 +5781,14 @@ class PPTPageGenNode(DisableThinkingMixin, PlanNode):
 
         if qa_status == "failed":
             ppt_gen_status = "failed"
-        elif missing_pages or low_density_pages or qa_status == "partial" or layout_warning_pages:
-            ppt_gen_status = "partial"
         else:
-            ppt_gen_status = "ok"
+            has_partial_output = bool(missing_pages or low_density_pages or layout_warning_pages)
+            if qa_status == "partial":
+                has_partial_output = True
+            if has_partial_output:
+                ppt_gen_status = "partial"
+            else:
+                ppt_gen_status = "ok"
 
         logger.info(
             "[P8] 完成 status=%s page=%d missing=%d layout_warning=%d low_density=%d",

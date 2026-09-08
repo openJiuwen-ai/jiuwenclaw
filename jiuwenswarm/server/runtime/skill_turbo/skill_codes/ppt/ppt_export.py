@@ -297,16 +297,18 @@ class PPTExportNode(PlanNode):
                 or '"schema_version":2' in compact
                 or '"version":"v2"' in compact
             )
-            has_native = any(
-                token in lowered
-                for token in (
-                    "nativebinding",
-                    "native_binding",
-                    "nativemasters",
-                    "native_masters",
-                    "masterbindings",
-                )
+            native_tokens = (
+                "nativebinding",
+                "native_binding",
+                "nativemasters",
+                "native_masters",
+                "masterbindings",
             )
+            has_native = False
+            for token in native_tokens:
+                if token in lowered:
+                    has_native = True
+                    break
             if is_v2 and has_native:
                 return str(path)
         return ""

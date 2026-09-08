@@ -106,7 +106,7 @@ class SlideDesignerWorker:
                     fail_reason=fail_reason or "free_generate_failed",
                     path=path,
                 )
-            ok = await self._host._write_file(path, html)
+            ok = await self._host.write_file_for_worker(path, html)
             if not ok:
                 return SlideDesignerResult(
                     page_num=ctx.page_num,
@@ -159,7 +159,7 @@ class SlideDesignerWorker:
                     replace(ctx, pages_seeded=False)
                 )
                 if fb_html:
-                    ok = await self._host._write_file(path, fb_html)
+                    ok = await self._host.write_file_for_worker(path, fb_html)
                     return SlideDesignerResult(
                         page_num=ctx.page_num,
                         ok=ok,
@@ -176,7 +176,7 @@ class SlideDesignerWorker:
                 path=path,
             )
 
-        ok = await self._host._write_file(path, html)
+        ok = await self._host.write_file_for_worker(path, html)
         if not ok:
             return SlideDesignerResult(
                 page_num=ctx.page_num,
@@ -222,7 +222,7 @@ class SlideDesignerWorker:
 
     async def _load_seed_html(self, ctx: PageGenContext, page_type: str) -> str:
         if ctx.pages_seeded and ctx.page_path:
-            seeded = await self._host._read_file(ctx.page_path)
+            seeded = await self._host.read_file_for_worker(ctx.page_path)
             if seeded.strip():
                 return seeded
         if not ctx.pptx_root:
@@ -244,7 +244,7 @@ class SlideDesignerWorker:
             style_key,
             page_type=template_page_type,
         )
-        return await self._host._read_file(template_path)
+        return await self._host.read_file_for_worker(template_path)
 
     async def _fill_template_once(
         self,
@@ -261,7 +261,7 @@ class SlideDesignerWorker:
 
         # 预设/custom 内容页 → 完整 content-template fill
         if mode in {FillMode.PRESET_TEMPLATE, FillMode.CUSTOM_TEMPLATE} and not is_structural:
-            return await self._host._generate_content_template_fill(
+            return await self._host.generate_content_template_fill_for_worker(
                 ctx,
                 rewrite_hint=rewrite_hint,
                 seed_html_override=seed_html,
@@ -269,7 +269,7 @@ class SlideDesignerWorker:
 
         # 预设/custom 结构页 → structural template fill
         if mode in {FillMode.PRESET_TEMPLATE, FillMode.CUSTOM_TEMPLATE} and is_structural:
-            filled = await self._host._generate_structural_template_fill(
+            filled = await self._host.generate_structural_template_fill_for_worker(
                 ctx,
                 page_type,
                 seed_html_override=seed_html,
@@ -277,7 +277,10 @@ class SlideDesignerWorker:
             )
             if not filled:
                 return "", "", "structural_fill_failed"
-            if pg._normalize_template_whitespace(seed_html) == pg._normalize_template_whitespace(filled):
+            if (
+                self._host.normalize_template_whitespace_for_worker(seed_html)
+                == self._host.normalize_template_whitespace_for_worker(filled)
+            ):
                 return "", filled, "seed_not_modified"
             return filled, "", ""
 
@@ -290,7 +293,7 @@ class SlideDesignerWorker:
         return "", "", "unexpected_fill_mode"
 
     async def _run_free_generate(self, ctx: PageGenContext) -> tuple[str, str]:
-        html, _raw, reason = await self._host._generate_one(ctx)
+        html, _raw, reason = await self._host.generate_one_for_worker(ctx)
         return html, reason
 
     async def _layout_loop(
@@ -308,13 +311,13 @@ class SlideDesignerWorker:
         page_type = detect_page_type(ctx.outline_page)
         max_attempts = max(self._policy.max_layout_attempts, 1)
         for attempt in range(max_attempts):
-            static_hints = pg._post_check_layout_hints(current)
+            static_hints = self._host.post_check_layout_hints_for_worker(current)
             async with self._host.page_path_lock(path):
                 cli_ok, cli_issues = await self._run_check_layout_cli(ctx)
             if cli_ok:
                 return True, "", False
             cli_text = "; ".join(x for x in cli_issues if x)
-            fix_hint = pg._layout_fix_hint_from_cli_output(cli_text) or cli_text
+            fix_hint = self._host.layout_fix_hint_from_cli_output_for_worker(cli_text) or cli_text
             merged_issues = [fix_hint] + [h for h in static_hints if h and h not in fix_hint]
             fail_text = "; ".join(x for x in merged_issues if x) or "layout_failed"
             if attempt + 1 >= max_attempts:
@@ -323,7 +326,7 @@ class SlideDesignerWorker:
             fix_text = fail_text
 
             # P1: 优先 §3.5 原位修补
-            patched, _, patch_reason = await self._host._generate_layout_patch(
+            patched, _, patch_reason = await self._host.generate_layout_patch_for_worker(
                 ctx,
                 current_html=current,
                 seed_html=seed_html,
@@ -331,15 +334,17 @@ class SlideDesignerWorker:
             )
             if patched:
                 # 写盘前再剥一次：防 layout-patch 把 CHART_SCAFFOLD 注释带回
-                candidate = pg._fix_chart_scaffold_activation(patched)
+                candidate = self._host.fix_chart_scaffold_activation_for_worker(patched)
                 # 若修补把已填 option 打成 null/空骨架，或仍未填 null，丢弃并保留 current
-                if pg._layout_patch_regressed_chart_options(current, candidate):
+                if self._host.layout_patch_regressed_chart_options_for_worker(current, candidate):
                     logger.warning(
                         "[SlideDesignerWorker] 丢弃 layout_patch：图表 option 回退 page=%d",
                         ctx.page_num,
                     )
                     patch_reason = "layout_patch_chart_option_regressed"
-                elif pg._layout_patch_still_unfilled_chart_options(current, candidate):
+                elif self._host.layout_patch_still_unfilled_chart_options_for_worker(
+                    current, candidate
+                ):
                     logger.warning(
                         "[SlideDesignerWorker] 丢弃 layout_patch：图表 option 仍未填 page=%d",
                         ctx.page_num,
@@ -347,7 +352,7 @@ class SlideDesignerWorker:
                     patch_reason = "layout_patch_chart_option_still_null"
                 else:
                     current = candidate
-                    ok = await self._host._write_file(path, current)
+                    ok = await self._host.write_file_for_worker(path, current)
                     if not ok:
                         return False, "write_failed_after_layout_patch", False
                     continue
@@ -366,7 +371,7 @@ class SlideDesignerWorker:
                         return True, reason or patch_reason or fix_text, True
                     continue
                 current = fixed
-                ok = await self._host._write_file(path, current)
+                ok = await self._host.write_file_for_worker(path, current)
                 if not ok:
                     return False, "write_failed_after_layout_fix", False
                 continue

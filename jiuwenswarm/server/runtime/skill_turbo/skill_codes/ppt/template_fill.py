@@ -202,9 +202,15 @@ def resolve_template_dir(pptx_root: str, style_mode: str, style_id: str) -> str:
 
 def resolve_skill_root(pptx_root: str) -> str:
     """Return parent skills directory for CLI --skill-root."""
-    from pathlib import Path
+    from pathlib import PurePosixPath, PureWindowsPath
 
-    root = Path(pptx_root.rstrip("\\/"))
+    normalized = (pptx_root or "").rstrip("\\/")
+    if not normalized:
+        return ""
+    if "\\" in normalized or re.match(r"^[A-Za-z]:", normalized):
+        root = PureWindowsPath(normalized)
+    else:
+        root = PurePosixPath(normalized)
     if root.name == "pptx-craft":
         return str(root.parent)
     return str(root)
