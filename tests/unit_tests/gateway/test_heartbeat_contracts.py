@@ -107,6 +107,9 @@ async def test_agent_tools_call_agentserver_local_service() -> None:
     max_runs_schema = create.card.input_params["properties"]["max_runs"]
     assert max_runs_schema["type"] == ["integer", "null"]
     assert max_runs_schema["default"] == 12
+    run_at_schema = create.card.input_params["properties"]["schedule"]["properties"]["run_at"]
+    assert run_at_schema["maximum"] == 253_402_300_799.0
+    assert "Unix timestamp in seconds" in run_at_schema["description"]
     result = await create._func(
         name="follow up",
         prompt="continue",

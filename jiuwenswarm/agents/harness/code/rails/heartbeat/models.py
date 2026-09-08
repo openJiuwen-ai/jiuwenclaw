@@ -64,6 +64,10 @@ SCHEDULE_INTERVAL: str = "interval"
 SCHEDULE_CRON: str = "cron"
 SCHEDULE_ONCE: str = "once"
 
+# datetime supports Unix seconds through year 9999. Larger values are almost
+# certainly millisecond timestamps and cannot represent a useful schedule.
+MAX_UNIX_TIMESTAMP_SECONDS: float = 253_402_300_799.0
+
 HEARTBEAT_SCHEDULE_TYPES: tuple[str, ...] = (SCHEDULE_INTERVAL, SCHEDULE_CRON, SCHEDULE_ONCE)
 
 # 并发策略。
