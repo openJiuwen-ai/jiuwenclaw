@@ -52,19 +52,6 @@ def get_gateway_register_identity() -> dict[str, str]:
     return out
 
 
-KNOWN_SLOT_KEYS = frozenset({
-    "default_model",
-    "video_model",
-    "audio_model",
-    "vision_model",
-    "embedding_model",
-    "skill_prebuilt",
-    "extension_config",
-    "mcp",
-    "permissions",
-})
-
-
 def utc_now() -> datetime:
     """返回当前 UTC 时间（带 ``timezone.utc`` 的 aware ``datetime``）。"""
     return datetime.now(timezone.utc)
