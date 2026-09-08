@@ -1834,16 +1834,28 @@ def _effective_workspace_key(workspace_key: str | None = None) -> str:
     return "default"
 
 
-def get_multi_tenant_user_workspace_dir(workspace_key: str) -> Path:
+def get_multi_tenant_user_workspace_dir(
+    workspace_key: str | None = None,
+    *,
+    service_id: str | None = None,
+    agent_id: str | None = None,
+) -> Path:
     """租户工作区根目录（企业版 / 个人版隔离策略不同）。
 
     - 企业版: ``~/.jiuwenswarm/workspace_{workspace_key}``
-    - 个人版: ``~/.jiuwenswarm/service_default/agent_default``（固定，不按 key 分桶）
+    - 个人版: ``~/.jiuwenswarm/service_{service_id}/agent_{agent_id}``
+      （显式 sid/aid > bound env_ns > ``default``/``default``）
     """
-    if not is_enterprise():
-        return get_user_workspace_dir() / "service_default" / "agent_default"
-    wk = _require_workspace_key(workspace_key)
-    return get_user_workspace_dir() / f"workspace_{wk}"
+    if is_enterprise():
+        wk = _require_workspace_key(
+            workspace_key if workspace_key is not None else "default"
+        )
+        return get_user_workspace_dir() / f"workspace_{wk}"
+
+    from jiuwenswarm.common.local_env_config import resolve_env_ns
+
+    sid, aid = resolve_env_ns(service_id, agent_id)
+    return get_user_workspace_dir() / f"service_{sid}" / f"agent_{aid}"
 
 
 def get_tenant_agent_workspace_dir(workspace_key: str | None = None) -> Path:
