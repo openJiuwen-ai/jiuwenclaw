@@ -1194,6 +1194,7 @@
       "installDialogTitle": "安装可选组件",
       "installDialogDescription": "关闭此弹窗不会中断安装。安装完成后，您的配置将自动保存。",
       "installArtifact": "正在下载第 {{current}} 个文件，共 {{total}} 个：{{package}} {{version}}",
+      "installActivity": "最新安装活动",
       "installProgress": "下载进度",
       "installEta": "预计剩余 {{eta}}",
       "installRetry": "下载异常，正在重试（{{current}}/{{total}}）",
