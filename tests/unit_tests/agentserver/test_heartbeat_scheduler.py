@@ -329,6 +329,31 @@ async def test_max_runs_reached_marks_completed(setup) -> None:
     assert j.enabled is False
 
 
+async def test_unlimited_job_keeps_running_beyond_default_limit(setup) -> None:
+    store, _, sched = setup
+    job = await store.create_job(
+        name="unlimited", channel_id="web", session_id="s1", prompt="p",
+        schedule=HeartbeatSchedule.from_dict({"type": "interval", "interval_seconds": 120}),
+        source="agent_tool", max_runs=None,
+    )
+    for _ in range(13):
+        await store.update_job(job.id, {"next_run_at": 1.0})
+        await sched._tick_once()
+        running = await store.get_job(job.id)
+        assert running is not None
+        await sched.on_run_finished(
+            job.id, running.run_state.current_run_id, outcome="succeeded"
+        )
+
+    current = await store.get_job(job.id)
+    assert current is not None
+    assert current.run_count == 13
+    assert current.max_runs is None
+    assert current.status == STATUS_SCHEDULED
+    assert current.enabled is True
+    assert current.next_run_at is not None
+
+
 async def test_tick_normalizes_exhausted_legacy_scheduled_job_without_dispatch(setup) -> None:
     store, mh, sched = setup
     job = await store.create_job(
@@ -1110,6 +1135,38 @@ async def test_cancel_run_pause_schedule(setup) -> None:
     j = await store.get_job(job.id)
     assert j.status == STATUS_DISABLED
     assert j.run_state.last_cancel_status == "cancelled"
+
+
+async def test_cancel_completed_job_does_not_change_terminal_state(setup) -> None:
+    store, _, sched = setup
+    job = await store.create_job(
+        name="completed", channel_id="web", session_id="s1", prompt="p",
+        schedule=HeartbeatSchedule.from_dict(
+            {"type": "interval", "interval_seconds": 120}
+        ),
+        source="agent_tool", max_runs=1,
+    )
+    await store.update_job(job.id, {"next_run_at": 1.0})
+    await sched._tick_once()
+    running = await store.get_job(job.id)
+    await sched.on_run_finished(
+        job.id, running.run_state.current_run_id, outcome="succeeded"
+    )
+
+    result = await sched.cancel_run(job.id, pause_schedule=True)
+    persisted = await HeartbeatJobStore(path=store.path).get_job(job.id)
+
+    assert result == {
+        "job_id": job.id,
+        "cancelled_run_id": None,
+        "cancel_status": "idle",
+        "paused": False,
+        "reason": "job_terminal",
+    }
+    assert persisted is not None
+    assert persisted.status == STATUS_COMPLETED
+    assert persisted.enabled is False
+    assert persisted.run_count == 1
 
 
 async def test_cancel_run_reports_exact_stream_not_found(setup) -> None:

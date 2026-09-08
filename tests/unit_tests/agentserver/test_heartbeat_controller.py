@@ -142,6 +142,23 @@ async def test_create_default_source_web_rpc(ctrl: HeartbeatController) -> None:
     assert job["metadata"]["source"] == "web_rpc"
 
 
+async def test_create_distinguishes_default_and_unlimited_max_runs(
+    ctrl: HeartbeatController,
+) -> None:
+    base = {
+        "name": "n",
+        "channel_id": "web",
+        "session_id": "s",
+        "prompt": "p",
+        "schedule": {"type": "interval", "interval_seconds": 120},
+    }
+    finite = await ctrl.create_job(base)
+    unlimited = await ctrl.create_job({**base, "name": "unlimited", "max_runs": None})
+
+    assert finite["max_runs"] == 12
+    assert unlimited["max_runs"] is None
+
+
 # ---------------------------------------------------------------------------
 # 资源限制
 # ---------------------------------------------------------------------------
