@@ -84,7 +84,10 @@ def _validate_a2a_card_path(value: str) -> str:
         raise ValueError("must be an absolute same-origin path")
     parsed = urlsplit(value)
     decoded = unquote(parsed.path)
-    if parsed.scheme or parsed.netloc or parsed.query or parsed.fragment:
+    # G.CTL.03: if 内布尔条件不超过 3 个
+    if parsed.scheme or parsed.netloc or parsed.query:
+        raise ValueError("must not contain a scheme, host, query, or fragment")
+    if parsed.fragment:
         raise ValueError("must not contain a scheme, host, query, or fragment")
     if decoded.startswith("//") or "\\" in decoded or ".." in decoded.split("/"):
         raise ValueError("must remain a same-origin path")

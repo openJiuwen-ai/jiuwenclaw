@@ -59,12 +59,10 @@ def _require_secure_a2a_credential_transport(
     business: dict[str, Any],
 ) -> None:
     credential = business.get("credential")
-    if (
-        tag == "a2a_outbound"
-        and isinstance(credential, dict)
-        and credential.get("operation") == "replace"
-        and request.url.scheme.lower() != "https"
-    ):
+    # G.CTL.03: if 内布尔条件不超过 3 个，isinstance 判断前置
+    if tag != "a2a_outbound" or not isinstance(credential, dict):
+        return
+    if credential.get("operation") == "replace" and request.url.scheme.lower() != "https":
         raise HTTPException(
             status_code=400,
             detail="A2A credentials may only be synchronized over HTTPS",

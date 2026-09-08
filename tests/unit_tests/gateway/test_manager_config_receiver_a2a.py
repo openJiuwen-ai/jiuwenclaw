@@ -4,10 +4,12 @@
 
 from __future__ import annotations
 
+import importlib
 import logging
 import sys
 from collections.abc import Iterator
 from datetime import datetime, timezone
+from pathlib import Path
 from types import ModuleType
 from typing import Any
 
@@ -81,9 +83,30 @@ from jiuwenswarm.gateway.storage_assembly.setup import (
     create_a2a_outbound_repository,
     create_enterprise_record_repositories,
 )
-from jiuwenswarm.infrastructure.module_importer import (
-    import_manager_config_receiver_module,
-)
+
+
+def import_manager_config_receiver_module(module_suffix: str) -> Any:
+    """Load the bundled extension without relying on the removed runtime importer."""
+    parent_name = "jiuwenswarm.loaded_extension"
+    package_name = f"{parent_name}.manager_config_receiver"
+    extension_root = (
+        Path(__file__).resolve().parents[3]
+        / "packages"
+        / "jiuwenclaw-ee"
+        / "gateway"
+        / "extensions"
+        / "manager_config_receiver"
+    )
+    if parent_name not in sys.modules:
+        parent = ModuleType(parent_name)
+        parent.__path__ = []  # type: ignore[attr-defined]
+        sys.modules[parent_name] = parent
+    if package_name not in sys.modules:
+        package = ModuleType(package_name)
+        package.__path__ = [str(extension_root)]  # type: ignore[attr-defined]
+        package.__package__ = package_name
+        sys.modules[package_name] = package
+    return importlib.import_module(f"{package_name}.{module_suffix}")
 
 
 class _Secrets:
