@@ -27,7 +27,7 @@ import statusProcessingIcon from '../../assets/work-mode/status-processing.svg';
 import statusSuccessIcon from '../../assets/work-mode/status-success.svg';
 import statusWaitingIcon from '../../assets/work-mode/status-waiting.svg';
 import statusWarningIcon from '../../assets/work-mode/status-warning.svg';
-import teamLeaderIcon from '../../assets/teamleader.svg';
+import { UnassignedTeamAvatar } from './UnassignedTeamAvatar';
 import { getBoardTaskTitle, getMemberDisplayName, getTaskColumnKey, type TaskColumnKey, type TeamMember } from './shared';
 
 const compactStatusIcons: Record<TaskColumnKey, string> = {
@@ -91,12 +91,14 @@ export function CompactTaskList({
         const statusIcon = renderStatusIcon ? (
           renderStatusIcon(task)
         ) : (
-          <img
-            src={compactStatusIcons[columnKey]}
-            className={`h-4 w-4 shrink-0 ${columnKey === 'running' ? 'animate-spin' : ''}`}
-            aria-hidden="true"
-            data-testid="team-area-task-planning-task-status-icon"
-          />
+          <span className="flex h-4 w-4 shrink-0 items-center justify-center overflow-hidden">
+            <img
+              src={compactStatusIcons[columnKey]}
+              className={`h-4 w-4 shrink-0 ${columnKey === 'running' ? 'animate-spin' : ''}`}
+              aria-hidden="true"
+              data-testid="team-area-task-planning-task-status-icon"
+            />
+          </span>
         );
         return (
           <div
@@ -135,16 +137,5 @@ export function CompactTaskList({
         );
       })}
     </div>
-  );
-}
-
-function UnassignedTeamAvatar({ className }: { className?: string }) {
-  return (
-    <img
-      src={teamLeaderIcon}
-      className={className}
-      alt=""
-      aria-hidden="true"
-    />
   );
 }

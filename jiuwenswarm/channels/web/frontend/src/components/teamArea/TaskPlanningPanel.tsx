@@ -18,6 +18,7 @@ import {
   type TeamMember,
 } from './shared';
 import { CompactTaskList } from './CompactTaskList';
+import { UnassignedTeamAvatar } from './UnassignedTeamAvatar';
 import { getTotalTaskVisualProgressPercent } from './taskProgress';
 import { useAdaptiveTooltip } from '../../hooks/useAdaptiveTooltip';
 import { SwarmflowTreeView } from './SwarmflowTreeView';
@@ -57,7 +58,8 @@ type TaskPlanningPanelProps = {
   emptyIllustration?: string;
 };
 
-const COLUMN_STATS: Array<{ key: TaskColumnKey; labelKey: string }> = [
+const COLUMN_STATS: Array<{ key: TaskColumnKey | 'progress'; labelKey: string }> = [
+  { key: 'progress', labelKey: 'team.planning.metrics.progress' },
   { key: 'completed', labelKey: 'team.planning.columns.completed' },
   { key: 'running', labelKey: 'team.planning.columns.running' },
   { key: 'waiting', labelKey: 'team.planning.columns.waiting' },
@@ -79,21 +81,6 @@ export function ProgressBar({
         data-testid="team-area-task-planning-progress"
       >
         <div className="flex justify-between gap-[22px]">
-          <div className="flex items-center gap-2.5" data-testid="team-area-task-planning-progress-stat">
-            <span
-              className="text-xs"
-              style={{ color: 'var(--color-task-column-label)' }}
-              data-testid="team-area-task-planning-progress-label"
-            >
-              {t('team.planning.metrics.progress')}
-            </span>
-            <span
-              className="text-sm font-semibold text-text-strong"
-              data-testid="team-area-task-planning-progress-value"
-            >
-              {progressPercent}%
-            </span>
-          </div>
           {COLUMN_STATS.map((column) => (
             <div
               key={column.key}
@@ -112,7 +99,7 @@ export function ProgressBar({
                 className="text-sm font-semibold text-text-strong"
                 data-testid="team-area-task-planning-column-count"
               >
-                {groupedTasks[column.key].length}
+                {column.key === 'progress' ? `${progressPercent}%` : groupedTasks[column.key].length}
               </span>
             </div>
           ))}
@@ -222,30 +209,6 @@ export function ProgressSection({
                 data-testid="team-area-task-planning-progress-fill"
               />
             </div>
-          </div>
-          <div className="flex justify-between gap-2 mb-4">
-            {COLUMN_STATS.map((column) => (
-              <div
-                key={column.key}
-                data-testid="team-area-task-planning-column-stat"
-                data-variant={column.key}
-                className="flex items-center gap-2.5"
-              >
-                <span
-                  className="text-xs"
-                  style={{ color: 'var(--color-task-column-label)' }}
-                  data-testid="team-area-task-planning-column-label"
-                >
-                  {t(column.labelKey)}
-                </span>
-                <span
-                  className="text-sm font-semibold text-text-strong"
-                  data-testid="team-area-task-planning-column-count"
-                >
-                  {groupedTasks[column.key].length}
-                </span>
-              </div>
-            ))}
           </div>
         </div>
         <div className="flex-1 overflow-y-auto">
@@ -633,20 +596,6 @@ function BoardTaskCard({
           ))}
       </div>
     </article>
-  );
-}
-
-function UnassignedTeamAvatar({ className }: { className?: string }) {
-  const { t } = useTranslation();
-
-  return (
-    <div
-      className={`flex shrink-0 items-center justify-center overflow-hidden border border-border bg-card text-[12px] font-medium text-muted ${className || ''}`}
-      aria-label={t('team.planning.unassignedAvatar')}
-      title={t('team.planning.unassigned')}
-    >
-      --
-    </div>
   );
 }
 

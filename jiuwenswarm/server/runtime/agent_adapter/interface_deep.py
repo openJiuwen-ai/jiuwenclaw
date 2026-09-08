@@ -2395,6 +2395,27 @@ class JiuWenSwarmDeepAdapter:
     def _touch_session_adapter(self, session_id: str | None) -> None:
         self._session_adapter_last_used[self._session_adapter_key(session_id)] = time.time()
 
+    @staticmethod
+    def _session_has_live_subagent_runtime(
+        adapter: "JiuWenSwarmDeepAdapter",
+        session_id: str,
+    ) -> bool:
+        """Return True when a session still has live subagent slots in use."""
+        get_instance = getattr(adapter, "get_live_session_instance", None)
+        if not callable(get_instance):
+            return False
+        deep_agent = get_instance(session_id)
+        if deep_agent is None:
+            return False
+        controls = getattr(deep_agent, "_subagent_controls", None) or {}
+        control = controls.get(session_id)
+        if control is None:
+            return False
+        try:
+            return int(control.capacity().get("used", 0)) > 0
+        except Exception:
+            return False
+
     def _drop_session_adapter_cache_entry(
         self,
         session_id: str,
@@ -2501,6 +2522,9 @@ class JiuWenSwarmDeepAdapter:
                 break
             last_used = self._session_adapter_last_used.get(sid, 0.0)
             if now - last_used < self.SESSION_ADAPTER_IDLE_TTL_SEC:
+                continue
+            adapter = self._session_adapters.get(sid)
+            if adapter is not None and self._session_has_live_subagent_runtime(adapter, sid):
                 continue
             lock = self._session_adapter_locks.get(sid)
             if lock is not None and (

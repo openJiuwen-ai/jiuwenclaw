@@ -1548,7 +1548,9 @@
     "mySkillsTabs": {
       "all": "全部",
       "enabled": "启用",
-      "disabled": "禁用"
+      "disabled": "禁用",
+      "builtin": "内置",
+      "other": "其他技能"
     },
     "publishFilter": {
       "all": "全部",
@@ -1575,6 +1577,7 @@
     "disable": "禁用",
     "noDisabledSkills": "暂无禁用的技能",
     "noEnabledSkills": "暂无启用的技能",
+    "noBuiltinSkills": "暂无内置技能",
     "setEnabledError": "设置技能启用状态失败",
     "setEnabledSuccess": "已启用技能 {name}",
     "setDisabledSuccess": "已禁用技能 {name}",
@@ -1879,6 +1882,8 @@
       "zoomIn": "放大",
       "zoomOut": "缩小",
       "zoomLevel": "当前缩放 {{percent}}%",
+      "fullscreen": "全屏",
+      "exitFullscreen": "退出全屏",
       "actions": {
         "read": "读取图谱",
         "incrementalBuild": "增量构建",
@@ -2145,6 +2150,9 @@
       "skillNetInstallFailedHint": "SkillNet 安装失败，请检查 skill URL 或依赖",
       "importFailed": "导入失败",
       "importFailedHint": "导入失败，请检查路径或权限",
+      "uploadFailed": "文件上传失败，请重试",
+      "uploadUnsafePath": "文件名包含不允许的字符或使用了系统保留名称，请重命名后上传",
+      "uploadInvalidRequest": "上传请求无效或缺少文件，请重新选择文件后上传",
       "uninstallFailed": "卸载失败",
       "uninstallFailedHint": "卸载失败，请稍后重试"
     }
@@ -2295,6 +2303,7 @@
       "namePlaceholder": "输入展示名称",
       "descriptionLabel": "能力介绍",
       "descriptionPlaceholder": "说明这个专家擅长什么",
+      "charCount": "{{count}}/{{max}}",
       "tagLabel": "领域标签（可选）",
       "tagPlaceholder": "请选择领域标签",
       "toggleTags": "展开或收起领域标签",

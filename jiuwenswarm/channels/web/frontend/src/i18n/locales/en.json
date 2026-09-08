@@ -1566,7 +1566,9 @@
     "mySkillsTabs": {
       "all": "All",
       "enabled": "Enabled",
-      "disabled": "Disabled"
+      "disabled": "Disabled",
+      "builtin": "Builtin",
+      "other": "Other Skills"
     },
     "publishFilter": {
       "all": "All",
@@ -1593,6 +1595,7 @@
     "disable": "Disable",
     "noDisabledSkills": "No disabled skills",
     "noEnabledSkills": "No enabled skills",
+    "noBuiltinSkills": "No builtin skills",
     "setEnabledError": "Failed to set skill enabled status",
     "setEnabledSuccess": "Skill {name} enabled",
     "setDisabledSuccess": "Skill {name} disabled",
@@ -1897,6 +1900,8 @@
       "zoomIn": "Zoom in",
       "zoomOut": "Zoom out",
       "zoomLevel": "Current zoom {{percent}}%",
+      "fullscreen": "Fullscreen",
+      "exitFullscreen": "Exit fullscreen",
       "actions": {
         "read": "Read graph",
         "incrementalBuild": "Incremental build",
@@ -2163,6 +2168,9 @@
       "skillNetInstallFailedHint": "SkillNet install failed. Check the skill URL or dependencies.",
       "importFailed": "Import failed",
       "importFailedHint": "Import failed. Check the path or permissions.",
+      "uploadFailed": "File upload failed. Please try again.",
+      "uploadUnsafePath": "The filename contains disallowed characters or uses a reserved system name. Rename the file and upload it again.",
+      "uploadInvalidRequest": "The upload request is invalid or missing a file. Select the file again and upload it.",
       "uninstallFailed": "Uninstall failed",
       "uninstallFailedHint": "Uninstall failed. Please try again later."
     }
@@ -2313,6 +2321,7 @@
       "namePlaceholder": "Enter a display name",
       "descriptionLabel": "Capability description",
       "descriptionPlaceholder": "Describe what this Expert is good at",
+      "charCount": "{{count}}/{{max}}",
       "tagLabel": "Domain tags (optional)",
       "tagPlaceholder": "Choose strength tags",
       "toggleTags": "Expand or collapse domain tags",
