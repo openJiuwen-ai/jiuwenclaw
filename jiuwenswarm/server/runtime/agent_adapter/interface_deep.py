@@ -7525,7 +7525,14 @@ class JiuWenSwarmDeepAdapter:
                 self._parent_session_id,
             )
             return
-        permission_config = config_base.get("permissions", {}) if config_base else {}
+        from jiuwenswarm.agents.harness.common.rails.permissions.builtin_rules_host import (
+            with_package_builtin_rules,
+        )
+
+        raw_permissions = config_base.get("permissions", {}) if config_base else {}
+        permission_config = with_package_builtin_rules(
+            raw_permissions if isinstance(raw_permissions, dict) else {}
+        )
         if self._permission_rail is not None:
             self._permission_rail.update_config(permission_config)
             logger.info("[JiuWenSwarmDeepAdapter] _permission_rail config hot-updated")
