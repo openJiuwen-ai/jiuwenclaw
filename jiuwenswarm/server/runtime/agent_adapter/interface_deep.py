@@ -4879,6 +4879,16 @@ class JiuWenSwarmDeepAdapter:
             return
         try:
             await self._instance.unregister_rail(rail)
+            skill_rail = self._skill_rail
+            skill_mode = self._resolve_skill_mode(
+                self._config_cache, retrieval_enabled=False
+            )
+            if skill_rail is not None and skill_rail.skill_mode != skill_mode:
+                # Retrieval forced AUTO_LIST; restoring only the prompt would
+                # leave its list_skill ability behind in native ALL mode.
+                skill_rail.uninit(self._instance)
+                skill_rail.skill_mode = skill_mode
+                skill_rail.init(self._instance)
         except Exception as exc:
             logger.warning(
                 "[JiuWenSwarmDeepAdapter] SkillRetrievalPromptRail unregister failed: %s",
