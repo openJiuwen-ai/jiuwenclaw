@@ -67,6 +67,17 @@ def _get_video_gen_api_credentials() -> tuple[str, str, str]:
     return api_key, api_base, model
 
 
+def video_gen_configured() -> bool:
+    """Whether the Video processing config (key/base/model) is complete.
+
+    Public entry point for callers outside this module (interface_deep.py,
+    swarm/providers/tools.py) that only need a yes/no gate and shouldn't
+    depend on _get_video_gen_api_credentials' private tuple shape.
+    """
+    api_key, api_base, model = _get_video_gen_api_credentials()
+    return bool(api_key and api_base and model)
+
+
 def _resolve_frame_reference(path_or_url: str) -> tuple[str | None, str | None]:
     """first_frame_path may be a real http(s) URL, an already-complete data:
     URI, or a local file path - resolved to a data: URI here (server-side)

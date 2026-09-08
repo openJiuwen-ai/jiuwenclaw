@@ -60,12 +60,12 @@ from jiuwenswarm.agents.harness.common.tools.video_tools import video_understand
 from jiuwenswarm.agents.harness.common.tools.video_gen_tools import (
     generate_video,
     check_video_status,
-    _get_video_gen_api_credentials,
+    video_gen_configured,
     video_gen_enabled,
 )
 from jiuwenswarm.agents.harness.common.tools.visual_gen_tools import (
     generate_visual,
-    _get_visual_gen_api_credentials,
+    visual_gen_configured,
     visual_gen_enabled,
 )
 from jiuwenswarm.agents.harness.common.tools.xiaoyi_phone_tools import (
@@ -443,8 +443,7 @@ def _build_video_gen_tools(ctx: SwarmBuildContext) -> list[Any]:
     _ = ctx
     if not video_gen_enabled():
         return []
-    api_key, api_base, model = _get_video_gen_api_credentials()
-    if not (api_key and api_base and model):
+    if not video_gen_configured():
         return []
     return _mark_stateless([generate_video, check_video_status])
 
@@ -454,8 +453,7 @@ def _build_visual_gen_tools(ctx: SwarmBuildContext) -> list[Any]:
     _ = ctx
     if not visual_gen_enabled():
         return []
-    api_key, api_base, model = _get_visual_gen_api_credentials()
-    if not (api_key and api_base and model):
+    if not visual_gen_configured():
         return []
     return _mark_stateless([generate_visual])
 

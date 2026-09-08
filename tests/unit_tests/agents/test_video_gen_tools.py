@@ -126,6 +126,26 @@ def test_credentials_partial_config_leaves_missing_fields_empty(monkeypatch: pyt
 
 
 # ---------------------------------------------------------------------------
+# video_gen_configured - the public gate other modules should use instead of
+# reaching into _get_video_gen_api_credentials' private tuple.
+# ---------------------------------------------------------------------------
+
+
+def test_video_gen_configured_false_when_unset():
+    assert vg.video_gen_configured() is False
+
+
+def test_video_gen_configured_true_when_complete(monkeypatch: pytest.MonkeyPatch):
+    _set_video_model_config(monkeypatch)
+    assert vg.video_gen_configured() is True
+
+
+def test_video_gen_configured_false_when_partial(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("VIDEO_GEN_API_KEY", "sk-only-key-set")
+    assert vg.video_gen_configured() is False
+
+
+# ---------------------------------------------------------------------------
 # _resolve_frame_reference
 # ---------------------------------------------------------------------------
 

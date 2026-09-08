@@ -314,12 +314,12 @@ from jiuwenswarm.agents.harness.common.tools.image_tools import generate_image
 from jiuwenswarm.agents.harness.common.tools.video_gen_tools import (
     generate_video,
     check_video_status,
-    _get_video_gen_api_credentials,
+    video_gen_configured,
     video_gen_enabled,
 )
 from jiuwenswarm.agents.harness.common.tools.visual_gen_tools import (
     generate_visual,
-    _get_visual_gen_api_credentials,
+    visual_gen_configured,
     visual_gen_enabled,
 )
 
@@ -4598,8 +4598,7 @@ class JiuWenSwarmDeepAdapter:
         if not video_gen_enabled():
             logger.info("[JiuWenSwarmDeepAdapter] video_gen tools skipped: Video processing disabled")
             return False
-        api_key, api_base, model = _get_video_gen_api_credentials()
-        if not (api_key and api_base and model):
+        if not video_gen_configured():
             logger.info("[JiuWenSwarmDeepAdapter] video_gen tools skipped: Video Model config incomplete")
             return False
         return True
@@ -4613,8 +4612,7 @@ class JiuWenSwarmDeepAdapter:
         if not visual_gen_enabled():
             logger.info("[JiuWenSwarmDeepAdapter] visual_gen tool skipped: Visual processing disabled")
             return False
-        api_key, api_base, model = _get_visual_gen_api_credentials()
-        if not (api_key and api_base and model):
+        if not visual_gen_configured():
             logger.info("[JiuWenSwarmDeepAdapter] visual_gen tool skipped: Visual processing config incomplete")
             return False
         return True

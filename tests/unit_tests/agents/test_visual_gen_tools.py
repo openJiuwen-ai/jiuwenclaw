@@ -113,6 +113,26 @@ def test_credentials_partial_config_leaves_missing_fields_empty(monkeypatch: pyt
 
 
 # ---------------------------------------------------------------------------
+# visual_gen_configured - the public gate other modules should use instead of
+# reaching into _get_visual_gen_api_credentials' private tuple.
+# ---------------------------------------------------------------------------
+
+
+def test_visual_gen_configured_false_when_unset():
+    assert vg.visual_gen_configured() is False
+
+
+def test_visual_gen_configured_true_when_complete(monkeypatch: pytest.MonkeyPatch):
+    _set_visual_gen_config(monkeypatch)
+    assert vg.visual_gen_configured() is True
+
+
+def test_visual_gen_configured_false_when_partial(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("VISUAL_GEN_API_KEY", "sk-only-key-set")
+    assert vg.visual_gen_configured() is False
+
+
+# ---------------------------------------------------------------------------
 # generate_visual - guard clauses (no HTTP call should happen)
 # ---------------------------------------------------------------------------
 

@@ -66,6 +66,17 @@ def _get_visual_gen_api_credentials() -> tuple[str, str, str]:
     return api_key, api_base, model
 
 
+def visual_gen_configured() -> bool:
+    """Whether the Visual processing config (key/base/model) is complete.
+
+    Public entry point for callers outside this module (interface_deep.py,
+    swarm/providers/tools.py) that only need a yes/no gate and shouldn't
+    depend on _get_visual_gen_api_credentials' private tuple shape.
+    """
+    api_key, api_base, model = _get_visual_gen_api_credentials()
+    return bool(api_key and api_base and model)
+
+
 def _resolve_save_path(save_dir: str | None, filename: str) -> Path:
     root = Path(save_dir).expanduser() if save_dir else (get_agent_workspace_dir() / "generated_images")
     root.mkdir(parents=True, exist_ok=True)
