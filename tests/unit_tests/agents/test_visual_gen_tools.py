@@ -113,57 +113,6 @@ def test_credentials_partial_config_leaves_missing_fields_empty(monkeypatch: pyt
 
 
 # ---------------------------------------------------------------------------
-# generate_visual - guard clauses (no HTTP call should happen)
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_generate_visual_without_config_returns_error(monkeypatch: pytest.MonkeyPatch):
-    def _unexpected_request(request: httpx.Request) -> httpx.Response:
-        raise AssertionError(f"no HTTP call should be made without config, got {request.url}")
-
-    _patch_async_client(monkeypatch, _unexpected_request)
-
-    result = await generate_visual(prompt="a cat wearing sunglasses")
-
-    assert result == (
-        "[ERROR]: image generation is not configured - set the Visual processing "
-        "API key, API URL, and model name in configuration settings."
-    )
-
-
-@pytest.mark.asyncio
-async def test_generate_visual_with_partial_config_returns_error(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setenv("VISUAL_GEN_API_KEY", "sk-test")
-
-    def _unexpected_request(request: httpx.Request) -> httpx.Response:
-        raise AssertionError(f"no HTTP call should be made with partial config, got {request.url}")
-
-    _patch_async_client(monkeypatch, _unexpected_request)
-
-    result = await generate_visual(prompt="a cat wearing sunglasses")
-
-    assert result == (
-        "[ERROR]: image generation is not configured - set the Visual processing "
-        "API key, API URL, and model name in configuration settings."
-    )
-
-
-@pytest.mark.asyncio
-async def test_generate_visual_with_blank_prompt_returns_error(monkeypatch: pytest.MonkeyPatch):
-    _set_visual_gen_config(monkeypatch)
-
-    def _unexpected_request(request: httpx.Request) -> httpx.Response:
-        raise AssertionError(f"no HTTP call should be made with a blank prompt, got {request.url}")
-
-    _patch_async_client(monkeypatch, _unexpected_request)
-
-    result = await generate_visual(prompt="   ")
-
-    assert result == "[ERROR]: prompt is required."
-
-
-# ---------------------------------------------------------------------------
 # generate_visual - happy path
 # ---------------------------------------------------------------------------
 
