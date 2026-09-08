@@ -78,7 +78,8 @@ function BeamMergeReference({ entry, copy }: {
     <div
       className={clsx('beam-tree__merge', `is-${entry.node.status}`)}
       title={copy.mergeTo(label)}
-      data-testid={`beam-tree-merge-${entry.node.id}`}
+      data-testid="chat-panel-beam-tree-merge"
+      data-variant={entry.node.id}
     >
       <GitMerge size={13} aria-hidden="true" />
       <span>{copy.mergeTo(label)}</span>
@@ -96,7 +97,8 @@ function BeamTreeNodeCard({ entry, copy }: {
     <div
       className={clsx('beam-tree__node', `is-${node.status}`)}
       title={label}
-      data-testid={`beam-tree-node-${node.id}`}
+      data-testid="chat-panel-beam-tree-node"
+      data-variant={node.id}
     >
       <div className="beam-tree__node-main">
         <span className="beam-tree__type">
@@ -125,14 +127,16 @@ function BeamTreeBranch({ entry, copy }: {
   });
 
   return (
-    <div className="beam-tree__branch">
+    <div className="beam-tree__branch" data-testid="chat-panel-beam-tree-branch">
       <BeamTreeNodeCard entry={entry} copy={copy} />
       {(visibleChildren.length > 0 || hiddenRejectedCount > 0) && (
-        <div className="beam-tree__children">
+        <div className="beam-tree__children" data-testid="chat-panel-beam-tree-children">
           {visibleChildren.map((child, index) => (
             <div
               className="beam-tree__child"
               key={`${entry.node.id}-${child.kind}-${child.node.id}-${index}`}
+              data-testid="chat-panel-beam-tree-child"
+              data-variant={child.node.id}
             >
               {child.kind === 'merge' ? (
                 <BeamMergeReference entry={child} copy={copy} />
@@ -145,6 +149,7 @@ function BeamTreeBranch({ entry, copy }: {
             <button
               type="button"
               className="beam-tree__more"
+              data-testid="chat-panel-beam-tree-more"
               onClick={() => setShowAllRejected((value) => !value)}
               aria-expanded={showAllRejected}
             >
@@ -187,18 +192,19 @@ export function BeamSearchTree({
     : copy.seedStage;
 
   return (
-    <section className="beam-tree animate-rise" data-testid="beam-search-tree">
+    <section className="beam-tree animate-rise" data-testid="chat-panel-beam-search-tree">
       <button
         type="button"
         className="beam-tree__header"
+        data-testid="chat-panel-beam-search-tree-header"
         onClick={() => setCollapsed((value) => !value)}
         aria-expanded={!collapsed}
       >
-        <span className="beam-tree__title">
-          <span className="beam-tree__badge">{copy.title}</span>
-          <span className="beam-tree__stage">{stage}</span>
+        <span className="beam-tree__title" data-testid="chat-panel-beam-search-tree-title">
+          <span className="beam-tree__badge" data-testid="chat-panel-beam-search-tree-badge">{copy.title}</span>
+          <span className="beam-tree__stage" data-testid="chat-panel-beam-search-tree-stage">{stage}</span>
         </span>
-        <span className="beam-tree__meta">
+        <span className="beam-tree__meta" data-testid="chat-panel-beam-search-tree-meta">
           {copy.summary(model.nodeCount, selected, rejected)}
           <ChevronDown
             className={clsx('beam-tree__chevron', !collapsed && 'is-open')}
@@ -208,15 +214,15 @@ export function BeamSearchTree({
         </span>
       </button>
       {!collapsed && (
-        <div className="beam-tree__body">
+        <div className="beam-tree__body" data-testid="chat-panel-beam-search-tree-body">
           {model.roots.length > 0 ? (
-            <div className="beam-tree__forest">
+            <div className="beam-tree__forest" data-testid="chat-panel-beam-search-tree-forest">
               {model.roots.map((root) => (
                 <BeamTreeBranch key={root.node.id} entry={root} copy={copy} />
               ))}
             </div>
           ) : (
-            <div className="beam-tree__empty">{copy.empty}</div>
+            <div className="beam-tree__empty" data-testid="chat-panel-beam-search-tree-empty">{copy.empty}</div>
           )}
         </div>
       )}

@@ -126,6 +126,14 @@ class RuntimeAdapter(abc.ABC):
         """Release all resources for a sandbox."""
         ...
 
+    async def get_sandbox_ip_address(self, sandbox_id: str) -> str | None:
+        """Return the sandbox IPv4 address if the runtime can resolve it.
+
+        Optional backend capability. Default returns ``None`` so future
+        adapters are not forced to implement IP discovery.
+        """
+        return None
+
     async def write_file(
         self,
         sandbox_id: str,

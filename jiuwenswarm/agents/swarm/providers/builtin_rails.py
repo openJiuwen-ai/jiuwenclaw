@@ -26,6 +26,9 @@ from openjiuwen.agent_teams.harness.manifest import (
 )
 
 from jiuwenswarm.agents.harness.common.rails.avatar_rail import AvatarPromptRail
+from jiuwenswarm.agents.harness.common.rails.multimodal_image_rail import (
+    MultimodalImageRail,
+)
 from jiuwenswarm.agents.harness.common.rails.response_prompt_rail import (
     ResponsePromptRail,
 )
@@ -37,6 +40,7 @@ from jiuwenswarm.agents.harness.common.rails.stream_event_rail import (
 RESPONSE_PROMPT = "swarm.response_prompt"
 STREAM_EVENT = "swarm.stream_event"
 AVATAR_PROMPT = "swarm.avatar_prompt"
+MULTIMODAL_IMAGE = "swarm.multimodal_image"
 
 
 class ResponsePromptInput(ConstructionInput):
@@ -76,9 +80,17 @@ harness_element(
     description="Injects per-request digital-avatar prompt sections.",
     builder=AvatarPromptRail,
 )
+harness_element(
+    kind=ElementKind.RAIL,
+    name=MULTIMODAL_IMAGE,
+    description="Feeds request image attachments into the member's model context, "
+    "or strips image blocks when the model has no native image input.",
+    builder=MultimodalImageRail,
+)
 
 __all__ = [
     "RESPONSE_PROMPT",
     "STREAM_EVENT",
     "AVATAR_PROMPT",
+    "MULTIMODAL_IMAGE",
 ]

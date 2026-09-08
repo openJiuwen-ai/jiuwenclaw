@@ -33,6 +33,7 @@ class GatewaySlashCommand(str, Enum):
     SECURITY_REVIEW = "/security-review"
     JOIN = "/join"
     EXIT = "/exit"
+    PERSIST = "/persist"
 
 
 class ModeSubcommand(str, Enum):
@@ -46,6 +47,18 @@ class ModeSubcommand(str, Enum):
     CODE_PLAN = "code.plan"
     CODE_NORMAL = "code.normal"
     CODE_TEAM = "code.team"
+    TEAM_PLAN = "team.plan"
+    TEAM_PLAN_NORMAL = "team.plan.normal"
+    TEAM_PLAN_CODE = "team.plan.code"
+    # 新三段命名 canonical（P2 引入；旧成员保留）。
+    AGENT_WORK_NORMAL = "agent.work.normal"
+    AGENT_WORK_PLAN = "agent.work.plan"
+    AGENT_CODE_NORMAL = "agent.code.normal"
+    AGENT_CODE_PLAN = "agent.code.plan"
+    TEAM_WORK_NORMAL = "team.work.normal"
+    TEAM_WORK_PLAN = "team.work.plan"
+    TEAM_CODE_NORMAL = "team.code.normal"
+    TEAM_CODE_PLAN = "team.code.plan"
 
 
 _VALID_MODE_LINES: frozenset[str] = frozenset(
@@ -76,6 +89,7 @@ CONTROL_MESSAGE_TEXTS: frozenset[str] = frozenset(
         GatewaySlashCommand.REWIND.value,
         GatewaySlashCommand.JOIN.value,
         GatewaySlashCommand.EXIT.value,
+        GatewaySlashCommand.PERSIST.value,
     }
 )
 
@@ -107,6 +121,8 @@ class ParsedControlAction(str, Enum):
     JOIN_BAD = "join_bad"
     EXIT_OK = "exit_ok"
     EXIT_BAD = "exit_bad"
+    PERSIST_OK = "persist_ok"
+    PERSIST_BAD = "persist_bad"
 
 
 @dataclass(frozen=True)
@@ -132,6 +148,8 @@ class ParsedChannelControl:
     """join/exit 时的 session 引用。"""
     member_name: str | None = None
     """join 时的席位名。"""
+    persist_task: str | None = None
+    """persist_ok 时为去掉 /persist 前缀后的首条任务。"""
 
 
 _PR_ARG_MAX_LEN = 2048
@@ -167,6 +185,17 @@ def parse_channel_control_text(text: str) -> ParsedChannelControl:
     """
     if not text:
         return ParsedChannelControl(ParsedControlAction.NONE)
+    # /persist 是“创建会话 + 首条任务”的混合命令，任务正文允许换行。
+    # 必须先于其它控制命令的单行限制解析。
+    persist_match = re.match(r"^/persist(?=$|\s)", text.strip(), flags=re.IGNORECASE)
+    if persist_match:
+        task = text.strip()[persist_match.end():].strip()
+        if not task:
+            return ParsedChannelControl(ParsedControlAction.PERSIST_BAD)
+        return ParsedChannelControl(
+            ParsedControlAction.PERSIST_OK,
+            persist_task=task,
+        )
     if "\n" in text:
         return ParsedChannelControl(ParsedControlAction.NONE)
     t = text.strip()
@@ -296,6 +325,9 @@ def is_control_like_for_im_batching(text: str) -> bool:
     """
     if not text:
         return False
+    # Persist 的任务正文可以换行，但整条消息仍必须绕过 IM 合并窗口。
+    if re.match(r"^/persist(?=$|\s)", text.strip(), flags=re.IGNORECASE):
+        return True
     if "\n" in text:
         return False
     t = text.strip()
@@ -354,7 +386,7 @@ FIRST_BATCH_REGISTRY: tuple[SlashCommandEntry, ...] = (
     SlashCommandEntry(
         id="mode",
         canonical_text=f"{GatewaySlashCommand.MODE.value} agent|code|team|agent.plan|agent.fast|code.plan|"
-                       f"code.normal|code.team|team.plan",
+                       f"code.normal|code.team|team.plan|team.plan.normal|team.plan.code",
         scope="gateway",
         req_method=None,
         notes="受控通道切换模式：一级模式 agent/code/team（映射到默认子模式）；"
@@ -442,6 +474,75 @@ FIRST_BATCH_REGISTRY: tuple[SlashCommandEntry, ...] = (
               "GET/PAUSE/CLEAR returns status immediately.",
     ),
 )
+
+
+# ---------------------------------------------------------------------------
+# 快捷面板命令清单（Web 前端「输入 / 唤起面板」用，commands.list 下发）
+# ---------------------------------------------------------------------------
+
+BUILTIN_COMMANDS_META: tuple[dict[str, Any], ...] = (
+    {
+        "name": "compact",
+        "description": "压缩对话历史，保留摘要以节省上下文",
+        "usage": "/compact",
+        "example": None,
+        "kind": "built-in",
+        "takesArgs": False,
+        "scope": "agent",
+        "execution": "rpc",
+        "req_method": "command.compact",
+        # 压缩的是会话历史，无会话即无意义
+        "requires_session": True,
+        "available_modes": None,
+    },
+    {
+        # Web 侧复用现有 Plan 开关：面板选中后立即翻转，不向输入框插入命令。
+        "name": "plan",
+        "description": "切换计划模式（只读规划 → 审批 → 执行）",
+        "usage": "/plan",
+        "example": None,
+        "kind": "built-in",
+        "takesArgs": False,
+        "scope": "agent",
+        "execution": "chat.send_with_mode",
+        "mode": "agent.plan",
+        "plan_entry_source": "slash_command",
+        # 纯本地开关翻转，欢迎页（NEW_CONVERSATION_ID）也能用，开关随首次发送迁移
+        "requires_session": False,
+        "available_modes": None,
+    },
+    {
+        "name": "persist",
+        "description": "开启永续会话并开始任务（仅限新会话，创建后不可更改）",
+        "usage": "/persist <任务>",
+        "example": "/persist 帮我持续跟进这次产品发布",
+        "kind": "built-in",
+        "takesArgs": True,
+        "scope": "client",
+        "execution": "session.create",
+        "requires_session": False,
+        "available_modes": None,
+    },
+)
+
+
+def list_builtin_commands(params: dict | None = None) -> dict:
+    """返回快捷面板要展示的命令清单（静态元数据，无 IO）。
+
+    params(可选):
+        work_mode: str — 当前工作模式，用于按 available_modes 过滤可用命令
+    返回:
+        {"commands": [command_meta, ...]}
+    """
+    params = params or {}
+    work_mode = params.get("work_mode")
+    out = []
+    for cmd in BUILTIN_COMMANDS_META:
+        am = cmd.get("available_modes")
+        if am is not None and work_mode and work_mode not in am:
+            continue
+        out.append(dict(cmd))
+    return {"commands": out}
 
 
 def _skill_source_tag(item: dict[str, Any]) -> str:

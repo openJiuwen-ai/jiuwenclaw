@@ -105,6 +105,7 @@ export function SpreadsheetPreview({ url, title, size }: { url: string; title: s
         className="flex h-full min-h-[240px] items-center justify-center gap-2 text-sm text-text-muted"
         aria-label={title}
         data-testid="artifact-spreadsheet-preview"
+        data-variant="loading"
       >
         <LoaderCircle className="animate-spin" size={16} />
         {t('common.loading')}
@@ -113,21 +114,21 @@ export function SpreadsheetPreview({ url, title, size }: { url: string; title: s
   }
   if (status === 'too-large') {
     return (
-      <div className="h-full" aria-label={title} data-testid="artifact-spreadsheet-preview">
+      <div className="h-full" aria-label={title} data-testid="artifact-spreadsheet-preview" data-variant="too-large">
         <PreviewMessage danger>{t('artifacts.spreadsheetTooLarge', { size: '50 MiB' })}</PreviewMessage>
       </div>
     );
   }
   if (status === 'resource-limit') {
     return (
-      <div className="h-full" aria-label={title} data-testid="artifact-spreadsheet-preview">
+      <div className="h-full" aria-label={title} data-testid="artifact-spreadsheet-preview" data-variant="resource-limit">
         <PreviewMessage danger>{t('artifacts.spreadsheetResourceLimitExceeded')}</PreviewMessage>
       </div>
     );
   }
   if (status === 'error' || !workbook) {
     return (
-      <div className="h-full" aria-label={title} data-testid="artifact-spreadsheet-preview">
+      <div className="h-full" aria-label={title} data-testid="artifact-spreadsheet-preview" data-variant="error">
         <PreviewMessage danger>{t('artifacts.spreadsheetPreviewFailed')}</PreviewMessage>
       </div>
     );
@@ -192,11 +193,13 @@ function WorkbookViewer({ workbook, title }: { workbook: SpreadsheetWorkbookData
       className="flex h-full min-h-0 w-full flex-col overflow-hidden border border-border bg-card"
       aria-label={title}
       data-testid="artifact-spreadsheet-preview"
+      data-variant="ready"
     >
       <div
         className="flex h-10 shrink-0 items-end gap-1 overflow-x-auto border-b border-border bg-panel px-2 pt-1"
         role="tablist"
         aria-label={t('artifacts.spreadsheetSheetTabsLabel')}
+        data-testid="artifact-spreadsheet-sheet-tabs"
       >
         {visibleSheets.map((sheet, index) => {
           const selected = sheet.id === activeSheet?.id;
@@ -213,6 +216,8 @@ function WorkbookViewer({ workbook, title }: { workbook: SpreadsheetWorkbookData
               aria-controls={tabPanelId}
               tabIndex={selected ? 0 : -1}
               title={sheet.name}
+              data-testid="artifact-spreadsheet-sheet-tab"
+              data-variant={sheet.id}
               className={clsx(
                 'relative h-8 max-w-48 shrink-0 truncate rounded-t-md px-3 text-xs transition-colors',
                 selected ? 'bg-card font-medium text-text' : 'text-text-muted hover:bg-secondary hover:text-text',
@@ -227,7 +232,7 @@ function WorkbookViewer({ workbook, title }: { workbook: SpreadsheetWorkbookData
         })}
       </div>
       {activeSheet ? (
-        <div id={tabPanelId} role="tabpanel" className="min-h-0 flex-1">
+        <div id={tabPanelId} role="tabpanel" className="min-h-0 flex-1" data-testid="artifact-spreadsheet-sheet-panel">
           <WorksheetGrid key={activeSheet.id} sheet={activeSheet} styles={workbook.styles} />
         </div>
       ) : (
@@ -362,7 +367,7 @@ function WorksheetGrid({ sheet, styles }: { sheet: SpreadsheetSheetData; styles:
   }
 
   return (
-    <div className="relative isolate h-full min-h-0 w-full overflow-hidden bg-card">
+    <div className="relative isolate h-full min-h-0 w-full overflow-hidden bg-card" data-testid="artifact-spreadsheet-grid">
       <div
         ref={scrollRef}
         className="relative z-0 h-full w-full overflow-auto"
@@ -370,6 +375,7 @@ function WorksheetGrid({ sheet, styles }: { sheet: SpreadsheetSheetData; styles:
         aria-label={t('artifacts.spreadsheetTableLabel', { sheet: sheet.name })}
         aria-rowcount={sheet.rowCount}
         aria-colcount={sheet.columnCount}
+        data-testid="artifact-spreadsheet-grid-scroll"
         onScroll={handleScroll}
       >
         <div

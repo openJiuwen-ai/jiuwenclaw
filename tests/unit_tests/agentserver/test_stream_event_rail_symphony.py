@@ -4,6 +4,7 @@ import pytest
 
 from openjiuwen.core.foundation.llm import AssistantMessage, ToolMessage, UserMessage
 from openjiuwen.core.single_agent.rail.base import ToolCallInputs
+from openjiuwen.symphony.discovery import SkillDCICommandResult
 
 from jiuwenswarm.agents.harness.common.rails.stream_event_rail import (
     JiuSwarmStreamEventRail,
@@ -14,7 +15,6 @@ from jiuwenswarm.agents.harness.common.rails.symphony import (
 from jiuwenswarm.agents.harness.common.tool_progress_context import (
     current_tool_progress,
 )
-from jiuwenswarm.symphony.agent import AgenticToolResult
 
 
 class _StreamSession:
@@ -41,10 +41,41 @@ class _ModelContext:
         self.messages.append(message)
 
 
+def _minimal_planned_graph(status="ready"):
+    nodes = (
+        {}
+        if status == "no_plan"
+        else {
+            "writer": {"label": "Writer", "metadata": {"type": "skill"}},
+            "reviewer": {"label": "Reviewer", "metadata": {"type": "skill"}},
+        }
+    )
+    return {
+        "graph": {
+            "id": "plan-1",
+            "type": "planned_graph",
+            "directed": True,
+            "metadata": {"status": status},
+            "nodes": nodes,
+            "edges": (
+                []
+                if status == "no_plan"
+                else [
+                    {
+                        "source": "writer",
+                        "target": "reviewer",
+                        "relation": "can_feed",
+                    }
+                ]
+            ),
+        }
+    }
+
+
 def test_symphony_tool_stream_handler_matches_only_compose_tool():
     handler = SymphonyToolStreamHandler()
 
-    assert handler.matches(SimpleNamespace(name="symphony_compose_score"))
+    assert handler.matches(SimpleNamespace(name="symphony_compose_graph"))
     assert not handler.matches(SimpleNamespace(name="todo_list"))
 
 
@@ -81,7 +112,14 @@ def _model_ctx(messages):
 
 
 @pytest.mark.asyncio
-async def test_stream_event_rail_strips_image_blocks_when_read_image_multimodal_disabled():
+async def test_stream_event_rail_strips_image_blocks_when_read_image_multimodal_disabled(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.harness.common.rails.stream_event_rail."
+        "should_enable_read_image_multimodal",
+        lambda _agent: True,
+    )
     rail = JiuSwarmStreamEventRail()
     message = UserMessage(
         content=[
@@ -136,7 +174,7 @@ async def test_stream_event_rail_keeps_image_blocks_when_read_image_multimodal_e
 async def test_stream_event_rail_does_not_enable_symphony_status_events_for_plan_tool():
     rail = JiuSwarmStreamEventRail()
     session = _StreamSession()
-    ctx = _ctx(session, "symphony_compose_score", tool_call_id="parent-call")
+    ctx = _ctx(session, "symphony_compose_graph", tool_call_id="parent-call")
 
     await rail.before_tool_call(ctx)
 
@@ -155,7 +193,7 @@ async def test_stream_event_rail_does_not_enable_symphony_status_events_for_plan
 async def test_stream_event_rail_emits_beam_progress_as_tool_update():
     rail = JiuSwarmStreamEventRail()
     session = _StreamSession()
-    ctx = _ctx(session, "symphony_compose_score", tool_call_id="beam-call")
+    ctx = _ctx(session, "symphony_compose_graph", tool_call_id="beam-call")
 
     await rail.before_tool_call(ctx)
     callback = current_tool_progress()
@@ -179,24 +217,15 @@ async def test_stream_event_rail_emits_beam_progress_as_tool_update():
 
 
 @pytest.mark.asyncio
-async def test_stream_event_rail_force_finishes_symphony_compose_score_result():
+async def test_stream_event_rail_does_not_force_finish_normal_compose_result():
     rail = JiuSwarmStreamEventRail()
     session = _StreamSession()
     result = {
         "success": True,
-        "direct_display": True,
-        "content": "## Symphony plan\n\n```mermaid\nflowchart LR\n  A --> B\n```",
-        "score_status": {"success": True, "exists": True, "stale": False},
-        "score_build": {"rebuilt": False, "reason": "not_required"},
-        "beam_search": {
-            "round_index": 2,
-            "graph": {
-                "nodes": [{"id": "skill-a", "status": "final"}],
-                "edges": [],
-            },
-        },
+        "planned_graph": _minimal_planned_graph(),
+        "graph_status": {"success": True, "exists": True, "stale": False},
     }
-    ctx = _ctx(session, "symphony_compose_score", tool_result=result)
+    ctx = _ctx(session, "symphony_compose_graph", tool_result=result)
 
     await rail.before_tool_call(ctx)
     await rail.after_tool_call(ctx)
@@ -207,35 +236,27 @@ async def test_stream_event_rail_force_finishes_symphony_compose_score_result():
         if (
             chunk.type == "tool_result"
             and tool_result is not None
-            and tool_result.get("tool_name") == "symphony_compose_score"
+            and tool_result.get("tool_name") == "symphony_compose_graph"
         ):
             tool_results.append(tool_result)
     assert tool_results[0]["raw_output"] == result
-    assert tool_results[0]["score_status"] == result["score_status"]
-    assert tool_results[0]["score_build"] == result["score_build"]
-    assert "beam_search" not in tool_results[0]
-    assert tool_results[0]["raw_output"]["beam_search"] == result["beam_search"]
-    assert tool_results[0]["direct_display"] is True
+    assert tool_results[0]["graph_status"] == result["graph_status"]
+    assert "direct_display" not in tool_results[0]
+    assert "followup_action" not in tool_results[0]
     direct_messages = [chunk for chunk in session.chunks if chunk.type == "chat.final"]
     assert direct_messages == []
-    assert ctx.force_finish_requests == [
-        {"output": result["content"], "result_type": "answer"}
-    ]
+    assert ctx.force_finish_requests == []
 
 
 @pytest.mark.asyncio
-async def test_stream_event_rail_continues_after_symphony_skill_gap_result():
+async def test_stream_event_rail_does_not_add_skill_gap_followup_to_compose_result():
     rail = JiuSwarmStreamEventRail()
     session = _StreamSession()
     result = {
         "success": True,
-        "direct_display": True,
-        "display_format": "markdown",
-        "content": "## Symphony plan\n\nNo suitable skill found.",
-        "continue_after_display": True,
-        "followup_action": "external_skill_discovery",
+        "planned_graph": _minimal_planned_graph("no_plan"),
     }
-    ctx = _ctx(session, "symphony_compose_score", tool_result=result)
+    ctx = _ctx(session, "symphony_compose_graph", tool_result=result)
 
     await rail.before_tool_call(ctx)
     await rail.after_tool_call(ctx)
@@ -245,30 +266,31 @@ async def test_stream_event_rail_continues_after_symphony_skill_gap_result():
         for chunk in session.chunks
         if chunk.type == "tool_result"
     ]
-    assert tool_results[0]["continue_after_display"] is True
-    assert tool_results[0]["followup_action"] == "external_skill_discovery"
+    assert "continue_after_display" not in tool_results[0]
+    assert "followup_action" not in tool_results[0]
     assert not any(chunk.type == "chat.final" for chunk in session.chunks)
     assert ctx.force_finish_requests == []
 
 
 @pytest.mark.asyncio
-async def test_stream_event_rail_uses_agentic_tool_detailed_output_as_raw_output():
+async def test_stream_event_rail_emits_skill_index_result_as_raw_output():
     rail = JiuSwarmStreamEventRail()
     session = _StreamSession()
-    detailed_output = {
-        "success": True,
-        "result": "# Skill Branch Explore",
-        "skill_tree": {
-            "query": "skill_branch_explore: OfficeDocs",
-            "steps": [{"order": 0, "node_id": "OfficeDocs"}],
-            "candidates": [],
-        },
+    diagnostics = {
+        "command": 'rg -il "office|documents" /',
+        "cwd": "/",
+        "output": "[skill] documents/META.md  desc: Document Writer",
+        "observed_skill_ids": ["documents"],
+        "candidate_count": 1,
+        "error": False,
+        "truncated": False,
+        "runtime": "SkillDCI.SkillFSToolkit",
     }
-    result = AgenticToolResult(
-        {"success": True, "result": "# Skill Branch Explore"},
-        detailed_output=detailed_output,
+    result = SkillDCICommandResult(
+        diagnostics["output"],
+        detailed_output=diagnostics,
     )
-    ctx = _ctx(session, "skill_branch_explore", tool_result=result)
+    ctx = _ctx(session, "skill_index", tool_result=result)
 
     await rail.before_tool_call(ctx)
     await rail.after_tool_call(ctx)
@@ -278,8 +300,9 @@ async def test_stream_event_rail_uses_agentic_tool_detailed_output_as_raw_output
         for chunk in session.chunks
         if chunk.type == "tool_result"
     ]
-    assert tool_results[0]["raw_output"] == detailed_output
-    assert "skill_tree" not in tool_results[0]["result"]
+    assert tool_results[0]["result"] == str(result)
+    assert tool_results[0]["raw_output"] == diagnostics
+    assert tool_results[0]["raw_output"]["observed_skill_ids"] == ["documents"]
 
 
 @pytest.mark.asyncio
@@ -322,7 +345,7 @@ async def test_stream_event_rail_inserts_missing_tool_result_after_cancelled_cal
                 "type": "function",
                 "id": "compose-call",
                 "function": {
-                    "name": "symphony_compose_score",
+                    "name": "symphony_compose_graph",
                     "arguments": "{\"query\":\"compose\"}",
                 },
             }],
@@ -336,5 +359,5 @@ async def test_stream_event_rail_inserts_missing_tool_result_after_cancelled_cal
     assert isinstance(messages[1], AssistantMessage)
     assert isinstance(messages[2], ToolMessage)
     assert messages[2].tool_call_id == "compose-call"
-    assert "symphony_compose_score" in messages[2].content
+    assert "symphony_compose_graph" in messages[2].content
     assert isinstance(messages[3], UserMessage)

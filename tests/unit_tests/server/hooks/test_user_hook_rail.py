@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Any
+from unittest.mock import AsyncMock
 import pytest
 
 from jiuwenswarm.common.hooks_config import HooksConfig, HookMatcher
@@ -28,6 +29,7 @@ class MockToolInputs:
 class MockCallbackContext:
     inputs: MockToolInputs = field(default_factory=MockToolInputs)
     extra: dict = field(default_factory=dict)
+    session: Any = None
 
 
 # ============================================================
@@ -167,6 +169,23 @@ class TestBeforeToolCall:
         ctx = MockCallbackContext(inputs=MockToolInputs(tool_name="Bash"))
         await rail.before_tool_call(ctx)
         assert "_skip_tool" not in ctx.extra
+
+    @pytest.mark.asyncio
+    async def test_passes_session_id_from_context_session(self):
+        config = self._make_config(
+            PreToolUse=[("*", [{"command": "echo ok", "timeout": 5}])]
+        )
+        rail = UserHookRail(config)
+        rail._executor.run_all = AsyncMock(return_value=[])
+        ctx = MockCallbackContext(
+            inputs=MockToolInputs(tool_name="Bash"),
+            session=type("Session", (), {"get_session_id": lambda self: "session-2747"})(),
+        )
+
+        await rail.before_tool_call(ctx)
+
+        hook_input = rail._executor.run_all.await_args.kwargs["hook_input"]
+        assert hook_input["session_id"] == "session-2747"
 
 
 # ============================================================

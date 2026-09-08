@@ -151,6 +151,7 @@ def main() -> None:
     home_dir = os.environ.get("JIUWENSWARM_HOME", os.environ.get("JWS_HOME", os.environ.get("HOME", "/storage/Users/currentUser")))
     os.environ["HOME"] = home_dir
     os.environ.setdefault("JIUWENSWARM_HOME", home_dir)
+    os.environ["JIUWENSWARM_RUNTIME_PLATFORM"] = "harmony"
 
     # Ensure UTF-8 encoding
     os.environ.setdefault("PYTHONIOENCODING", "utf-8")

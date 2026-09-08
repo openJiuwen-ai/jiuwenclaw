@@ -15,6 +15,7 @@ Features:
 from __future__ import annotations
 
 import asyncio
+import base64
 import logging
 import re
 import ssl
@@ -37,6 +38,9 @@ class ProxyRoute:
     target_endpoint: str
     api_key: str = ""
     skip_cert_verify: bool = False
+    basic_username: str = ""
+    basic_password: str = field(default="", repr=False)
+    basic_password_file: str = ""
     _target_host: str = ""
     _target_port: int = 0
     _use_tls: bool = False
@@ -213,12 +217,19 @@ class InferencePrivacyProxy:
         return self._rewrite_path(path, route)
 
     def _inject_api_key(self, headers: bytes, route: ProxyRoute) -> bytes:
-        """Inject API key into headers (wildcard replacement).
+        """Inject auth credentials into headers.
 
-        Replaces ANY existing key with configured key:
-        - Authorization: Bearer <any-key> -> Authorization: Bearer {route.api_key}
-        - X-Api-Key: <any-key> -> X-Api-Key: {route.api_key}
+        Dispatches by route auth scheme:
+        - Basic route (``basic_username`` set): overwrite any existing
+          ``Authorization`` (case-insensitive) with the configured Basic header,
+          adding it when absent. ``X-Api-Key`` and other headers are untouched.
+        - api_key route: wildcard-replace ``Authorization: Bearer <any>`` and
+          ``X-Api-Key: <any>`` (existing behavior, unchanged).
+        - Neither configured: pass through unchanged.
         """
+        if route.basic_username:
+            return self._inject_basic_auth(headers, route)
+
         if not route.api_key:
             return headers
 
@@ -242,6 +253,29 @@ class InferencePrivacyProxy:
             self._log(f"Injected API key for route '{route.path_prefix}'")
 
         return result.encode()
+
+    def _inject_basic_auth(self, headers: bytes, route: ProxyRoute) -> bytes:
+        """Inject HTTP Basic ``Authorization`` header for a Basic route.
+
+        Removes any existing ``Authorization`` header (case-insensitive, any
+        scheme — Bearer / Basic / other) and appends a single
+        ``Authorization: Basic <base64(user:pass)>`` header. If no
+        ``Authorization`` is present the header is added. Other headers (e.g.
+        ``X-Api-Key``) are preserved untouched. The credential value is never
+        logged.
+        """
+        credential = base64.b64encode(
+            f"{route.basic_username}:{route.basic_password}".encode("utf-8")
+        ).decode("ascii")
+
+        lines = headers.decode(errors="replace").split("\r\n")
+        # Drop every existing Authorization header (case-insensitive) so the
+        # upstream receives exactly one, regardless of what the client sent.
+        filtered = [line for line in lines if not line.lower().startswith("authorization:")]
+        filtered.append(f"Authorization: Basic {credential}")
+
+        self._log(f"Injected Basic auth for route '{route.path_prefix}'")
+        return "\r\n".join(filtered).encode()
 
     def inject_api_key(self, headers: bytes, route: ProxyRoute) -> bytes:
         """Public wrapper for API key header injection."""

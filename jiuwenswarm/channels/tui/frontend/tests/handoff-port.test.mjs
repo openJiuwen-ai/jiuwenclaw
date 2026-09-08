@@ -79,7 +79,7 @@ class MockUiLifecycle {
   const lifecycle = new MockUiLifecycle();
   const handoff = new HandoffPortImpl(env, lifecycle);
   // 第一次 requestHandoff 触发 handoffInProgress=true（但 mock closeUi 不退出）
-  await handoff.requestHandoff(HANDOFF_TARGET_CC_TUI, "switch claude").catch(() => {});
+  await handoff.requestHandoff(HANDOFF_TARGET_CC_TUI, "switch agent-a").catch(() => {});
   const result = handoff.checkHandoff(HANDOFF_TARGET_CC_TUI);
   assert.equal(result.ok, false);
   assert.equal(result.code, "HANDOFF_IN_PROGRESS");
@@ -109,14 +109,14 @@ class MockUiLifecycle {
   });
   const lifecycle = new MockUiLifecycle();
   const handoff = new HandoffPortImpl(env, lifecycle);
-  await handoff.requestHandoff(HANDOFF_TARGET_CC_TUI, "switch claude");
+  await handoff.requestHandoff(HANDOFF_TARGET_CC_TUI, "switch agent-a");
   assert.equal(lifecycle.lastCall.reason, "switch");
   assert.equal(lifecycle.lastCall.exitCode, 88);
   // handoff JSON 应包含 action、content 和 parsed 字段
   const msg = JSON.parse(lifecycle.lastCall.handoffMessage);
   assert.equal(msg.action, "switch");
-  assert.equal(msg.content, "switch claude");
-  assert.equal(msg.parsed, "claude");
+  assert.equal(msg.content, "switch agent-a");
+  assert.equal(msg.parsed, "agent-a");
 }
 
 // 8. requestHandoff 在预检失败时抛错
@@ -125,7 +125,7 @@ class MockUiLifecycle {
   const lifecycle = new MockUiLifecycle();
   const handoff = new HandoffPortImpl(env, lifecycle);
   await assert.rejects(
-    () => handoff.requestHandoff(HANDOFF_TARGET_CC_TUI, "switch claude"),
+    () => handoff.requestHandoff(HANDOFF_TARGET_CC_TUI, "switch agent-a"),
     /Running outside agentos-tui launcher/,
   );
   assert.equal(lifecycle.calls.length, 0);  // closeUi 未被调用

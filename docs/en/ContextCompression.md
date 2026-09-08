@@ -50,9 +50,11 @@ Context compression is disabled by default. You can enable it in the following w
 
 **Method 1: Enable via Configuration File**
 
-Edit the `config.yaml` configuration file, find the `context_engine_config` section:
+Edit the `config.yaml` configuration file, find the `react.context_engine_config` section:
 
 ```yaml
+react:
+  context_engine_config:
     enabled: true         # Set this to true to enable context compression
 ```
 
@@ -84,11 +86,13 @@ The status panel includes:
 
 **Method 2: View via Slash Command**
 
-Enter the following command in the conversation input box to view detailed context compression information:
+Enter the following command in the conversation input box to view context information:
 
 ```bash
-/context
+/ctx
 ```
+
+> **Note**: The `/ctx` command shows basic context information. For more detailed compression status, use the status panel in the conversation interface.
 ![Context Status Panel](../assets/images/上下文状态.png)
 
 ## 3. Case Practice
@@ -298,20 +302,35 @@ Context compression technology is suitable for various scenarios requiring long 
 
 ## 6. Advanced Configuration
 
-The following is a typical configuration example for context compression:
+The following shows the complete configuration structure with source code default values:
 
 ```yaml
-context_engine:
-  max_messages: 100        # Maximum number of messages
-  max_tokens: 100000      # Maximum number of tokens
-  compression:
-    enabled: true         # Enable context compression
-    messages_threshold: 3 # Message count trigger threshold
-    tokens_threshold: 20000 # Token count trigger threshold
-    large_message_threshold: 1000 # Large message definition
-    offload_message_type: ["tool"] # Only compress tool return results
-    messages_to_keep: 5   # Keep the last 5 messages
-    keep_last_round: true # Keep complete last round conversation
+react:
+  context_engine_config:
+    enabled: true
+
+    # Message Summary Offloader Configuration (source defaults)
+    message_summary_offloader_config:
+      tokens_threshold: 20000          # Source default: 20000 tokens
+      large_message_threshold: 1000   # Source default: 1000 tokens
+      keep_last_round: true           # Source default: true
+
+    # Dialogue Compressor Configuration (source defaults)
+    dialogue_compressor_config:
+      tokens_threshold: 10000         # Source default: 10000 tokens
+      messages_to_keep: null          # Source default: null (no limit)
+      keep_last_round: true           # Source default: true
+
+    # Round Level Compressor Configuration (source defaults)
+    round_level_compressor_config:
+      rounds_threshold: 10            # Source default: 10 rounds
+      tokens_threshold: 10000         # Source default: 10000 tokens
+      keep_last_round: true           # Source default: true
+      keep_recent_messages: 0         # Source default: 0 messages
+
+    # Other configurations
+    reasoning_tool_loop_compact_config:
+      enabled: false
 ```
 
-By configuring context compression parameters reasonably, users can obtain the best dialogue experience according to their usage scenarios and needs.
+> **Note**: The above shows source code default values. Your actual `config.yaml` may use different values. For example, the example above uses `keep_last_round: true` which is the source default, but your configuration file might have customized values.

@@ -3,10 +3,15 @@ import { CommandKind, type SlashCommand } from "../types.js";
 import type { ClientMode } from "../../modes.js";
 
 const EVOLUTION_SUPPORTED_MODES = new Set<ClientMode>([
-  "agent.plan",
-  "team",
-  "team.plan",
-  "code.team",
+  // 单 agent plan：原 agent.plan 的等价新串。
+  "agent.work.plan",
+  // team 全系列：原集合 {team, team.plan, code.team} 在新 canonical 下覆盖
+  // team.work.* / team.code.* 的 normal 与 plan 变体；只列 plan 会让
+  // team.work.normal / team.code.normal 下 /evolve 被前端误拒（回归 #1）。
+  "team.work.normal",
+  "team.work.plan",
+  "team.code.normal",
+  "team.code.plan",
 ]);
 
 function unsupportedEvolutionModeMessage(mode: ClientMode): string | null {
@@ -28,6 +33,7 @@ export function createEvolveCommand(): SlashCommand {
     example: "/evolve pptx improve error handling",
     kind: CommandKind.BUILT_IN,
     hidden: true,
+    requiresSkillEvolution: true,
     takesArgs: true,
     action: (ctx, args) => {
       const unsupportedMode = unsupportedEvolutionModeMessage(ctx.mode);
@@ -61,6 +67,7 @@ export function createEvolveListCommand(): SlashCommand {
     example: "/evolve_list pptx --sort score",
     kind: CommandKind.BUILT_IN,
     hidden: true,
+    requiresSkillEvolution: true,
     takesArgs: true,
     action: (ctx, args) => {
       const parsedArgs = parseArgs(args);
@@ -100,6 +107,7 @@ export function createEvolveSimplifyCommand(): SlashCommand {
     example: "/evolve_simplify pptx merge duplicate export-failure records",
     kind: CommandKind.BUILT_IN,
     hidden: true,
+    requiresSkillEvolution: true,
     takesArgs: true,
     action: (ctx, args) => {
       const unsupportedMode = unsupportedEvolutionModeMessage(ctx.mode);
@@ -145,6 +153,7 @@ export function createEvolveRebuildCommand(): SlashCommand {
     example: "/evolve_rebuild pptx improve error handling",
     kind: CommandKind.BUILT_IN,
     hidden: true,
+    requiresSkillEvolution: true,
     takesArgs: true,
     action: (ctx, args) => {
       const parsedArgs = parseArgs(args);

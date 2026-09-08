@@ -19,6 +19,8 @@ from jiuwenswarm.extensions.agentos.agentos_router.ssh_relay import (
 DEFAULT_AGENT_WORKSPACE_ROOT = "/home/agentos/users"
 # Env override for gateway.agentos.sandbox_idle_timeout_seconds (vibeskill-aligned).
 SANDBOX_IDLE_TIMEOUT_ENV = "SANDBOX_IDLE_TIMEOUT_SECONDS"
+# Env override for gateway.agentos.disconnect_cleanup_timeout_seconds.
+DISCONNECT_CLEANUP_TIMEOUT_ENV = "DISCONNECT_CLEANUP_TIMEOUT_SECONDS"
 
 
 @dataclass(frozen=True)
@@ -45,11 +47,21 @@ class RouterConfig:
     # has no held tasks (chat/SSH) for this long. <= 0 disables reclamation.
     sandbox_idle_timeout_seconds: float = 600.0
     sandbox_idle_check_interval_seconds: float = 30.0
+    # Channel-disconnect cleanup: when a user has zero live channels, wait this
+    # long before deleting their jiuwenswarm agent (gives a chance to reconnect
+    # and gives in-flight chat/SSH time to finish). Reuses the same
+    # pop_if_idle safety check as the idle reaper (READY + task_count==0 +
+    # last_active_at beyond this window). <= 0 disables disconnect cleanup.
+    disconnect_cleanup_timeout_seconds: float = 60.0
+    # Web/TUI connect warmup: create the builtin jiuwenswarm sandbox and open
+    # the instance WS in the background so the first chat is not blocked on
+    # create + cold-start 502 retries. Failure never drops the connection.
+    connect_warmup_enabled: bool = True
     ssh: YuanrongSshSettings = YuanrongSshSettings()
     ssh_channel: SshChannelEndpoint | None = None
     auth_service_url: str = ""
     timeout: float = 10.0
-    auth_enabled: bool = True
+    auth_enabled: bool = False
 
 
 def agentos_router_selected(config: dict[str, Any]) -> bool:
@@ -107,6 +119,16 @@ def _read_float_env(name: str) -> float | None:
     return float(text)
 
 
+def _read_bool(section: dict[str, Any], key: str, default: bool) -> bool:
+    """Read a bool; missing / blank keeps *default*; explicit false/0/no/off disables."""
+    raw = section.get(key)
+    if raw is None or (isinstance(raw, str) and not str(raw).strip()):
+        return default
+    if isinstance(raw, bool):
+        return raw
+    return str(raw).strip().lower() in ("1", "true", "yes", "on")
+
+
 def load_router_config(config: dict[str, Any]) -> RouterConfig:
     gateway = config.get("gateway") if isinstance(config, dict) else {}
     if not isinstance(gateway, dict):
@@ -133,7 +155,7 @@ def load_router_config(config: dict[str, Any]) -> RouterConfig:
 
     auth_service_url = str(agentos.get("auth_service_url") or "").strip()
     timeout = float(agentos.get("timeout") or 10)
-    auth_enabled = str(agentos.get("auth_enabled", "true")).strip().lower() in ("true", "1", "yes")
+    auth_enabled = str(agentos.get("auth_enabled", "false")).strip().lower() in ("true", "1", "yes")
 
     # Env wins over yaml (incl. explicit 0 to disable), same as vibeskill.
     idle_timeout_env = _read_float_env(SANDBOX_IDLE_TIMEOUT_ENV)
@@ -141,6 +163,13 @@ def load_router_config(config: dict[str, Any]) -> RouterConfig:
         idle_timeout_env
         if idle_timeout_env is not None
         else _read_float(agentos, "sandbox_idle_timeout_seconds", 600.0)
+    )
+
+    disconnect_cleanup_env = _read_float_env(DISCONNECT_CLEANUP_TIMEOUT_ENV)
+    disconnect_cleanup_timeout_seconds = (
+        disconnect_cleanup_env
+        if disconnect_cleanup_env is not None
+        else _read_float(agentos, "disconnect_cleanup_timeout_seconds", 60.0)
     )
 
     return RouterConfig(
@@ -169,6 +198,8 @@ def load_router_config(config: dict[str, Any]) -> RouterConfig:
         sandbox_idle_check_interval_seconds=_read_float(
             agentos, "sandbox_idle_check_interval_seconds", 30.0
         ),
+        disconnect_cleanup_timeout_seconds=disconnect_cleanup_timeout_seconds,
+        connect_warmup_enabled=_read_bool(agentos, "connect_warmup_enabled", True),
         ssh=load_yuanrong_ssh_settings(agentos.get("ssh")),
         ssh_channel=load_ssh_channel_endpoint(config),
         auth_service_url=auth_service_url,

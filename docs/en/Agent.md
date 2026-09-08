@@ -154,13 +154,13 @@ Loadable modules. Each skill typically defines goals, steps, tool usage, and out
 
 #### 5. Memory
 
-Three kinds:
+Memory is organized into three files:
 
-- **User profile** — who you are, preferences, habits  
-- **Episodic** — events, decisions, conversation snippets  
-- **Semantic** — background knowledge and concepts  
+- **USER.md (user profile)** — Located at the workspace root; stores user identity, preferences, and habits
+- **MEMORY.md (long-term memory)** — Under `memory/`; stores durable, reusable content like decisions and persistent facts
+- **YYYY-MM-DD.md (daily log)** — Under `memory/daily_memory/`; archives daily runtime context and conversation snippets by date
 
-**Note:** Memory is mostly automatic; you can search history when needed.
+**Note:** Memory is mostly automatic; you can search history when needed. See [Memory](Memory.md) for the full structure.
 
 #### 6. Config
 
@@ -189,7 +189,7 @@ JiuwenSwarm supports multi-agent collaboration through team-based workflows to h
 - Result aggregation: The leader collects and integrates results from teammates  
 - Dynamic adjustment: Task assignments adapt based on execution progress  
 
-**Configuration:** Team settings are configured in the `team` section of `config/config.yaml`
+**Configuration:** Team settings are configured under `modes.team.<team_name>` in `config/config.yaml`
 
 > See team collaboration documentation for more details on multi-agent workflows.
 
@@ -208,10 +208,13 @@ C:\Users\<username>\.jiuwenswarm\
 │
 ├── config/                          # Configuration
 │   ├── config.yaml                  # Main config (models, channels, permissions)
-│   └── builtin_rules.yaml           # Built-in rules
+│   ├── builtin_rules.yaml           # Built-in rules
+│   ├── .env                         # Environment variables
+│   └── runtime_state/               # Runtime state directory (per-session / per-task files)
 │
 ├── agent/                           # Agent-related data
 │   ├── sessions/                    # Session history storage
+│   ├── home/                        # Agent home data
 │   └── workspace/                   # Agent workspace
 │       ├── AGENT_ZH.md              # Agent bootstrap config (Chinese)
 │       ├── AGENT_EN.md              # Agent bootstrap config (English)
@@ -219,19 +222,19 @@ C:\Users\<username>\.jiuwenswarm\
 │       ├── IDENTITY_EN.md           # Identity (English)
 │       ├── SOUL_ZH.md               # Values and persona (Chinese)
 │       ├── SOUL_EN.md               # Values and persona (English)
-│       ├── HEARTBEAT_ZH.md          # Heartbeat tasks (Chinese)
-│       ├── HEARTBEAT_EN.md          # Heartbeat tasks (English)
 │       ├── USER.md                  # User profile and preferences
 │       ├── memory/                  # Agent memory store
 │       ├── todo/                    # Agent todo items storage
 │       └── skills/                  # Skills
 │
-├── todo/                            # Global todo items storage
+├── .agent_teams/                    # Team-related data (bindings.json, team.db, trio-count/, etc.)
+├── .updates/                        # Version update cache
 ├── gateway/                         # Gateway data
 ├── logs/                            # Log files
 ├── memory/                          # Global memory store
 ├── received_files/                  # Incoming external files
-└── web/                             # Web channel assets
+├── web/                             # Web channel assets
+└── .trace/                          # Trace data (created on demand)
 ```
 
 **Key files:**
@@ -244,10 +247,9 @@ C:\Users\<username>\.jiuwenswarm\
 | `agent/workspace/AGENT_ZH.md` | Bootstrap config (Chinese) | Yes, when needed | Affects startup behavior |
 | `agent/workspace/IDENTITY_ZH.md` | Identity (Chinese) | Customizable | Affects how the agent sees its role |
 | `agent/workspace/SOUL_ZH.md` | Values and persona (Chinese) | Customizable | Affects tone and style |
-| `agent/workspace/HEARTBEAT_ZH.md` | Heartbeat tasks (Chinese) | Adjustable | Affects scheduled / proactive behavior |
 | `agent/workspace/USER.md` | User profile and preferences | Auto-managed by system | Affects personalization; update via agent conversation |
 | `agent/workspace/skills/` | Skills | Add skills | Extends capabilities |
-| `agent/workspace/memory/` | Memory store (user profile, episodic, semantic) | Do not edit by hand | Risk of corrupting memory data |
+| `agent/workspace/memory/` | Memory store (MEMORY.md, daily_memory/) | Do not edit by hand | Risk of corrupting memory data |
 | `agent/workspace/todo/` | Agent todo items storage | Auto-managed by system | Affects task tracking; manage via agent conversation |
 | `todo/` | Global todo items storage | Auto-managed by system | Affects task tracking; manage via agent conversation |
 | `logs/` | Logs | View only | Used for troubleshooting |
@@ -257,9 +259,13 @@ C:\Users\<username>\.jiuwenswarm\
 ```text
 C:\Users\Administrator\.jiuwenswarm\
 ├── config\config.yaml
+├── config\builtin_rules.yaml
+├── config\runtime_state\           # Runtime state directory (per-session / per-task files)
+├── .agent_teams\                    # Team-related data
 ├── todo\                            # Global todo items
 ├── agent\
 │   ├── sessions\                    # Session history
+│   ├── home\                       # Agent home data
 │   └── workspace\
 │       ├── AGENT_ZH.md
 │       ├── AGENT_EN.md
@@ -267,12 +273,13 @@ C:\Users\Administrator\.jiuwenswarm\
 │       ├── IDENTITY_EN.md
 │       ├── SOUL_ZH.md
 │       ├── SOUL_EN.md
-│       ├── HEARTBEAT_ZH.md
-│       ├── HEARTBEAT_EN.md
 │       ├── USER.md
 │       ├── memory\
 │       ├── todo\                    # Agent todo items
 │       └── skills\
+├── .updates\                        # Version update cache
+├── logs\                            # Log files
+└── .trace\                          # Trace data (created on demand)
 ```
 
 > **Notes:**  
@@ -316,7 +323,6 @@ C:\Users\<username>\.jiuwenswarm\config\config.yaml
 |-----|---------|------------|
 | `preferred_language` | Preferred language | Read-only OK |
 | `logging.level` | Log level | Read-only OK |
-| `heartbeat.every` | Heartbeat interval | Read-only OK |
 | `channels.*.enabled` | Channel on/off | Read-only OK |
 
 **Category 2 — change with care**
@@ -325,7 +331,6 @@ C:\Users\<username>\.jiuwenswarm\config\config.yaml
 |-----|---------|--------|------------|
 | `models.defaults[0].model_client_config.model_name` | Default model | Quality and speed | Confirm the model works first |
 | `models.defaults[0].model_config_obj.temperature` | Temperature | Creativity vs. stability | Often 0.7–1.0 |
-| `heartbeat.active_hours` | Active window | When proactive runs fire | Match your schedule |
 | `permissions.tools.*` | Tool permissions | Safety | Understand risk before changing |
 
 **Category 3 — avoid unless you know why**
@@ -402,9 +407,11 @@ models:
 ```yaml
 channels:
   feishu:
-    enabled: true
+    apps:
+      - name: Feishu default app
+        enabled: true  # Enable the Feishu channel (enabled is inside the apps list element)
   telegram:
-    enabled: false
+    enabled: false  # Disable the Telegram channel (telegram has enabled at the top level)
 ```
 
 #### Troubleshooting

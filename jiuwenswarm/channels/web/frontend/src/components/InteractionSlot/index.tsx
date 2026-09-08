@@ -34,7 +34,11 @@ export function InteractionSlot({ onSubmit }: InteractionSlotProps) {
   // 授权条：页签式吸附输入框顶部；交互卡：独立浮卡。
   const isAuth = kind === 'authorization';
   return (
-    <div className={`interaction-slot${isAuth ? ' interaction-slot--attached' : ''}`}>
+    <div
+      className={`interaction-slot${isAuth ? ' interaction-slot--attached' : ''}`}
+      data-testid="interaction-slot-root"
+      data-variant={isAuth ? 'auth' : 'interaction'}
+    >
       {isAuth ? (
         <AuthorizationPrompt pending={pending} onSubmit={onSubmit} />
       ) : (

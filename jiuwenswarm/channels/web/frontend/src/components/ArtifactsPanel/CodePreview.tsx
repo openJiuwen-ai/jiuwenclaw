@@ -84,12 +84,12 @@ export function CodePreview({ content, name, mimeType }: { content: string; name
     <div className="relative h-full min-h-0 w-full overflow-hidden" data-testid="artifact-code-preview">
       <div ref={hostRef} className="h-full min-h-0 w-full" />
       {loadState === 'loading' && (
-        <div className="absolute inset-0 flex items-center justify-center gap-2 text-sm text-text-muted">
+        <div className="absolute inset-0 flex items-center justify-center gap-2 text-sm text-text-muted" data-testid="artifact-code-preview-overlay" data-variant="loading">
           <LoaderCircle className="animate-spin" size={16} />
           {t('common.loading')}
         </div>
       )}
-      {loadState === 'error' && <div className="absolute inset-0 flex items-center justify-center text-sm text-text-muted">{t('artifacts.previewFailed')}</div>}
+      {loadState === 'error' && <div className="absolute inset-0 flex items-center justify-center text-sm text-text-muted" data-testid="artifact-code-preview-overlay" data-variant="error">{t('artifacts.previewFailed')}</div>}
     </div>
   );
 }

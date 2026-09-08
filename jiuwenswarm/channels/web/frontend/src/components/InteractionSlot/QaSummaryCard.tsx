@@ -17,30 +17,30 @@ export function QaSummaryCard({ content }: QaSummaryCardProps) {
   if (!data) return null;
 
   return (
-    <div className="flex justify-start mb-3 animate-rise">
-      <div className="qa-summary">
+    <div className="flex justify-start mb-3 animate-rise" data-testid="interaction-slot-qa-summary-wrap">
+      <div className="qa-summary" data-testid="interaction-slot-qa-summary">
         {data.title && (
-          <div className="qa-summary__head">
-            <FileText size={14} strokeWidth={2} className="qa-summary__head-icon" />
-            <span>{data.title}</span>
+          <div className="qa-summary__head" data-testid="interaction-slot-qa-summary-head">
+            <FileText size={14} strokeWidth={2} className="qa-summary__head-icon" data-testid="interaction-slot-qa-summary-head-icon" />
+            <span data-testid="interaction-slot-qa-summary-head-title">{data.title}</span>
           </div>
         )}
-        <div className="qa-summary__list">
+        <div className="qa-summary__list" data-testid="interaction-slot-qa-summary-list">
           {data.items.map((item, idx) => (
-            <div className="qa-summary__item" key={idx}>
-              <div className="qa-summary__q">
-                <span className="qa-summary__q-index">{idx + 1}.</span>
-                <span>{item.question}</span>
+            <div className="qa-summary__item" key={idx} data-testid="interaction-slot-qa-summary-item" data-variant={idx}>
+              <div className="qa-summary__q" data-testid="interaction-slot-qa-summary-item-question">
+                <span className="qa-summary__q-index" data-testid="interaction-slot-qa-summary-item-question-index">{idx + 1}.</span>
+                <span data-testid="interaction-slot-qa-summary-item-question-text">{item.question}</span>
               </div>
-              <div className="qa-summary__answers">
+              <div className="qa-summary__answers" data-testid="interaction-slot-qa-summary-item-answers">
                 {item.answers.length > 0 ? (
                   item.answers.map((ans, i) => (
-                    <div className="qa-summary__a" key={i}>
+                    <div className="qa-summary__a" key={i} data-testid="interaction-slot-qa-summary-item-answer">
                       {ans}
                     </div>
                   ))
                 ) : (
-                  <div className="qa-summary__a qa-summary__a--empty">—</div>
+                  <div className="qa-summary__a qa-summary__a--empty" data-testid="interaction-slot-qa-summary-item-answer-empty">—</div>
                 )}
               </div>
             </div>

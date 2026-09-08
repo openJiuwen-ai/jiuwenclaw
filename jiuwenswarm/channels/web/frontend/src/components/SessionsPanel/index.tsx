@@ -6,6 +6,7 @@ import { containsIgnoredDirectory } from '../../features/fileTreeFilters';
 import { isHistoryPreviewFile } from '../../features/historyFilePreview';
 import { webRequest } from '../../services/webClient';
 import { useChatStore } from '../../stores/chatStore';
+import { toDisplaySessionTitle } from '../../utils/documentMessage';
 
 function SessionErrorIndicator({ sessionId }: { sessionId: string }) {
   const error = useChatStore((state) => state.runtimes[sessionId]?.error);
@@ -479,36 +480,37 @@ export function SessionsPanel({
         : t('sessions.restore');
 
   return (
-    <div className="flex-1 min-h-0">
-      <div className="card w-full h-full flex flex-col">
-        <div className="flex items-center justify-between gap-4 mb-4">
+    <div className="flex-1 min-h-0" data-testid="sessions-panel-root">
+      <div className="card w-full h-full flex flex-col" data-testid="sessions-panel-card">
+        <div className="flex items-center justify-between gap-4 mb-4" data-testid="sessions-panel-header">
           <div>
-            <h2 className="text-lg font-semibold">{t('sessions.title')}</h2>
-            <p className="text-sm text-text-muted mt-1">{t('sessions.subtitle')}</p>
+            <h2 className="text-lg font-semibold" data-testid="sessions-panel-title">{t('sessions.title')}</h2>
+            <p className="text-sm text-text-muted mt-1" data-testid="sessions-panel-subtitle">{t('sessions.subtitle')}</p>
           </div>
           <button
             type="button"
             onClick={() => void loadSessions()}
             disabled={loadingSessions}
             className="btn !px-3 !py-1.5 disabled:opacity-50 disabled:cursor-not-allowed"
+            data-testid="sessions-panel-refresh-button"
           >
             {loadingSessions ? t('common.refreshing') : t('common.refresh')}
           </button>
         </div>
 
         {sessionsError ? (
-          <div className="mb-4 rounded-md border border-danger/30 bg-danger/10 px-3 py-2 text-sm text-danger">
+          <div className="mb-4 rounded-md border border-danger/30 bg-danger/10 px-3 py-2 text-sm text-danger" data-testid="sessions-panel-error">
             {sessionsError}
           </div>
         ) : null}
 
         <div className="flex-1 min-h-0 grid grid-cols-[minmax(0,1fr)_minmax(0,4fr)] gap-4">
-          <div className="rounded-xl border border-border bg-card/70 backdrop-blur-sm overflow-hidden shadow-sm flex flex-col min-h-0">
-            <div className="px-4 py-3 bg-secondary/30 border-b border-border">
+          <div className="rounded-xl border border-border bg-card/70 backdrop-blur-sm overflow-hidden shadow-sm flex flex-col min-h-0" data-testid="sessions-panel-history-column">
+            <div className="px-4 py-3 bg-secondary/30 border-b border-border" data-testid="sessions-panel-history-header">
               <div className="flex items-stretch justify-between gap-4">
                 <div>
-                  <h3 className="text-sm font-medium text-text">{t('sessions.history')}</h3>
-                  <p className="text-xs text-text-muted mt-1 mono">
+                  <h3 className="text-sm font-medium text-text" data-testid="sessions-panel-history-title">{t('sessions.history')}</h3>
+                  <p className="text-xs text-text-muted mt-1 mono" data-testid="sessions-panel-history-count">
                     {t('sessions.count', { count: sessions.length })}
                   </p>
                 </div>
@@ -522,17 +524,18 @@ export function SessionsPanel({
                     void onRestoreSession(selectedSessionId, selectedSession?.mode);
                   }}
                   className="btn !px-3 !py-1.5 shrink-0 disabled:opacity-50 disabled:cursor-not-allowed"
+                  data-testid="sessions-panel-restore-button"
                 >
                   {t('sessions.restore')}
                 </button>
               </div>
             </div>
-            <div className="flex-1 overflow-auto p-2 space-y-1">
+            <div className="flex-1 overflow-auto p-2 space-y-1" data-testid="sessions-panel-history-list">
               {!loadingSessions && sessions.length === 0 ? (
-                <div className="h-full flex items-center justify-center text-sm text-text-muted">{t('sessions.empty')}</div>
+                <div className="h-full flex items-center justify-center text-sm text-text-muted" data-testid="sessions-panel-history-empty">{t('sessions.empty')}</div>
               ) : (
                 sessions.map((session) => (
-                  <div key={session.session_id} className="group grid grid-cols-[minmax(0,1fr)_auto] items-center gap-2">
+                  <div key={session.session_id} className="group grid grid-cols-[minmax(0,1fr)_auto] items-center gap-2" data-testid="sessions-panel-session-row" data-variant={session.session_id}>
                     <button
                       type="button"
                       className={`w-full min-w-0 text-left px-3 py-2 rounded-lg border text-sm  ${
@@ -545,14 +548,15 @@ export function SessionsPanel({
                         setSelectedSessionId(session.session_id);
                         void loadSessionFilesForSession(session.session_id);
                       }}
-                      title={session.title || parseSessionDisplayLabel(session.session_id, t)}
+                      title={toDisplaySessionTitle(session.title || '') || parseSessionDisplayLabel(session.session_id, t)}
+                      data-testid="sessions-panel-session-item"
                     >
                       <span className="flex items-center gap-2">
-                        <span className="truncate block flex-1">{session.title || parseSessionDisplayLabel(session.session_id, t)}</span>
+                        <span className="truncate block flex-1" data-testid="sessions-panel-session-item-title">{toDisplaySessionTitle(session.title || '') || parseSessionDisplayLabel(session.session_id, t)}</span>
                         <SessionErrorIndicator sessionId={session.session_id} />
                       </span>
                       {session.mode === 'team' && session.team_name ? (
-                        <span className="mt-1 block truncate text-[11px] text-text-muted">
+                        <span className="mt-1 block truncate text-[11px] text-text-muted" data-testid="sessions-panel-session-item-team-label">
                           {t('sessions.teamLabel', { team: session.team_name })}
                         </span>
                       ) : null}
@@ -563,6 +567,7 @@ export function SessionsPanel({
                       className="shrink-0 p-1.5 rounded-md text-text-muted hover:text-danger hover:bg-danger-subtle  disabled:opacity-50"
                       disabled={deletingSessionId === session.session_id}
                       onClick={() => void handleDeleteSession(session)}
+                      data-testid="sessions-panel-session-item-delete"
                     >
                       <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
                         <path strokeLinecap="round" strokeLinejoin="round" d="M14.74 9l-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 01-2.244 2.077H8.084a2.25 2.25 0 01-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 00-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 013.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 00-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 00-7.5 0" />
@@ -574,25 +579,25 @@ export function SessionsPanel({
             </div>
           </div>
 
-          <div className="rounded-xl border border-border bg-card/70 backdrop-blur-sm overflow-hidden shadow-sm grid grid-cols-[minmax(0,1fr)_minmax(0,3fr)] min-h-0">
+          <div className="rounded-xl border border-border bg-card/70 backdrop-blur-sm overflow-hidden shadow-sm grid grid-cols-[minmax(0,1fr)_minmax(0,3fr)] min-h-0" data-testid="sessions-panel-files-column">
             <div className="border-r border-border flex flex-col min-h-0">
-              <div className="px-4 py-3 bg-secondary/30 border-b border-border">
+              <div className="px-4 py-3 bg-secondary/30 border-b border-border" data-testid="sessions-panel-files-header">
                 <div>
-                  <h3 className="text-sm font-medium text-text">{t('sessions.files')}</h3>
-                  <p className="text-xs text-text-muted mt-1 truncate" title={selectedSessionLabel}>
+                  <h3 className="text-sm font-medium text-text" data-testid="sessions-panel-files-title">{t('sessions.files')}</h3>
+                  <p className="text-xs text-text-muted mt-1 truncate" title={selectedSessionLabel} data-testid="sessions-panel-files-selected-label">
                     {selectedSessionLabel}
                   </p>
                 </div>
               </div>
-              <div className="flex-1 overflow-auto p-2">
+              <div className="flex-1 overflow-auto p-2" data-testid="sessions-panel-files-list">
                 {!selectedSessionId ? (
-                  <div className="h-full flex items-center justify-center text-sm text-text-muted">{t('sessions.selectFirst')}</div>
+                  <div className="h-full flex items-center justify-center text-sm text-text-muted" data-testid="sessions-panel-files-empty" data-variant="unselected">{t('sessions.selectFirst')}</div>
                 ) : loadingFiles ? (
-                  <div className="h-full flex items-center justify-center text-sm text-text-muted">{t('sessions.loadingFiles')}</div>
+                  <div className="h-full flex items-center justify-center text-sm text-text-muted" data-testid="sessions-panel-files-empty" data-variant="loading">{t('sessions.loadingFiles')}</div>
                 ) : filesError ? (
-                  <div className="rounded-md border border-danger/30 bg-danger/10 px-3 py-2 text-xs text-danger">{filesError}</div>
+                  <div className="rounded-md border border-danger/30 bg-danger/10 px-3 py-2 text-xs text-danger" data-testid="sessions-panel-files-error">{filesError}</div>
                 ) : files.length === 0 ? (
-                  <div className="h-full flex items-center justify-center text-sm text-text-muted">{t('sessions.emptyFiles')}</div>
+                  <div className="h-full flex items-center justify-center text-sm text-text-muted" data-testid="sessions-panel-files-empty" data-variant="empty">{t('sessions.emptyFiles')}</div>
                 ) : (
                   <div className="space-y-1">
                     {files.map((file) => {
@@ -612,20 +617,23 @@ export function SessionsPanel({
                             if (!canPreview) return;
                             setSelectedFile(file);
                           }}
+                          data-testid="sessions-panel-file-item"
+                          data-variant={file.path}
                         >
                           <span className="flex items-center justify-between gap-2">
                             <span
                               className="truncate block"
                               style={{ paddingLeft: `${file.depth * 16}px` }}
+                              data-testid="sessions-panel-file-item-name"
                             >
                               {file.name}
                             </span>
                             {file.isDirectory ? (
-                              <span className="text-[10px] px-1.5 py-0.5 rounded border border-border bg-secondary/50 text-text-muted">
+                              <span className="text-[10px] px-1.5 py-0.5 rounded border border-border bg-secondary/50 text-text-muted" data-testid="sessions-panel-file-item-directory-badge">
                                 {t('sessions.folder')}
                               </span>
                             ) : !canPreview ? (
-                              <span className="text-[10px] px-1.5 py-0.5 rounded border border-border bg-secondary/50 text-text-muted">
+                              <span className="text-[10px] px-1.5 py-0.5 rounded border border-border bg-secondary/50 text-text-muted" data-testid="sessions-panel-file-item-not-previewable-badge">
                                 {t('sessions.notPreviewable')}
                               </span>
                             ) : null}
@@ -637,7 +645,7 @@ export function SessionsPanel({
                 )}
               </div>
             </div>
-            <div className="flex-1 min-h-0">
+            <div className="flex-1 min-h-0" data-testid="sessions-panel-file-preview">
               {selectedFile ? (
                 <FileViewer
                   filePath={selectedFile.path}
@@ -645,7 +653,7 @@ export function SessionsPanel({
                   reloadNonce={filePreviewReloadNonce}
                 />
               ) : (
-                <div className="h-full flex items-center justify-center text-text-muted">
+                <div className="h-full flex items-center justify-center text-text-muted" data-testid="sessions-panel-file-preview-empty">
                   {t('sessions.selectFile')}
                 </div>
               )}

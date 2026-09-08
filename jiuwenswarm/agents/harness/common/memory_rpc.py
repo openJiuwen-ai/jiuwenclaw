@@ -28,6 +28,8 @@ from jiuwenswarm.agents.harness.common.rails.project_memory import (
 )
 from jiuwenswarm.common.coding_memory_paths import resolve_project_coding_memory_dir
 from jiuwenswarm.common.config import get_config
+from jiuwenswarm.common.mode_matrix import is_code_profile_mode
+from jiuwenswarm.common.utils import get_agent_workspace_dir
 
 logger = logging.getLogger(__name__)
 
@@ -39,8 +41,14 @@ def _is_forbidden_enabled(config: dict[str, Any] | None) -> bool:
 
 
 def _get_coding_memory_dir(workspace: str, project_dir: str | None = None) -> str:
+    """Resolve coding memory below the agent-owned system workspace.
+
+    ``workspace`` is retained for the RPC interface because it is also used
+    for project-memory operations. Coding memory is agent-owned data, though,
+    so it must not follow a project workspace supplied by the caller.
+    """
     return resolve_project_coding_memory_dir(
-        agent_workspace_dir=workspace,
+        agent_workspace_dir=get_agent_workspace_dir(),
         project_dir=project_dir,
     )
 
@@ -78,12 +86,13 @@ def _get_runtime_memory_dirs(workspace: str, project_dir: str | None = None) -> 
     """运行时记忆目录（agent 自动写入，对用户只读）。
 
     使用父目录以覆盖所有项目子目录：
-    - <workspace>/memory            -> agent mode auto memory
-    - <workspace>/coding_memory     -> code mode coding memory（含各项目子目录）
+    - <workspace>/memory                              -> agent mode auto memory
+    - <agent-workspace>/coding_memory                 -> code mode coding memory
+      （含各项目子目录）
     """
     return [
         os.path.normpath(os.path.join(workspace, "memory")),
-        os.path.normpath(os.path.join(workspace, "coding_memory")),
+        os.path.normpath(os.path.join(get_agent_workspace_dir(), "coding_memory")),
     ]
 
 
@@ -155,6 +164,11 @@ def _classify_memory_file(path: str, workspace: str) -> str:
     if path.startswith(jiuwen_dir):
         return "user"
     return "project"
+
+
+def _is_creatable_memory_file(path: str) -> bool:
+    """Whether a validated missing path is a user-managed memory entrypoint."""
+    return os.path.basename(path) in ("JIUWENSWARM.md", "JIUWENSWARM.local.md")
 
 
 def _relative_path(abs_path: str, workspace: str, project_dir: str | None = None) -> str:
@@ -231,7 +245,9 @@ def _scan_md_files(directory: str, kind: str, workspace: str, project_dir: str |
 
 
 def _is_code_mode(mode: str) -> bool:
-    return mode.startswith("code")
+    # code profile 族：旧 "code"/"code.*" 前缀 + 新 canonical agent.code.* /
+    # team.code.*（复用 mode_matrix 谓词，与 memory.config 的归一逻辑一致）。
+    return is_code_profile_mode(mode) or (mode or "").startswith("code")
 
 
 def _is_agent_mode(mode: str) -> bool:
@@ -304,13 +320,14 @@ async def handle_memory_edit(
     kind = _classify_memory_file(resolved, workspace)
 
     if not exists:
+        editable = _is_creatable_memory_file(resolved)
         return {
             "path": resolved,
             "exists": False,
             "content_preview": "",
             "kind": kind,
-            "editable": False,
-            "reason": "memory file does not exist",
+            "editable": editable,
+            "reason": None if editable else "memory file does not exist",
         }
 
     try:

@@ -10,6 +10,7 @@ source "envfile_handler.sh"
 source "template_handler.sh"
 source "jiuwenswarm_handler.sh"
 source "gateway_handler.sh"
+source "web_handler.sh"
 
 process_up() {
     for module in "${MODULES[@]}"; do
@@ -21,6 +22,10 @@ process_up() {
             gateway)
                 check_gateway_up_dependency
                 deploy_gateway
+                ;;
+            web)
+                check_web_up_dependency
+                deploy_web
                 ;;
         esac
     done
@@ -39,6 +44,9 @@ process_down() {
                 ;;
             gateway)
                 uninstall_gateway
+                ;;
+            web)
+                uninstall_web
                 ;;
         esac
     done

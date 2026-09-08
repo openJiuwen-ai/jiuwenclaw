@@ -103,6 +103,35 @@ class TestPaths:
         monkeypatch.setattr(paths_mod, "get_user_workspace_dir", lambda: tmp_path)
         assert paths_mod.debug_trace_dir("code.normal") == tmp_path / ".code" / "traces"
 
+    def test_original_agent_plan_keeps_agent_dir_after_code_profile_resolution(
+        self, monkeypatch, tmp_path
+    ):
+        monkeypatch.setattr(paths_mod, "get_user_workspace_dir", lambda: tmp_path)
+        mode = paths_mod.resolve_debug_trace_mode("code.plan", "agent.plan")
+
+        assert paths_mod.debug_trace_file(mode, "sess") == (
+            tmp_path / ".agent" / "traces" / "dump-agent-sess.txt"
+        )
+
+    def test_plain_web_agent_in_code_profile_remains_code_dump(self):
+        assert paths_mod.resolve_debug_trace_mode("code.normal", "agent") == "code.normal"
+
+    def test_explicit_code_plan_remains_code_dump(self):
+        assert paths_mod.resolve_debug_trace_mode("code.plan", "code.plan") == "code.plan"
+
+    def test_original_agent_plan_uses_agent_debug_settings(self, monkeypatch):
+        monkeypatch.setattr(
+            debug_config,
+            "_load_debug_trace_config",
+            lambda: {
+                "agent": {"enabled": True},
+                "code": {"enabled": False},
+            },
+        )
+        mode = paths_mod.resolve_debug_trace_mode("code.plan", "agent.plan")
+
+        assert resolve_debug_trace_settings(mode=mode, request_debug=False).enabled is True
+
     def test_file_names(self, monkeypatch, tmp_path):
         monkeypatch.setattr(paths_mod, "get_user_workspace_dir", lambda: tmp_path)
         assert paths_mod.debug_trace_file("agent.plan", "sess").name == "dump-agent-sess.txt"
@@ -255,6 +284,34 @@ class TestDebugTraceLoggerFeed:
         assert "input_tokens=100" in out and "model_name=GLM-5.2" in out
 
 
+    def test_answer_chunk_dropped_when_model_output_off(self, tmp_path):
+        # include_model_output=False must suppress the trailing `answer`
+        # chunk too — it re-sends the whole reply and is classified as
+        # text, so without this guard the reply leaks into the dump as a
+        # category=text JSON blob even though llm_output was suppressed.
+        s = debug_config.DebugTraceSettings(
+            mode="code.normal",
+            enabled=True,
+            dump_enabled=True,
+            otel_enabled=False,
+            include_model_output=False,
+        )
+        lg = DebugTraceLogger(
+            file_path=tmp_path / "dump.txt",
+            mode="code.normal",
+            session_id="sess",
+            request_id="req-1",
+            settings=s,
+        )
+        lg.start_run()
+        lg.feed(_chunk("llm_output", {"content": "streamed reply"}))
+        lg.feed(_chunk("answer", {"content": "streamed reply"}))
+        lg.end_run(status="ok")
+        out = _read(lg)
+        assert "streamed reply" not in out
+        assert "category=text" not in out
+
+
 # ── session registry (cross-task logger recovery) ──────────────────────────
 class TestSessionRegistry:
     """Dispatch sites run in the DeepAgent supervisor task, where the per-request
@@ -314,43 +371,30 @@ class TestSessionRegistry:
             lg.flush()  # close the dump file opened on construction
 
 
-# ── OTel get_team_span global fallback ─────────────────────────────────────
-class TestOtelTeamSpanFallback:
-    """The get_team_span monkeypatch returns _CURRENT_ROOT_SPAN when the
-    per-request ContextVar is invisible (agent runs in a session-setup supervisor
-    task), so OtelCallbackHandler finds a parent and emits child spans."""
+# ── OTel single-agent span mechanics ───────────────────────────────────────
+# Root-span fallback, run-output stamping, the single-agent team marker and
+# the create_subagent hook now live in the SDK; they are covered by
+# ``tests/unit_tests/harness/observability`` in the openjiuwen repository.
 
-    def test_patch_is_installed(self):
-        # ALL consumers must be patched: callback_handler (llm/tool spans) AND
-        # rail (agent.<type>.invoke spans — returns early when get_team_span is None).
-        import openjiuwen.agent_teams.observability.callback_handler as ch
-        import openjiuwen.agent_teams.observability.rail as rail
-        import jiuwenswarm.agents.harness.agent_observability as obs  # triggers install
 
-        # Patched bindings are tracked in the module-level _team_span_patched set
-        # (the wrapper is itself the key — it becomes the next lookup's orig, so
-        # re-install is idempotent).
-        assert ch.get_team_span in obs._team_span_patched
-        assert rail.get_team_span in obs._team_span_patched
+def test_assemble_run_answer_does_not_double_count_the_repeated_final():
+    """An ``answer`` chunk re-sends the whole reply the deltas already carried."""
+    from jiuwenswarm.server.runtime.agent_adapter.interface_deep import (
+        _assemble_run_answer,
+    )
 
-    def test_fallback_returns_current_root_span(self):
-        # _team_span_ctx ContextVar is unset in the test process -> orig returns
-        # None -> the patched get_team_span falls back to _CURRENT_ROOT_SPAN.
-        import openjiuwen.agent_teams.observability.callback_handler as ch
-        import jiuwenswarm.agents.harness.agent_observability as obs
+    assert _assemble_run_answer(["hello ", "world"], "hello world") == "hello world"
 
-        obs._CURRENT_ROOT_SPAN = "ROOT_SENTINEL"
-        try:
-            assert ch.get_team_span() == "ROOT_SENTINEL"
-        finally:
-            obs._CURRENT_ROOT_SPAN = None
 
-    def test_fallback_none_when_no_global_and_contextvar_empty(self):
-        import openjiuwen.agent_teams.observability.callback_handler as ch
-        import jiuwenswarm.agents.harness.agent_observability as obs
+def test_assemble_run_answer_keeps_a_flushed_tail():
+    """A cut-short round flushes only its tail as chat.final — keep both parts."""
+    from jiuwenswarm.server.runtime.agent_adapter.interface_deep import (
+        _assemble_run_answer,
+    )
 
-        obs._CURRENT_ROOT_SPAN = None
-        assert ch.get_team_span() is None
+    assert _assemble_run_answer(["hello "], "world") == "hello world"
+    assert _assemble_run_answer([], "only final") == "only final"
+    assert _assemble_run_answer([], "") == ""
 
 
 # ── truncation / redaction ─────────────────────────────────────────────────
@@ -593,22 +637,19 @@ class TestAgentObservabilityForce:
     def _reset(self):
         import jiuwenswarm.agents.harness.agent_observability as ao
         ao._agent_observability_active = False
-        ao._agent_owns_provider = False
         ao._force_ever_enabled = False
 
     def test_force_inits_and_sticky_blocks_teardown(self, monkeypatch):
         import jiuwenswarm.agents.harness.agent_observability as ao
-        import openjiuwen.agent_teams.observability as obs
         self._reset()
         calls = {"init": 0, "shutdown": 0}
-        monkeypatch.setattr(ao, "get_config", lambda: {"agent_observability": {"enabled": False}})
-        monkeypatch.setattr(obs, "is_initialized", lambda: False)
-        monkeypatch.setattr(obs, "ObservabilityConfig", lambda **kw: kw)
 
-        def fake_init(_cfg):
+        def fake_acquire(_cfg):
             calls["init"] += 1
+            return False
 
-        monkeypatch.setattr(obs, "init_observability", fake_init)
+        monkeypatch.setattr(ao, "get_config", lambda: {"agent_observability": {"enabled": False}})
+        monkeypatch.setattr(ao, "acquire_observability", fake_acquire)
         monkeypatch.setattr(
             ao, "shutdown_agent_observability",
             lambda: calls.__setitem__("shutdown", calls["shutdown"] + 1),
@@ -629,7 +670,6 @@ class TestAgentObservabilityForce:
         calls = {"shutdown": 0}
         # simulate a config-gated active provider (force never used)
         ao._agent_observability_active = True
-        ao._agent_owns_provider = True
         ao._force_ever_enabled = False
         monkeypatch.setattr(ao, "get_config", lambda: {"agent_observability": {"enabled": False}})
         monkeypatch.setattr(
@@ -909,86 +949,51 @@ class TestSubagentCapture:
         apply_task_tool_debug_patch()
         apply_task_tool_debug_patch()  # second call must be a no-op
         assert getattr(TaskTool, "debug_trace_patch_applied", False) is True
+        assert getattr(TaskTool, "debug_trace_patch_mode", "") == "dispatch_only"
+        assert TaskTool.invoke.__module__ == "openjiuwen.harness.tools.subagent.task_tool"
 
-    def test_ensure_observability_rail_attaches_when_obs_up(self, monkeypatch):
-        # When observability is initialized, _ensure_observability_rail must
-        # add_rail() an ObservabilityRail onto the subagent (run-time attachment,
-        # since build-time is unreliable when obs isn't up yet).
-        import types
+    def test_task_tool_patch_forwards_sdk_session(self, monkeypatch):
+        from openjiuwen.harness.tools.subagent.task_tool import TaskTool
 
-        from jiuwenswarm.server.runtime.debug_trace import subagent_capture
+        from jiuwenswarm.server.runtime import debug_trace
+        from jiuwenswarm.server.runtime.debug_trace.task_tool_patch import (
+            apply_task_tool_debug_patch,
+        )
 
-        sentinel = types.SimpleNamespace(name="OBS_RAIL")
+        apply_task_tool_debug_patch()
+        session = object()
+        captured: dict[str, Any] = {}
 
-        class FakeObsRail:
-            pass
+        class DebugLogger:
+            @staticmethod
+            def captures_subagent_flow() -> bool:
+                return True
 
-        # Point the module-level symbols the helper imports at fakes.
-        import sys
+        async def fake_invoke_subagent_with_trace(subagent, **kwargs):
+            captured.update(kwargs)
+            return {"output": "ok", "result_type": "answer"}
 
-        fake_mod = types.ModuleType("fake_obs_rail")
-        fake_mod.ObservabilityRail = FakeObsRail
-        fake_mod.maybe_observability_rail = lambda: sentinel
-        monkeypatch.setitem(sys.modules, "openjiuwen.agent_teams.observability.rail", fake_mod)
+        monkeypatch.setattr(debug_trace, "get_debug_trace_logger", lambda: DebugLogger())
+        monkeypatch.setattr(
+            debug_trace,
+            "invoke_subagent_with_trace",
+            fake_invoke_subagent_with_trace,
+        )
 
-        added: list[Any] = []
+        result = asyncio.run(
+            TaskTool._invoke_subagent(
+                object(),
+                object(),
+                {"query": "q"},
+                parent_session_id="parent-session",
+                session=session,
+            )
+        )
 
-        class FakeSub:
-            def configured_rails(self):
-                return []  # none yet
+        assert result["output"] == "ok"
+        assert captured["session"] is session
+        assert captured["session_id"] == "parent-session"
 
-            def add_rail(self, rail):
-                added.append(rail)
-
-        subagent_capture._ensure_observability_rail(FakeSub())
-        assert added == [sentinel]
-
-    def test_ensure_observability_rail_skips_when_already_attached(self, monkeypatch):
-        import types, sys
-
-        from jiuwenswarm.server.runtime.debug_trace import subagent_capture
-
-        class FakeObsRail:
-            pass
-
-        sentinel = types.SimpleNamespace(name="OBS_RAIL")
-
-        fake_mod = types.ModuleType("fake_obs_rail")
-        fake_mod.ObservabilityRail = FakeObsRail
-        fake_mod.maybe_observability_rail = lambda: sentinel
-        monkeypatch.setitem(sys.modules, "openjiuwen.agent_teams.observability.rail", fake_mod)
-
-        added: list[Any] = []
-
-        class FakeSub:
-            def configured_rails(self):
-                return [FakeObsRail()]  # already has an ObservabilityRail
-
-            def add_rail(self, rail):
-                added.append(rail)
-
-        subagent_capture._ensure_observability_rail(FakeSub())
-        assert added == []  # idempotent: not re-added
-
-    def test_ensure_observability_rail_noop_when_obs_off(self, monkeypatch):
-        import types, sys
-
-        from jiuwenswarm.server.runtime.debug_trace import subagent_capture
-
-        fake_mod = types.ModuleType("fake_obs_rail")
-        fake_mod.ObservabilityRail = type("ObservabilityRail", (), {})
-        fake_mod.maybe_observability_rail = lambda: None  # obs not initialized
-        monkeypatch.setitem(sys.modules, "openjiuwen.agent_teams.observability.rail", fake_mod)
-
-        added: list[Any] = []
-
-        class FakeSub:
-            def configured_rails(self):
-                return []
-
-            def add_rail(self, rail):
-                added.append(rail)
-
-        subagent_capture._ensure_observability_rail(FakeSub())
-        assert added == []  # no-op when observability is off
-
+    # Sub-agent rail attachment moved into the SDK
+    # (``openjiuwen.harness.observability.rail``); it is covered by
+    # ``tests/unit_tests/harness/observability/test_rail.py`` there.

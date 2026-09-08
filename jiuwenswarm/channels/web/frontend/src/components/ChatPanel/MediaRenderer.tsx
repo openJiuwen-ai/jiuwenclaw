@@ -1,10 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { MediaItem } from '../../types';
-import {
-  FileTypeIcon,
-  getFileTypeIconKeyFromFilename,
-  splitFilenameParts,
-} from './FileTypeIcon';
+import { FileIcon, getFileExtensionLabel } from '../FileIcon';
 import { stripUploadDocumentBlocks } from '../../utils/documentMessage';
 
 export { stripUploadDocumentBlocks };
@@ -20,9 +16,9 @@ interface MediaRendererProps {
 const VISIBLE_FILE_COUNT = 2;
 
 function isImageItem(item: MediaItem): boolean {
-  if (item.type === 'image') return true;
-  const mime = (item.mimeType || item.mime_type || '').toLowerCase();
-  return mime.startsWith('image/');
+  // Attachment routing owns the media/document distinction. MIME metadata alone
+  // must not turn ordinary files such as SVG documents back into image previews.
+  return item.type === 'image';
 }
 
 function isCardItem(item: MediaItem): boolean {
@@ -37,14 +33,16 @@ function mediaSrc(item: MediaItem): string | undefined {
     return `data:${mimeType};base64,${base64Data}`;
   }
   if (item.url) return item.url;
-  if (item.path) return `/file-api/raw-file?path=${encodeURIComponent(item.path)}`;
+  // Documents keep local absolute paths for agent @path refs; raw-file is project-scoped.
+  if (item.path && isImageItem(item)) {
+    return `/file-api/raw-file?path=${encodeURIComponent(item.path)}`;
+  }
   return undefined;
 }
 
 function FileCard({ item }: { item: MediaItem }) {
   const filename = item.filename || 'file';
-  const { stem, extLabel } = splitFilenameParts(filename);
-  const typeKey = getFileTypeIconKeyFromFilename(filename, item.type);
+  const extLabel = getFileExtensionLabel(filename);
   const src = mediaSrc(item);
   const showThumb = isImageItem(item) && Boolean(src);
 
@@ -54,12 +52,12 @@ function FileCard({ item }: { item: MediaItem }) {
         {showThumb ? (
           <img src={src} alt="" className="chat-msg-file-card__thumb" />
         ) : (
-          <FileTypeIcon typeKey={typeKey} size={28} />
+          <FileIcon fileName={filename} size={28} />
         )}
       </span>
       <span className="chat-msg-file-card__meta">
         <span className="chat-msg-file-card__name" title={filename}>
-          {stem}
+          {filename}
         </span>
         {extLabel ? <span className="chat-msg-file-card__ext">{extLabel}</span> : null}
       </span>
@@ -70,6 +68,8 @@ function FileCard({ item }: { item: MediaItem }) {
     return (
       <a
         className="chat-msg-file-card"
+        data-testid="chat-panel-msg-file-card"
+        data-variant={filename}
         href={src}
         download={filename}
         title={filename}
@@ -80,7 +80,7 @@ function FileCard({ item }: { item: MediaItem }) {
   }
 
   return (
-    <div className="chat-msg-file-card" title={filename}>
+    <div className="chat-msg-file-card" data-testid="chat-panel-msg-file-card" data-variant={filename} title={filename}>
       {body}
     </div>
   );
@@ -109,10 +109,11 @@ function OverflowMenu({ items }: { items: MediaItem[] }) {
   }, [open]);
 
   return (
-    <div className="chat-msg-file-more" ref={rootRef}>
+    <div className="chat-msg-file-more" data-testid="chat-panel-msg-file-more" ref={rootRef}>
       <button
         type="button"
         className="chat-msg-file-more__btn"
+        data-testid="chat-panel-msg-file-more-btn"
         aria-expanded={open}
         aria-haspopup="menu"
         onClick={() => setOpen((prev) => !prev)}
@@ -120,10 +121,9 @@ function OverflowMenu({ items }: { items: MediaItem[] }) {
         +{items.length}
       </button>
       {open && (
-        <div className="chat-msg-file-more__menu" role="menu">
+        <div className="chat-msg-file-more__menu" data-testid="chat-panel-msg-file-more-menu" role="menu">
           {items.map((item, index) => {
             const filename = item.filename || 'file';
-            const typeKey = getFileTypeIconKeyFromFilename(filename, item.type);
             const src = mediaSrc(item);
             const showThumb = isImageItem(item) && Boolean(src);
             const content = (
@@ -131,7 +131,7 @@ function OverflowMenu({ items }: { items: MediaItem[] }) {
                 {showThumb ? (
                   <img src={src} alt="" className="chat-msg-file-more__thumb" />
                 ) : (
-                  <FileTypeIcon typeKey={typeKey} size={20} />
+                  <FileIcon fileName={filename} size={20} />
                 )}
                 <span className="chat-msg-file-more__name" title={filename}>
                   {filename}
@@ -143,6 +143,8 @@ function OverflowMenu({ items }: { items: MediaItem[] }) {
                 <a
                   key={`${filename}-${index}`}
                   className="chat-msg-file-more__item"
+                  data-testid="chat-panel-msg-file-more-item"
+                  data-variant={filename}
                   href={src}
                   download={filename}
                   role="menuitem"
@@ -153,7 +155,7 @@ function OverflowMenu({ items }: { items: MediaItem[] }) {
               );
             }
             return (
-              <div key={`${filename}-${index}`} className="chat-msg-file-more__item" role="menuitem">
+              <div key={`${filename}-${index}`} className="chat-msg-file-more__item" data-testid="chat-panel-msg-file-more-item" data-variant={filename} role="menuitem">
                 {content}
               </div>
             );
@@ -176,7 +178,7 @@ function FileAttachmentBar({
   const overflow = items.slice(VISIBLE_FILE_COUNT);
 
   return (
-    <div className={`chat-msg-file-row chat-msg-file-row--${align}`}>
+    <div className={`chat-msg-file-row chat-msg-file-row--${align}`} data-testid="chat-panel-msg-file-row">
       {visible.map((item, index) => (
         <FileCard key={`${item.filename}-${index}`} item={item} />
       ))}
@@ -196,13 +198,13 @@ function MediaItemView({ item }: { item: MediaItem }) {
   switch (item.type) {
     case 'audio':
       return (
-        <audio controls className="w-full">
+        <audio controls className="w-full" data-testid="chat-panel-msg-media-item" data-variant="audio">
           <source src={src} type={mimeType} />
         </audio>
       );
     case 'video':
       return (
-        <video controls className="chat-msg-media-image">
+        <video controls className="chat-msg-media-image" data-testid="chat-panel-msg-media-item" data-variant="video">
           <source src={src} type={mimeType} />
         </video>
       );
@@ -220,10 +222,10 @@ export function MediaRenderer({ items, align = 'end', variant = 'inline' }: Medi
   const richItems = items.filter((item) => !isCardItem(item));
 
   return (
-    <div className={variant === 'above' ? 'chat-msg-attachments chat-msg-attachments--above' : 'chat-msg-attachments'}>
+    <div className={variant === 'above' ? 'chat-msg-attachments chat-msg-attachments--above' : 'chat-msg-attachments'} data-testid="chat-panel-msg-attachments">
       {cardItems.length > 0 && <FileAttachmentBar items={cardItems} align={align} />}
       {richItems.length > 0 && (
-        <div className={`chat-msg-media-rich chat-msg-media-rich--${align}`}>
+        <div className={`chat-msg-media-rich chat-msg-media-rich--${align}`} data-testid="chat-panel-msg-media-rich">
           {richItems.map((item, index) => (
             <MediaItemView key={`${item.filename}-${index}`} item={item} />
           ))}

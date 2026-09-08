@@ -1,3 +1,5 @@
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+
 import asyncio
 import json
 import types
@@ -16,9 +18,15 @@ from jiuwenswarm.server.runtime.agent_adapter.interface_deep import (
     _build_context_assemble_rail,
     _build_context_processor_rail,
 )
+from jiuwenswarm.agents.harness.common.rails.symphony.retrieval_context_processor import (
+    SymphonyRetrievalCompactProcessorConfig,
+)
 from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
+from jiuwenswarm.common.e2a.wire_codec import parse_agent_server_wire_unary
 from jiuwenswarm.common.schema.agent import AgentRequest
 from jiuwenswarm.common.schema.message import ReqMethod
+from jiuwenswarm.observability.session_delete import trajectory_session_accepts_records
+from jiuwenswarm.server.runtime.team_entity_store import TeamEntityStoreError
 
 
 class FakeWebSocket:
@@ -38,6 +46,7 @@ class FakeAgentManager:
         self.claim_session_calls = []
         self.activated_sessions = []
         self.released_sessions = []
+        self.cleaned_session_runtimes = []
 
     async def initialize(self, channel_id="", extra_config=None):
         self.initialize_calls.append(
@@ -67,6 +76,12 @@ class FakeAgentManager:
 
     def get_agent_nowait(self, channel_id=""):
         return None
+
+    async def cleanup_session_runtime(self, *, channel_id="", session_id: str):
+        self.cleaned_session_runtimes.append(
+            {"channel_id": channel_id, "session_id": session_id}
+        )
+        return False
 
 
 class FakeTeamManager:
@@ -132,6 +147,9 @@ class AgentWebSocketServerHarness(agent_ws_server_module.AgentWebSocketServer):
 
     async def handle_session_switch_for_test(self, ws, request, send_lock):
         await self._handle_session_switch(ws, request, send_lock)
+
+    async def handle_session_kvc_prepare_for_test(self, ws, request, send_lock):
+        await self._handle_session_kvc_prepare(ws, request, send_lock)
 
     async def handle_team_delete_for_test(self, ws, request, send_lock):
         await self._handle_team_delete(ws, request, send_lock)
@@ -232,14 +250,115 @@ def test_interface_deep_parse_stream_chunk_preserves_tool_update():
     }
 
 
+def _full_context_usage_payload():
+    return {
+        "event_type": "context.usage",
+        "schema_version": "context-usage.v1",
+        "phase": "pre_call",
+        "request_id": "req-context",
+        "session_id": "sess-context",
+        "context_window": {
+            "limit_tokens": 200000,
+            "input_tokens": 25000,
+            "occupancy_rate": 12.5,
+        },
+        "parts": {
+            "system_prompt": {
+                "category": "system_prompt",
+                "tokens": 10000,
+                "percentage_of_window": 5.0,
+                "percentage_of_input": 40.0,
+            },
+            "tools": {
+                "category": "tools",
+                "tokens": 15000,
+                "percentage_of_window": 7.5,
+                "percentage_of_input": 60.0,
+            },
+        },
+        "kv_cache": {
+            "request": {
+                "input_tokens": 25000,
+                "cache_read_tokens": 20000,
+                "cache_miss_tokens": 5000,
+                "hit_rate": 0.8,
+                "status": "observed",
+            },
+            "session": {
+                "calls_total": 1,
+                "calls_observed": 1,
+                "weighted_hit_rate": 0.8,
+            },
+        },
+    }
+
+
+def test_parse_stream_chunk_preserves_full_context_usage_snapshot():
+    parsed = parse_stream_chunk(
+        types.SimpleNamespace(
+            type="context.usage",
+            payload=_full_context_usage_payload(),
+        )
+    )
+
+    assert parsed["event_type"] == "context.usage"
+    assert parsed["context_window"]["limit_tokens"] == 200000
+    assert parsed["parts"]["system_prompt"]["tokens"] == 10000
+    assert parsed["parts"]["system_prompt"]["percentage_of_window"] == 5.0
+    assert parsed["parts"]["tools"]["percentage_of_input"] == 60.0
+    assert parsed["kv_cache"]["request"]["cache_read_tokens"] == 20000
+    assert parsed["kv_cache"]["session"]["weighted_hit_rate"] == 0.8
+    assert parsed["session_kv_cache_hit_rate"] == 0.8
+    assert parsed["rate"] == 12.5
+    assert parsed["context_usage_summary"]["occupancy_rate"] == 0.125
+    assert parsed["context_usage_summary"]["percentage"] == 12.5
+    assert parsed["context_max"] == 200000
+    assert parsed["tokens_used"] == 25000
+
+
+def test_interface_deep_parse_stream_chunk_preserves_full_context_usage_snapshot():
+    parse_chunk = getattr(interface_deep_module.JiuWenSwarmDeepAdapter, "_parse_stream_chunk")
+    parsed = parse_chunk(
+        types.SimpleNamespace(
+            type="context.usage",
+            payload=_full_context_usage_payload(),
+        )
+    )
+
+    assert parsed["parts"]["system_prompt"]["percentage_of_window"] == 5.0
+    assert parsed["parts"]["tools"]["tokens"] == 15000
+    assert parsed["kv_cache"]["request"]["cache_miss_tokens"] == 5000
+    assert parsed["kv_cache"]["session"]["calls_observed"] == 1
+    assert parsed["session_kv_cache_hit_rate"] == 0.8
+    assert parsed["rate"] == 12.5
+    assert parsed["context_usage_summary"]["occupancy_rate"] == 0.125
+    assert parsed["context_usage_summary"]["percentage"] == 12.5
+    assert parsed["context_max"] == 200000
+    assert parsed["tokens_used"] == 25000
+
+
+def test_context_usage_legacy_rate_converts_core_ratio_to_percent():
+    payload = _full_context_usage_payload()
+    payload["context_window"]["occupancy_rate"] = 0.125
+
+    parsed = parse_stream_chunk(
+        types.SimpleNamespace(
+            type="context.usage",
+            payload=payload,
+        )
+    )
+
+    assert parsed["rate"] == 12.5
+
+
 def test_interface_deep_parse_stream_chunk_preserves_tool_result_status():
     raw_output = {
         "success": False,
         "direct_display": True,
         "display_format": "markdown",
         "mermaid": "flowchart LR\n  A --> B",
-        "score_status": {"success": True, "exists": False},
-        "score_build": {"success": False, "detail": "failed"},
+        "graph_status": {"success": True, "exists": False},
+        "graph_build": {"success": False, "detail": "failed"},
     }
     parsed = parse_stream_chunk(
         types.SimpleNamespace(
@@ -247,7 +366,7 @@ def test_interface_deep_parse_stream_chunk_preserves_tool_result_status():
             payload={
                 "tool_result": {
                     "tool_call_id": "call-1",
-                    "tool_name": "symphony_compose_score",
+                    "tool_name": "symphony_compose_graph",
                     "result": "failed",
                     "status": "error",
                     "success": False,
@@ -256,8 +375,8 @@ def test_interface_deep_parse_stream_chunk_preserves_tool_result_status():
                     "direct_display": True,
                     "display_format": "markdown",
                     "mermaid": raw_output["mermaid"],
-                    "score_status": raw_output["score_status"],
-                    "score_build": raw_output["score_build"],
+                    "graph_status": raw_output["graph_status"],
+                    "graph_build": raw_output["graph_build"],
                 }
             },
         )
@@ -266,7 +385,7 @@ def test_interface_deep_parse_stream_chunk_preserves_tool_result_status():
     assert parsed == {
         "event_type": "chat.tool_result",
         "result": "failed",
-        "tool_name": "symphony_compose_score",
+        "tool_name": "symphony_compose_graph",
         "tool_call_id": "call-1",
         "status": "error",
         "success": False,
@@ -275,8 +394,8 @@ def test_interface_deep_parse_stream_chunk_preserves_tool_result_status():
         "direct_display": True,
         "display_format": "markdown",
         "mermaid": raw_output["mermaid"],
-        "score_status": raw_output["score_status"],
-        "score_build": raw_output["score_build"],
+        "graph_status": raw_output["graph_status"],
+        "graph_build": raw_output["graph_build"],
     }
 
 
@@ -385,7 +504,7 @@ def test_parse_stream_chunk_preserves_symphony_status_payload():
         types.SimpleNamespace(
             type="chat.symphony_status",
             payload={
-                "source": "symphony_compose_score",
+                "source": "symphony_compose_graph",
                 "operation_id": "call-1",
                 "phase": "checking_score",
                 "content": "Symphony status",
@@ -396,7 +515,7 @@ def test_parse_stream_chunk_preserves_symphony_status_payload():
 
     assert parsed == {
         "event_type": "chat.symphony_status",
-        "source": "symphony_compose_score",
+        "source": "symphony_compose_graph",
         "operation_id": "call-1",
         "phase": "checking_score",
         "content": "Symphony status",
@@ -410,7 +529,7 @@ def test_interface_deep_parse_stream_chunk_preserves_symphony_status_payload():
         types.SimpleNamespace(
             type="chat.symphony_status",
             payload={
-                "source": "symphony_compose_score",
+                "source": "symphony_compose_graph",
                 "operation_id": "call-1",
                 "phase": "planning",
                 "content": "Symphony planning status",
@@ -421,7 +540,7 @@ def test_interface_deep_parse_stream_chunk_preserves_symphony_status_payload():
 
     assert parsed == {
         "event_type": "chat.symphony_status",
-        "source": "symphony_compose_score",
+        "source": "symphony_compose_graph",
         "operation_id": "call-1",
         "phase": "planning",
         "content": "Symphony planning status",
@@ -625,16 +744,17 @@ def test_sync_team_identity_metadata_updates_only_for_create_kinds(monkeypatch):
     TeamHelpersHarness.sync_team_identity_metadata_for_test(
         channel_id="web",
         session_id="team_sess_001",
-        mode="team",
         ready_team_name="demo-team",
         activation_kind=RunActionKind.CREATE.value,
     )
 
+    # 只写 team_name，不碰 metadata.mode（sync_team_identity_metadata 曾写死
+    # mode="team" 会盖掉 chat 轮次落盘的 team.work.plan，制造 session.plan_status
+    # 误报 false 的空窗）。
     assert updates == [
         {
             "session_id": "team_sess_001",
             "channel_id": "web",
-            "mode": "team",
             "team_name": "demo-team",
         }
     ]
@@ -657,7 +777,6 @@ def test_sync_team_identity_metadata_skips_recover_kinds(monkeypatch):
     TeamHelpersHarness.sync_team_identity_metadata_for_test(
         channel_id="web",
         session_id="team_sess_001",
-        mode="team",
         ready_team_name="new-team",
         activation_kind=RunActionKind.NEW_TEAM_IN_SESSION.value,
     )
@@ -682,7 +801,6 @@ def test_sync_team_identity_metadata_keeps_existing_name_on_mismatch(monkeypatch
     TeamHelpersHarness.sync_team_identity_metadata_for_test(
         channel_id="web",
         session_id="team_sess_001",
-        mode="team",
         ready_team_name="new-team",
         activation_kind=RunActionKind.CREATE.value,
     )
@@ -789,8 +907,12 @@ async def test_handle_session_create_returns_session_id(monkeypatch, tmp_path):
     assert len(fake_manager.claim_session_calls) == 1
     assert fake_manager.claim_session_calls[0]["channel_id"] == "acp"
     assert fake_manager.claim_session_calls[0]["create_token"] == "create-acp-001"
-    metadata = json.loads((sessions_root / "acp_session_001" / "metadata.json").read_text(encoding="utf-8"))
-    assert metadata["mode"] == "agent"
+    # 读路径惰性迁移：旧 canonical agent → 新 canonical agent.work.normal。
+    # 直接用 get_session_metadata 读取，避免与 create 流程里 resolve_session_switch_context
+    # 触发的异步惰性迁移写回（agent → agent.work.normal）构成原始文件读竞态。
+    from jiuwenswarm.server.runtime.session.session_metadata import get_session_metadata
+    metadata = get_session_metadata("acp_session_001", cache_bust=True)
+    assert metadata["mode"] == "agent.work.normal"
     assert fake_ws.sent == [
         {
             "response_id": "req-session-create",
@@ -800,12 +922,74 @@ async def test_handle_session_create_returns_session_id(monkeypatch, tmp_path):
                 "projectId": "default",
                 "projectDir": "",
                 "workMode": "work",
+                "persist_session": False,
                 "prewarm_hit": True,
                 "prewarm_status": "ready",
             },
             "ok": True,
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_handle_session_create_locks_persist_session(monkeypatch, tmp_path):
+    server = AgentWebSocketServerHarness()
+    fake_manager = FakeAgentManager(session_id="persist_session_001")
+    server.set_agent_manager_for_test(fake_manager)
+    fake_ws = FakeWebSocket()
+    sessions_root = tmp_path / "sessions"
+    monkeypatch.setattr(
+        agent_ws_server_module,
+        "encode_agent_response_for_wire",
+        fake_encode_agent_response_for_wire,
+    )
+    patch_session_roots(monkeypatch, sessions_root)
+    request = AgentRequest(
+        request_id="create-persist-session",
+        channel_id="web",
+        req_method=ReqMethod.SESSION_CREATE,
+        params={"create_token": "persist-token", "persist_session": True},
+    )
+
+    await server.handle_session_create_for_test(fake_ws, request, asyncio.Lock())
+
+    assert fake_manager.claim_session_calls[0]["persist_session"] is True
+    assert fake_ws.sent[0]["payload"]["persist_session"] is True
+    metadata = json.loads(
+        (sessions_root / "persist_session_001" / "metadata.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert metadata["persist_session"] is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("invalid_value", [1, "true", None, {}])
+async def test_handle_session_create_requires_boolean_persist_session(
+    monkeypatch, tmp_path, invalid_value
+):
+    server = AgentWebSocketServerHarness()
+    fake_manager = FakeAgentManager(session_id="must-not-create")
+    server.set_agent_manager_for_test(fake_manager)
+    fake_ws = FakeWebSocket()
+    monkeypatch.setattr(
+        agent_ws_server_module,
+        "encode_agent_response_for_wire",
+        fake_encode_agent_response_for_wire,
+    )
+    patch_session_roots(monkeypatch, tmp_path / "sessions")
+    request = AgentRequest(
+        request_id="create-invalid-persist",
+        channel_id="web",
+        req_method=ReqMethod.SESSION_CREATE,
+        params={"create_token": "invalid-token", "persist_session": invalid_value},
+    )
+
+    await server.handle_session_create_for_test(fake_ws, request, asyncio.Lock())
+
+    assert fake_manager.claim_session_calls == []
+    assert fake_ws.sent[0]["ok"] is False
+    assert fake_ws.sent[0]["payload"]["error"] == "persist_session must be a boolean"
 
 
 @pytest.mark.asyncio
@@ -925,6 +1109,64 @@ async def test_handle_tui_session_create_accepts_explicit_id_without_prewarm(
 
 
 @pytest.mark.asyncio
+async def test_handle_tui_non_explicit_create_resolves_project_in_agentserver(
+    monkeypatch, tmp_path
+):
+    """Non-``--session`` TUI creates resolve the code project in AgentServer."""
+    server = AgentWebSocketServerHarness()
+    fake_manager = FakeAgentManager(session_id="tui_non_explicit")
+    server.set_agent_manager_for_test(fake_manager)
+    fake_ws = FakeWebSocket()
+    sessions_root = tmp_path / "sessions"
+    monkeypatch.setattr(
+        agent_ws_server_module,
+        "encode_agent_response_for_wire",
+        fake_encode_agent_response_for_wire,
+    )
+    patch_session_roots(monkeypatch, sessions_root)
+    project_dir = str(tmp_path / "tui-code-project")
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.session.project_store.find_or_create_code_project_for_tui_params",
+        lambda _params: types.SimpleNamespace(
+            project_id="proj_tui_code",
+            project_dir=project_dir,
+            work_mode="code",
+        ),
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.session.project_store.resolve_session_project_binding",
+        lambda project_id, resolved_dir: (project_id, resolved_dir, None, None),
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.session.project_store.get_project_by_id",
+        lambda project_id, cache_bust=True: types.SimpleNamespace(work_mode="code"),
+    )
+
+    request = AgentRequest(
+        request_id="req-tui-non-explicit",
+        channel_id="tui",
+        req_method=ReqMethod.SESSION_CREATE,
+        params={
+            "create_token": "legacy-tui-create-001",
+            "mode": "code.normal",
+            "cwd": project_dir,
+            "project_dir": project_dir,
+        },
+    )
+
+    await server.handle_session_create_for_test(fake_ws, request, asyncio.Lock())
+
+    assert len(fake_manager.claim_session_calls) == 1
+    assert fake_manager.claim_session_calls[0]["project_id"] == "proj_tui_code"
+    metadata = json.loads(
+        (sessions_root / "tui_non_explicit" / "metadata.json").read_text(encoding="utf-8")
+    )
+    assert metadata["project_id"] == "proj_tui_code"
+    assert metadata["project_dir"] == project_dir
+    assert fake_ws.sent[0]["ok"] is True
+
+
+@pytest.mark.asyncio
 async def test_handle_tui_explicit_session_create_is_idempotent_and_bypasses_prewarm(
     monkeypatch, tmp_path
 ):
@@ -958,6 +1200,42 @@ async def test_handle_tui_explicit_session_create_is_idempotent_and_bypasses_pre
         assert response["ok"] is True
         assert response["payload"]["session_id"] == "tui_external_idempotent"
         assert response["payload"]["prewarm_status"] == "bypassed"
+
+
+@pytest.mark.asyncio
+async def test_handle_tui_existing_session_rejects_persist_session_change(
+    monkeypatch, tmp_path
+):
+    server = AgentWebSocketServerHarness()
+    fake_manager = FakeAgentManager(session_id="must-not-be-used")
+    server.set_agent_manager_for_test(fake_manager)
+    sessions_root = tmp_path / "sessions"
+    patch_session_roots(monkeypatch, sessions_root)
+    monkeypatch.setattr(
+        agent_ws_server_module,
+        "encode_agent_response_for_wire",
+        fake_encode_agent_response_for_wire,
+    )
+    from jiuwenswarm.server.runtime.session.session_metadata import init_session_metadata
+
+    init_session_metadata(
+        session_id="tui_persist_locked",
+        channel_id="tui",
+        persist_session=True,
+    )
+    fake_ws = FakeWebSocket()
+    request = AgentRequest(
+        request_id="register-persist-mismatch",
+        channel_id="tui",
+        req_method=ReqMethod.SESSION_CREATE,
+        params={"session_id": "tui_persist_locked", "persist_session": False},
+    )
+
+    await server.handle_session_create_for_test(fake_ws, request, asyncio.Lock())
+
+    assert fake_ws.sent[0]["ok"] is False
+    assert fake_ws.sent[0]["payload"]["code"] == "CONFLICT"
+    assert fake_manager.claim_session_calls == []
 
 
 @pytest.mark.asyncio
@@ -1124,7 +1402,7 @@ async def test_handle_tui_explicit_create_rejects_id_owned_by_another_channel(
         ("web", "web_external_001", "no longer accepts session_id"),
         ("tui", "../unsafe", "invalid session_id"),
         ("tui", ".hidden", "invalid session_id"),
-        ("tui", "a" * 81, "invalid session_id"),
+        ("tui", "a" * 97, "invalid session_id"),
         ("tui", "a" * 129, "invalid session_id"),
     ],
 )
@@ -1218,6 +1496,7 @@ async def test_handle_session_create_injected_default_work_mode_does_not_mismatc
                 "projectId": "proj_code",
                 "projectDir": code_project.project_dir,
                 "workMode": "code",
+                "persist_session": False,
                 "prewarm_hit": True,
                 "prewarm_status": "ready",
             },
@@ -1228,7 +1507,8 @@ async def test_handle_session_create_injected_default_work_mode_does_not_mismatc
     from jiuwenswarm.server.runtime.session.session_metadata import get_session_metadata
 
     metadata = get_session_metadata("sess_code_project", cache_bust=True)
-    assert metadata["mode"] == "code.normal"
+    # 读路径惰性迁移：旧 canonical code.normal → 新 canonical agent.code.normal
+    assert metadata["mode"] == "agent.code.normal"
     assert metadata["work_mode"] == "code"
 
 
@@ -1285,6 +1565,7 @@ async def test_handle_session_create_acks_before_async_kvc(monkeypatch, tmp_path
                 "projectId": "default",
                 "projectDir": "",
                 "workMode": "work",
+                "persist_session": False,
                 "prewarm_hit": True,
                 "prewarm_status": "ready",
             },
@@ -1296,7 +1577,6 @@ async def test_handle_session_create_acks_before_async_kvc(monkeypatch, tmp_path
     await create_task
     assert len(kvc_calls) == 1
     assert kvc_calls[0]["target_session_id"] == "sess_async_kvc_001"
-    assert kvc_calls[0]["reason"] == "session.create switch: "
 
 
 @pytest.mark.asyncio
@@ -1354,6 +1634,7 @@ async def test_handle_session_create_prepares_team_before_ack(monkeypatch, tmp_p
                 "projectId": "default",
                 "projectDir": "",
                 "workMode": "work",
+                "persist_session": False,
                 "prewarm_hit": False,
                 "prewarm_status": "bypassed",
             },
@@ -1365,6 +1646,354 @@ async def test_handle_session_create_prepares_team_before_ack(monkeypatch, tmp_p
     assert fake_manager.claim_session_calls[0]["prewarm_eligible"] is False
     assert fake_team_manager.prepare_session_switch_calls == [
         {"session_id": "team_sess_001", "reason": "session.create switch: "}
+    ]
+
+
+@pytest.mark.asyncio
+async def test_handle_session_create_missing_token_preserves_legacy_error_wire(
+    monkeypatch, tmp_path
+):
+    server = AgentWebSocketServerHarness()
+    fake_manager = FakeAgentManager(session_id="unused-session")
+    server.set_agent_manager_for_test(fake_manager)
+    fake_ws = FakeWebSocket()
+
+    monkeypatch.setattr(
+        agent_ws_server_module,
+        "encode_agent_response_for_wire",
+        fake_encode_agent_response_for_wire,
+    )
+    patch_session_roots(monkeypatch, tmp_path / "sessions")
+
+    request = AgentRequest(
+        request_id="req-session-create-missing-token",
+        channel_id="web",
+        req_method=ReqMethod.SESSION_CREATE,
+        params={"mode": "agent"},
+    )
+
+    await server.handle_session_create_for_test(fake_ws, request, asyncio.Lock())
+
+    assert fake_manager.claim_session_calls == []
+    assert fake_ws.sent == [
+        {
+            "response_id": "req-session-create-missing-token",
+            "payload": {"error": "create_token is required"},
+            "ok": False,
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_handle_session_create_existing_metadata_fast_path_skips_owner_and_kvc(
+    monkeypatch, tmp_path
+):
+    server = AgentWebSocketServerHarness()
+    fake_manager = FakeAgentManager(session_id="existing-session")
+    server.set_agent_manager_for_test(fake_manager)
+    fake_ws = FakeWebSocket()
+    sessions_root = tmp_path / "sessions"
+    owner_calls = []
+    kvc_calls = []
+
+    monkeypatch.setattr(
+        agent_ws_server_module,
+        "encode_agent_response_for_wire",
+        fake_encode_agent_response_for_wire,
+    )
+    patch_session_roots(monkeypatch, sessions_root)
+    from jiuwenswarm.server.runtime.session.session_metadata import (
+        init_session_metadata,
+    )
+
+    init_session_metadata(
+        session_id="existing-session",
+        channel_id="web",
+        persist_session=True,
+        mode="agent.work.normal",
+    )
+
+    async def _prepare(**kwargs):
+        owner_calls.append(kwargs)
+
+    async def _dispatch(**kwargs):
+        kvc_calls.append(kwargs)
+
+    monkeypatch.setattr(server, "_prepare_session_switch_owner", _prepare)
+    monkeypatch.setattr(server, "_dispatch_session_switch_kvc", _dispatch)
+
+    request = AgentRequest(
+        request_id="req-session-create-existing",
+        channel_id="web",
+        req_method=ReqMethod.SESSION_CREATE,
+        params={"mode": "agent", "create_token": "existing-token"},
+    )
+
+    await server.handle_session_create_for_test(fake_ws, request, asyncio.Lock())
+
+    assert len(fake_manager.claim_session_calls) == 1
+    assert fake_manager.activated_sessions == ["existing-session"]
+    assert owner_calls == []
+    assert kvc_calls == []
+    assert fake_ws.sent[0]["ok"] is True
+    assert fake_ws.sent[0]["payload"]["session_id"] == "existing-session"
+    assert fake_ws.sent[0]["payload"]["persist_session"] is True
+
+
+@pytest.mark.asyncio
+async def test_handle_session_create_owner_error_releases_claim_and_uses_legacy_wire(
+    monkeypatch, tmp_path
+):
+    server = AgentWebSocketServerHarness()
+    fake_manager = FakeAgentManager(session_id="owner-error-session")
+    server.set_agent_manager_for_test(fake_manager)
+    fake_ws = FakeWebSocket()
+    kvc_calls = []
+
+    monkeypatch.setattr(
+        agent_ws_server_module,
+        "encode_agent_response_for_wire",
+        fake_encode_agent_response_for_wire,
+    )
+    patch_session_roots(monkeypatch, tmp_path / "sessions")
+
+    async def _prepare(**_kwargs):
+        raise RuntimeError("owner prepare failed")
+
+    async def _dispatch(**kwargs):
+        kvc_calls.append(kwargs)
+
+    monkeypatch.setattr(server, "_prepare_session_switch_owner", _prepare)
+    monkeypatch.setattr(server, "_dispatch_session_switch_kvc", _dispatch)
+
+    request = AgentRequest(
+        request_id="req-session-create-owner-error",
+        channel_id="web",
+        req_method=ReqMethod.SESSION_CREATE,
+        params={"mode": "agent", "create_token": "owner-error-token"},
+    )
+
+    await server.handle_session_create_for_test(fake_ws, request, asyncio.Lock())
+
+    assert fake_manager.released_sessions == ["owner-error-session"]
+    assert kvc_calls == []
+    assert fake_ws.sent == [
+        {
+            "response_id": "req-session-create-owner-error",
+            "payload": {"error": "owner prepare failed"},
+            "ok": False,
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_handle_session_create_metadata_is_visible_before_owner_prepare(
+    monkeypatch, tmp_path
+):
+    server = AgentWebSocketServerHarness()
+    fake_manager = FakeAgentManager(session_id="metadata-order-session")
+    server.set_agent_manager_for_test(fake_manager)
+    fake_ws = FakeWebSocket()
+    sessions_root = tmp_path / "sessions"
+    observed_metadata = []
+
+    monkeypatch.setattr(
+        agent_ws_server_module,
+        "encode_agent_response_for_wire",
+        fake_encode_agent_response_for_wire,
+    )
+    patch_session_roots(monkeypatch, sessions_root)
+
+    async def _prepare(**_kwargs):
+        from jiuwenswarm.server.runtime.session.session_metadata import (
+            get_session_metadata,
+        )
+
+        observed_metadata.append(
+            get_session_metadata("metadata-order-session", cache_bust=True)
+        )
+        return False, "agent", None, None, None
+
+    monkeypatch.setattr(server, "_prepare_session_switch_owner", _prepare)
+
+    request = AgentRequest(
+        request_id="req-session-create-metadata-order",
+        channel_id="acp",
+        req_method=ReqMethod.SESSION_CREATE,
+        params={
+            "mode": "agent",
+            "create_token": "metadata-order-token",
+            "persist_session": True,
+            "title": "characterization title",
+            "user_id": "characterization-user",
+            "model_name": "characterization-model",
+            "cron_id": "characterization-cron",
+        },
+    )
+
+    await server.handle_session_create_for_test(fake_ws, request, asyncio.Lock())
+
+    assert len(observed_metadata) == 1
+    metadata = observed_metadata[0]
+    assert metadata["session_id"] == "metadata-order-session"
+    assert metadata["channel_id"] == "acp"
+    assert metadata["user_id"] == "characterization-user"
+    assert metadata["title"] == "characterization title"
+    assert metadata["mode"] == "agent.work.normal"
+    assert metadata["project_id"] == "default"
+    assert metadata["project_dir"] == ""
+    assert metadata["persist_session"] is True
+    assert metadata["work_mode"] == "work"
+    assert metadata["model"] == "characterization-model"
+    assert metadata["cron_id"] == "characterization-cron"
+    assert fake_ws.sent[0]["ok"] is True
+
+
+@pytest.mark.asyncio
+async def test_handle_session_create_prewarm_miss_preserves_success_contract(
+    monkeypatch, tmp_path
+):
+    server = AgentWebSocketServerHarness()
+    fake_manager = FakeAgentManager(session_id="prewarm-miss-session")
+    server.set_agent_manager_for_test(fake_manager)
+    fake_ws = FakeWebSocket()
+    prepare_calls = []
+
+    async def _claim(**kwargs):
+        fake_manager.claim_session_calls.append(kwargs)
+        return types.SimpleNamespace(
+            session_id="prewarm-miss-session",
+            prewarm_hit=False,
+            prewarm_status="warming",
+        )
+
+    async def _prepare(**kwargs):
+        prepare_calls.append(kwargs)
+        return False, "agent", None, None, None
+
+    fake_manager.claim_prewarmed_session = _claim
+    monkeypatch.setattr(
+        agent_ws_server_module,
+        "encode_agent_response_for_wire",
+        fake_encode_agent_response_for_wire,
+    )
+    patch_session_roots(monkeypatch, tmp_path / "sessions")
+    monkeypatch.setattr(server, "_prepare_session_switch_owner", _prepare)
+
+    request = AgentRequest(
+        request_id="req-session-create-prewarm-miss",
+        channel_id="web",
+        req_method=ReqMethod.SESSION_CREATE,
+        params={"mode": "agent", "create_token": "prewarm-miss-token"},
+    )
+
+    await server.handle_session_create_for_test(fake_ws, request, asyncio.Lock())
+
+    assert fake_manager.claim_session_calls[0]["prewarm_eligible"] is True
+    assert fake_manager.activated_sessions == ["prewarm-miss-session"]
+    assert len(prepare_calls) == 1
+    assert prepare_calls[0]["target_session_id"] == "prewarm-miss-session"
+    assert fake_ws.sent == [
+        {
+            "response_id": "req-session-create-prewarm-miss",
+            "payload": {
+                "sessionId": "prewarm-miss-session",
+                "session_id": "prewarm-miss-session",
+                "projectId": "default",
+                "projectDir": "",
+                "workMode": "work",
+                "persist_session": False,
+                "prewarm_hit": False,
+                "prewarm_status": "warming",
+            },
+            "ok": True,
+        }
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("params", "expected_ok"),
+    [
+        ({"create_token": "metadata-wire-token"}, True),
+        ({}, False),
+    ],
+)
+async def test_handle_session_create_preserves_legacy_response_metadata_contract(
+    monkeypatch, tmp_path, params, expected_ok
+):
+    server = AgentWebSocketServerHarness()
+    fake_manager = FakeAgentManager(session_id="metadata-wire-session")
+    server.set_agent_manager_for_test(fake_manager)
+    fake_ws = FakeWebSocket()
+    patch_session_roots(monkeypatch, tmp_path / "sessions")
+
+    async def _prepare(**_kwargs):
+        return False, "agent", None, None, None
+
+    monkeypatch.setattr(server, "_prepare_session_switch_owner", _prepare)
+    request = AgentRequest(
+        request_id=f"req-session-create-metadata-{expected_ok}",
+        channel_id="web",
+        req_method=ReqMethod.SESSION_CREATE,
+        params=params,
+        metadata={"trace_id": "must-not-be-echoed"},
+    )
+
+    await server.handle_session_create_for_test(fake_ws, request, asyncio.Lock())
+
+    response = parse_agent_server_wire_unary(fake_ws.sent[0])
+    assert response.ok is expected_ok
+    assert response.metadata is None
+    if expected_ok:
+        assert response.payload["session_id"] == "metadata-wire-session"
+    else:
+        assert response.payload == {"error": "create_token is required"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("error", "code"),
+    [
+        ("project_dir requires a matching project_id", "BAD_REQUEST"),
+        ("project not found: missing-project", "NOT_FOUND"),
+    ],
+)
+async def test_handle_session_create_preserves_project_binding_error_wire(
+    monkeypatch, tmp_path, error, code
+):
+    server = AgentWebSocketServerHarness()
+    fake_manager = FakeAgentManager(session_id="project-error-session")
+    server.set_agent_manager_for_test(fake_manager)
+    fake_ws = FakeWebSocket()
+
+    monkeypatch.setattr(
+        agent_ws_server_module,
+        "encode_agent_response_for_wire",
+        fake_encode_agent_response_for_wire,
+    )
+    patch_session_roots(monkeypatch, tmp_path / "sessions")
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.session.project_store."
+        "resolve_session_project_binding",
+        lambda _project_id, _project_dir: ("", "", error, code),
+    )
+    request = AgentRequest(
+        request_id=f"req-session-create-project-error-{code.lower()}",
+        channel_id="web",
+        req_method=ReqMethod.SESSION_CREATE,
+        params={"create_token": "project-error-token"},
+    )
+
+    await server.handle_session_create_for_test(fake_ws, request, asyncio.Lock())
+
+    assert fake_manager.claim_session_calls == []
+    assert fake_ws.sent == [
+        {
+            "response_id": request.request_id,
+            "payload": {"error": error, "code": code},
+            "ok": False,
+        }
     ]
 
 
@@ -1587,6 +2216,7 @@ async def test_first_team_chat_auto_binds_and_preserves_original_query(monkeypat
             }
         }
     }
+    session_id = f"sess-auto-team-{mode.replace('.', '-')}"
     original_query = "建立一个团队，开发一个斗地主游戏"
     generation_prompts: list[str] = []
 
@@ -1608,14 +2238,14 @@ async def test_first_team_chat_auto_binds_and_preserves_original_query(monkeypat
     )
 
     init_session_metadata(
-        session_id="sess-auto-team",
+        session_id=session_id,
         channel_id="web",
         mode=mode,
     )
     request = AgentRequest(
         request_id="req-auto-team-chat",
         channel_id="web",
-        session_id="sess-auto-team",
+        session_id=session_id,
         req_method=ReqMethod.CHAT_SEND,
         params={"mode": mode, "query": original_query},
     )
@@ -1626,10 +2256,10 @@ async def test_first_team_chat_auto_binds_and_preserves_original_query(monkeypat
     assert request.params["query"] == original_query
     assert request.params["team_name"] == "landlord_game_team"
     assert generation_prompts == [original_query]
-    persisted = get_session_metadata("sess-auto-team", cache_bust=True)
+    persisted = get_session_metadata(session_id, cache_bust=True)
     assert persisted["team_name"] == "landlord_game_team"
     assert persisted["team_template_id"] == "research"
-    assert binding_store.get("landlord_game_team").session_ids == ("sess-auto-team",)
+    assert binding_store.get("landlord_game_team").session_ids == (session_id,)
     assert entity_store.get("landlord_game_team") is not None
 
 
@@ -1907,8 +2537,8 @@ async def test_handle_session_switch_delegates_product_lifecycle(
 
 
 @pytest.mark.asyncio
-async def test_handle_session_switch_acks_before_async_kvc(monkeypatch):
-    """A slow optional affinity signal must not hold the UI switch response."""
+async def test_handle_session_switch_records_foreground_before_ack(monkeypatch):
+    """The cheap foreground fact is committed before an immediate chat.send."""
     server = AgentWebSocketServerHarness()
     fake_ws = FakeWebSocket()
     kvc_started = asyncio.Event()
@@ -1944,13 +2574,18 @@ async def test_handle_session_switch_acks_before_async_kvc(monkeypatch):
         },
     )
 
-    await server.handle_session_switch_for_test(
-        fake_ws,
-        request,
-        asyncio.Lock(),
+    switch_task = asyncio.create_task(
+        server.handle_session_switch_for_test(
+            fake_ws,
+            request,
+            asyncio.Lock(),
+        )
     )
     await asyncio.wait_for(kvc_started.wait(), timeout=1.0)
+    assert fake_ws.sent == []
 
+    kvc_release.set()
+    await switch_task
     assert fake_ws.sent == [
         {
             "response_id": "req-session-switch-async-kvc",
@@ -1963,8 +2598,58 @@ async def test_handle_session_switch_acks_before_async_kvc(monkeypatch):
         }
     ]
 
-    kvc_release.set()
-    await asyncio.sleep(0)
+
+@pytest.mark.asyncio
+async def test_handle_session_kvc_prepare_is_best_effort(monkeypatch):
+    server = AgentWebSocketServerHarness()
+    fake_ws = FakeWebSocket()
+    calls = []
+
+    def _prepare(**kwargs):
+        calls.append(kwargs)
+        return "scheduled"
+
+    monkeypatch.setattr(
+        agent_ws_server_module,
+        "encode_agent_response_for_wire",
+        fake_encode_agent_response_for_wire,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.session.kv_cache.kv_cache_product_hooks."
+        "record_session_prepare",
+        _prepare,
+    )
+
+    request = AgentRequest(
+        request_id="req-kvc-prepare",
+        channel_id="web",
+        req_method=ReqMethod.SESSION_KVC_PREPARE,
+        params={
+            "session_id": "sess_002",
+            "intent_id": "intent-1",
+            "mode": "code.normal",
+        },
+    )
+
+    await server.handle_session_kvc_prepare_for_test(
+        fake_ws,
+        request,
+        asyncio.Lock(),
+    )
+
+    assert calls[0]["session_id"] == "sess_002"
+    assert calls[0]["intent_id"] == "intent-1"
+    assert fake_ws.sent == [
+        {
+            "response_id": "req-kvc-prepare",
+            "payload": {
+                "session_id": "sess_002",
+                "scheduled": True,
+                "outcome": "scheduled",
+            },
+            "ok": True,
+        }
+    ]
 
 
 @pytest.mark.asyncio
@@ -2181,6 +2866,110 @@ async def test_handle_team_delete_deletes_all_matching_team_sessions(monkeypatch
             "ok": True,
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_handle_team_delete_warns_when_local_team_directory_cleanup_fails(monkeypatch):
+    server = AgentWebSocketServerHarness()
+    fake_ws = FakeWebSocket()
+    store_calls = []
+    warning_calls = []
+
+    class FakeBindingStore:
+        @staticmethod
+        def delete(team_name: str):
+            store_calls.append(("binding", team_name))
+            return True
+
+    class FakeEntityStore:
+        @staticmethod
+        def delete_team_directory(team_name: str):
+            store_calls.append(("entity", team_name))
+            raise TeamEntityStoreError(
+                "failed to delete team entity directory: [WinError 5] access denied: pack.idx",
+                code="INTERNAL_ERROR",
+            )
+
+    class FakeSessionDir:
+        @staticmethod
+        def exists() -> bool:
+            return False
+
+    class FakeSessionsRoot:
+        @staticmethod
+        def __truediv__(_session_id: str):
+            return FakeSessionDir()
+
+    monkeypatch.setattr(
+        agent_ws_server_module,
+        "encode_agent_response_for_wire",
+        fake_encode_agent_response_for_wire,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.harness.team.stop_team_session_runtime_across_managers",
+        lambda session_id, reason="": asyncio.sleep(0, result=True),
+    )
+    monkeypatch.setattr(
+        "openjiuwen.core.runner.Runner.delete_agent_team",
+        lambda **kwargs: asyncio.sleep(0, result=True),
+    )
+    monkeypatch.setattr(
+        agent_ws_server_module,
+        "get_agent_sessions_dir",
+        lambda: FakeSessionsRoot(),
+    )
+    monkeypatch.setattr(
+        agent_ws_server_module,
+        "remove_session_metadata_cache",
+        lambda _session_id: None,
+    )
+    monkeypatch.setattr(
+        interface_deep_module,
+        "ensure_persistent_checkpointer",
+        lambda: asyncio.sleep(0),
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.team_binding_store.get_team_binding_store",
+        lambda: FakeBindingStore(),
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.team_entity_store.get_team_entity_store",
+        lambda: FakeEntityStore(),
+    )
+    monkeypatch.setattr(
+        agent_ws_server_module.logger,
+        "warning",
+        lambda message, *args: warning_calls.append((message, args)),
+    )
+    server.set_find_team_session_ids_override_for_test(
+        lambda _team_name: asyncio.sleep(0, result=["team_sess_001"])
+    )
+
+    request = AgentRequest(
+        request_id="req-team-delete-team-dir-failed",
+        channel_id="web",
+        req_method=ReqMethod.TEAM_DELETE,
+        params={"mode": "team", "team_name": "jiuwen_team"},
+    )
+
+    await server.handle_team_delete_for_test(fake_ws, request, asyncio.Lock())
+
+    assert store_calls == [("entity", "jiuwen_team"), ("binding", "jiuwen_team")]
+    assert len(warning_calls) == 1
+    warning_message, warning_args = warning_calls[0]
+    assert "failed to delete local team directory" in warning_message
+    assert warning_args[0] == "jiuwen_team"
+    assert warning_args[1] == "INTERNAL_ERROR"
+    assert "[WinError 5] access denied: pack.idx" in str(warning_args[2])
+    assert fake_ws.sent[-1] == {
+        "response_id": "req-team-delete-team-dir-failed",
+        "payload": {
+            "team_name": "jiuwen_team",
+            "session_ids": ["team_sess_001"],
+            "deleted": True,
+        },
+        "ok": True,
+    }
 
 
 @pytest.mark.asyncio
@@ -2555,6 +3344,25 @@ async def test_handle_session_delete_initializes_persistent_checkpointer(monkeyp
     ensure_calls = []
     release_calls = []
     cleared_metadata_cache = []
+    heartbeat_deleted = []
+    heartbeat_delete_prepared = []
+
+    class HeartbeatRuntime:
+        is_available = True
+
+        async def begin_session_delete(self, session_id: str) -> None:
+            heartbeat_delete_prepared.append(session_id)
+
+        async def abort_session_delete(
+            self, session_id: str, *, channel_id: str = ""
+        ) -> None:
+            raise AssertionError("successful deletion must not be aborted")
+
+        async def commit_session_delete(self, session_id: str) -> None:
+            heartbeat_deleted.append(session_id)
+
+    server._heartbeat_runtime = HeartbeatRuntime()
+    server.get_runtime().set_session_delete_lifecycle(server._heartbeat_runtime)
 
     async def fake_ensure_persistent_checkpointer():
         ensure_calls.append("called")
@@ -2568,8 +3376,7 @@ async def test_handle_session_delete_initializes_persistent_checkpointer(monkeyp
         fake_encode_agent_response_for_wire,
     )
     monkeypatch.setattr(
-        agent_ws_server_module,
-        "get_agent_sessions_dir",
+        "jiuwenswarm.common.utils.get_agent_sessions_dir",
         lambda: sessions_root,
     )
     monkeypatch.setattr(
@@ -2586,8 +3393,7 @@ async def test_handle_session_delete_initializes_persistent_checkpointer(monkeyp
         fake_release,
     )
     monkeypatch.setattr(
-        agent_ws_server_module,
-        "remove_session_metadata_cache",
+        "jiuwenswarm.server.runtime.session.session_metadata.remove_session_metadata_cache",
         lambda session_id: cleared_metadata_cache.append(session_id),
     )
 
@@ -2603,12 +3409,197 @@ async def test_handle_session_delete_initializes_persistent_checkpointer(monkeyp
     assert ensure_calls == ["called"]
     assert release_calls == ["sess-agent-1"]
     assert cleared_metadata_cache == ["sess-agent-1"]
+    assert heartbeat_delete_prepared == ["sess-agent-1"]
+    assert heartbeat_deleted == ["sess-agent-1"]
     assert not session_dir.exists()
+    assert trajectory_session_accepts_records("sess-agent-1") is False
     assert fake_ws.sent == [
         {
             "response_id": "req-session-delete",
             "payload": {"session_id": "sess-agent-1"},
             "ok": True,
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_handle_session_delete_drains_runtime_before_kvc_and_checkpoint_cleanup(
+    monkeypatch,
+    tmp_path,
+):
+    server = AgentWebSocketServerHarness()
+    fake_ws = FakeWebSocket()
+    sessions_root = tmp_path / "sessions"
+    session_dir = sessions_root / "sess-agent-drain"
+    session_dir.mkdir(parents=True)
+    events = []
+
+    class RuntimeManager:
+        def get_agent_nowait(self, *args, **kwargs):
+            return None
+
+        async def release_subagent_runtime_for_session(self, **kwargs):
+            return False
+
+        async def cleanup_session_runtime(self, *, channel_id="", session_id: str):
+            events.append(("runtime", channel_id, session_id))
+            return True
+
+    async def fake_evict_plan_session(*, session_id):
+        events.append(("evict", None, session_id))
+
+    async def fake_release(session_id: str):
+        events.append(("release", None, session_id))
+
+    async def fake_ensure_persistent_checkpointer():
+        return None
+
+    server.set_agent_manager_for_test(RuntimeManager())
+    plan_controller = server._execution_runtime().plan_controller
+    plan_controller.active_sessions.add("sess-agent-drain")
+    plan_controller.exited_sessions.add("sess-agent-drain")
+    monkeypatch.setattr(
+        agent_ws_server_module,
+        "encode_agent_response_for_wire",
+        fake_encode_agent_response_for_wire,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.common.utils.get_agent_sessions_dir",
+        lambda: sessions_root,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.session.session_metadata.get_session_metadata",
+        lambda _session_id: {"mode": "code.normal", "channel_id": "bench-channel"},
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.agent_adapter.interface_deep.ensure_persistent_checkpointer",
+        fake_ensure_persistent_checkpointer,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.session.kv_cache.kv_cache_product_hooks.evict_plan_session",
+        fake_evict_plan_session,
+    )
+    monkeypatch.setattr("openjiuwen.core.runner.Runner.release", fake_release)
+
+    request = AgentRequest(
+        request_id="req-session-delete-drain",
+        channel_id="request-channel",
+        req_method=ReqMethod.SESSION_DELETE,
+        params={"session_id": "sess-agent-drain"},
+    )
+
+    try:
+        await server.handle_session_delete_for_test(fake_ws, request, asyncio.Lock())
+
+        assert events == [
+            ("runtime", "bench-channel", "sess-agent-drain"),
+            ("evict", None, "sess-agent-drain"),
+            ("release", None, "sess-agent-drain"),
+        ]
+        assert "sess-agent-drain" not in plan_controller.active_sessions
+        assert "sess-agent-drain" not in plan_controller.exited_sessions
+        assert not session_dir.exists()
+        assert fake_ws.sent[0]["ok"] is True
+    finally:
+        plan_controller.active_sessions.discard("sess-agent-drain")
+        plan_controller.exited_sessions.discard("sess-agent-drain")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure_stage", ["runtime", "evict", "release"])
+async def test_handle_session_delete_keeps_state_when_cleanup_fails(
+    monkeypatch,
+    tmp_path,
+    failure_stage,
+):
+    server = AgentWebSocketServerHarness()
+    fake_ws = FakeWebSocket()
+    sessions_root = tmp_path / "sessions"
+    session_dir = sessions_root / "sess-agent-busy"
+    session_dir.mkdir(parents=True)
+    evict_calls = []
+    release_calls = []
+
+    class BusyRuntimeManager:
+        def get_agent_nowait(self, *args, **kwargs):
+            return None
+
+        async def release_subagent_runtime_for_session(self, **kwargs):
+            return False
+
+        async def cleanup_session_runtime(self, *, channel_id="", session_id: str):
+            if failure_stage == "runtime":
+                raise RuntimeError("session runtime is still active")
+            return True
+
+    async def fake_evict_plan_session(**kwargs):
+        evict_calls.append(kwargs)
+        if failure_stage == "evict":
+            raise RuntimeError("plan eviction failed")
+
+    async def fake_release(session_id: str):
+        release_calls.append(session_id)
+        if failure_stage == "release":
+            raise RuntimeError("runner release failed")
+
+    async def fake_ensure_persistent_checkpointer():
+        return None
+
+    server.set_agent_manager_for_test(BusyRuntimeManager())
+    plan_controller = server._execution_runtime().plan_controller
+    plan_controller.active_sessions.add("sess-agent-busy")
+    plan_controller.exited_sessions.add("sess-agent-busy")
+    monkeypatch.setattr(
+        agent_ws_server_module,
+        "encode_agent_response_for_wire",
+        fake_encode_agent_response_for_wire,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.common.utils.get_agent_sessions_dir",
+        lambda: sessions_root,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.session.session_metadata.get_session_metadata",
+        lambda _session_id: {"mode": "code.normal"},
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.agent_adapter.interface_deep.ensure_persistent_checkpointer",
+        fake_ensure_persistent_checkpointer,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.session.kv_cache.kv_cache_product_hooks.evict_plan_session",
+        fake_evict_plan_session,
+    )
+    monkeypatch.setattr("openjiuwen.core.runner.Runner.release", fake_release)
+
+    request = AgentRequest(
+        request_id="req-session-delete-busy",
+        channel_id="web",
+        req_method=ReqMethod.SESSION_DELETE,
+        params={"session_id": "sess-agent-busy"},
+    )
+
+    try:
+        await server.handle_session_delete_for_test(fake_ws, request, asyncio.Lock())
+
+        assert "sess-agent-busy" in plan_controller.active_sessions
+        assert "sess-agent-busy" in plan_controller.exited_sessions
+    finally:
+        plan_controller.active_sessions.discard("sess-agent-busy")
+        plan_controller.exited_sessions.discard("sess-agent-busy")
+
+    assert bool(evict_calls) is (failure_stage in {"evict", "release"})
+    assert bool(release_calls) is (failure_stage == "release")
+    assert session_dir.exists()
+    assert trajectory_session_accepts_records("sess-agent-busy") is True
+    assert fake_ws.sent == [
+        {
+            "response_id": "req-session-delete-busy",
+            "payload": {
+                "error": "session runtime cleanup failed",
+                "code": "DELETE_FAILED",
+            },
+            "ok": False,
         }
     ]
 
@@ -2643,8 +3634,7 @@ async def test_handle_session_delete_unbinds_team_session(monkeypatch, tmp_path)
         fake_encode_agent_response_for_wire,
     )
     monkeypatch.setattr(
-        agent_ws_server_module,
-        "get_agent_sessions_dir",
+        "jiuwenswarm.common.utils.get_agent_sessions_dir",
         lambda: sessions_root,
     )
     monkeypatch.setattr(
@@ -2669,8 +3659,7 @@ async def test_handle_session_delete_unbinds_team_session(monkeypatch, tmp_path)
         lambda: binding_store,
     )
     monkeypatch.setattr(
-        agent_ws_server_module,
-        "remove_session_metadata_cache",
+        "jiuwenswarm.server.runtime.session.session_metadata.remove_session_metadata_cache",
         lambda session_id: cleared_metadata_cache.append(session_id),
     )
 
@@ -2686,6 +3675,7 @@ async def test_handle_session_delete_unbinds_team_session(monkeypatch, tmp_path)
     assert delete_calls == [{"session_id": "sess-team-1", "reason": "session.delete: "}]
     assert cleared_metadata_cache == ["sess-team-1"]
     assert not session_dir.exists()
+    assert trajectory_session_accepts_records("sess-team-1") is True
     binding = binding_store.get("research_team")
     assert binding is not None
     assert binding.session_ids == ("sess-keep",)
@@ -2720,8 +3710,7 @@ async def test_handle_session_delete_rejects_when_checkpointer_unavailable(monke
         fake_encode_agent_response_for_wire,
     )
     monkeypatch.setattr(
-        agent_ws_server_module,
-        "get_agent_sessions_dir",
+        "jiuwenswarm.common.utils.get_agent_sessions_dir",
         lambda: sessions_root,
     )
     monkeypatch.setattr(
@@ -3025,7 +4014,7 @@ def test_build_context_processor_rail_uses_summary_offloader_config(monkeypatch)
 
     assert isinstance(rail, FakeContextProcessorRail)
     assert rail.preset is True
-    assert rail.processors == [
+    assert rail.processors[:-1] == [
         (
             "MessageSummaryOffloader",
             {
@@ -3035,6 +4024,8 @@ def test_build_context_processor_rail_uses_summary_offloader_config(monkeypatch)
         ),
         ("DialogueCompressor", {"tokens_threshold": 100000}),
     ]
+    assert rail.processors[-1][0] == "SymphonyRetrievalCompactProcessor"
+    assert isinstance(rail.processors[-1][1], SymphonyRetrievalCompactProcessorConfig)
 
 
 def test_build_context_processor_rail_prefers_summary_offloader_config(monkeypatch):
@@ -3059,9 +4050,11 @@ def test_build_context_processor_rail_prefers_summary_offloader_config(monkeypat
     )
 
     assert isinstance(rail, FakeContextProcessorRail)
-    assert rail.processors == [
+    assert rail.processors[:-1] == [
         ("MessageSummaryOffloader", {"tokens_threshold": 6000}),
     ]
+    assert rail.processors[-1][0] == "SymphonyRetrievalCompactProcessor"
+    assert isinstance(rail.processors[-1][1], SymphonyRetrievalCompactProcessorConfig)
 
 
 def test_build_context_processor_rail_passes_session_memory_config(monkeypatch):
@@ -3085,7 +4078,9 @@ def test_build_context_processor_rail_passes_session_memory_config(monkeypatch):
 
     assert isinstance(rail, FakeContextProcessorRail)
     assert rail.preset is True
-    assert rail.processors is None
+    assert rail.processors == [
+        ("SymphonyRetrievalCompactProcessor", SymphonyRetrievalCompactProcessorConfig())
+    ]
     assert rail.session_memory == {
         "trigger_tokens": 12000,
         "update_mode": "direct_replace",

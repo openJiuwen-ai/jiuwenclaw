@@ -88,6 +88,37 @@ async def test_lookup_by_container_empty_container_id_returns_empty():
     assert reg.lookup_by_container("feishu", "default", "") == []
 
 
+@pytest.mark.asyncio
+async def test_unregister_by_ws_id_removes_only_disconnected_socket():
+    reg = SessionSharingRegistry()
+    for ws_id in ("ws-live", "ws-dead"):
+        rk = _rk("web", "web-user", "sess-web")
+        dt = make_delivery_target("web", ws_id=ws_id)
+        await reg.register("sess-web", SubRole.GODVIEW, rk, dt)
+
+    removed = await reg.unregister_by_ws_id("ws-dead", channel_id="web")
+
+    assert removed == 1
+    remaining = reg.lookup_member("sess-web", SubRole.GODVIEW)
+    assert [sub.delivery.ws_id for sub in remaining] == ["ws-live"]
+
+
+@pytest.mark.asyncio
+async def test_unregister_by_ws_id_respects_channel_boundary():
+    reg = SessionSharingRegistry()
+    for channel_id in ("web", "tui"):
+        rk = _rk(channel_id, f"{channel_id}-user", "sess-shared")
+        dt = make_delivery_target(channel_id, ws_id="same-id")
+        await reg.register("sess-shared", SubRole.GODVIEW, rk, dt)
+
+    removed = await reg.unregister_by_ws_id("same-id", channel_id="web")
+
+    assert removed == 1
+    remaining = reg.lookup_member("sess-shared", SubRole.GODVIEW)
+    assert len(remaining) == 1
+    assert remaining[0].routing_key.channel_id == "tui"
+
+
 # ---------- Fix 2: resolve_member_by_user 语义（/exit 正确性的基础） ----------
 #
 # /exit 不带 session_ref 时用 msg.session_id。这之所以正确，是因为 handle_message

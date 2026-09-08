@@ -1,4 +1,4 @@
-# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
 """Path management for JiuWenSwarm.
 
@@ -17,7 +17,6 @@ Runtime layout:
   - AGENT.md
   - IDENTITY.md
   - SOUL.md
-  - HEARTBEAT.md
   - USER.md
 - <root>/agent/sessions
 - <root>/agent/workspace/agent-data.json
@@ -36,7 +35,9 @@ import sys
 import datetime
 import shutil
 import socket
+import stat
 import time
+import zipfile
 from pathlib import Path
 from dataclasses import dataclass
 from typing import Any, Literal, Optional
@@ -481,6 +482,25 @@ def _find_package_root() -> Path | None:
     return current
 
 
+def _find_config_template_path() -> Path:
+    """Locate the shipped ``config.yaml`` template inside the package."""
+    package_root = _find_package_root()
+    if not package_root:
+        raise RuntimeError("package root not found")
+
+    candidates = [
+        package_root / "resources" / "config.yaml",
+        package_root / "config" / "config.yaml",
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    raise RuntimeError(
+        "config.yaml template not found; tried: "
+        + ", ".join(str(p) for p in candidates)
+    )
+
+
 def _resolve_preferred_language(
     config_yaml_dest: Path, explicit: Optional[str]
 ) -> str:
@@ -610,6 +630,99 @@ def _update_skills_state_for_builtin(
         logger.error(f"保存技能状态文件失败: {e}")
 
 
+def _repair_skill_creator_normal_frontmatter(normal_dir: Path) -> None:
+    """将 ``skill-creator-normal/SKILL.md`` 中残留的 ``name: skill-creator`` 改为目录名.
+
+    仅改目录、不改正文 name 时，skills.list 会扫出两个同名 ``skill-creator``，
+    前端 ``key={skill.name}`` 在切换「团队技能」等过滤时会叠出重复卡片。
+    """
+    skill_md = normal_dir / "SKILL.md"
+    if not skill_md.is_file():
+        return
+    try:
+        text = skill_md.read_text(encoding="utf-8")
+    except OSError:
+        return
+    if "name: skill-creator-normal" in text:
+        return
+    if "name: skill-creator" not in text:
+        return
+    # 新路由入口文案不应落在 normal 目录；若误判则跳过
+    router_markers = (
+        "Routes skill creation",
+        "Unified entry point",
+        "统一入口",
+    )
+    if any(marker in text for marker in router_markers):
+        return
+    updated = text.replace("name: skill-creator", "name: skill-creator-normal", 1)
+    if updated == text:
+        return
+    try:
+        skill_md.write_text(updated, encoding="utf-8")
+        logger.info("已修复 skill-creator-normal frontmatter name")
+    except OSError as exc:
+        logger.warning(f"修复 skill-creator-normal frontmatter 失败: {exc}")
+
+
+def _migrate_skill_creator_router_rename(user_skills_dir: Path) -> None:
+    """一次性迁移：skill-creator-router → skill-creator，旧 skill-creator → skill-creator-normal.
+
+    避免用户目录已有旧 ``skill-creator`` 时跳过安装，导致装不上新的路由入口。
+    迁移后删除旧 router 目录，由后续默认安装从内置资源拷贝新的 ``skill-creator``。
+    """
+    old_router = user_skills_dir / "skill-creator-router"
+    old_creator = user_skills_dir / "skill-creator"
+    normal = user_skills_dir / "skill-creator-normal"
+
+    def _looks_like_legacy_monadic_creator(skill_dir: Path) -> bool:
+        skill_md = skill_dir / "SKILL.md"
+        if not skill_md.is_file():
+            return False
+        try:
+            text = skill_md.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            return False
+        # 新路由 / 旧 router 文案
+        router_markers = (
+            "Routes skill creation",
+            "Unified entry point",
+            "统一入口",
+            "创建/修改的**路由**",
+            "创建/修改的**分发器**",
+        )
+        if any(marker in text for marker in router_markers):
+            return False
+        has_legacy_name = "name: skill-creator" in text
+        has_normal_name = "name: skill-creator-normal" in text
+        return has_legacy_name or has_normal_name
+
+    try:
+        if old_router.is_dir():
+            if old_creator.is_dir() and not normal.exists():
+                old_creator.rename(normal)
+                logger.info("已迁移默认技能: skill-creator -> skill-creator-normal")
+            elif old_creator.is_dir() and normal.exists():
+                shutil.rmtree(old_creator)
+                logger.info("已移除冲突的旧 skill-creator，将安装新的路由 skill-creator")
+            shutil.rmtree(old_router)
+            logger.info("已移除旧 skill-creator-router，将安装新的路由 skill-creator")
+        elif (
+            old_creator.is_dir()
+            and not normal.exists()
+            and _looks_like_legacy_monadic_creator(old_creator)
+        ):
+            # 仅有旧单体 skill-creator、尚无 skill-creator-normal
+            old_creator.rename(normal)
+            logger.info("已迁移默认技能: skill-creator -> skill-creator-normal（无 router 目录）")
+
+        # 无论本次是否刚改名：修复已存在的 normal 目录残留 name
+        if normal.is_dir():
+            _repair_skill_creator_normal_frontmatter(normal)
+    except OSError as exc:
+        logger.warning(f"skill-creator 重命名迁移失败，将尝试按默认列表安装: {exc}")
+
+
 def _install_default_builtin_skills(
     builtin_dir: Path,
     user_skills_dir: Path,
@@ -619,8 +732,11 @@ def _install_default_builtin_skills(
     """安装默认的内置技能到用户技能目录.
 
     默认安装的技能：
-    - skill-creator: 技能创建助手
-    - swarmskill-creator: Swarm技能创建助手
+    - skill-creator: 所有 Skill Creator 的统一入口（创建/修改路由）
+    - skill-creator-normal: 单体技能创建助手（由 skill-creator 路由选中）
+    - swarmskill-creator: Swarm技能创建助手（由 skill-creator 路由选中）
+    - skill-omni-creation: 链接/网页/视频技能创建助手（由 skill-creator 路由选中）
+    - huawei-cloud-maas-setup: 华为云MaaS购买与配置引导
 
     Args:
         builtin_dir: 内置技能目录路径
@@ -629,13 +745,22 @@ def _install_default_builtin_skills(
         cumulative_diff: 累积的文件变更追踪结果
     """
     # 定义默认安装的技能列表
-    default_skills = ["skill-creator", "swarmskill-creator"]
+    default_skills = [
+        "skill-creator",
+        "skill-creator-normal",
+        "swarmskill-creator",
+        "skill-omni-creation",
+        "huawei-cloud-maas-setup",
+        "agent-creator",
+        "plugin-creator"
+    ]
 
     if not builtin_dir.exists() or not builtin_dir.is_dir():
         logger.warning(f"内置技能目录不存在，跳过默认技能安装: {builtin_dir}")
         return
 
     user_skills_dir.mkdir(parents=True, exist_ok=True)
+    _migrate_skill_creator_router_rename(user_skills_dir)
 
     # 记录成功安装的技能，用于后续更新状态文件
     installed_skills = []
@@ -672,6 +797,98 @@ def _install_default_builtin_skills(
     # 更新 skills_state.json，记录已安装的技能
     if installed_skills:
         _update_skills_state_for_builtin(user_skills_dir, installed_skills)
+
+
+def ensure_default_builtin_skills() -> None:
+    """确保所有默认内置技能已安装到用户技能目录（幂等）。
+
+    与 ``prepare_workspace`` 不同，本函数设计为每次启动都可安全调用：
+    仅复制用户目录中尚不存在的默认技能，已存在的技能不会被覆盖或修改，
+    从而让新增的默认技能在老用户工作区中也能自动补齐。
+    """
+    builtin_dir = get_builtin_skills_dir()
+    user_skills_dir = get_agent_skills_dir()
+
+    if not builtin_dir.exists() or not builtin_dir.is_dir():
+        logger.warning(f"内置技能目录不存在，跳过默认技能补齐: {builtin_dir}")
+        return
+
+    default_skills = [
+        "skill-creator",
+        "skill-creator-normal",
+        "swarmskill-creator",
+        "skill-omni-creation",
+        "huawei-cloud-maas-setup",
+    ]
+
+    user_skills_dir.mkdir(parents=True, exist_ok=True)
+    _migrate_skill_creator_router_rename(user_skills_dir)
+
+    installed_skills = []
+    for skill_name in default_skills:
+        builtin_skill_path = builtin_dir / skill_name
+        user_skill_path = user_skills_dir / skill_name
+
+        if not builtin_skill_path.exists() or not builtin_skill_path.is_dir():
+            logger.warning(f"内置技能不存在，跳过补齐: {skill_name}")
+            continue
+
+        if user_skill_path.exists():
+            continue
+
+        try:
+            shutil.copytree(builtin_skill_path, user_skill_path)
+            logger.info(f"已补齐默认技能: {skill_name}")
+            installed_skills.append(skill_name)
+        except Exception as e:
+            logger.error(f"补齐默认技能失败 {skill_name}: {e}")
+
+    if installed_skills:
+        _update_skills_state_for_builtin(user_skills_dir, installed_skills)
+
+
+def ensure_config_migrated_from_template(
+    workspace_dir: Optional[Path] = None,
+) -> bool:
+    """将模板新增的配置项合并进用户 config.yaml（保留用户已有值）。
+
+    版本号短路：用户 config.config_version == 程序 VERSION 时跳过迁移；
+    不一致时迁移，迁移成功后由 migrate_config_from_template 把 config_version 写回程序版本。
+    """
+    from jiuwenswarm.common.config import migrate_config_from_template, load_yaml_round_trip
+    from jiuwenswarm.common._build_config import VERSION
+
+    root = Path(workspace_dir) if workspace_dir else get_user_workspace_dir()
+    config_path = root / "config" / "config.yaml"
+
+    try:
+        template_path = _find_config_template_path()
+    except RuntimeError as e:
+        logger.warning(f"跳过配置迁移: {e}")
+        return False
+
+    # 版本号短路：已同步则跳过（不跑 _deep_merge、不读模板内容）
+    # config 不存在时交由 migrate_config_from_template 内部 exists() 优雅处理，不在此抛 FileNotFoundError
+    if not config_path.exists():
+        return migrate_config_from_template(template_path, config_path)
+
+    user_data = load_yaml_round_trip(config_path)
+    if isinstance(user_data, dict) and user_data.get("config_version") == VERSION:
+        logger.debug(f"config 版本 {VERSION} 一致，跳过迁移: {config_path}")
+        return False
+
+    if isinstance(user_data, dict) and user_data.get("config_version"):
+        logger.info(
+            f"config 版本 {user_data.get('config_version')} != 程序 {VERSION}，开始迁移"
+        )
+    else:
+        logger.info(f"config 无版本号(未迁移)，开始迁移到 {VERSION}")
+
+    if not migrate_config_from_template(template_path, config_path):
+        return False
+
+    logger.info(f"已从模板合并新增配置项: {config_path} (config_version -> {VERSION})")
+    return True
 
 
 def _migrate_from_jiuwenclaw_root() -> bool:
@@ -754,14 +971,13 @@ def _migrate_legacy_workspace(
     separate directories outside of the workspace.
 
     Migration:
-    - Old: ~/.jiuwenswarm/agent/home/ (PRINCIPLE.md, TONE.md, HEARTBEAT.md)
+    - Old: ~/.jiuwenswarm/agent/home/ (PRINCIPLE.md, TONE.md)
     - Old: ~/.jiuwenswarm/agent/skills/
     - Old: ~/.jiuwenswarm/agent/memory/
 
     - New: ~/.jiuwenswarm/agent/workspace/ (DeepAgent standard)
 
     Mapping:
-    - agent/home/HEARTBEAT.md -> agent/workspace/HEARTBEAT.md
     - agent/skills/ -> agent/workspace/skills/
     - agent/memory/ -> agent/workspace/memory/
 
@@ -783,13 +999,6 @@ def _migrate_legacy_workspace(
 
     # 1. Migrate old home files
     if old_home.exists():
-        # HEARTBEAT.md -> HEARTBEAT.md (if not exists in new location)
-        old_heartbeat = old_home / "HEARTBEAT.md"
-        new_heartbeat = new_workspace / "HEARTBEAT.md"
-        if old_heartbeat.exists() and not new_heartbeat.exists():
-            shutil.copy2(old_heartbeat, new_heartbeat)
-            logger.info("Migrated HEARTBEAT.md from home")
-
         # Merge PRINCIPLE.md and TONE.md into SOUL.md
         old_principle = old_home / "PRINCIPLE.md"
         old_tone = old_home / "TONE.md"
@@ -975,6 +1184,82 @@ def cleanup_team_files(workspace_dir: Path) -> None:
                 logger.warning(f"[Cleanup] Failed to remove legacy team database file: {e}")
 
 
+def _is_windows_frozen_bundle() -> bool:
+    """Return whether this process is a packaged Windows application."""
+    return sys.platform == "win32" and bool(getattr(sys, "frozen", False))
+
+
+def cleanup_stale_openjiuwen_descs() -> None:
+    """Remove flat OpenJiuwen descriptions left by a layout migration.
+
+    New OpenJiuwen releases store tool descriptions below domain directories,
+    while an in-place upgrade can leave the former flat files beside them. The
+    recursive description index treats both files as the same key and refuses
+    to start. A flat file is removed only when a non-fragment nested file with
+    the same stem exists, so flat-only layouts and fragment files remain intact.
+
+    Windows frozen bundles skip runtime cleanup because their installer repairs
+    the installed package data before offering to launch the application.
+
+    Raises:
+        RuntimeError: If a confirmed stale file cannot be removed.
+    """
+    if _is_windows_frozen_bundle():
+        logger.info(
+            "[Cleanup] Skipping OpenJiuwen description cleanup in frozen Windows "
+            "bundle; the installer performs upgrade cleanup."
+        )
+        return
+
+    try:
+        import openjiuwen
+    except ModuleNotFoundError as exc:
+        if exc.name == "openjiuwen":
+            return
+        raise
+
+    package_file = getattr(openjiuwen, "__file__", None)
+    if not package_file:
+        return
+
+    descs_dir = (
+        Path(package_file).parent
+        / "agent_teams"
+        / "tools"
+        / "locales"
+        / "descs"
+    )
+    if not descs_dir.is_dir():
+        return
+
+    for lang_dir in sorted(path for path in descs_dir.iterdir() if path.is_dir()):
+        nested_stems = set()
+        for desc_path in lang_dir.rglob("*.md"):
+            if desc_path.parent == lang_dir:
+                continue
+            if "fragments" in desc_path.relative_to(lang_dir).parts:
+                continue
+            nested_stems.add(desc_path.stem)
+
+        for flat_md in sorted(lang_dir.glob("*.md")):
+            if flat_md.stem not in nested_stems:
+                continue
+            try:
+                flat_md.unlink()
+                logger.info(
+                    f"[Cleanup] Removed stale flat OpenJiuwen description: {flat_md}"
+                )
+            except FileNotFoundError:
+                # Another process may have completed the same idempotent cleanup.
+                continue
+            except OSError as exc:
+                raise RuntimeError(
+                    "Failed to remove stale OpenJiuwen description "
+                    f"'{flat_md}'. Ensure the Python environment is writable "
+                    "or reinstall OpenJiuwen in a clean environment."
+                ) from exc
+
+
 def prepare_workspace(
     overwrite: bool = True,
     preferred_language: Optional[str] = None,
@@ -992,6 +1277,9 @@ def prepare_workspace(
     # 初始化累积结果（用于追踪所有复制操作）
     cumulative_diff = CopyDiffResult([], [], [])
     workspace_dir.mkdir(parents=True, exist_ok=True)
+
+    # Create logs directory at workspace root (~/.jiuwenswarm/logs)
+    (workspace_dir / "logs").mkdir(parents=True, exist_ok=True)
 
     # Migrate from legacy jiuwenclaw_workspace directory name to workspace
     _migrate_jiuwenclaw_workspace_to_workspace(workspace_dir)
@@ -1028,18 +1316,7 @@ def prepare_workspace(
 
     # ----- config: copy config.yaml -----
     resources_dir = package_root / "resources"
-    config_yaml_src_candidates = [
-        resources_dir / "config.yaml",
-        package_root / "config" / "config.yaml",
-    ]
-
-    config_yaml_src = next((p for p in config_yaml_src_candidates if p.exists()), None)
-
-    if not config_yaml_src:
-        raise RuntimeError(
-            "config.yaml template not found; tried: "
-            + ", ".join(str(p) for p in config_yaml_src_candidates)
-        )
+    config_yaml_src = _find_config_template_path()
 
     config_dest_dir = workspace_dir / "config"
     config_dest_dir.mkdir(parents=True, exist_ok=True)
@@ -1149,6 +1426,7 @@ def prepare_workspace(
 
     # Copy DeepAgent workspace template (includes agent-data.json, memory, skills)
     # Ignore _ZH.md and _EN.md files - they are handled separately
+    # Ignore mcp_builtins*.zip, plugins
     if template_agent_workspace.exists():
         with TrackCopyDiff(
             dest=deepagent_workspace,
@@ -1158,7 +1436,7 @@ def prepare_workspace(
             _copy_dir(
                 template_agent_workspace,
                 deepagent_workspace,
-                ignore_patterns=("*_ZH.md", "*_EN.md", "skills"),
+                ignore_patterns=("*_ZH.md", "*_EN.md", "skills", "mcp_builtins*.zip", "plugins"),
             )
     else:
         deepagent_workspace.mkdir(parents=True, exist_ok=True)
@@ -1174,7 +1452,6 @@ def prepare_workspace(
     suffix = "_ZH" if resolved_lang == "zh" else "_EN"
     multilang_files = [
         (f"AGENT{suffix}.md", "AGENT.md"),
-        (f"HEARTBEAT{suffix}.md", "HEARTBEAT.md"),
         (f"IDENTITY{suffix}.md", "IDENTITY.md"),
         (f"SOUL{suffix}.md", "SOUL.md"),
         (f"memory/MEMORY{suffix}.md", "memory/MEMORY.md"),
@@ -1209,6 +1486,17 @@ def prepare_workspace(
     agent_sessions.mkdir(parents=True, exist_ok=True)
     default_project_workspace.mkdir(parents=True, exist_ok=True)
 
+    # Single-Agent equipment remains in the DeepAgent workspace. AgentGroup
+    # definitions are team-owned state and therefore live below .agent_teams.
+    # Template copy ignores plugins/; package reconcile belongs to runtime equipment module.
+    for kind in ("agent_templates", "plugin_packages"):
+        kind_root = deepagent_workspace / "plugins" / kind
+        (kind_root / "built_in").mkdir(parents=True, exist_ok=True)
+        (kind_root / "local").mkdir(parents=True, exist_ok=True)
+    agent_group_root = workspace_dir / ".agent_teams" / "agent_groups"
+    (agent_group_root / "built_in").mkdir(parents=True, exist_ok=True)
+    (agent_group_root / "local").mkdir(parents=True, exist_ok=True)
+
     from jiuwenswarm.common.config import migrate_config_from_template, set_preferred_language_in_config_file
 
     migrate_config_from_template(config_yaml_src, config_yaml_dest)
@@ -1222,7 +1510,274 @@ def prepare_workspace(
         cumulative_diff=cumulative_diff,
     )
 
+    # ----- 预置 MCP 包目录: 首次解压 zip 种子 / 版本升级覆盖 -----
+    _ensure_mcp_builtins(
+        template_agent_workspace=template_agent_workspace,
+        mcp_builtins_dir=deepagent_workspace / "mcp" / "mcp_builtins",
+        overwrite=overwrite,
+        cumulative_diff=cumulative_diff,
+    )
+
     return cumulative_diff
+
+
+def _find_mcp_builtins_seed(template_agent_workspace: Path) -> Path | None:
+    """定位打包进 resources 的预置 MCP 种子 zip。
+
+    文件名形如 ``mcp_builtins_v0.1.zip``，用 glob 匹配
+    ``mcp_builtins*.zip``；多个候选的排序依据是压缩包内部版本标记，
+    文件名不作为版本真值。种子随 ``resources/**/*`` 打进 whl。
+    """
+    candidates = list(template_agent_workspace.glob("mcp_builtins*.zip"))
+    return max(candidates, key=_mcp_seed_sort_key) if candidates else None
+
+
+def _mcp_seed_sort_key(zip_path: Path) -> tuple[int, ...]:
+    version = _read_mcp_builtins_seed_version(zip_path)
+    if version is None:
+        return ()
+    try:
+        return tuple(int(part) for part in version.removeprefix("v").split("."))
+    except ValueError:
+        return ()
+
+
+def _read_mcp_builtins_seed_version(zip_path: Path) -> str | None:
+    """Read the collection version declared inside a valid seed archive."""
+    try:
+        with zipfile.ZipFile(zip_path) as zf:
+            names = {info.filename.replace("\\", "/"): info for info in zf.infolist()}
+            marker = names.get("mcp_builtins/.mcp_builtins_version")
+            if marker is None:
+                logger.warning(
+                    "[mcp_builtins] seed %s has no internal version marker",
+                    zip_path,
+                )
+                return None
+            version = zf.read(marker).decode("utf-8").strip()
+            return version or None
+    except (OSError, UnicodeError, zipfile.BadZipFile) as exc:
+        logger.warning("[mcp_builtins] read seed version failed: %s", exc)
+        return None
+
+
+def mcp_builtins_seed_update_needed(workspace_dir: Path | None = None) -> bool:
+    """Return whether the bundled MCP seed must be installed or upgraded."""
+    package_root = _find_package_root()
+    if package_root is None:
+        return False
+
+    seed_zip = _find_mcp_builtins_seed(
+        package_root / "resources" / "agent" / "workspace"
+    )
+    if seed_zip is None:
+        return False
+    seed_version = _read_mcp_builtins_seed_version(seed_zip)
+    if seed_version is None:
+        return False
+
+    runtime_root = Path(workspace_dir) if workspace_dir else get_user_workspace_dir()
+    installed_dir = runtime_root / "agent" / "workspace" / "mcp" / "mcp_builtins"
+    try:
+        installed_version = (
+            installed_dir / ".mcp_builtins_version"
+        ).read_text(encoding="utf-8").strip()
+    except OSError:
+        return True
+    return installed_version != seed_version
+
+
+def _print_console_progress(message: str) -> None:
+    """Print progress without letting a legacy console encoding abort startup."""
+    try:
+        print(message)
+    except UnicodeEncodeError:
+        escaped = message.encode("ascii", errors="backslashreplace").decode("ascii")
+        print(escaped)
+
+
+def _ensure_mcp_builtins(
+    template_agent_workspace: Path,
+    mcp_builtins_dir: Path,
+    overwrite: bool,
+    cumulative_diff: CopyDiffResult,
+) -> None:
+    """启动时保证预置 MCP 包目录就位（首次解压 / 版本更新覆盖）。
+
+    规则：无 mcp_builtins 目录 → 解压种子；已有但目录内版本标记与种子内标记
+    版本不一致 → 整目录覆盖解压（版本升级）；一致且非 overwrite → 跳过；
+    overwrite=True（init -f）→ 无论版本一致都重新解压。种子 zip 缺失则
+    跳过（开发期 resources 没打 zip 不应阻断启动）。
+    """
+    seed_zip = _find_mcp_builtins_seed(template_agent_workspace)
+    if seed_zip is None:
+        logger.debug("[mcp_builtins] no seed zip under %s; skip", template_agent_workspace)
+        return
+
+    seed_version = _read_mcp_builtins_seed_version(seed_zip)
+    if seed_version is None:
+        logger.error("[mcp_builtins] invalid seed without collection version: %s", seed_zip)
+        return
+    version_file = mcp_builtins_dir / ".mcp_builtins_version"
+    local_version: str | None = None
+    if mcp_builtins_dir.is_dir():
+        try:
+            local_version = version_file.read_text(encoding="utf-8").strip() or None
+        except OSError:
+            local_version = None
+
+    # 首次安装（无目录）或版本不一致（升级）或强制覆盖 → 解压。
+    need_extract = (
+        not mcp_builtins_dir.exists()
+        or (seed_version is not None and seed_version != local_version)
+        or overwrite
+    )
+    if not need_extract:
+        return
+
+    action = "install" if not mcp_builtins_dir.exists() else (
+        "upgrade" if local_version != seed_version else "reinstall"
+    )
+    logger.info(
+        "[mcp_builtins] %s: seed=%s local=%s -> extract %s",
+        action, seed_version, local_version, seed_zip.name,
+    )
+    _print_console_progress(
+        f"[jiuwenswarm-init] MCP 预置包 {action} ({seed_version or '?'}) "
+        f"<- {seed_zip.name}"
+    )
+
+    # 原子化覆盖：先解压到临时目录，成功后整体替换旧目录，避免解压中途
+    # 失败留下「旧目录已删 + 新目录半残」的损坏状态。
+    mcp_builtins_dir.parent.mkdir(parents=True, exist_ok=True)
+    tmp_dir = mcp_builtins_dir.parent / f".{mcp_builtins_dir.name}.tmp.{os.getpid()}"
+    # 残留的临时目录（上次崩溃遗留）先清掉。
+    if tmp_dir.exists():
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+    try:
+        with zipfile.ZipFile(seed_zip) as zf:
+            # Normalize ZIP member paths to forward slashes and extract manually
+            # to prevent extractall from flattening the directory tree on Linux
+            # when backslashes are used.
+            for info in zf.infolist():
+                member = info.filename.replace("\\", "/")
+                # Skip dir entries (trailing /)
+                if member.endswith("/"):
+                    continue
+                # Guard against absolute / parent-traversal entries. A malformed
+                # seed is rejected as a whole instead of silently dropping files.
+                if (
+                    not member.startswith("mcp_builtins/")
+                    or member.startswith("/")
+                    or ".." in member.split("/")
+                ):
+                    raise OSError(f"unsafe MCP seed member: {info.filename}")
+                target = tmp_dir / member
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with zf.open(info) as src, open(target, "wb") as dst:
+                    shutil.copyfileobj(src, dst)
+        # A zip built under a wrapper dir would leave a nested mcp_builtins/
+        # subdir; flatten so tmp_dir directly holds each package dir. Flat zips
+        # are unaffected. 套在 try 内，move 失败也走回滚清理。
+        nested = tmp_dir / "mcp_builtins"
+        if nested.is_dir():
+            for entry in nested.iterdir():
+                shutil.move(str(entry), str(tmp_dir / entry.name))
+            nested.rmdir()
+        marker = tmp_dir / ".mcp_builtins_version"
+        if marker.read_text(encoding="utf-8").strip() != seed_version:
+            raise OSError("MCP seed collection version marker changed during extraction")
+        unexpected_root_files = [
+            path.name
+            for path in tmp_dir.iterdir()
+            if path.is_file() and path.name != ".mcp_builtins_version"
+        ]
+        if unexpected_root_files:
+            raise OSError(
+                "MCP seed contains unexpected root files: "
+                + ", ".join(sorted(unexpected_root_files))
+            )
+        from jiuwenswarm.server.runtime.mcp.package_manifest import iter_mcp_packages
+
+        package_dirs = [
+            path for path in tmp_dir.iterdir()
+            if path.is_dir() and not path.name.startswith(".")
+        ]
+        packages = iter_mcp_packages(tmp_dir)
+        if not package_dirs or len(packages) != len(package_dirs):
+            raise OSError("MCP seed contains an invalid package manifest")
+    except (OSError, zipfile.BadZipFile) as exc:
+        logger.error("[mcp_builtins] extract %s failed: %s", seed_zip, exc)
+        print(f"[jiuwenswarm-init] ERROR: extract MCP seed failed: {exc}")
+        # 清理半残的临时目录，保留旧目录不动（下次启动可重试）。
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        return
+
+    # 解压完成且 flatten 后，原子替换旧目录。Windows 上 os.replace 对目录
+    # 的支持依赖 Python 3.9+ 的可替代语义；失败时降级为 rmtree + rename。
+    if mcp_builtins_dir.exists():
+        try:
+            shutil.rmtree(mcp_builtins_dir)
+        except OSError as rmtree_exc:  # noqa: BLE001
+            logger.warning(
+                "[mcp_builtins] rmtree old dir failed (will retry rename): %s",
+                rmtree_exc,
+            )
+            # Windows 文件占用：无法删旧目录时，退一步把临时目录 rename
+            # 覆盖（shutil.move 跨目录 rename 失败会降级 copy+remove）。
+            try:
+                shutil.rmtree(mcp_builtins_dir, ignore_errors=True)
+            except Exception:  # noqa: BLE001
+                pass
+    try:
+        os.replace(tmp_dir, mcp_builtins_dir)
+    except OSError:
+        shutil.move(str(tmp_dir), str(mcp_builtins_dir))
+    with TrackCopyDiff(
+        dest=mcp_builtins_dir,
+        cumulative=cumulative_diff,
+        overwrite=overwrite,
+    ):
+        pass  # 仅登记到 diff 摘要，文件已解压就位
+
+
+def prepare_runtime_workspace(*, cleanup_stale_descs: bool = True) -> None:
+    """Perform the idempotent workspace work required before runtime children start.
+
+    Desktop and the ``jiuwenswarm.app`` supervisor call this once before they
+    launch AgentServer and Gateway.  The children can then skip the same disk
+    work via ``JIUWENSWARM_RUNTIME_WORKSPACE_READY=1``.  Standalone child
+    entrypoints intentionally retain this function as their fallback.
+    """
+    if cleanup_stale_descs:
+        cleanup_stale_openjiuwen_descs()
+
+    workspace_dir = get_user_workspace_dir()
+    config_file = workspace_dir / "config" / "config.yaml"
+    new_workspace = workspace_dir / "agent" / "workspace"
+    old_workspace = workspace_dir / "agent" / "jiuwenclaw_workspace"
+    mcp_builtins_dir = new_workspace / "mcp" / "mcp_builtins"
+
+    cleanup_team_files(workspace_dir)
+
+    config_missing = not config_file.exists()
+    workspace_migration_needed = old_workspace.exists() and not new_workspace.exists()
+    mcp_builtins_missing = not mcp_builtins_dir.is_dir()
+    mcp_builtins_update_needed = mcp_builtins_seed_update_needed(workspace_dir)
+    workspace_preparation_needed = any(
+        (
+            config_missing,
+            workspace_migration_needed,
+            mcp_builtins_missing,
+            mcp_builtins_update_needed,
+        )
+    )
+    if workspace_preparation_needed:
+        prepare_workspace(overwrite=False, workspace_dir=workspace_dir)
+
+    ensure_config_migrated_from_template(workspace_dir)
+    ensure_default_builtin_skills()
 
 
 def _close_log_handlers() -> None:
@@ -1503,6 +2058,415 @@ def get_agent_skills_dir() -> Path:
     return get_agent_workspace_dir() / "skills"
 
 
+# Last directory handed to openJiuWen's ``configure_global_skills_dir``. Kept so
+# the override is applied once instead of on every call, while a changed user
+# home (tests, named instances) still re-pins the library.
+_openjiuwen_skill_library: Path | None = None
+
+
+def configure_skill_library() -> Path:
+    """Register the JiuWenSwarm Skill library as the process-wide single library.
+
+    openJiuWen teams resolve every member / team / rail Skill lookup through
+    ``openjiuwen.agent_teams.paths.global_skills_dir()``. Without this override it
+    falls back to ``~/.openjiuwen/workspace/skills`` and the two runtimes read
+    different libraries. Single-agent mode is unaffected: it already reads
+    :func:`get_agent_skills_dir` directly.
+
+    Idempotent; safe to call from any startup path. Call it before assembling any
+    team, member or rail so they all resolve the same physical directory.
+
+    Returns:
+        Path of the single Skill library.
+    """
+    global _openjiuwen_skill_library
+    skills_dir = get_agent_skills_dir()
+    if _openjiuwen_skill_library == skills_dir:
+        return skills_dir
+    try:
+        from openjiuwen.agent_teams.paths import configure_global_skills_dir
+    except ImportError as exc:
+        logger.warning("[SkillLibrary] openjiuwen paths unavailable, keeping default library: %s", exc)
+        return skills_dir
+    configure_global_skills_dir(skills_dir)
+    _openjiuwen_skill_library = skills_dir
+    return skills_dir
+
+
+def _is_directory_link(path: Path) -> bool:
+    """Return whether a path entry is a symlink or a Windows reparse point.
+
+    Windows directory junctions created by ``mklink /J`` are not symlinks: they
+    show up as ordinary directories unless the reparse-point attribute is read.
+
+    Args:
+        path: Entry to inspect.
+
+    Returns:
+        True when the entry is a link rather than a real directory.
+    """
+    if path.is_symlink():
+        return True
+    if sys.platform != "win32":
+        return False
+    try:
+        file_attributes = os.lstat(path).st_file_attributes
+    except (AttributeError, OSError):
+        return False
+    return bool(file_attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT)
+
+
+def _library_skill_names(library: Path) -> set[str]:
+    """Return the names of every valid Skill directory in the shared library.
+
+    Args:
+        library: The single Skill library directory.
+
+    Returns:
+        Set of Skill directory names; empty when the library is missing.
+    """
+    names: set[str] = set()
+    try:
+        entries = list(library.iterdir())
+    except OSError:
+        return names
+    for entry in entries:
+        if entry.is_dir() and (entry / "SKILL.md").is_file():
+            names.add(entry.name)
+    return names
+
+
+def _is_library_replica(entry: Path, library: Path) -> bool:
+    """Return whether a real directory is an untouched copy of a library Skill.
+
+    Sandboxed runtimes (e.g. the HarmonyOS app sandbox) forbid ``symlink(2)``
+    even inside the app's own files directory, so the legacy view layer fell back
+    to copying the Skill directory. Those copies are indistinguishable from links
+    except by content, and they are the only real directories the migration is
+    allowed to delete.
+
+    Args:
+        entry: Real directory inside a legacy view directory.
+        library: The single Skill library directory.
+
+    Returns:
+        True when the library holds a Skill of the same name and the same
+        ``SKILL.md`` bytes, meaning nothing would be lost by removing the copy.
+    """
+    source = library / entry.name
+    entry_md = entry / "SKILL.md"
+    source_md = source / "SKILL.md"
+    if not entry_md.is_file() or not source_md.is_file():
+        return False
+    try:
+        return entry_md.read_bytes() == source_md.read_bytes()
+    except OSError:
+        return False
+
+
+def _read_skill_view_names(view_dir: Path) -> set[str]:
+    """Return the Skill names a legacy view directory exposed.
+
+    The scan reports every directory-shaped entry, including one a user dropped
+    in by hand: the removal step needs to see those too, so it can keep them
+    instead of deleting them. Names that do not exist in the shared library are
+    filtered out again before anything is seeded from them, in
+    :func:`_seed_visibility_from_view`.
+
+    Args:
+        view_dir: Legacy ``skills/`` directory of a team or member workspace.
+
+    Returns:
+        Set of Skill names, covering links, junctions and sandbox copies alike.
+    """
+    names: set[str] = set()
+    try:
+        entries = list(view_dir.iterdir())
+    except OSError:
+        return names
+    for entry in entries:
+        if entry.name.startswith(".") or entry.name.startswith("_"):
+            continue
+        if _is_directory_link(entry) or entry.is_dir():
+            names.add(entry.name)
+    return names
+
+
+def _remove_skill_view_entry(entry: Path, library: Path) -> bool:
+    """Remove one legacy view entry, never a real directory the user owns.
+
+    Only three shapes are removable: a POSIX symlink (``unlink``), a Windows
+    junction / reparse point (``os.rmdir`` removes the link, not its target), and
+    a sandbox fallback copy that still matches the library byte for byte. Any
+    other real directory is a Skill somebody put there by hand and is kept —
+    this judgement is the whole reason the legacy remover refused to ``rmtree``.
+
+    Args:
+        entry: Entry inside a legacy view directory.
+        library: The single Skill library directory.
+
+    Returns:
+        True when the entry was removed.
+    """
+    try:
+        if entry.is_symlink():
+            entry.unlink()
+            return True
+        if _is_directory_link(entry):
+            # Junction: rmdir detaches the link and leaves the target intact.
+            os.rmdir(entry)
+            return True
+        if entry.is_file():
+            entry.unlink()
+            return True
+        if entry.is_dir() and _is_library_replica(entry, library):
+            shutil.rmtree(entry)
+            return True
+    except OSError as exc:
+        logger.warning("[SkillViewMigration] failed to remove legacy view entry %s: %s", entry, exc)
+        return False
+    logger.info("[SkillViewMigration] kept user-owned directory: %s", entry)
+    return False
+
+
+def _seed_visibility_from_view(
+    metadata_path: Path,
+    scope: str,
+    entity_id: str,
+    view_names: set[str],
+    library_names: set[str],
+) -> None:
+    """Seed a workspace visibility document from its legacy view directory.
+
+    The seed is written at ``AUTHORITY_MIGRATION``, which ranks above the
+    default/config seeds every assembly path writes: the view directory records
+    what the workspace was *actually* allowed to see, a config seed only records
+    a default. The rank — not the call order — is what decides the outcome, so a
+    config-seeded document written earlier is replaced here instead of silently
+    winning, and a document already carrying an explicit authorization
+    (``AUTHORITY_EXPLICIT``) is never touched.
+
+    A view that covered the whole library — the common case, since the legacy
+    sync linked every valid Skill — is recorded as an empty allow list rather
+    than a frozen snapshot: an empty allow list means "inherit the library", so
+    Skills installed later stay visible.
+
+    Only names the library actually holds become a grant. A view directory can
+    also contain a directory somebody put there by hand, and such a name would
+    otherwise be written into the allow list forever: it can never resolve to a
+    Skill, but its presence turns the list from empty ("inherit the library")
+    into a restriction, permanently narrowing what the workspace may see. When
+    the intersection is empty there is no grant left to preserve and the
+    document is seeded unrestricted, exactly like an empty view.
+
+    Args:
+        metadata_path: Target ``skills-visibility.json`` path.
+        scope: ``member`` or ``team``.
+        entity_id: Member name or team name.
+        view_names: Skill names the legacy view exposed.
+        library_names: Skill names currently in the shared library.
+    """
+    from openjiuwen.agent_teams.skill.visibility import AUTHORITY_MIGRATION, bootstrap_skill_visibility
+
+    granted = view_names & library_names
+    unrestricted = not granted or granted >= library_names
+    allow: list[str] = [] if unrestricted else sorted(granted)
+    try:
+        bootstrap_skill_visibility(
+            metadata_path,
+            scope=scope,
+            entity_id=entity_id,
+            allow=allow,
+            bootstrapped_from="migration:symlinks",
+            authority=AUTHORITY_MIGRATION,
+        )
+    except OSError as exc:
+        logger.warning("[SkillViewMigration] failed to seed %s: %s", metadata_path, exc)
+
+
+def _remove_empty_skill_view(view_dir: Path, library: Path) -> None:
+    """Drop a ``skills/`` directory that exposes no Skill.
+
+    Older workspace schemas materialized an empty ``skills/`` directory in every
+    team and member workspace, complete with a ``.workspace`` marker file. It
+    grants nothing and no Skill lookup reads it, so it is removed rather than
+    migrated. Only the shapes :func:`_remove_skill_view_entry` accepts are
+    deleted, so a directory somebody put there by hand survives untouched and
+    the removal is simply skipped.
+
+    Args:
+        view_dir: The ``skills/`` directory of a team or member workspace.
+        library: The single Skill library directory.
+    """
+    try:
+        entries = list(view_dir.iterdir())
+    except OSError as exc:
+        logger.warning("[SkillViewMigration] failed to scan %s: %s", view_dir, exc)
+        return
+    for entry in entries:
+        if not _remove_skill_view_entry(entry, library):
+            return
+    try:
+        view_dir.rmdir()
+    except OSError as exc:
+        logger.warning("[SkillViewMigration] failed to remove empty view dir %s: %s", view_dir, exc)
+
+
+def _migrate_one_skill_view(
+    *,
+    view_dir: Path,
+    metadata_path: Path,
+    scope: str,
+    entity_id: str,
+    library: Path,
+    library_names: set[str],
+) -> int:
+    """Migrate one legacy view directory into visibility metadata and drop it.
+
+    Metadata is written before anything is deleted: a partial cleanup then leaves
+    a correct document behind and the next run simply retries the removal.
+
+    A directory that exposes no Skill at all is a bare scaffold, not a legacy
+    view — older workspace schemas created an empty ``skills/`` in every team and
+    member workspace. It is still removed, but nothing is seeded from it (there
+    is no grant to preserve, and config bootstrap is the right source for such a
+    workspace) and it is not counted as a migrated view, so an empty scaffold
+    cannot keep reporting a migration that never happens.
+
+    Args:
+        view_dir: Legacy ``skills/`` directory of the workspace.
+        metadata_path: Target ``skills-visibility.json`` path.
+        scope: ``member`` or ``team``.
+        entity_id: Member name or team name.
+        library: The single Skill library directory.
+        library_names: Skill names currently in the shared library.
+
+    Returns:
+        1 when the workspace still carried a legacy view directory, 0 otherwise.
+    """
+    if not view_dir.is_dir():
+        return 0
+
+    view_names = _read_skill_view_names(view_dir)
+    if not view_names:
+        _remove_empty_skill_view(view_dir, library)
+        return 0
+
+    _seed_visibility_from_view(metadata_path, scope, entity_id, view_names, library_names)
+
+    kept = 0
+    try:
+        entries = list(view_dir.iterdir())
+    except OSError as exc:
+        logger.warning("[SkillViewMigration] failed to scan %s: %s", view_dir, exc)
+        return 1
+    for entry in entries:
+        if not _remove_skill_view_entry(entry, library):
+            kept += 1
+    if kept == 0:
+        try:
+            view_dir.rmdir()
+        except OSError as exc:
+            logger.warning("[SkillViewMigration] failed to remove empty view dir %s: %s", view_dir, exc)
+    logger.info(
+        "[SkillViewMigration] migrated %s view: names=%d kept=%d -> %s",
+        scope,
+        len(view_names),
+        kept,
+        metadata_path,
+    )
+    return 1
+
+
+def migrate_team_skill_views(library_dir: Path | None = None) -> int:
+    """Convert legacy per-workspace Skill view directories into visibility metadata.
+
+    Teams used to materialize a ``skills/`` directory inside every team and
+    member workspace, filled with directory links — or, on sandboxed runtimes
+    that forbid ``symlink(2)``, real copies — pointing at the shared library.
+    Skills now live in exactly one physical library and visibility is metadata,
+    so each view directory is read once, turned into the workspace's initial
+    allow list, and then removed. Single-agent workspaces are never scanned:
+    only ``agent_teams`` homes ever carried these view directories.
+
+    Idempotent: a second run writes no metadata, because the documents it wrote
+    already carry ``AUTHORITY_MIGRATION`` and a seed never overwrites its own
+    rank; it only retries removals that a user-owned directory kept alive.
+
+    Must run after :func:`configure_skill_library`, which pins the library this
+    scan compares against. It does *not* have to run before team assembly: the
+    migrated allow lists win over config-seeded ones by rank rather than by
+    ordering, so moving this call later can no longer silently widen a
+    workspace's Skill view (see :func:`_seed_visibility_from_view`).
+
+    Args:
+        library_dir: The single Skill library. Defaults to
+            :func:`get_agent_skills_dir`.
+
+    Returns:
+        Number of workspaces that still carried a legacy view directory.
+    """
+    library = Path(library_dir) if library_dir is not None else get_agent_skills_dir()
+    try:
+        from openjiuwen.agent_teams.paths import (
+            get_agent_teams_home,
+            member_skill_visibility_path,
+            team_skill_visibility_path,
+        )
+        from openjiuwen.agent_teams.skill.visibility import SCOPE_MEMBER, SCOPE_TEAM
+    except ImportError as exc:
+        logger.warning("[SkillViewMigration] openjiuwen skill visibility unavailable: %s", exc)
+        return 0
+
+    teams_home = get_agent_teams_home()
+    if not teams_home.is_dir():
+        return 0
+
+    library_names = _library_skill_names(library)
+    migrated = 0
+    try:
+        team_dirs = sorted(entry for entry in teams_home.iterdir() if entry.is_dir())
+    except OSError as exc:
+        logger.warning("[SkillViewMigration] failed to scan %s: %s", teams_home, exc)
+        return 0
+
+    for team_dir in team_dirs:
+        team_name = team_dir.name
+        migrated += _migrate_one_skill_view(
+            view_dir=team_dir / "team-workspace" / "skills",
+            metadata_path=team_skill_visibility_path(team_name),
+            scope=SCOPE_TEAM,
+            entity_id=team_name,
+            library=library,
+            library_names=library_names,
+        )
+        workspaces_root = team_dir / "workspaces"
+        if not workspaces_root.is_dir():
+            continue
+        try:
+            member_dirs = sorted(entry for entry in workspaces_root.iterdir() if entry.is_dir())
+        except OSError as exc:
+            logger.warning("[SkillViewMigration] failed to scan %s: %s", workspaces_root, exc)
+            continue
+        for member_ws in member_dirs:
+            if not member_ws.name.endswith("_workspace"):
+                continue
+            member_name = member_ws.name[: -len("_workspace")]
+            if not member_name:
+                continue
+            migrated += _migrate_one_skill_view(
+                view_dir=member_ws / "skills",
+                metadata_path=member_skill_visibility_path(team_name, member_name),
+                scope=SCOPE_MEMBER,
+                entity_id=member_name,
+                library=library,
+                library_names=library_names,
+            )
+    if migrated:
+        logger.info("[SkillViewMigration] migrated %d legacy skill views", migrated)
+    return migrated
+
+
 def get_interactions_dir() -> Path:
     """Get the interactions directory for pending interaction contexts.
 
@@ -1513,8 +2477,34 @@ def get_interactions_dir() -> Path:
 
 
 def get_cron_jobs_path() -> Path:
-    """Canonical path for cron_jobs.json shared by gateway and agentserver."""
-    return get_user_workspace_dir() / "agent" / "home" / "cron_jobs.json"
+    """Path to cron_jobs.json, following wherever this workspace keeps it.
+
+    ``_migrate_legacy_workspace`` relocates the file to ``gateway/`` while this
+    getter pointed at ``agent/home/``, so after a migration the scheduler read a
+    missing path and silently loaded zero jobs. Resolution order:
+
+    1. ``gateway/`` if present -- the migration ran.
+    2. ``agent/home/`` if present -- it has not; repointing unconditionally
+       would empty the schedules of every deployment that never migrated.
+    3. ``gateway/`` otherwise, so a fresh workspace never creates
+       ``agent/home``, whose existence alone marks a workspace legacy.
+    """
+    workspace = get_user_workspace_dir()
+    gateway_path = workspace / "gateway" / "cron_jobs.json"
+    legacy_path = workspace / "agent" / "home" / "cron_jobs.json"
+    if gateway_path.exists():
+        return gateway_path
+    if legacy_path.exists():
+        return legacy_path
+    return gateway_path
+
+
+def get_heartbeat_jobs_path() -> Path:
+    """Canonical path for heartbeat_jobs.json (new thread-automation heartbeat jobs).
+
+    与 ``get_cron_jobs_path`` 同目录(``agent/home``),禁止在业务代码中硬编码该路径。
+    """
+    return get_agent_home_dir() / "heartbeat_jobs.json"
 
 
 def get_deepagent_todo_dir() -> Path:
@@ -1542,15 +2532,6 @@ def get_deepagent_agents_dir() -> Path:
         Path to agents directory: ~/.jiuwenswarm/agent/workspace/agents
     """
     return get_agent_workspace_dir() / "agents"
-
-
-def get_deepagent_heartbeat_path() -> Path:
-    """Get the DeepAgent HEARTBEAT.md file path.
-
-    Returns:
-        Path to HEARTBEAT.md: ~/.jiuwenswarm/agent/workspace/HEARTBEAT.md
-    """
-    return get_agent_workspace_dir() / "HEARTBEAT.md"
 
 
 def get_deepagent_agent_md_path() -> Path:
@@ -1686,10 +2667,33 @@ def get_env_file() -> Path:
     return get_config_dir() / ".env"
 
 
-def reset_free_search_runtime_flags() -> None:
-    """Start each process with free-search engines disabled unless reopened via config UI."""
-    os.environ["FREE_SEARCH_DDG_ENABLED"] = "false"
-    os.environ["FREE_SEARCH_BING_ENABLED"] = "false"
+def env_url(name: str, default: str) -> str:
+    """Read an endpoint URL from the environment, falling back when blank.
+
+    ``os.environ.get(name, default)`` only falls back when the key is absent.
+    The shipped ``.env`` template declares the endpoint overrides as empty
+    values and documents "leave blank to use official default URLs", so a
+    plain ``get`` would hand back an empty URL and the request would fail with
+    a message-less transport error. Treat unset and blank alike.
+
+    Args:
+        name: Environment variable name holding the endpoint override.
+        default: Official endpoint used when the variable is unset or blank.
+
+    Returns:
+        The configured endpoint URL, or ``default`` when unset or blank.
+    """
+    return os.environ.get(name, "").strip() or default
+
+
+def apply_free_search_runtime_defaults() -> None:
+    """Disable free-search engines for this process unless the flags are already set.
+
+    A value from ``.env``, the config UI, or the shell environment wins, so an
+    explicit opt-in survives process start.
+    """
+    os.environ.setdefault("FREE_SEARCH_DDG_ENABLED", "false")
+    os.environ.setdefault("FREE_SEARCH_BING_ENABLED", "false")
 
 
 def get_config_file() -> Path:

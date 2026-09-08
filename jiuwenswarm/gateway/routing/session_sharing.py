@@ -188,6 +188,57 @@ class SessionSharingRegistry:
                             return release
         return None
 
+    async def unregister_by_ws_id(
+        self,
+        ws_id: str,
+        *,
+        channel_id: str | None = None,
+    ) -> int:
+        """Remove subscriptions whose physical WebSocket has disconnected.
+
+        ``RoutingKey`` entries are transport indexes owned by ``BaseWsChannel``;
+        ``Subscription`` entries live independently in this registry.  Both must
+        be removed when a socket closes, otherwise a reconnect can leave
+        GodView or member delivery pointing at a dead ``ws_id``.
+        """
+        target_ws_id = str(ws_id or "").strip()
+        if not target_ws_id:
+            return 0
+
+        removed_count = 0
+        async with self._lock:
+            for sid, members in list(self._subs.items()):
+                for member_name, subs in list(members.items()):
+                    kept = []
+                    for sub in subs:
+                        matches_ws = (
+                            getattr(sub.delivery, "ws_id", "") == target_ws_id
+                        )
+                        matches_channel = (
+                            channel_id is None
+                            or sub.routing_key.channel_id == channel_id
+                        )
+                        if matches_ws and matches_channel:
+                            removed_count += 1
+                            continue
+                        kept.append(sub)
+                    if kept:
+                        members[member_name] = kept
+                    else:
+                        del members[member_name]
+                if not members:
+                    del self._subs[sid]
+
+        if removed_count:
+            logger.info(
+                "[Registry] unregistered disconnected websocket: "
+                "channel_id=%s ws_id=%s subscriptions=%d",
+                channel_id or "*",
+                target_ws_id,
+                removed_count,
+            )
+        return removed_count
+
     async def unregister_all_for_identity(
         self, channel_id: str, app_id: str, user_id: str,
         session_id: str | None = None,

@@ -103,7 +103,9 @@
 | `content_blocks` | 与 ACP `Vec<ContentBlock>` 同构的 JSON 数组；在 `method==session/prompt` 且无 `prompt` 时可映射为 `prompt` |
 | `text` / `content` / `query` | 纯文本用户输入；无 `prompt`/`content_blocks` 时取第一个非空字符串生成单条 `text` block |
 | `files` / `attachments` | 附件列表，元素形状见 **`E2AFileRef`**（`uri` 必填） |
-| 其他 | 如 `mode`、`page_idx`、心跳文案等，随网关 RPC 自由扩展 |
+| `mode` | 运行模式，取值与语义见 [模式系统](模式系统.md) |
+| `work_mode` | 可选。Web 组合字段，取值 `work` / `code`；与 `mode` 一起决定 work/code profile，以及是否开启硬规划模式。详见 [模式系统](模式系统.md) 中「工作模式（work_mode）」 |
+| 其他 | 如 `page_idx`、心跳文案等，随网关 RPC 自由扩展 |
 
 ### 4.5 `auth`、扩展槽
 
@@ -204,14 +206,17 @@ Python：`jiuwenswarm.common.e2a.merge_params_to_acp_prompt(envelope)`。
   "user_id": "u_001",
   "params": {
     "content": "你好",
-    "mode": "plan",
-    "query": "你好"
+    "query": "你好",
+    "mode": "agent",
+    "work_mode": "work"
   },
   "provenance": {
     "source_protocol": "e2a"
   }
 }
 ```
+
+使用 E2A 协议时建议同时发送 `mode` 与 `work_mode`。
 
 `channel_context` 可省略（空对象序列化时可不出现或 `{}`）。
 
@@ -227,8 +232,9 @@ Python：`jiuwenswarm.common.e2a.merge_params_to_acp_prompt(envelope)`。
   "timestamp": 1774524781.15,
   "params": {
     "content": "查桌面文件",
-    "mode": "plan",
-    "query": "查桌面文件"
+    "query": "查桌面文件",
+    "mode": "agent",
+    "work_mode": "work"
   },
   "metadata": {
     "feishu_open_id": "ou_xxx",
@@ -386,3 +392,13 @@ Agent → 网关 → 客户端的**每一条**出站记录（含流式多帧）�
 ---
 
 *本文与 `jiuwenswarm/common/e2a/models.py`（`E2AEnvelope`、`E2AResponse`）同步维护。*
+
+## 变更记录
+
+- v0.2.4b3：`agent.fast` 与 `agent.plan` 模式合并为 `agent` 模式，新增 `work_mode` 字段；Web 模式下 `agent.plan` + `work_mode` 会开启硬规划模式。
+---
+
+## 返回导航
+
+- [返回文档首页](../README.md)
+- [返回项目首页](../../README_CN.md)

@@ -1,5 +1,5 @@
 ---
-last_updated: 2026-07-07
+last_updated: 2026-08-16
 status: partial
 confidence: inferred
 ---
@@ -21,6 +21,8 @@ Channel or frontend
   -> Gateway
   -> channel/frontend output
 ```
+
+When explicitly enabled per request, both Work and Code adapters mount the same eternal-conversation Rail. The Rail writes a complete hash-chained Raw History, while a Session-owned coordinator—not the disposable channel Adapter—runs the semantic Extractor and the Pending-to-Built Builder. Snapshot replacement is allowed only at a task boundary where the published covered cursor equals the latest completed requested cursor; ContextProcessor output recorded after its changes remains authoritative foreground evidence.
 
 ## AgentServer Responsibilities
 

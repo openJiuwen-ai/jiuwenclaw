@@ -7,6 +7,7 @@
 import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Session } from '../../types';
+import { toDisplaySessionTitle } from '../../utils/documentMessage';
 import clsx from 'clsx';
 
 interface SessionItemProps {
@@ -54,8 +55,9 @@ export function SessionItem({ session, isActive, onClick, onDelete }: SessionIte
   const { t, i18n } = useTranslation();
   const [showDelete, setShowDelete] = useState(false);
   
-  // 优先展示会话标题，缺失时回退到会话 ID 片段
-  const preview = session.title?.trim() || session.session_id.slice(0, 8);
+  // 优先展示会话标题，缺失时回退到会话 ID 片段；隐藏【上传文档】后缀
+  const preview =
+    toDisplaySessionTitle(session.title || '') || session.session_id.slice(0, 8);
 
   const handleDelete = (e: React.MouseEvent) => {
     e.stopPropagation();
@@ -67,6 +69,8 @@ export function SessionItem({ session, isActive, onClick, onDelete }: SessionIte
       className="relative group"
       onMouseEnter={() => setShowDelete(true)}
       onMouseLeave={() => setShowDelete(false)}
+      data-testid="session-sidebar-session-item"
+      data-variant={session.session_id}
     >
       <button
         onClick={onClick}
@@ -74,6 +78,7 @@ export function SessionItem({ session, isActive, onClick, onDelete }: SessionIte
           'nav-item w-full text-left pr-8',
           isActive && 'active'
         )}
+        data-testid="session-sidebar-session-item-main"
       >
         {/* 会话图标 */}
         <div className={clsx(
@@ -90,10 +95,10 @@ export function SessionItem({ session, isActive, onClick, onDelete }: SessionIte
           <div className={clsx(
             'text-sm font-medium truncate',
             isActive ? 'text-text-strong' : 'text-text'
-          )}>
+          )} data-testid="session-sidebar-session-item-title">
             {preview}
           </div>
-          <div className="text-xs text-text-muted truncate">
+          <div className="text-xs text-text-muted truncate" data-testid="session-sidebar-session-item-time">
             {session.updated_at
               ? formatTime(session.updated_at, i18n.language, t)
               : t('sessionSidebar.newSession')}
@@ -105,7 +110,7 @@ export function SessionItem({ session, isActive, onClick, onDelete }: SessionIte
           <span className={clsx(
             'text-xs px-1.5 py-0.5 rounded-full',
             isActive ? 'bg-accent-subtle text-accent' : 'bg-secondary text-text-muted'
-          )}>
+          )} data-testid="session-sidebar-session-item-count">
             {session.message_count}
           </span>
         )}
@@ -117,6 +122,7 @@ export function SessionItem({ session, isActive, onClick, onDelete }: SessionIte
           onClick={handleDelete}
           className="absolute right-2 top-1/2 -translate-y-1/2 p-1.5 rounded-md text-text-muted hover:text-danger hover:bg-danger-subtle "
           title={t('sessions.delete')}
+          data-testid="session-sidebar-session-item-delete"
         >
           <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
             <path strokeLinecap="round" strokeLinejoin="round" d="M14.74 9l-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 01-2.244 2.077H8.084a2.25 2.25 0 01-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 00-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 013.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 00-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 00-7.5 0" />

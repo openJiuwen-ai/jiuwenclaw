@@ -16,7 +16,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from openjiuwen.agent_teams.paths import configure_openjiuwen_home, get_agent_teams_home
+
 from jiuwenswarm.common.utils import get_agent_root_dir
+from jiuwenswarm.common.utils import get_user_workspace_dir
 
 TEAM_NAME_RE = re.compile(r"^[^/\\\x00-\x1f\x7f]{1,64}$")
 
@@ -110,8 +113,25 @@ class TeamBindingStore:
     """File-backed team binding catalog."""
 
     def __init__(self, path: Path | None = None) -> None:
-        self._path = path or get_agent_root_dir() / "teams" / "bindings.json"
+        if path is None:
+            configure_openjiuwen_home(get_user_workspace_dir())
+            self._path = get_agent_teams_home() / "bindings.json"
+            self._migrate_legacy_file(get_agent_root_dir() / "teams" / "bindings.json")
+        else:
+            self._path = path
         self._lock = threading.RLock()
+
+    def _migrate_legacy_file(self, legacy_path: Path) -> None:
+        """Move the old agent/teams catalog when the new catalog is absent."""
+        if self._path.exists() or not legacy_path.is_file():
+            return
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            legacy_path.replace(self._path)
+        except FileNotFoundError:
+            # Another process may have completed the migration first.
+            if not self._path.exists():
+                raise
 
     @property
     def path(self) -> Path:

@@ -1,6 +1,7 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
 import json
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -8,6 +9,7 @@ import pytest
 from jiuwenswarm.common.e2a.models import E2AEnvelope
 from jiuwenswarm.extensions.yuanrong_frontend_client import (
     YuanrongAgentApiError,
+    YuanrongAgentFileError,
     YuanrongFrontendAgentClient,
 )
 
@@ -29,6 +31,21 @@ class YuanrongFrontendAgentClientProbe(YuanrongFrontendAgentClient):
             req_method=req_method,
             stream=stream,
         )
+
+    def parse_agent_file_list_response(
+        self,
+        body: str,
+        status: int,
+    ) -> list[dict[str, Any]]:
+        return self._parse_agent_file_list_response(body, status)
+
+    def parse_agent_file_mkdir_response(
+        self,
+        body: str,
+        status: int,
+        path: str,
+    ) -> dict[str, Any]:
+        return self._parse_agent_file_mkdir_response(body, status, path)
 
 
 @pytest.fixture
@@ -347,3 +364,170 @@ async def test_create_sandbox_requires_required_fields(
             workspace="/home/hhc/workspaceA",
             runtime_spec={"runtime": "python3.11", "rootfs": {}},
         )
+
+
+def test_parse_list_unwraps_faas_envelope(client: YuanrongFrontendAgentClientProbe):
+    body = json.dumps({
+        "body": {
+            "items": [
+                {
+                    "name": "hello.txt",
+                    "path": "/home/agentos/hello.txt",
+                    "is_directory": False,
+                    "size": 10,
+                },
+            ]
+        },
+        "innerCode": "0",
+        "billingDuration": "todo",
+    })
+    items = client.parse_agent_file_list_response(body, 200)
+    assert len(items) == 1
+    assert items[0]["name"] == "hello.txt"
+
+
+def test_parse_list_plain_items_still_works(client: YuanrongFrontendAgentClientProbe):
+    body = json.dumps({"items": [{"name": "a", "path": "/home/agentos/a"}]})
+    items = client.parse_agent_file_list_response(body, 200)
+    assert items[0]["name"] == "a"
+
+
+def test_parse_list_faas_error_raises(client: YuanrongFrontendAgentClientProbe):
+    body = json.dumps({"body": {"error": "boom"}, "innerCode": "1"})
+    with pytest.raises(YuanrongAgentFileError):
+        client.parse_agent_file_list_response(body, 200)
+
+
+def test_parse_mkdir_unwraps_code_data_envelope(client: YuanrongFrontendAgentClientProbe):
+    body = json.dumps(
+        {
+            "code": 200,
+            "data": {
+                "success": True,
+                "path": "/home/snuser/work/sub",
+                "created": True,
+            },
+        }
+    )
+    parsed = client.parse_agent_file_mkdir_response(body, 200, "/fallback")
+    assert parsed == {
+        "success": True,
+        "path": "/home/snuser/work/sub",
+        "created": True,
+    }
+
+
+def test_parse_mkdir_idempotent_created_false(client: YuanrongFrontendAgentClientProbe):
+    body = json.dumps(
+        {"code": 200, "data": {"success": True, "path": "/home/agentos/sub", "created": False}}
+    )
+    parsed = client.parse_agent_file_mkdir_response(body, 200, "/home/agentos/sub")
+    assert parsed["created"] is False
+
+
+def test_parse_mkdir_unwraps_faas_envelope(client: YuanrongFrontendAgentClientProbe):
+    body = json.dumps(
+        {
+            "body": {"success": True, "path": "/home/agentos/sub", "created": True},
+            "innerCode": "0",
+        }
+    )
+    parsed = client.parse_agent_file_mkdir_response(body, 200, "/fallback")
+    assert parsed["path"] == "/home/agentos/sub"
+    assert parsed["created"] is True
+
+
+def test_parse_mkdir_http_400_is_bad_request(client: YuanrongFrontendAgentClientProbe):
+    with pytest.raises(YuanrongAgentFileError) as exc:
+        client.parse_agent_file_mkdir_response(
+            json.dumps({"code": 400, "message": "parent directory does not exist"}),
+            400,
+            "/home/agentos/nope/deep",
+        )
+    assert exc.value.error_code == "BAD_REQUEST"
+    assert exc.value.http_status == 400
+
+
+def test_normalize_mkdir_mode_rejects_illegal(client: YuanrongFrontendAgentClientProbe):
+    assert client._normalize_mkdir_mode(None) is None  # noqa: SLF001
+    assert client._normalize_mkdir_mode("0755") == "0755"  # noqa: SLF001
+    assert client._normalize_mkdir_mode("700") == "700"  # noqa: SLF001
+    with pytest.raises(YuanrongAgentFileError) as exc:
+        client._normalize_mkdir_mode("rwx")  # noqa: SLF001
+    assert exc.value.error_code == "BAD_REQUEST"
+
+
+@pytest.mark.asyncio
+async def test_mkdir_agent_dir_sends_query_params(client: YuanrongFrontendAgentClientProbe):
+    await client.connect("http://127.0.0.1:8080")
+    captured: dict[str, Any] = {}
+
+    def fake_urlopen(req, timeout=0):
+        del timeout
+        captured["url"] = req.full_url
+        captured["method"] = req.get_method()
+        captured["authorization"] = dict(req.header_items()).get("Authorization")
+        resp = MagicMock()
+        resp.status = 200
+        resp.read.return_value = json.dumps(
+            {"code": 200, "data": {"success": True, "path": "/home/agentos/sub", "created": True}}
+        ).encode()
+        resp.__enter__ = MagicMock(return_value=resp)
+        resp.__exit__ = MagicMock(return_value=False)
+        return resp
+
+    with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+        result = await client.mkdir_agent_dir(
+            "inst-1",
+            "/home/agentos/sub",
+            mode="0755",
+            recursive=True,
+            auth_headers={"Authorization": "Bearer tok-mkdir"},
+        )
+
+    assert result["created"] is True
+    assert captured["method"] == "POST"
+    assert captured["authorization"] == "Bearer tok-mkdir"
+    assert "/api/agent/inst-1/files/mkdir?" in captured["url"]
+    assert "path=%2Fhome%2Fagentos%2Fsub" in captured["url"]
+    assert "mode=0755" in captured["url"]
+    assert "recursive=true" in captured["url"]
+
+
+@pytest.mark.asyncio
+async def test_mkdir_agent_dir_omits_mode_when_unset(client: YuanrongFrontendAgentClientProbe):
+    await client.connect("http://127.0.0.1:8080")
+    captured: dict[str, Any] = {}
+
+    def fake_urlopen(req, timeout=0):
+        del timeout
+        captured["url"] = req.full_url
+        resp = MagicMock()
+        resp.status = 200
+        resp.read.return_value = json.dumps(
+            {"success": True, "path": "/home/agentos/sub", "created": True}
+        ).encode()
+        resp.__enter__ = MagicMock(return_value=resp)
+        resp.__exit__ = MagicMock(return_value=False)
+        return resp
+
+    with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+        await client.mkdir_agent_dir("inst-1", "/home/agentos/sub")
+
+    assert "mode=" not in captured["url"]
+    assert "recursive=false" in captured["url"]
+
+
+@pytest.mark.asyncio
+async def test_mkdir_agent_dir_rejects_empty_path(client: YuanrongFrontendAgentClientProbe):
+    await client.connect("http://127.0.0.1:8080")
+    with pytest.raises(ValueError, match="path is required"):
+        await client.mkdir_agent_dir("inst-1", "   ")
+
+
+@pytest.mark.asyncio
+async def test_mkdir_agent_dir_rejects_nul_path(client: YuanrongFrontendAgentClientProbe):
+    await client.connect("http://127.0.0.1:8080")
+    with pytest.raises(YuanrongAgentFileError) as exc:
+        await client.mkdir_agent_dir("inst-1", "/home/agentos/foo\x00bar")
+    assert exc.value.error_code == "BAD_REQUEST"

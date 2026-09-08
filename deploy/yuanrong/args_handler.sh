@@ -11,7 +11,7 @@ parse_args() {
                 CMD="${args[$i]}"
                 i=$((i+1))
                 ;;
-            jiuwenswarm|gateway)
+            jiuwenswarm|gateway|web)
                 MODULES+=("${args[$i]}")
                 i=$((i+1))
                 ;;
@@ -34,7 +34,7 @@ parse_args() {
     fi
 
     if [ ${#MODULES[@]} -eq 0 ]; then
-        MODULES=("jiuwenswarm" "gateway")
+        MODULES=("jiuwenswarm" "gateway" "web")
     fi
 
     info "Executing command: $*"
@@ -52,9 +52,10 @@ Commands (Required):
   down      Stop and uninstall specified modules
   restart   Restart specified modules
 
-Modules (Optional, default: jiuwenswarm gateway):
+Modules (Optional, default: jiuwenswarm gateway web):
   jiuwenswarm    Install jiuwenswarm on all hosts + register function on yr master
   gateway        jiuwenswarm gateway service (process-mode)
+  web            jiuwenswarm web static server (serves frontend dist on WEB_STATIC_PORT, /ws proxies to gateway WEB_PORT)
 
 Options:
   --hosts HOSTS      Comma-separated IP list for cluster hosts (default: local machine IP)
@@ -69,12 +70,14 @@ Prerequisites:
   yuanrong must be already deployed on all hosts (use yuanrong_deploy.sh up --hosts ...)
 
 Examples:
-  ./$(basename "$0") up --hosts 192.168.1.1                          # Deploy all (jiuwenswarm + gateway)
+  ./$(basename "$0") up --hosts 192.168.1.1                          # Deploy all (jiuwenswarm + gateway + web)
   ./$(basename "$0") up jiuwenswarm --hosts 192.168.1.1              # Deploy jiuwenswarm only
   ./$(basename "$0") up gateway --hosts 192.168.1.1                  # Deploy gateway only
+  ./$(basename "$0") up web --hosts 192.168.1.1                      # Deploy web server only
   ./$(basename "$0") up                                              # Deploy all on local machine
   ./$(basename "$0") down --hosts 192.168.1.1                        # Stop all
   ./$(basename "$0") down gateway --hosts 192.168.1.1                # Stop gateway only
+  ./$(basename "$0") down web --hosts 192.168.1.1                    # Stop web server only
   ./$(basename "$0") restart --hosts 192.168.1.1                     # Restart all
 EOF
     exit 0

@@ -1,4 +1,5 @@
-# JiuwenSwarm 打包 exe 脚本
+# Copyright (c) Huawei Technologies Co., Ltd. 2025-2026. All rights reserved.
+# Windows 打包 exe 脚本
 # 用法: .\scripts\build-exe.ps1  或  pwsh -File scripts\build-exe.ps1
 
 param(
@@ -174,8 +175,22 @@ if (Test-Truthy $BundleNode) {
     Use-NodeRuntime -SourceDir $NodeSource
 }
 
-Write-Host "=== JiuwenSwarm Build Exe ===" -ForegroundColor Cyan
+Write-Host "=== Windows Build Exe ===" -ForegroundColor Cyan
 Write-Host "Project root: $ProjectRoot`n" -ForegroundColor Gray
+
+# Synchronize tracked consumers before the project environment resolves the new metadata.
+$BuildConfigJson = uv run --no-project --python 3.11 python `
+    "$ProjectRoot\scripts\build_config.py" --sync --emit-json
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+$BuildConfig = $BuildConfigJson | ConvertFrom-Json
+$BuildDisplayName = [string]$BuildConfig.display_name
+$BuildVersion = [string]$BuildConfig.version
+$BuildExecutableNameWindows = [string]$BuildConfig.executable_name_windows
+$BuildDistDirName = [string]$BuildConfig.dist_dir_name
+$BuildErrorLogName = [string]$BuildConfig.error_log_name
+$BuildSetupBaseName = [string]$BuildConfig.setup_base_name
+$BuildSetupFilename = [string]$BuildConfig.setup_filename
+Write-Host "Build identity: $BuildDisplayName $BuildVersion" -ForegroundColor Gray
 
 # 1. Install dependencies
 Write-Host "[1/4] Installing Python dependencies (uv sync --extra dev)..." -ForegroundColor Yellow
@@ -204,7 +219,8 @@ uv run pyinstaller scripts\jiuwenswarm.spec --noconfirm
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Verify the actual frozen runtime, not only the PyInstaller source configuration.
-$FrozenExe = Join-Path $ProjectRoot "dist\jiuwenswarm\jiuwenswarm.exe"
+$FrozenDir = Join-Path $ProjectRoot "dist\$BuildDistDirName"
+$FrozenExe = Join-Path $FrozenDir $BuildExecutableNameWindows
 $A2UIVerifier = Join-Path $ProjectRoot "scripts\verify_a2ui_bundle.py"
 $VerifyProcess = Start-Process `
     -FilePath $FrozenExe `
@@ -213,14 +229,24 @@ $VerifyProcess = Start-Process `
     -PassThru `
     -NoNewWindow
 if ($VerifyProcess.ExitCode -ne 0) {
-    throw "Frozen A2UI bundle verification failed. See ~/.jiuwenswarm/logs/jiuwenswarm_exe_error.log"
+    throw "Frozen A2UI bundle verification failed. See ~/.jiuwenswarm/logs/$BuildErrorLogName"
 }
 
 # 3.5 Bundle Node.js runtime for browser tools
 if (Test-Truthy $BundleNode) {
     Write-Host "`n[3.5/4] Bundling Node.js runtime..." -ForegroundColor Yellow
-    $DistDir = Join-Path $ProjectRoot "dist\jiuwenswarm"
-    Copy-NodeRuntime -SourceDir $NodeSource -DistDir $DistDir
+    Copy-NodeRuntime -SourceDir $NodeSource -DistDir $FrozenDir
+
+    $PlaywrightVerifier = Join-Path $ProjectRoot "scripts\verify_playwright_mcp_bundle.py"
+    $PlaywrightVerifyProcess = Start-Process `
+        -FilePath $FrozenExe `
+        -ArgumentList @($PlaywrightVerifier) `
+        -Wait `
+        -PassThru `
+        -NoNewWindow
+    if ($PlaywrightVerifyProcess.ExitCode -ne 0) {
+        throw "Frozen Playwright MCP bundle verification failed. See ~/.jiuwenswarm/logs/$BuildErrorLogName"
+    }
 } else {
     Write-Host "`n[3.5/4] Skipping bundled Node.js runtime (BUNDLE_NODE=$BundleNode)" -ForegroundColor Yellow
 }
@@ -253,10 +279,20 @@ if (-not $Iscc) {
         exit 1
     }
 }
-& $Iscc "$ProjectRoot\scripts\installer.iss"
+$InnoDefines = @(
+    "/DBuildDisplayName=$BuildDisplayName",
+    "/DBuildVersion=$BuildVersion",
+    "/DBuildExecutableNameWindows=$BuildExecutableNameWindows",
+    "/DBuildDistDirName=$BuildDistDirName",
+    "/DBuildSetupBaseName=$BuildSetupBaseName"
+)
+& $Iscc @InnoDefines "$ProjectRoot\scripts\installer.iss"
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-$InstallerPath = (Get-ChildItem "$ProjectRoot\dist\JiuwenSwarm-setup-*.exe" | Select-Object -First 1).FullName
+$InstallerPath = Join-Path $ProjectRoot "dist\$BuildSetupFilename"
+if (-not (Test-Path -LiteralPath $InstallerPath)) {
+    throw "Installer was not created at the configured path: $InstallerPath"
+}
 
 Write-Host "`n=== Build complete ===" -ForegroundColor Green
 Write-Host "Installer: $InstallerPath" -ForegroundColor Green

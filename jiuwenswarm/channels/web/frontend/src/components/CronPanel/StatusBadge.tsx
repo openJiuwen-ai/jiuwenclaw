@@ -35,7 +35,7 @@ export default function StatusBadge({ enabled, expired }: StatusBadgeProps) {
   const { t } = useTranslation();
   if (expired) {
     return (
-      <span className="inline-flex items-center gap-1.5 text-sm text-amber-600">
+      <span className="inline-flex items-center gap-1.5 text-sm text-amber-600" data-testid="cron-status-badge" data-variant="expired">
         <BoldRingIcon />
         {t('cron.status.expired')}
       </span>
@@ -43,14 +43,14 @@ export default function StatusBadge({ enabled, expired }: StatusBadgeProps) {
   }
   if (enabled) {
     return (
-      <span className="inline-flex items-center gap-1.5 text-sm text-cron-running">
+      <span className="inline-flex items-center gap-1.5 text-sm text-cron-running" data-testid="cron-status-badge" data-variant="running">
         <RunningIcon />
         {t('cron.status.running')}
       </span>
     );
   }
   return (
-    <span className="inline-flex items-center gap-1.5 text-sm text-text-muted">
+    <span className="inline-flex items-center gap-1.5 text-sm text-text-muted" data-testid="cron-status-badge" data-variant="paused">
       <BoldRingIcon />
       {t('cron.status.paused')}
     </span>

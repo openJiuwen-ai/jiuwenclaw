@@ -1489,9 +1489,8 @@ react:
     enable_reload: true
   # Skills 在线自演进配置
   evolution:
-    enabled: true
-    auto_scan: false
-    skill_base_dir: "agent/skills"
+    skill_evolution: false
+    auto_save: false
 
 tools:
   - todo
@@ -1547,15 +1546,6 @@ pip install lark-oapi
 | Java | Checkstyle | 下载 JAR 到 `tools/checkstyle.jar` |
 | Go | golangci-lint, gosec | `go install ...` |
 | Rust | Clippy, cargo-audit | `rustup component add clippy` |
-
-### 7.4 心跳配置
-
-在 `HEARTBEAT.md` 中配置定时审查：
-
-```markdown
-## 活跃的任务项
-- 执行代码质量扫描  # 每天扫描代码质量
-```
 
 ## 第八章｜测试验证
 

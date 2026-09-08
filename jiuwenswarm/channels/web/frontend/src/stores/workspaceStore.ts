@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import i18n from '../i18n';
 import { projectRegistryClient } from '../features/workspace/projectRegistryClient';
+import { persistWorkMode, readStoredWorkMode } from '../features/workspace/workModeStorage';
 import type { ProjectInfo, Session, WorkMode } from '../types';
 import { useChatStore } from './chatStore';
 import { useSessionStore } from './sessionStore';
@@ -8,12 +9,6 @@ import { useSessionStore } from './sessionStore';
 export const PROJECT_SESSION_PAGE_SIZE = 10;
 const DEFAULT_PROJECT_ID = 'default';
 const DEFAULT_CODE_PROJECT_ID = 'default_code';
-const WORK_MODE_STORAGE_KEY = 'jiuwenswarm_work_mode';
-
-function readInitialWorkMode(): WorkMode {
-  if (typeof window === 'undefined') return 'work';
-  return window.localStorage.getItem(WORK_MODE_STORAGE_KEY) === 'code' ? 'code' : 'work';
-}
 
 function normalizeProject(project: ProjectInfo, fallbackWorkMode: WorkMode): ProjectInfo {
   return {
@@ -209,7 +204,9 @@ function shouldKeepPendingLocalSession(session: Session): boolean {
   if (session.pinned) return false;
   if (!getSessionTitle(session)) return false;
   const runtime = useChatStore.getState().getRuntime(session.session_id);
-  return session.is_processing === true || runtime?.isProcessing === true;
+  return session.is_processing === true
+    || runtime?.isProcessing === true
+    || runtime?.isPaused === true;
 }
 
 function reconcileVisibleProjectSessions(serverSessions: Session[], visibleSessions: Session[]): Session[] {
@@ -244,7 +241,7 @@ function getProjectSessionListsAfterPin(
 }
 
 export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
-  workMode: readInitialWorkMode(),
+  workMode: readStoredWorkMode(),
   projects: [],
   projectSessions: {},
   projectSessionTotals: {},
@@ -257,7 +254,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
 
   setWorkMode: async (workMode) => {
     if (get().workMode === workMode) return;
-    window.localStorage.setItem(WORK_MODE_STORAGE_KEY, workMode);
+    persistWorkMode(workMode);
     set({
       workMode,
       projects: [],
@@ -266,6 +263,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       sessionVisibility: {},
       pinnedSessions: [],
       selectedProject: null,
+      expandedProjectIds: {},
       error: null,
     });
     await get().loadProjects();
@@ -280,13 +278,25 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       const projects = (payload.projects || []).map((project) => (
         normalizeProject(project, requestedWorkMode)
       ));
-      set((state) => ({
-        projects,
-        selectedProject: state.selectedProject
-          ? findProject(projects, state.selectedProject.project_id)
-          : null,
-        isLoadingProjects: false,
-      }));
+      set((state) => {
+        // 项目会话需要经过 Gateway → AgentServer，并且后端每次查询都会扫描
+        // 当前用户的会话元数据。首屏若把所有历史项目默认展开，会同时触发 N 次
+        // 全量扫描；仅默认项目初始展开，其余项目在用户展开时再加载。
+        const expandedProjectIds = { ...state.expandedProjectIds };
+        for (const project of projects) {
+          if (expandedProjectIds[project.project_id] === undefined) {
+            expandedProjectIds[project.project_id] = isDefaultProject(project);
+          }
+        }
+        return {
+          projects,
+          expandedProjectIds,
+          selectedProject: state.selectedProject
+            ? findProject(projects, state.selectedProject.project_id)
+            : null,
+          isLoadingProjects: false,
+        };
+      });
       await get().loadPinnedSessions();
     } catch (error) {
       set({ isLoadingProjects: false, error: error instanceof Error ? error.message : String(error) });
@@ -386,15 +396,32 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     await get().loadProjects();
     const state = get();
     await Promise.all(state.projects
-      .filter((project) => isDefaultProject(project) || (state.expandedProjectIds[project.project_id] ?? true))
+      .filter((project) => isDefaultProject(project) || Boolean(state.expandedProjectIds[project.project_id]))
       .map((project) => state.loadProjectSessions(project.project_id)));
   },
 
   upsertSession: (session, options = {}) => {
     const state = get();
-    const projectId = findProjectIdForSession(state.projects, session);
-    if (!projectId) return;
+    const isCronSession = Boolean(session.cron_id?.trim());
     set((current) => {
+      // cron 会话由 cronStore 在对应定时任务节点展示。WebSocket / metadata
+      // 的增量更新不能把它临时插入项目普通会话列表，否则在下一次全量刷新前
+      // 会同时出现在两个位置。已置顶的会话沿用现有规则，展示在置顶区。
+      if (isCronSession && !session.pinned) {
+        return {
+          projectSessions: patchSessionLists(
+            current.projectSessions,
+            session.session_id,
+            {},
+            { removeFromProjectLists: true },
+          ),
+          pinnedSessions: current.pinnedSessions.filter(
+            (item) => item.session_id !== session.session_id,
+          ),
+        };
+      }
+      const projectId = findProjectIdForSession(state.projects, session);
+      if (!projectId) return current;
       const currentProjectSessions = current.projectSessions[projectId] || [];
       const sessionWasVisible = currentProjectSessions.some((item) => item.session_id === session.session_id);
       const pinnedSessions = session.pinned

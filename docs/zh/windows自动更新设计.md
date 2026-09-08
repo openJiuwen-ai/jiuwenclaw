@@ -9,9 +9,9 @@
 - 用户可在左侧栏 `更新` 页面手动检查更新
 - 桌面版更新源默认使用 GitCode Releases，可切换为 GitHub Releases；pip 安装模式使用 PyPI
 - 下载产物按平台区分：
-  - Windows：Inno Setup 安装包 `JiuwenSwarm-setup-<version>.exe`
-  - macOS：DMG 镜像 `JiuwenSwarm-<version>.dmg`
-  - Linux：`JiuwenSwarm-<version>.tar.gz`
+  - Windows：Release 中的 `.exe` 安装包；存在多个候选时，优先选择文件名中唯一包含 `workswarm` 的包
+  - macOS：Release 中的 `.dmg` 镜像；存在多个候选时，优先选择文件名中唯一包含 `workswarm` 的包
+  - Linux：仍按 `JiuwenSwarm-<version>.tar.gz` 精确匹配
 - 下载完成后由外部 helper 完成安装与重启：Windows 以交互式安装向导完成，macOS / Linux 由 helper 脚本静默安装并重启
 - 支持预发布版本：稳定版与预发布版共用同一更新通道，稳定版用户也会收到 beta 推送
 
@@ -22,31 +22,19 @@
 - 不做版本忽略、灰度发布、多渠道分流
 - 不做强制更新
 
-## 版本号与预发布规则
-
-安装包命名示例：
-
-| 类型 | Windows | macOS |
-|---|---|---|
-| 正式版 | `JiuwenSwarm-setup-0.2.2.exe` | `JiuwenSwarm-0.2.2.dmg` |
-| 预发布版 | `JiuwenSwarm-setup-0.2.3.beta1.exe` | `JiuwenSwarm-0.2.3.beta1.dmg` |
+## 桌面版时间戳规则
 
 同一个版本的 Windows 与 macOS 安装包一起发布。
 
-版本比较采用全序关系 `release_sort_key`，排序规则：
+Windows 与 macOS 桌面端从分页的 Releases 列表中找到当前安装版本对应的发布记录，将其发布时间与列表中最新的发布时间比较。若列表未包含当前版本，则按 tag 补查当前 Release；时间戳统一转换为 UTC，只有远端时间更新时才提示更新。Linux 保持原有版本比较逻辑。
 
-1. 先比较基础版本号（数字逐段比较）：`0.2.3` > `0.2.2`
-2. 同一基础版本下，正式版高于任意预发布版：`0.2.3` > `0.2.3.beta1`
-3. 同一基础版本的预发布之间，按类型排序：`dev` < `alpha` < `beta` < `rc` < `pre`
-4. 同一类型下，序号大者为新：`0.2.3.beta2` > `0.2.3.beta1`
-
-由于稳定版与预发布版共用通道，运行 `0.2.2` 稳定版的用户会被提示更新到 `0.2.3.beta1`（更高基础版本），这是设计预期行为。
+版本号仅用于定位当前 Release 和界面展示，不参与桌面版本的新旧排序，也不参与 Windows / macOS 安装包匹配。每个 Release 应分别只包含一个 `.exe` 和一个 `.dmg`；作为临时过渡兼容规则，同平台存在多个安装包时，自动更新会选择文件名中唯一包含 `workswarm`（不区分大小写）的包。其他附件可使用任意名称。`pip` 安装模式仍保持原有版本比较逻辑。
 
 ## 核心流程
 
 1. 应用启动后，前端异步调用 `updater.check`
 2. 后端请求 Releases 列表接口，获取全部已发布版本（含预发布，跳过 draft）
-3. 按 `release_sort_key` 选出最新版本，与当前 `__version__` 比较
+3. 按发布时间选出最新 Release，与当前安装版本对应的 Release 时间比较
 4. 若发现新版本，记录最新版本、发布时间、更新说明和对应平台的安装包下载地址
 5. 用户在 `更新` 页点击 `下载更新`
 6. 后端后台下载安装包到用户工作区下的 `.updates` 目录
@@ -61,14 +49,14 @@
 https://api.gitcode.com/api/v5/repos/{owner}/{repo}/releases
 ```
 
-也可切换为 GitHub Releases。为了发现预发布版本，后端拉取完整 releases 列表（而非 `/latest` 端点，因为 `/latest` 会排除预发布），跳过 draft、保留 prerelease，再按版本排序取最新。当列表接口不可用时回退到 `/latest`。
+也可切换为 GitHub Releases。为了发现预发布版本，后端拉取完整 releases 列表（而非 `/latest` 端点，因为 `/latest` 会排除预发布），跳过 draft、保留 prerelease，再按发布时间取最新。当列表接口不可用时回退到 `/latest`。
 
 从 release 中读取：
 
 - `tag_name` 作为版本号（保留预发布后缀，如 `0.2.3.beta1`）
 - `body` 作为更新说明
 - `published_at` 作为发布时间
-- `assets[]` 中按平台匹配的安装包
+- `assets[]` 中按平台扩展名匹配的安装包（Windows `.exe`、macOS `.dmg`）；存在多个候选时优先选择文件名中唯一包含 `workswarm` 的包
 
 ## 配置
 
@@ -81,13 +69,11 @@ updater:
   repo_owner: openJiuwen
   repo_name: jiuwenswarm
   release_api_url: ""
-  asset_name_pattern_windows: "JiuwenSwarm-setup-{version}.exe"
-  asset_name_pattern_macos: "JiuwenSwarm-{version}.dmg"
   asset_name_pattern_linux: "JiuwenSwarm-{version}.tar.gz"
   timeout_seconds: 20
 ```
 
-pip 安装模式额外支持 `pypi_mirror` 字段。
+Windows / macOS 不再读取安装包命名模板；旧配置中的相关字段会保留兼容读取，但不影响选包。pip 安装模式额外支持 `pypi_mirror` 字段。
 
 ## 后端接口
 
@@ -155,3 +141,9 @@ pip 安装模式额外支持 `pypi_mirror` 字段。
 - 所有外部路径在 helper 脚本中均使用 `shlex.quote` 转义，防止 release 接口返回恶意资源名时发生 shell 注入
 - helper 脚本写入用户工作区下的 `.updates` 目录，写入前检查写权限
 - macOS helper 将完整执行日志写入日志目录的 `update_helper.log`
+---
+
+## 返回导航
+
+- [返回文档首页](../README.md)
+- [返回项目首页](../../README_CN.md)

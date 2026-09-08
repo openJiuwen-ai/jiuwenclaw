@@ -81,6 +81,8 @@ function WeekdayPicker({ selected, onToggle }: { selected: number[]; onToggle: (
             key={value}
             type="button"
             onClick={() => onToggle(value)}
+            data-testid="cron-schedule-weekday-btn"
+            data-variant={key}
             className={`h-9 min-w-0 flex-1 rounded-md border text-sm transition-colors ${
               active
                 ? 'border-accent bg-accent-subtle text-accent'
@@ -220,23 +222,25 @@ export default function ScheduleEditor({
   const weekOfMonthOptions = WEEK_OF_MONTH_OPTIONS.map((o) => ({ value: o.value, label: t(`cron.schedule.weekOfMonth.${o.key}`) }));
 
   return (
-    <div className="relative">
+    <div className="relative" data-testid="cron-schedule-editor">
       <div className="mb-2 flex items-center gap-1.5 text-sm font-bold text-text-strong">
-        {t('cron.schedule.title')} <span className="text-danger">*</span>
+        <span data-testid="cron-schedule-title">{t('cron.schedule.title')}</span> <span className="text-danger">*</span>
         <span
           className="inline-flex h-4 w-4 items-center justify-center rounded-full border border-border text-[10px] font-normal text-text-muted cursor-help"
           title={t('cron.schedule.help') ?? undefined}
+          data-testid="cron-schedule-help"
         >
           ?
         </span>
       </div>
 
-      <div className="mb-3 inline-flex rounded-md bg-bg-muted p-0.5">
+      <div className="mb-3 inline-flex rounded-md bg-bg-muted p-0.5" data-testid="cron-schedule-mode-tabs">
         {(['period', 'interval', 'once'] as const).map((mode) => (
           <button
             key={mode}
             type="button"
             onClick={() => switchTopMode(mode)}
+            data-testid={`cron-schedule-mode-tab-${mode}`}
             className={`rounded px-4 py-1.5 text-sm transition-colors ${
               topMode === mode ? 'bg-card font-bold text-text-strong shadow-sm' : 'text-text-muted hover:text-text'
             }`}
@@ -247,6 +251,7 @@ export default function ScheduleEditor({
         <button
           type="button"
           onClick={() => setTopMode('cronExpr')}
+          data-testid="cron-schedule-mode-tab-cron-expr"
           className={`rounded px-4 py-1.5 text-sm transition-colors ${
             topMode === 'cronExpr' ? 'bg-card font-bold text-text-strong shadow-sm' : 'text-text-muted hover:text-text'
           }`}
@@ -257,7 +262,7 @@ export default function ScheduleEditor({
 
       {topMode === 'period' && (
         <div className="flex flex-col gap-2">
-          <div className="flex flex-nowrap items-center gap-2">
+          <div className="flex flex-nowrap items-center gap-2" data-testid="cron-simple-select-5">
             <SimpleSelect
               value={schedule.kind === 'interval' || schedule.kind === 'once' ? 'daily' : schedule.kind === 'monthlyWeekday' ? 'monthly' : schedule.kind}
               onChange={(v) => setPeriodKind(v as Extract<CronScheduleKind, 'daily' | 'weekly' | 'monthly' | 'yearly'>)}
@@ -268,7 +273,7 @@ export default function ScheduleEditor({
             {/* "每月"的二级切换：按日期（已有）/ 按星期（"每月第几周星期几"，见 plan.md §2.3.8），
                 跟周期细分选择器放同一行，节省纵向空间 */}
             {(schedule.kind === 'monthly' || schedule.kind === 'monthlyWeekday') && (
-              <div className="inline-flex w-fit shrink-0 rounded-md bg-bg-muted p-0.5">
+              <div className="inline-flex w-fit shrink-0 rounded-md bg-bg-muted p-0.5" data-testid="cron-schedule-monthly-sub-tabs">
                 {(['date', 'week'] as const).map((subMode) => {
                   const active = subMode === 'date' ? schedule.kind === 'monthly' : schedule.kind === 'monthlyWeekday';
                   return (
@@ -276,6 +281,8 @@ export default function ScheduleEditor({
                       key={subMode}
                       type="button"
                       onClick={() => setMonthlySubMode(subMode)}
+                      data-testid="cron-schedule-monthly-sub-tab"
+                      data-variant={subMode}
                       className={`rounded px-3 py-1 text-xs transition-colors ${
                         active ? 'bg-card font-bold text-text-strong shadow-sm' : 'text-text-muted hover:text-text'
                       }`}
@@ -390,12 +397,13 @@ export default function ScheduleEditor({
       {topMode === 'interval' && schedule.kind === 'interval' && (
         <div className="flex flex-col gap-1">
           <div className="flex flex-nowrap items-center gap-2">
-            <span className="shrink-0 text-sm text-text-muted">{t('cron.schedule.every')}</span>
+            <span className="shrink-0 text-sm text-text-muted" data-testid="cron-schedule-every-label">{t('cron.schedule.every')}</span>
             <input
               type="text"
               inputMode="numeric"
               value={intervalNumberText}
               title={t('cron.schedule.integerOnlyHint') ?? undefined}
+              data-testid="cron-schedule-interval-input"
               onKeyDown={(e) => {
                 // 小时/分钟步长在 croniter 里都只支持正整数：在按键这一刻就挡掉非数字字符，
                 // 而不是等 onChange 里再"事后清洗"——之前的实现允许小数点先短暂插入、再被
@@ -439,7 +447,7 @@ export default function ScheduleEditor({
               placeholder={t(schedule.intervalUnit === 'minutes' ? 'cron.schedule.everyMinutesPlaceholder' : 'cron.schedule.everyHoursPlaceholder') ?? undefined}
               className="w-16 shrink-0 rounded-md border border-border bg-card px-2 py-1.5 text-sm text-text outline-none focus:border-accent"
             />
-            <div className="inline-flex w-fit shrink-0 rounded-md bg-bg-muted p-0.5">
+            <div className="inline-flex w-fit shrink-0 rounded-md bg-bg-muted p-0.5" data-testid="cron-schedule-interval-unit-tabs">
               {(['hours', 'minutes'] as const).map((unit) => {
                 const active = (schedule.intervalUnit ?? 'hours') === unit;
                 return (
@@ -447,6 +455,8 @@ export default function ScheduleEditor({
                     key={unit}
                     type="button"
                     onClick={() => setIntervalUnit(unit)}
+                    data-testid="cron-schedule-interval-unit-tab"
+                    data-variant={unit}
                     className={`rounded px-1.5 py-0.5 text-xs transition-colors ${
                       active ? 'bg-card font-bold text-text-strong shadow-sm' : 'text-text-muted hover:text-text'
                     }`}
@@ -464,13 +474,13 @@ export default function ScheduleEditor({
             const n = schedule.intervalUnit === 'minutes' ? schedule.everyMinutes : schedule.everyHours;
             return n === undefined || n < 1;
           })() && (
-            <p className="text-xs text-danger">{t('cron.schedule.integerOnlyHint')}</p>
+            <p className="text-xs text-danger" data-testid="cron-schedule-interval-hint">{t('cron.schedule.integerOnlyHint')}</p>
           )}
         </div>
       )}
 
       {topMode === 'once' && schedule.kind === 'once' && (
-        <div className="flex flex-nowrap items-center gap-2">
+        <div className="flex flex-nowrap items-center gap-2" data-testid="cron-date-picker-2">
           <TimePicker
             value={schedule.time ?? ''}
             onChange={(v) => updateSchedule({ ...schedule, time: v })}
@@ -495,6 +505,7 @@ export default function ScheduleEditor({
               value={value}
               onChange={(e) => onChange(e.target.value)}
               placeholder={t('cron.schedule.cronExprPlaceholder') ?? undefined}
+              data-testid="cron-schedule-cron-expr-input"
               className={`w-full rounded-md border bg-card px-3 py-1.5 pr-8 text-sm text-text outline-none mono ${
                 !validation.valid ? 'border-danger' : 'border-border focus:border-accent'
               }`}
@@ -502,6 +513,7 @@ export default function ScheduleEditor({
             <span
               className="absolute right-2 top-1/2 -translate-y-1/2 text-text-muted hover:text-text cursor-help"
               title={t('cron.placeholders.cron') ?? undefined}
+              data-testid="cron-schedule-cron-expr-help"
             >
               <svg width="16" height="16" viewBox="0 0 40 40" xmlns="http://www.w3.org/2000/svg">
                 <circle cx="20" cy="20" r="18" fill="transparent" stroke="currentColor" strokeWidth="2" />
@@ -510,7 +522,7 @@ export default function ScheduleEditor({
             </span>
           </div>
           {!validation.valid && (
-            <p className="mt-1 text-xs text-danger">{t(validation.error || 'cron.errors.cronFormat')}</p>
+            <p className="mt-1 text-xs text-danger" data-testid="cron-schedule-cron-expr-error">{t(validation.error || 'cron.errors.cronFormat')}</p>
           )}
         </div>
       )}
@@ -519,10 +531,11 @@ export default function ScheduleEditor({
       {onWakeOffsetSecondsChange && (
         <div className="mt-3">
           <div className="mb-1.5 flex items-center gap-1.5 text-sm font-bold text-text-strong">
-            {t('cron.schedule.wakeOffset')}
+            <span data-testid="cron-schedule-wake-offset-label">{t('cron.schedule.wakeOffset')}</span>
             <span
               className="inline-flex h-4 w-4 items-center justify-center rounded-full border border-border text-[10px] font-normal text-text-muted cursor-help"
               title={t('cron.schedule.wakeOffsetHelp') ?? undefined}
+              data-testid="cron-schedule-wake-offset-help"
             >
               ?
             </span>
@@ -540,9 +553,10 @@ export default function ScheduleEditor({
                 onWakeOffsetSecondsChange(wakeOffsetMinutesToSeconds(normalized));
               }}
               placeholder="0"
+              data-testid="cron-schedule-wake-offset-input"
               className="w-28 shrink-0 rounded-md border border-border bg-card px-3 py-1.5 text-sm text-text outline-none focus:border-accent disabled:cursor-not-allowed disabled:opacity-50"
             />
-            <span className="shrink-0 text-sm text-text-muted">{t('cron.schedule.wakeOffsetUnit')}</span>
+            <span className="shrink-0 text-sm text-text-muted" data-testid="cron-schedule-wake-offset-unit-label">{t('cron.schedule.wakeOffsetUnit')}</span>
           </div>
         </div>
       )}

@@ -5,6 +5,7 @@ import asyncio
 import pytest
 
 from jiuwenswarm.extensions.agentos.agentos_router.agent_manager import (
+    AgentCreateFailed,
     AgentCreatingTimeout,
     AgentDeleted,
     AgentManager,
@@ -71,6 +72,55 @@ async def test_waiting_for_creation_times_out() -> None:
     await asyncio.gather(owner, return_exceptions=True)
     failed = await agent_manager.list_user_agents("u1")
     assert failed[0].info.status is AgentStatus.FAILED
+
+
+@pytest.mark.asyncio
+async def test_failed_create_does_not_retry() -> None:
+    agent_manager = AgentManager()
+    create_calls = 0
+
+    async def creator(agent: AgentInfo) -> AgentInfo:
+        nonlocal create_calls
+        create_calls += 1
+        raise RuntimeError("boom")
+
+    with pytest.raises(RuntimeError, match="boom"):
+        await agent_manager.get_or_create_agent("u1", "jiuwenswarm", creator=creator)
+
+    with pytest.raises(AgentCreateFailed, match="AGENT_CREATE_FAILED"):
+        await agent_manager.get_or_create_agent("u1", "jiuwenswarm", creator=creator)
+
+    assert create_calls == 1
+    failed = await agent_manager.list_user_agents("u1")
+    assert failed[0].info.status is AgentStatus.FAILED
+
+
+@pytest.mark.asyncio
+async def test_cancelled_create_does_not_retry() -> None:
+    agent_manager = AgentManager()
+    create_calls = 0
+    creator_started = asyncio.Event()
+    never = asyncio.Event()
+
+    async def creator(agent: AgentInfo) -> AgentInfo:
+        nonlocal create_calls
+        create_calls += 1
+        creator_started.set()
+        await never.wait()
+        return agent
+
+    owner = asyncio.create_task(
+        agent_manager.get_or_create_agent("u1", "jiuwenswarm", creator=creator)
+    )
+    await creator_started.wait()
+    owner.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await owner
+
+    with pytest.raises(AgentCreateFailed, match="AGENT_CREATE_FAILED"):
+        await agent_manager.get_or_create_agent("u1", "jiuwenswarm", creator=creator)
+
+    assert create_calls == 1
 
 
 @pytest.mark.asyncio
@@ -204,6 +254,27 @@ async def test_acquire_and_release_track_task_count() -> None:
     assert fetched.task_count == 0
     await agent_manager.delete_agent("u1", "jiuwenswarm")
     await agent_manager.release(first.key)
+
+
+@pytest.mark.asyncio
+async def test_get_agent_acquire_holds_ready_runtime() -> None:
+    agent_manager = AgentManager()
+    created = await agent_manager.get_or_create_agent("u1", "claude")
+    assert created.task_count == 0
+
+    held = await agent_manager.get_agent("u1", "claude", acquire=True)
+    assert held is not None
+    assert held.task_count == 1
+    assert await agent_manager.pop_if_idle(held.key, 0.0) is None
+
+    plain = await agent_manager.get_agent("u1", "claude")
+    assert plain is not None
+    assert plain.task_count == 1
+
+    await agent_manager.release(held.key)
+    released = await agent_manager.get_agent("u1", "claude")
+    assert released is not None
+    assert released.task_count == 0
 
 
 @pytest.mark.asyncio

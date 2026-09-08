@@ -20,6 +20,8 @@ import {
 } from "./builtins/evolve.js";
 import { createExitCommand } from "./builtins/exit.js";
 import { createHelpCommand } from "./builtins/help.js";
+import { createHarmonyOSDevInitCommand } from "./builtins/harmonyos-dev-init.js";
+import { createHarmonyOSProjectInitCommand } from "./builtins/harmonyos-project-init.js";
 import { createHooksCommand } from "./builtins/hooks.js";
 import { createKeybindingsCommand } from "./builtins/keybindings.js";
 import { createInitCommand } from "./builtins/init.js";
@@ -29,14 +31,17 @@ import { createMemoryCommand } from "./builtins/memory.js";
 import { createPluginCommand } from "./builtins/plugin.js";
 import { createReloadPluginsCommand } from "./builtins/reload-plugins.js";
 import { createModeCommand } from "./builtins/mode.js";
+import { createNewCommand } from "./builtins/new.js";
 import { createPermissionsCommand } from "./builtins/permissions.js";
 import { createPlanCommand } from "./builtins/plan.js";
+import { createPersistCommand } from "./builtins/persist.js";
 import { createResumeCommand } from "./builtins/resume.js";
 import { createRenameCommand } from "./builtins/rename.js";
 import { createRewindCommand } from "./builtins/rewind.js";
 import { createSandboxCommand } from "./builtins/sandbox.js";
 import { createSessionCommand } from "./builtins/session.js";
 import { createSimplifyCommand } from "./builtins/simplify.js";
+import { createAutofixPrCommand } from "./builtins/autofix-pr.js";
 import { createStatusCommand } from "./builtins/status.js";
 import { createStatusLineCommand } from "./builtins/statusline.js";
 import { createSkillsCommand } from "./builtins/skills.js";
@@ -55,6 +60,11 @@ import { createSwitchCommand } from "./builtins/switch.js";
 
 export interface BuiltinCommandsOptions {
   /**
+   * Whether HarmonyOS development commands are visible and executable.
+   * The TUI enables this only when JIUWENSWARM_TUI_HARMONYOS_ENABLED=1.
+   */
+  harmonyosEnabled?: boolean;
+  /**
    * 是否激活 /switch 命令。
    * 仅一体机场景（launcher 注入 AGENTOS_TUI_SUPERVISED=1）时为 true，
    * 此时命令可见且可执行；否则不注册，命令在 help、补全、执行中均不可见。
@@ -62,10 +72,19 @@ export interface BuiltinCommandsOptions {
   switchEnabled?: boolean;
 }
 
+export function isHarmonyOSCommandsEnabled(
+  env: Record<string, string | undefined> = process.env,
+): boolean {
+  return env.JIUWENSWARM_TUI_HARMONYOS_ENABLED === "1";
+}
+
 export function createBuiltinCommands(options: BuiltinCommandsOptions = {}): SlashCommand[] {
   const commands: SlashCommand[] = [
     createAgentsCommand(),
     createHelpCommand(() => commands),
+    ...(options.harmonyosEnabled
+      ? [createHarmonyOSDevInitCommand(), createHarmonyOSProjectInitCommand()]
+      : []),
     createHooksCommand(),
     createKeybindingsCommand(),
     createBranchCommand(),
@@ -89,14 +108,17 @@ export function createBuiltinCommands(options: BuiltinCommandsOptions = {}): Sla
     createModelCommand(),
     createMcpCommand(),
     createModeCommand(),
+    createNewCommand(),
     createPermissionsCommand(),
     createPlanCommand(),
+    createPersistCommand(),
     createResumeCommand(),
     createRenameCommand(),
     createRewindCommand(),
     createSandboxCommand(),
     createSessionCommand(),
     createSimplifyCommand(),
+    createAutofixPrCommand(),
     createSkillsCommand(),
     createStatusCommand(),
     createStatusLineCommand(),

@@ -163,7 +163,9 @@ class PipExecutor(UpgradeExecutor):
         self.is_platform_supported = True
 
     def install(self) -> None:
-        package = self._config.get("repo_name", "jiuwenswarm")
+        package = self._config.get("package_name") or self._config.get(
+            "repo_name", "jiuwenswarm"
+        )
         timeout = self._config["timeout_seconds"]
 
         self._status_callback({

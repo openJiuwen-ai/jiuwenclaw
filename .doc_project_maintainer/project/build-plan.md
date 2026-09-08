@@ -1,5 +1,5 @@
 ---
-last_updated: 2026-08-03
+last_updated: 2026-08-18
 sync_status: partial
 coverage_status: partial
 flow_coverage_status: partial
@@ -15,6 +15,7 @@ code_symbol_coverage_status: partial
 - Flow delivery: eight AgentServer flows are documented, including MCP, sandbox, plan exit, scheduled Auto-Harness, and history streaming.
 - Project status remains partial: most modules, directories, source symbol entry docs, cross-layer flows, and default-health audits are still pending.
 - The 2026-07-31/2026-08-01 scoped prewarm follow-ups are synced without widening coverage or claiming a health audit. They record the global slot cap, foreground promotion/cancellation, registry serialization, sync coalescing, MemoryRail singleflight, and canonical code cache identity; affected symbols remain unaudited or audit-expired.
+- The 2026-08-18 expanded Persist Session slice is implemented and flow-synced: Web locks `persist_session` during `session.create`, metadata/list/restore remain authoritative, and prewarm identity is unchanged. Source symbol inventory and audit signatures were not widened or regenerated.
 - Every stable source file inventoried: yes, by the 2026-07-15 `inventory_symbols.py --verify-docs` scan.
 - Every required symbol documented or out of scope: no.
 - Every requested-scope audit symbol closure eligible or out of scope: no; 0 AgentWebSocketServer method audits are source-expired, while 69 records currently have entry-document hash mismatches and broader repository audits remain pending.
@@ -41,6 +42,7 @@ code_symbol_coverage_status: partial
 - 2026-07-15: `agentserver-expiration-scan` - scanned `10afedf2`; all 128 existing AgentWebSocketServer method audits remain source-current, 0 expired, and 6 newly observed unaudited server methods were left outside the frozen queue.
 - 2026-07-31: AgentServer-owned session allocation and one-slot DeepAgent prewarming across enabled channels/projects; Web, TUI, IM, ACP, A2A, SSH, fork, and single-Agent Cron creation paths were aligned.
 - 2026-08-01/03: Prewarm priority/cache correction and unified TUI startup creation; early RPCs wait for allocation, while explicit IDs retain the compatibility bypass. Focused lifecycle tests pass in both prewarm states.
+- 2026-08-18: Persist Session creation contract, Web draft/locked UI, metadata authority, legacy one-time migration, and prewarm-safe idempotency. Focused functional regression is green; the existing Windows concurrent-reader atomic-replace test remains an active environment-specific failure, and the separate real-model four-quadrant acceptance remains incomplete (Web/Work 200/200, Web/Code checkpoint 65/200).
 
 ## Completed AgentServer Flow Slices
 

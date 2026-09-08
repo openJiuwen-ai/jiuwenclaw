@@ -211,3 +211,28 @@ def test_build_child_env_injects_full_port_group(desktop_app, monkeypatch):
     # Keys we rely on for dotenv preservation stay in sync with the helper.
     for key in DESKTOP_PRESERVED_ENV_KEYS:
         assert key in env
+
+
+def test_cleanup_stale_update_artifacts_is_product_name_agnostic(
+    desktop_app,
+    tmp_path: Path,
+    monkeypatch,
+):
+    workspace = tmp_path / "workspace"
+    updates_dir = workspace / ".updates"
+    updates_dir.mkdir(parents=True)
+    stale_names = (
+        "TomorrowDesk-preview.exe",
+        "AnotherProduct-nightly.dmg",
+        "future-name.dmg.part",
+    )
+    for name in stale_names:
+        (updates_dir / name).write_bytes(b"stale")
+    keep = updates_dir / "release-notes.txt"
+    keep.write_text("keep", encoding="utf-8")
+    monkeypatch.setattr(desktop_app, "get_user_workspace_dir", lambda: workspace)
+
+    desktop_app._cleanup_stale_update_artifacts()
+
+    assert all(not (updates_dir / name).exists() for name in stale_names)
+    assert keep.exists()

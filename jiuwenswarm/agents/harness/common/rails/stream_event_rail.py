@@ -28,7 +28,7 @@ from openjiuwen.core.single_agent.rail.base import (
     ToolCallInputs,
 )
 from openjiuwen.harness.rails.base import DeepAgentRail
-from openjiuwen.harness.schema.task import TodoStatus
+from openjiuwen.harness.rails._multimodal import should_enable_read_image_multimodal
 from openjiuwen.harness.tools import TodoListTool
 from openjiuwen.harness.workspace.workspace import WorkspaceNode
 
@@ -47,6 +47,7 @@ from jiuwenswarm.common.tool_display import (
     inject_call_goal_schema,
 )
 from jiuwenswarm.common.utils import logger
+from jiuwenswarm.common.todo_snapshot import format_todos_for_frontend
 
 _TODO_TOOL_NAMES = frozenset(["todo_create", "todo_get", "todo_list", "todo_modify"])
 
@@ -267,11 +268,9 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
         ) or "cn"
 
     def _read_image_multimodal_enabled(self) -> bool:
-        deep_config = (
-            getattr(self._deep_agent, "deep_config", None)
-            or getattr(self._deep_agent, "_deep_config", None)
-        )
-        return bool(getattr(deep_config, "enable_read_image_multimodal", False))
+        if self._deep_agent is None:
+            return False
+        return should_enable_read_image_multimodal(self._deep_agent)
 
     def _tool_interrupted_message(self, tool_name: str) -> str:
         """Build a language-aware tool interruption message."""
@@ -462,6 +461,15 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
         sid = session_id or "default"
         self._abort_requested.pop(sid, None)
 
+    def is_abort_requested(self, session_id: str = "") -> bool:
+        """Whether interrupt cancel/supplement armed the abort flag for *session_id*.
+
+        Lets the adapter's 0-token empty-run guard tell a user-cancelled round
+        (abort flag set) from a silently failed one (flag never set).
+        """
+        sid = session_id or "default"
+        return bool(self._abort_requested.get(sid, False))
+
     def reset_for_new_task(self, session_id: str = "") -> None:
         """Unblock the pause event for the next task without touching the abort flag.
 
@@ -615,6 +623,9 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
         next_tools: list[Any] = []
         changed = False
         for tool in tools:
+            if getattr(tool, "name", None) == "skill_index":
+                next_tools.append(tool)
+                continue
             params = getattr(tool, "parameters", None)
             if not isinstance(params, dict):
                 next_tools.append(tool)
@@ -654,6 +665,18 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
                 )
 
     async def after_model_call(self, ctx: AgentCallbackContext) -> None:
+        # New agent-core versions emit the complete pre/post context usage
+        # snapshots themselves.  The report on the callback context is the
+        # capability marker; emitting the legacy rail event as well would add
+        # a second, incomplete ``context.usage`` frame after the full one.
+        extra = getattr(ctx, "extra", {})
+        if isinstance(extra, dict) and extra.get("_context_usage_event_emitted"):
+            return
+        if getattr(ctx, "context_usage_report", None) is not None:
+            return
+        inputs = getattr(ctx, "inputs", None)
+        if getattr(inputs, "context_usage_report", None) is not None:
+            return
         await self._emit_context_usage(
             ctx,
             member_name=self._member_name or None,
@@ -714,11 +737,6 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
             self._inflight_tool_calls.pop(tc_id, None)
 
         await self._emit_tool_result(session, tc, ctx.inputs.tool_result)
-        self._symphony_stream_handler.request_force_finish(
-            ctx,
-            tc,
-            ctx.inputs.tool_result,
-        )
         await self._emit_ask_user_question_if_interrupted(
             session,
             tc,
@@ -936,32 +954,10 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
     ) -> List[dict[str, Any]]:
         """Format todo items for frontend compatibility.
 
-        Maps internal TodoStatus values to frontend-compatible status strings.
-        Cancelled items are omitted because the frontend todo panel tracks
-        actionable or completed tasks only.
-
-        Args:
-            todos_data: List of TodoItem objects from TodoListTool.
-
-        Returns:
-            List of formatted todo dictionaries.
+        Delegates to the shared snapshot helper so history restore and live
+        tool-call emits stay on one field mapping.
         """
-        status_mapping = {
-            TodoStatus.PENDING: "pending",
-            TodoStatus.IN_PROGRESS: "in_progress",
-            TodoStatus.COMPLETED: "completed",
-        }
-
-        return [
-            {
-                "id": item.id,
-                "content": item.content,
-                "activeForm": item.activeForm,
-                "status": status_mapping.get(item.status, item.status.value),
-            }
-            for item in todos_data
-            if item.status != TodoStatus.CANCELLED
-        ]
+        return format_todos_for_frontend(todos_data)
 
     @staticmethod
     async def _emit_context_usage(
@@ -994,7 +990,10 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
             # with built-in dict + 200000 fallback (never returns 0)
             raw_total_tokens = ContextUtils.resolve_context_max(
                 model_name=model_name,
-                fallback_context_window_tokens=getattr(context, "_context_window_tokens", None),
+                fallback_context_window_tokens=(
+                    getattr(context, "_context_window_tokens", None)
+                    or getattr(context, "_model_context_window_tokens_override", None)
+                ),
                 model_context_window_tokens=getattr(context, "_model_context_window_tokens", None),
             )
 

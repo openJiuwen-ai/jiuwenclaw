@@ -135,76 +135,6 @@ jiuwenswarm_ensure_func_code() {
     fi
 }
 
-jiuwenswarm_detect_session_dir() {
-    local master_host="$1"
-
-    DEPLOY_VARS["YR_SESSION_DIR"]=$(exec_on_host "${master_host}" "readlink /tmp/yr_sessions/latest 2>/dev/null || echo ''" | tr -d '\r')
-
-    if [ -z "${DEPLOY_VARS["YR_SESSION_DIR"]}" ]; then
-        error "Could not detect yuanrong session dir on ${master_host}. Please ensure yuanrong is deployed and started (run yuanrong_deploy.sh up first)."
-    fi
-
-    info "Detected yuanrong session dir on ${master_host}: ${DEPLOY_VARS["YR_SESSION_DIR"]}"
-}
-
-jiuwenswarm_get_meta_port() {
-    local master_host="$1"
-    local session_dir="${DEPLOY_VARS["YR_SESSION_DIR"]}"
-
-    if [ -n "${session_dir}" ]; then
-        META_PORT=$(exec_on_host "${master_host}" "cat ${session_dir}/metaservice_config.json 2>/dev/null" | jq -r '.server.port // empty' 2>/dev/null | tr -d '\r')
-    fi
-
-    if [ -z "${META_PORT}" ]; then
-        META_PORT="31182"
-        warning "Could not detect meta_service port, using default ${META_PORT}"
-    fi
-
-    info "META_PORT: ${META_PORT}"
-}
-
-jiuwenswarm_get_frontend_port() {
-    local master_host="$1"
-    local session_dir="${DEPLOY_VARS["YR_SESSION_DIR"]}"
-
-    if [ -n "${session_dir}" ]; then
-        DEPLOY_VARS["FRONTEND_PORT"]=$(exec_on_host "${master_host}" "cat ${session_dir}/frontend_init_args.json 2>/dev/null" | jq -r '.http.serverListenPort // empty' 2>/dev/null | tr -d '\r')
-    fi
-
-    if [ -z "${DEPLOY_VARS["FRONTEND_PORT"]:-}" ]; then
-        DEPLOY_VARS["FRONTEND_PORT"]="8888"
-        warning "Could not detect frontend port, using default ${DEPLOY_VARS["FRONTEND_PORT"]}"
-    fi
-
-    info "FRONTEND_PORT: ${DEPLOY_VARS["FRONTEND_PORT"]}"
-}
-
-jiuwenswarm_register_func() {
-    local master_host="$1"
-
-    jiuwenswarm_get_meta_port "${master_host}"
-    jiuwenswarm_get_frontend_port "${master_host}"
-
-    DEPLOY_VARS["MASTER_NODE_IP"]="${master_host}"
-
-    info "Registering jiuwenswarm function on process-mode openyuanrong..."
-    render_config_template "${CLAW_META_PROCESS_TEMPLATE_FILE}" "${CLAW_META_PROCESS_FILE}" "DEPLOY_VARS"
-
-    info "curl -X POST -H \"Content-Type: application/json\" -H \"x-storage-type: local\" http://${master_host}:${META_PORT}/serverless/v1/functions -d @${CLAW_META_PROCESS_FILE}"
-    local res
-    res=$(curl -s -X POST -H "Content-Type: application/json" -H "x-storage-type: local" "http://${master_host}:${META_PORT}/serverless/v1/functions" -d @"${CLAW_META_PROCESS_FILE}")
-    info "Function registration result: ${res}"
-
-    local code
-    code=$(echo "${res}" | jq -r '.code' 2>/dev/null || echo "-1")
-    if [[ "${code}" != "0" ]]; then
-        error "Failed to register serverless function"
-    fi
-
-    DEPLOY_VARS["FUNCTION_ID"]=$(echo "${res}" | jq -r '.function.id')
-    success "Serverless function registered successfully! function_id: ${DEPLOY_VARS["FUNCTION_ID"]}"
-}
-
 deploy_jiuwenswarm() {
     local hosts_str="${DEPLOY_VARS["CLUSTER_HOSTS"]}"
     local master_host
@@ -234,19 +164,12 @@ deploy_jiuwenswarm() {
         jiuwenswarm_ensure_func_code "${host}"
     done
 
-    info "Registering function on yr master node (${master_host})..."
-    jiuwenswarm_detect_session_dir "${master_host}"
-    jiuwenswarm_register_func "${master_host}"
-
     success "jiuwenswarm deployment completed!"
     echo ""
     echo "=========================================="
     success "Deployment Summary"
     echo "=========================================="
     echo "  YR Master: ${master_host}"
-    echo "  Function ID: ${DEPLOY_VARS["FUNCTION_ID"]}"
-    echo "  Meta Port: ${META_PORT}"
-    echo "  Frontend Port: ${DEPLOY_VARS["FRONTEND_PORT"]}"
     echo "  Func Code Dir: ${DEPLOY_VARS["YR_FUNC_CODE_DIR"]}"
     echo ""
     echo "  Next step: deploy gateway"
@@ -266,39 +189,12 @@ uninstall_jiuwenswarm() {
     IFS=',' read -ra JIUWENSWARM_HOST_LIST <<< "${hosts_str}"
     local master_host="${JIUWENSWARM_HOST_LIST[0]}"
 
-    local func_svc_name="${DEPLOY_VARS["FUNC_SVC_NAME"]}"
-    if [ -z "${func_svc_name}" ]; then
-        error "FUNC_SVC_NAME is not set. Please set it in .env.custom."
-    fi
-
-    info "Unregistering jiuwenswarm function on yr master (${master_host})..."
-
-    # 复用 up 流程的检测逻辑，获取 session dir 和 meta port
-    jiuwenswarm_detect_session_dir "${master_host}"
-    jiuwenswarm_get_meta_port "${master_host}"
-
-    local delete_url="http://${master_host}:${META_PORT}/serverless/v1/functions/${func_svc_name}"
-    info "curl -H \"Content-type: application/json\" -X DELETE ${delete_url}"
-
-    local res
-    res=$(curl -s -H "Content-type: application/json" -X DELETE "${delete_url}" || true)
-    info "Function unregistration result: ${res}"
-
-    # DELETE 成功返回 {}（无 code 字段）或 code=0；其他视为失败
-    local code
-    code=$(echo "${res}" | jq -r '.code // "none"' 2>/dev/null || echo "error")
-    if [[ "${code}" == "0" || "${code}" == "none" ]]; then
-        success "Serverless function unregistered successfully: ${func_svc_name}"
-    else
-        warning "Failed to unregister serverless function (may not exist): ${res}"
-    fi
-
+    # 注意: down 仅停止服务，不注销 function（注册已不再需要）。
+    # pip 包卸载由 agentos uninstall 流程（module.sh 的 jiuwenswarm_uninstall 钩子）负责。
     echo ""
     echo "=========================================="
-    success "jiuwenswarm uninstall completed!"
+    success "jiuwenswarm down completed!"
     echo "=========================================="
     echo "  YR Master: ${master_host}"
-    echo "  Function: ${func_svc_name}"
-    echo "  Meta Port: ${META_PORT}"
     echo "=========================================="
 }

@@ -1,9 +1,9 @@
-import { existsSync, readdirSync, statSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, statSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, parse, relative } from "node:path";
 import { addError, addInfo, makeItem } from "../helpers.js";
 import { CommandKind, type SlashCommand } from "../types.js";
-import { getEditorInfo } from "../../utils/editor.js";
+import { getEditorEnvironmentHint } from "../../utils/editor.js";
 import {
   findGitRoot,
   formatMemoryPathForDisplay,
@@ -135,6 +135,21 @@ function normalizePathKey(p: string): string {
   }
 }
 
+function errorCode(error: unknown): string | undefined {
+  return typeof error === "object" && error !== null && "code" in error
+    ? String((error as { code?: unknown }).code)
+    : undefined;
+}
+
+function createEmptyMemoryFile(filePath: string): void {
+  mkdirSync(dirname(filePath), { recursive: true });
+  try {
+    writeFileSync(filePath, "", { encoding: "utf-8", flag: "wx" });
+  } catch (error) {
+    if (errorCode(error) !== "EEXIST" || !existsSync(filePath)) throw error;
+  }
+}
+
 /**
  * Walk from CWD upward to root, scanning each directory for memory files.
  * This mirrors Claude Code's unguarded traversal in claudemd.ts — no project
@@ -224,8 +239,10 @@ function discoverMemoryFilesFromFs(cwd: string): MemoryFile[] {
 }
 
 function modeToShort(mode: string): string {
-  if (mode.startsWith("code")) return "code";
-  return mode.replace("agent.", "");
+  // 新三段命名 agent.code.* / team.code.* 也是 code profile；agent.work.* 归到 canonical "agent"。
+  if (mode.startsWith("code") || mode.startsWith("agent.code") || mode.startsWith("team.code")) return "code";
+  if (mode.startsWith("agent")) return "agent";
+  return mode;
 }
 
 /** 收集并排序可编辑规则文件（合并后端 list + 前端发现，含占位条目）。
@@ -433,6 +450,7 @@ async function editMemoryByPath(
   try {
     const trustedDirs = ctx.getTrustedDirs();
     const projectDir = ctx.getCurrentProjectDir();
+    const gitRoot = findGitRoot(projectDir);
 
     // 把 display path（相对路径或 ~ 缩写）解析为绝对路径
     // getDisplayPath 可能返回相对于 gitRoot/projectDir 的路径或 ~ 缩写
@@ -440,18 +458,16 @@ async function editMemoryByPath(
     if (path.startsWith("~/") || path === "~") {
       resolvedPath = join(homedir(), path.slice(1));
     } else if (!path.match(/^[A-Za-z]:[/\\]/) && !path.startsWith("/")) {
-      // 相对路径：尝试 join(projectDir, path)，如果文件存在就用
+      // 已存在文件优先按 projectDir 解析；否则使用 git root（如有）
+      // 或 projectDir 作为创建位置。
       const fromProject = join(projectDir, path);
       if (existsSync(fromProject)) {
         resolvedPath = fromProject;
       } else {
-        // 尝试从 gitRoot 解析
-        const gitRoot = findGitRoot(projectDir);
         if (gitRoot) {
-          const fromGit = join(gitRoot, path);
-          if (existsSync(fromGit)) {
-            resolvedPath = fromGit;
-          }
+          resolvedPath = join(gitRoot, path);
+        } else {
+          resolvedPath = fromProject;
         }
       }
     }
@@ -473,22 +489,39 @@ async function editMemoryByPath(
     if (isAncestorMemFile) {
       const displayPath = getDisplayPath(path, projectDir);
       if (!existsSync(path)) {
-        ctx.addItem(addError(ctx.sessionId, `Cannot edit: ${path} — memory file does not exist.`));
-        return;
+        const isGitRootMemoryFile =
+          !!gitRoot
+          && isAncestorOrSelfDir(fileParent, gitRoot)
+          && isAncestorOrSelfDir(gitRoot, fileParent);
+        if (!isGitRootMemoryFile) {
+          ctx.addItem(addError(ctx.sessionId, `Cannot edit: ${path} — memory file does not exist.`));
+          return;
+        }
+        try {
+          createEmptyMemoryFile(path);
+        } catch (error) {
+          ctx.addItem(
+            addError(
+              ctx.sessionId,
+              `Cannot create memory file: ${error instanceof Error ? error.message : String(error)}`,
+            ),
+          );
+          return;
+        }
       }
       if (ctx.openInEditor) {
-        const { source, value } = getEditorInfo();
-        const editorHint = source !== "default"
-          ? `(${source}="${value}")`
-          : "(default: vi)";
+        const editorEnvironmentHint = getEditorEnvironmentHint();
         // openInEditor blocks until the editor window closes (TUI frozen in
-        // the meantime). Emit the "Opened…" line in onDone, i.e. AFTER the
-        // editor exits — matches CC's editFileInEditor → onDone("Opened…").
-        ctx.openInEditor(path, () => {
+        // the meantime). Report the result only after the editor exits.
+        await ctx.openInEditor(path, (success) => {
+          if (success === false) {
+            ctx.addItem(addError(ctx.sessionId, `Failed to open editor for memory file: ${displayPath}`));
+            return;
+          }
           ctx.addItem(
             addInfo(
               ctx.sessionId,
-              `Opened memory file at ${displayPath} ${editorHint}`,
+              `Memory file edited successfully: ${displayPath}\n\n> ${editorEnvironmentHint}`,
               "m",
             ),
           );
@@ -517,22 +550,35 @@ async function editMemoryByPath(
       return;
     }
 
+    if (!payload.exists && !existsSync(payload.path)) {
+      try {
+        createEmptyMemoryFile(payload.path);
+      } catch (error) {
+        ctx.addItem(
+          addError(
+            ctx.sessionId,
+            `Cannot create memory file: ${error instanceof Error ? error.message : String(error)}`,
+          ),
+        );
+        return;
+      }
+    }
+
     if (ctx.openInEditor) {
       const projectDir = ctx.getCurrentProjectDir();
       const displayPath = getDisplayPath(payload.path, projectDir);
-      const { source, value } = getEditorInfo();
-      const editorHint = source !== "default"
-        ? `(${source}="${value}")`
-        : "(default: vi)";
-
+      const editorEnvironmentHint = getEditorEnvironmentHint();
       // openInEditor blocks until the editor window closes (TUI frozen in
-      // the meantime). Emit the "Opened…" line in onDone, AFTER the editor
-      // exits — matches CC's editFileInEditor → onDone("Opened…").
-      ctx.openInEditor(payload.path, () => {
+      // the meantime). Report the result only after the editor exits.
+      await ctx.openInEditor(payload.path, (success) => {
+        if (success === false) {
+          ctx.addItem(addError(ctx.sessionId, `Failed to open editor for memory file: ${displayPath}`));
+          return;
+        }
         ctx.addItem(
           addInfo(
             ctx.sessionId,
-            `Opened memory file at ${displayPath} ${editorHint}`,
+            `Memory file edited successfully: ${displayPath}\n\n> ${editorEnvironmentHint}`,
             "m",
           ),
         );

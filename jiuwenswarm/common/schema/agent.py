@@ -81,6 +81,9 @@ class AgentRequest:
     permission_context: PermissionContext | None = None
     # V2: AgentRef(mode, id)，全链路透传供响应侧回带（设计 §6.3/§5.2）。
     agent_ref: Any = None
+    # 创建者/调用者标识（envelope.user_id 透传）。AgentServer 据此回写会话
+    # metadata.user_id，供 gateway 列表接口按用户隔离会话历史。默认空串向后兼容。
+    user_id: str = ""
 
 
 @dataclass

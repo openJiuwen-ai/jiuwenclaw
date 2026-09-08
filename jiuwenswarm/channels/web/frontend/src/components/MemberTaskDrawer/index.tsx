@@ -8,16 +8,15 @@ import { useState, useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useChatStore, useTodoStore, useSessionStore } from '../../stores';
 import { TeamMemberAvatar } from '../TeamMemberAvatar';
+import { getMemberDisplayName } from '../teamArea/shared';
 
 interface MemberTaskDrawerProps {
   memberId: string;
   onClose: () => void;
 }
 
-// 获取成员显示名称
-const getMemberDisplayName = (memberId: string): string => {
-  return memberId.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
-};
+// 成员显示名称统一走 teamArea/shared 的名册解析，别在这里美化内部 slug——
+// 美化出来的仍然是 member_id，和面板里的展示名对不上。
 
 // 获取成员角色描述
 const getMemberRole = (memberId: string): string => {
@@ -98,11 +97,12 @@ function CollapsibleTaskGroup({ title, count, expanded, onToggle, children }: Co
       {/* 标题栏 */}
       <button
         onClick={onToggle}
+        data-testid="member-task-drawer-collapsible-group-toggle"
         className="w-full flex items-center justify-between px-4 py-3 bg-card hover:bg-gray-50 "
       >
         <div className="flex items-center gap-2">
-          <h3 className="text-sm font-medium text-text">{title}</h3>
-          <span className="text-xs text-text-muted bg-secondary px-1.5 py-0.5 rounded">{count}</span>
+          <h3 className="text-sm font-medium text-text" data-testid="member-task-drawer-collapsible-group-title">{title}</h3>
+          <span className="text-xs text-text-muted bg-secondary px-1.5 py-0.5 rounded" data-testid="member-task-drawer-collapsible-group-count">{count}</span>
         </div>
         <span className="text-text-muted">
           <ChevronIcon expanded={expanded} />
@@ -112,7 +112,7 @@ function CollapsibleTaskGroup({ title, count, expanded, onToggle, children }: Co
       <div className="border-t border-border" />
       {/* 内容区域 */}
       {expanded && (
-        <div className="px-4 py-3 bg-card space-y-3">
+        <div className="px-4 py-3 bg-card space-y-3" data-testid="member-task-drawer-collapsible-group-content">
           {children}
         </div>
       )}
@@ -169,25 +169,31 @@ export function MemberTaskDrawer({ memberId, onClose }: MemberTaskDrawerProps) {
   const pendingTasks = memberTasks.filter(t => t.status === 'pending' || t.status === 'queued');
 
   const renderTaskItem = (task: { id: string; title: string; status: string }) => (
-    <div key={task.id} className="flex items-center gap-3 py-2">
+    <div
+      key={task.id}
+      className="flex items-center gap-3 py-2"
+      data-testid="member-task-drawer-task-item"
+      data-variant={task.id}
+    >
       <span className="flex-shrink-0">
         <TaskStatusIcon status={task.status} />
       </span>
-      <span className="text-sm text-text truncate flex-1">{task.title}</span>
+      <span className="text-sm text-text truncate flex-1" data-testid="member-task-drawer-task-item-title">{task.title}</span>
     </div>
   );
 
   return (
-    <div className="fixed inset-0 z-50 flex justify-end">
+    <div className="fixed inset-0 z-50 flex justify-end" data-testid="member-task-drawer-root">
       {/* 遮罩层 */}
       <div
         className="absolute inset-0 bg-black/30 backdrop-blur-sm"
         onClick={onClose}
+        data-testid="member-task-drawer-overlay"
       />
       {/* 抽屉面板 */}
-      <div className="relative w-[420px] max-w-full h-full bg-bg shadow-xl flex flex-col animate-slide-in-right">
+      <div className="relative w-[420px] max-w-full h-full bg-bg shadow-xl flex flex-col animate-slide-in-right" data-testid="member-task-drawer-panel">
         {/* 头部 */}
-        <div className="flex items-center justify-between px-4 py-3 border-b border-border bg-card">
+        <div className="flex items-center justify-between px-4 py-3 border-b border-border bg-card" data-testid="member-task-drawer-header">
           <div className="flex items-center gap-3">
             <TeamMemberAvatar
               member={memberId}
@@ -196,12 +202,13 @@ export function MemberTaskDrawer({ memberId, onClose }: MemberTaskDrawerProps) {
               imageClassName="rounded-full"
             />
             <div>
-              <h2 className="text-sm font-medium text-text">{displayName}</h2>
-              <p className="text-xs text-text-muted">{role}</p>
+              <h2 className="text-sm font-medium text-text" data-testid="member-task-drawer-header-name">{displayName}</h2>
+              <p className="text-xs text-text-muted" data-testid="member-task-drawer-header-role">{role}</p>
             </div>
           </div>
           <button
             onClick={onClose}
+            data-testid="member-task-drawer-close-button"
             className="p-1.5 rounded-lg hover:bg-secondary/50 "
           >
             <svg className="w-5 h-5 text-text-muted" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
@@ -211,25 +218,25 @@ export function MemberTaskDrawer({ memberId, onClose }: MemberTaskDrawerProps) {
         </div>
 
         {/* 任务统计 */}
-        <div className="px-4 py-3 bg-card border-b border-border">
+        <div className="px-4 py-3 bg-card border-b border-border" data-testid="member-task-drawer-stats">
           <div className="grid grid-cols-3 gap-4 text-center">
-            <div>
-              <div className="text-lg font-semibold text-text">{inProgressTasks.length}</div>
-              <div className="text-[10px] text-text-muted">{t('team.inProgress')}</div>
+            <div data-testid="member-task-drawer-stat-in-progress">
+              <div className="text-lg font-semibold text-text" data-testid="member-task-drawer-stat-in-progress-count">{inProgressTasks.length}</div>
+              <div className="text-[10px] text-text-muted" data-testid="member-task-drawer-stat-in-progress-label">{t('team.inProgress')}</div>
             </div>
-            <div>
-              <div className="text-lg font-semibold text-text">{completedTasks.length}</div>
-              <div className="text-[10px] text-text-muted">{t('team.completed')}</div>
+            <div data-testid="member-task-drawer-stat-completed">
+              <div className="text-lg font-semibold text-text" data-testid="member-task-drawer-stat-completed-count">{completedTasks.length}</div>
+              <div className="text-[10px] text-text-muted" data-testid="member-task-drawer-stat-completed-label">{t('team.completed')}</div>
             </div>
-            <div>
-              <div className="text-lg font-semibold text-text">{pendingTasks.length}</div>
-              <div className="text-[10px] text-text-muted">{t('team.pending')}</div>
+            <div data-testid="member-task-drawer-stat-pending">
+              <div className="text-lg font-semibold text-text" data-testid="member-task-drawer-stat-pending-count">{pendingTasks.length}</div>
+              <div className="text-[10px] text-text-muted" data-testid="member-task-drawer-stat-pending-label">{t('team.pending')}</div>
             </div>
           </div>
         </div>
 
         {/* 任务列表 */}
-        <div className="flex-1 overflow-y-auto">
+        <div className="flex-1 overflow-y-auto" data-testid="member-task-drawer-task-list">
           {/* 进行中任务 - 默认展开 */}
           {inProgressTasks.length > 0 && (
             <CollapsibleTaskGroup
@@ -268,11 +275,11 @@ export function MemberTaskDrawer({ memberId, onClose }: MemberTaskDrawerProps) {
 
           {/* 无任务提示 */}
           {memberTasks.length === 0 && (
-            <div className="flex flex-col items-center justify-center py-12 text-text-muted">
+            <div className="flex flex-col items-center justify-center py-12 text-text-muted" data-testid="member-task-drawer-empty">
               <svg className="w-10 h-10 opacity-30 mb-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1}>
                 <path strokeLinecap="round" strokeLinejoin="round" d="M9 12.75L11.25 15 15 9.75M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
               </svg>
-              <p className="text-sm">{t('team.noTasks')}</p>
+              <p className="text-sm" data-testid="member-task-drawer-empty-text">{t('team.noTasks')}</p>
             </div>
           )}
         </div>

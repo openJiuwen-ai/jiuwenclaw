@@ -24,6 +24,7 @@ export function ProjectCreateMenu({
         className={itemClassName}
         onClick={() => onCreate('blank')}
         role="menuitem"
+        data-testid="multi-session-project-create-menu-blank"
       >
         {blankIcon}
         <span>{t('multiSession.project.createBlank')}</span>
@@ -33,6 +34,7 @@ export function ProjectCreateMenu({
         className={itemClassName}
         onClick={() => onCreate('existing')}
         role="menuitem"
+        data-testid="multi-session-project-create-menu-existing"
       >
         {existingIcon}
         <span>{t('multiSession.project.selectExisting')}</span>

@@ -1,13 +1,20 @@
+import asyncio
 from copy import deepcopy
 from types import SimpleNamespace
 
 import pytest
 
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import BaseError, build_error
+
+from jiuwenswarm.symphony.adapter import llm_config_signature
 from jiuwenswarm.symphony.llm import (
     LLMConfig,
     create_llm_client,
+    create_model_response_observer,
     extract_message_content,
     get_llm_token_usage_summary,
+    probe_model_connection,
     reset_llm_token_usage,
     thinking_disabled_request_overrides,
     _record_usage_from_response,
@@ -66,7 +73,7 @@ def test_thinking_disabled_request_overrides_returns_isolated_compatibility_fiel
 
 
 def test_extract_message_content_supports_openjiuwen_response_shape():
-    response = SimpleNamespace(content=[{"text": "{\"ok\": true}"}])
+    response = SimpleNamespace(content=[{"text": '{"ok": true}'}])
 
     assert extract_message_content(response) == '{"ok": true}'
 
@@ -96,7 +103,11 @@ def test_llm_config_from_default_models(monkeypatch):
                     "timeout": 12,
                     "verify_ssl": False,
                 },
-                "model_config_obj": {"temperature": 0.2, "top_p": 0.8, "max_tokens": 99},
+                "model_config_obj": {
+                    "temperature": 0.2,
+                    "top_p": 0.8,
+                    "max_tokens": 99,
+                },
             }
         ],
     )
@@ -130,8 +141,12 @@ def test_llm_config_removes_internal_reasoning_level():
     request_kwargs = config.model_request_kwargs()
 
     assert "reasoning_level" not in request_kwargs
+    assert "reasoning" not in request_kwargs
     assert request_kwargs["max_tokens"] == 99
-    assert request_kwargs["extra_body"] == thinking_disabled_request_overrides()["extra_body"]
+    assert (
+        request_kwargs["extra_body"]
+        == thinking_disabled_request_overrides()["extra_body"]
+    )
 
 
 def test_llm_config_forces_high_reasoning_config_to_disabled():
@@ -144,7 +159,19 @@ def test_llm_config_forces_high_reasoning_config_to_disabled():
             },
             request={
                 "max_tokens": 99,
-                "extra_body": {"custom_option": {"enabled": True}},
+                "reasoning": {"mode": "enabled", "effort": "max"},
+                "reasoning_effort": "high",
+                "thinking": {"type": "enabled"},
+                "enable_thinking": True,
+                "chat_template_kwargs": {"enable_thinking": True},
+                "extra_body": {
+                    "custom_option": {"enabled": True},
+                    "reasoning": {"effort": "high"},
+                    "thinking": {"type": "enabled"},
+                    "enable_thinking": True,
+                    "thinking_budget": 4096,
+                    "chat_template_kwargs": {"enable_thinking": True},
+                },
             },
         )
     )
@@ -152,12 +179,48 @@ def test_llm_config_forces_high_reasoning_config_to_disabled():
     request_kwargs = config.model_request_kwargs()
 
     assert "reasoning_level" not in request_kwargs
+    assert "reasoning" not in request_kwargs
     assert "reasoning_effort" not in request_kwargs
+    assert "thinking" not in request_kwargs
+    assert "enable_thinking" not in request_kwargs
+    assert "chat_template_kwargs" not in request_kwargs
     assert request_kwargs["max_tokens"] == 99
     assert request_kwargs["extra_body"] == {
         "custom_option": {"enabled": True},
         **thinking_disabled_request_overrides()["extra_body"],
     }
+
+
+def test_llm_config_legacy_controls_reach_core_without_neutral_reasoning_plan(
+    monkeypatch,
+):
+    config = LLMConfig.from_model_entry(
+        _model_entry(
+            reasoning_level="high",
+            client={
+                "api_base": "https://custom.example.test/v1",
+                "model_name": "deepseek-v4-flash",
+            },
+        )
+    )
+
+    captured = {}
+
+    class FakeModel:
+        def __init__(self, *, model_client_config, model_config):
+            captured["client"] = model_client_config
+            captured["request"] = model_config
+
+    monkeypatch.setattr("openjiuwen.core.foundation.llm.Model", FakeModel)
+
+    model = config.create_model()
+
+    assert isinstance(model, FakeModel)
+    assert captured["request"].reasoning is None
+    assert (
+        captured["request"].extra_body
+        == thinking_disabled_request_overrides()["extra_body"]
+    )
 
 
 def test_llm_config_owns_nested_model_entry_data():
@@ -183,7 +246,9 @@ def test_llm_config_owns_nested_model_entry_data():
     assert entry == original
     assert config.model_client_kwargs()["custom_headers"] == {"X-Test": "original"}
     assert config.model_request_kwargs()["response_format"] == {"type": "json_object"}
-    assert config.model_request_kwargs()["extra_body"]["custom_option"] == {"enabled": True}
+    assert config.model_request_kwargs()["extra_body"]["custom_option"] == {
+        "enabled": True
+    }
 
 
 def test_llm_config_prefers_resolved_default_model(monkeypatch):
@@ -244,6 +309,237 @@ def test_create_llm_client_uses_jiuwenswarm_client():
     assert type(client).__name__ == "JiuwenSwarmChatClient"
 
 
+def test_llm_config_creates_native_openjiuwen_model(monkeypatch):
+    captured = {}
+
+    class FakeModel:
+        def __init__(self, *, model_client_config, model_config):
+            captured["client"] = model_client_config
+            captured["request"] = model_config
+
+    monkeypatch.setattr("openjiuwen.core.foundation.llm.Model", FakeModel)
+
+    model = _llm_config().create_model()
+
+    assert isinstance(model, FakeModel)
+    assert captured["request"].model_name == "model-a"
+    assert captured["client"].api_base == "https://example.test/v1"
+
+
+@pytest.mark.asyncio
+async def test_probe_model_connection_uses_bounded_low_cost_request(monkeypatch):
+    model = _FakeInvokeModel()
+    monkeypatch.setattr(LLMConfig, "create_model", lambda _config: model)
+
+    await probe_model_connection(_llm_config())
+
+    assert model.calls == [
+        {
+            "messages": [{"role": "user", "content": "Hi"}],
+            "max_tokens": 16,
+            "timeout": 25,
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_probe_model_connection_preserves_framework_model_error(monkeypatch):
+    expected = build_error(
+        StatusCode.MODEL_CALL_FAILED,
+        error_msg="model unavailable",
+    )
+
+    class FailingModel:
+        async def invoke(self, **kwargs):
+            del kwargs
+            raise expected
+
+    monkeypatch.setattr(LLMConfig, "create_model", lambda _config: FailingModel())
+
+    with pytest.raises(BaseError) as exc_info:
+        await probe_model_connection(_llm_config())
+
+    assert exc_info.value is expected
+    assert (
+        str(exc_info.value) == "[181001] model call failed, reason: model unavailable"
+    )
+
+
+@pytest.mark.asyncio
+async def test_probe_model_connection_wraps_untyped_provider_error(monkeypatch):
+    class FailingModel:
+        async def invoke(self, **kwargs):
+            del kwargs
+            raise OSError("connection refused")
+
+    monkeypatch.setattr(LLMConfig, "create_model", lambda _config: FailingModel())
+
+    with pytest.raises(BaseError) as exc_info:
+        await probe_model_connection(_llm_config())
+
+    assert exc_info.value.status is StatusCode.MODEL_CALL_FAILED
+    assert (
+        str(exc_info.value) == "[181001] model call failed, reason: connection refused"
+    )
+    assert isinstance(exc_info.value.cause, OSError)
+
+
+@pytest.mark.asyncio
+async def test_probe_model_connection_enforces_coroutine_deadline(monkeypatch):
+    class HangingModel:
+        async def invoke(self, **kwargs):
+            del kwargs
+            await asyncio.Event().wait()
+
+    monkeypatch.setattr(LLMConfig, "create_model", lambda _config: HangingModel())
+    monkeypatch.setattr(
+        "jiuwenswarm.symphony.llm._MODEL_CONNECTION_PROBE_TIMEOUT_SECONDS",
+        0.01,
+    )
+
+    with pytest.raises(BaseError) as exc_info:
+        await probe_model_connection(_llm_config())
+
+    assert exc_info.value.status is StatusCode.MODEL_CALL_FAILED
+    assert str(exc_info.value) == (
+        "[181001] model call failed, reason: "
+        "model connection test timed out after 0.01s"
+    )
+    assert isinstance(exc_info.value.cause, TimeoutError)
+
+
+def test_model_response_observer_preserves_orchestration_usage_context():
+    reset_llm_token_usage()
+    config = _llm_config()
+    observer = create_model_response_observer(config)
+
+    observer(
+        SimpleNamespace(
+            usage_metadata=SimpleNamespace(
+                input_tokens=7,
+                output_tokens=3,
+                total_tokens=10,
+            )
+        ),
+        "orchestration",
+        "beam_final_rerank",
+    )
+
+    summary = get_llm_token_usage_summary()
+    assert summary["by_stage"]["orchestration"]["total_tokens"] == 10
+    assert (
+        summary["by_operation"]["orchestration.beam_final_rerank"]["request_count"] == 1
+    )
+    reset_llm_token_usage()
+
+
+def test_llm_identity_digest_is_complete_stable_and_redacted():
+    config = LLMConfig(
+        model="model-a",
+        temperature=0.2,
+        top_p=0.8,
+        model_client_config={
+            "api_key": "super-secret-api-key",
+            "api_base": "https://private-endpoint.example/v1/",
+            "client_provider": "openai",
+            "routing": {"region": "region-a", "credential": "route-secret"},
+        },
+        model_config_obj={
+            "max_tokens": 99,
+            "extra_body": {
+                "request_route": "route-a",
+                "token": "request-secret",
+            },
+        },
+    )
+
+    reordered_config = LLMConfig(
+        model="model-a",
+        temperature=0.2,
+        top_p=0.8,
+        model_client_config={
+            "routing": {"credential": "route-secret", "region": "region-a"},
+            "client_provider": "openai",
+            "api_base": "https://private-endpoint.example/v1/",
+            "api_key": "super-secret-api-key",
+        },
+        model_config_obj={
+            "extra_body": {
+                "token": "request-secret",
+                "request_route": "route-a",
+            },
+            "max_tokens": 99,
+        },
+    )
+    digest = config.identity_digest()
+
+    assert digest == reordered_config.identity_digest()
+    assert digest == llm_config_signature(config)
+    assert len(digest) == 64
+    for sensitive_value in (
+        "super-secret-api-key",
+        "https://private-endpoint.example/v1",
+        "route-secret",
+        "request-secret",
+    ):
+        assert sensitive_value not in digest
+
+
+@pytest.mark.parametrize(
+    ("field", "updated_client", "updated_request", "updated_top_p"),
+    [
+        (
+            "endpoint",
+            {"api_base": "https://endpoint-b.example/v1"},
+            {},
+            0.2,
+        ),
+        ("provider", {"client_provider": "azure"}, {}, 0.2),
+        ("routing", {"routing_region": "region-b"}, {}, 0.2),
+        (
+            "request",
+            {},
+            {"extra_body": {"request_route": "request-b"}},
+            0.2,
+        ),
+        ("top_p", {}, {}, 0.9),
+    ],
+)
+def test_llm_identity_digest_changes_for_every_client_affecting_setting(
+    field,
+    updated_client,
+    updated_request,
+    updated_top_p,
+):
+    del field
+    client_config = {
+        "api_key": "secret",
+        "api_base": "https://endpoint-a.example/v1",
+        "client_provider": "openai",
+        "routing_region": "region-a",
+    }
+    request_config = {
+        "max_tokens": 99,
+        "extra_body": {"request_route": "request-a"},
+    }
+    baseline = LLMConfig(
+        model="model-a",
+        temperature=0.0,
+        top_p=0.2,
+        model_client_config=client_config,
+        model_config_obj=request_config,
+    )
+    changed = LLMConfig(
+        model="model-a",
+        temperature=0.0,
+        top_p=updated_top_p,
+        model_client_config={**client_config, **updated_client},
+        model_config_obj={**request_config, **updated_request},
+    )
+
+    assert baseline.identity_digest() != changed.identity_digest()
+
+
 @pytest.mark.asyncio
 async def test_complete_json_async_passes_request_overrides_to_invoke():
     client = create_llm_client(_llm_config())
@@ -260,9 +556,7 @@ async def test_complete_json_async_passes_request_overrides_to_invoke():
 
     assert result == '{"ok": true}'
     assert "reasoning_effort" not in fake_model.calls[0]
-    assert fake_model.calls[0]["extra_body"] == {
-        "thinking": {"type": "disabled"}
-    }
+    assert fake_model.calls[0]["extra_body"] == {"thinking": {"type": "disabled"}}
 
 
 @pytest.mark.asyncio
@@ -295,10 +589,7 @@ async def test_complete_json_many_async_passes_request_overrides_to_each_invoke(
 
     assert results == ['{"ok": true}', '{"ok": true}']
     assert all("reasoning_effort" not in call for call in fake_model.calls)
-    assert [
-        call["extra_body"]
-        for call in fake_model.calls
-    ] == [
+    assert [call["extra_body"] for call in fake_model.calls] == [
         {"thinking": {"type": "disabled"}},
         {"thinking": {"type": "disabled"}},
     ]

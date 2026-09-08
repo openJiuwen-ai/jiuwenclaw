@@ -75,6 +75,16 @@ PLAN_EXECUTE_OPTION_VALUES: frozenset[str] = frozenset({"plan_execute"})
 # CodeAgentModeRail 在 exit_plan_mode 跑完后据此结束本轮。
 PLAN_EXECUTE_CTX_KEY = "_plan_execute_deferred"
 
+# ── Plan approval revise（Web 专用："下一步"）──────────────────────────────
+# 语义：不退出 plan，按修改意见继续完善同一份计划。复用 reject 通道
+# （``approved=False``），额外通过 ``PLAN_REVISE_PAYLOAD_KEY`` 让 rail 给假回执
+# 包上「尚未批准、再调 exit_plan_mode」。
+#
+# TUI 仍发 ``reject``，不带这个键，假回执保持原文，行为不变。
+PLAN_REVISE_PAYLOAD_KEY = "plan_revise"
+
+PLAN_REVISE_OPTION_VALUES: frozenset[str] = frozenset({"plan_revise"})
+
 # ── 进入 plan 时注入的提醒 ─────────────────────────────────────────────────
 # 进入 plan 的那一轮会把一段 <system-reminder> 拼到 ``params["query"]`` 前面。
 # 那段文字是给模型看的运行时上下文，不是用户说的话，所以写会话历史时必须还原
@@ -86,7 +96,7 @@ PLAN_REMINDER_ORIGINAL_QUERY_KEY = "_plan_reminder_original_query"
 _PLAN_APPROVAL_ACTIONS: tuple[dict[str, str], ...] = (
     {"kind": "execute", "value": PLAN_EXECUTE_PAYLOAD_KEY, "requires_input": "no"},
     {"kind": "skip", "value": PLAN_SKIP_PAYLOAD_KEY, "requires_input": "empty"},
-    {"kind": "revise", "value": "reject", "requires_input": "yes"},
+    {"kind": "revise", "value": PLAN_REVISE_PAYLOAD_KEY, "requires_input": "yes"},
 )
 
 _PLAN_ACTION_LABELS: dict[str, dict[str, str]] = {
@@ -114,7 +124,7 @@ def build_plan_approval_actions(language: str) -> list[dict[str, str]]:
     - ``plan_execute``：批准并退出 plan，本轮到此结束；前端随后补发一条普通
       非 plan 消息来真正执行。
     - ``plan_skip``：留在 plan，结束本轮，不执行也不修改。
-    - ``reject`` + ``custom_input``：留在 plan，按修改意见继续完善同一份计划。
+    - ``plan_revise`` + ``custom_input``：留在 plan，按修改意见继续完善同一份计划。
 
     TUI 不读取该字段，仍使用 ``questions[].options`` 的 approve / reject，
     批准后在同一轮里直接继续实现。
@@ -183,7 +193,7 @@ _FEEDBACK_INJECTION_CN = (
     "\n\n<system-reminder>\n"
     "用户要求修订计划（尚未批准执行）。请只修改计划文件，不要实现产品代码。\n"
     "你仍处于 plan 模式：禁止编辑计划文件以外的任何文件，禁止运行写操作。\n"
-    "修订完成后，再次调用 exit_plan_mode 提交审批。\n\n"
+    "**修订完成后，再次调用 exit_plan_mode 提交审批。**\n\n"
     "**用户修订意见：**\n{user_message}\n"
     "</system-reminder>"
 )
@@ -201,6 +211,16 @@ FEEDBACK_INJECTION = {
     "cn": _FEEDBACK_INJECTION_CN,
     "en": _FEEDBACK_INJECTION_EN,
 }
+
+
+def wrap_plan_revision_feedback(user_message: str, language: str = "cn") -> str:
+    """Wrap a Web「下一步」reply so the model sees it was not approved.
+
+    Only the Web revise path sets ``plan_revise``. TUI reject stays unwrapped.
+    """
+    lang = "en" if (language or "").strip().lower().startswith("en") else "cn"
+    # 用户原文可能含花括号，不能走 str.format。
+    return FEEDBACK_INJECTION[lang].replace("{user_message}", user_message or "")
 
 # ── Intent detection helpers ─────────────────────────────────────────────
 
@@ -349,6 +369,8 @@ __all__ = [
     "PLAN_EXECUTE_CTX_KEY",
     "PLAN_EXECUTE_OPTION_VALUES",
     "PLAN_EXECUTE_PAYLOAD_KEY",
+    "PLAN_REVISE_OPTION_VALUES",
+    "PLAN_REVISE_PAYLOAD_KEY",
     "PLAN_SKIP_FEEDBACK",
     "PLAN_SKIP_OPTION_VALUES",
     "PLAN_REMINDER_ORIGINAL_QUERY_KEY",
@@ -360,6 +382,7 @@ __all__ = [
     "PENDING_APPROVAL_MARKER",
     "APPROVED_NOTIFICATION",
     "FEEDBACK_INJECTION",
+    "wrap_plan_revision_feedback",
     "classify_plan_user_intent",
     "is_direct_plan_implement_request",
     "is_user_approving",

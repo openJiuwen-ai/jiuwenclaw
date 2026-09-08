@@ -102,6 +102,36 @@ def test_resolve_timeout_exempts_swarmflow_reply_from_unary_cap():
     ) is None
 
 
+def test_resolve_timeout_exempts_schedule_run_from_unary_cap():
+    """schedule.run's task execution is asyncio.create_task'd (non-blocking);
+    the synchronous wait is dominated by first-time get_agent() +
+    start_scheduler() warmup, which can exceed 25s on a cold AgentServer.
+    Gateway must not cap it — the client timeout_ms is the ceiling."""
+    assert resolve_agent_request_timeout_seconds(
+        channel_id="tui",
+        method="schedule.run",
+        is_stream=False,
+    ) is None
+    # Client passes a short timeout: still uncapped so the client (not gateway)
+    # decides when to give up.
+    assert resolve_agent_request_timeout_seconds(
+        channel_id="tui",
+        method="schedule.run",
+        is_stream=False,
+        client_timeout_ms=5_000,
+    ) is None
+
+
+def test_resolve_timeout_exempts_schedule_check_config_from_unary_cap():
+    """schedule.check_config shares the same cold-start warmup path as
+    schedule.run (it is called right before run in the auto-harness flow)."""
+    assert resolve_agent_request_timeout_seconds(
+        channel_id="tui",
+        method="schedule.check_config",
+        is_stream=False,
+    ) is None
+
+
 def test_request_timeout_from_envelope_accepts_metadata_fallback():
     env = SimpleNamespace(
         channel="tui",

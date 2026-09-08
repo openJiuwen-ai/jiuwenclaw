@@ -59,12 +59,13 @@ export function TextFieldWithDefaults({
   );
 
   return (
-    <div className="a2ui-textfield" style={hostWeightStyle(node.weight)}>
+    <div className="a2ui-textfield" data-testid="a2ui-textfield" style={hostWeightStyle(node.weight)}>
       <section className={classMapToString(theme.components.TextField.container)}>
         {label && (
           <label
             htmlFor={id}
             className={classMapToString(theme.components.TextField.label)}
+            data-testid="a2ui-textfield-label"
           >
             {label}
           </label>
@@ -77,6 +78,8 @@ export function TextFieldWithDefaults({
             placeholder="Please enter a value"
             className={classMapToString(theme.components.TextField.element)}
             style={stylesToObject(theme.additionalStyles?.TextField)}
+            data-testid="a2ui-textfield-input"
+            data-variant={fieldKind}
           />
         ) : (
           <input
@@ -87,6 +90,8 @@ export function TextFieldWithDefaults({
             placeholder="Please enter a value"
             className={classMapToString(theme.components.TextField.element)}
             style={stylesToObject(theme.additionalStyles?.TextField)}
+            data-testid="a2ui-textfield-input"
+            data-variant={fieldKind}
           />
         )}
       </section>

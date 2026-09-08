@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
+import hashlib
 import json
 from collections import defaultdict
+from collections.abc import Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
 from copy import deepcopy
@@ -12,6 +15,10 @@ from threading import Lock
 from typing import Any, Dict, Iterator, List, Optional
 
 from jiuwenswarm.common.reasoning_injector import inject_reasoning_params
+
+LLM_IDENTITY_SCHEMA_VERSION = "JiuwenSwarm-llm-identity-v1"
+_MODEL_CONNECTION_PROBE_TIMEOUT_SECONDS = 25
+_MODEL_CONNECTION_PROBE_MAX_TOKENS = 16
 
 
 @dataclass(frozen=True)
@@ -36,16 +43,21 @@ class LLMConfig:
             models = {}
         default_models = models.get("defaults")
         has_default_model = (
-            isinstance(default_models, list)
-            and bool(default_models)
+            isinstance(default_models, list) and bool(default_models)
         ) or isinstance(models.get("default"), dict)
         if not has_default_model:
-            raise RuntimeError("No JiuwenSwarm default model is configured in config.yaml.")
+            raise RuntimeError(
+                "No JiuwenSwarm default model is configured in config.yaml."
+            )
 
         defaults = get_default_models(config)
         if not defaults:
-            raise RuntimeError("No JiuwenSwarm default model is configured in config.yaml.")
-        entry = next((item for item in defaults if item.get("is_default") is True), defaults[0])
+            raise RuntimeError(
+                "No JiuwenSwarm default model is configured in config.yaml."
+            )
+        entry = next(
+            (item for item in defaults if item.get("is_default") is True), defaults[0]
+        )
         return cls.from_model_entry(entry or {})
 
     @classmethod
@@ -78,11 +90,31 @@ class LLMConfig:
             model_client_config=client_config,
             model_config_obj=request_config,
         )
-        request_config.pop("reasoning_effort", None)
+        for key in (
+            "reasoning",
+            "reasoning_effort",
+            "thinking",
+            "enable_thinking",
+            "thinking_budget",
+            "thinking_strategy",
+            "chat_template_kwargs",
+        ):
+            request_config.pop(key, None)
         extra_body = request_config.get("extra_body")
         if not isinstance(extra_body, dict):
             extra_body = {}
-        extra_body = deepcopy(extra_body)
+        else:
+            extra_body = deepcopy(extra_body)
+            for key in (
+                "reasoning",
+                "reasoning_effort",
+                "thinking",
+                "enable_thinking",
+                "thinking_budget",
+                "thinking_strategy",
+                "chat_template_kwargs",
+            ):
+                extra_body.pop(key, None)
         extra_body.update(thinking_disabled_request_overrides()["extra_body"])
         request_config["extra_body"] = extra_body
         request_config["model"] = model
@@ -105,6 +137,19 @@ class LLMConfig:
         client_config = deepcopy(self.model_client_config or {})
         if self.base_url:
             client_config["api_base"] = self.base_url
+        # 已知自建网关按 host 补全 endpoint_profile（与主路径
+        # build_model_from_entry 同源规则）。symphony 强制关闭思考，
+        # 方言错了会发官方 thinking.type 而被 vLLM 类网关忽略。
+        if not client_config.get("endpoint_profile"):
+            from jiuwenswarm.common.reasoning_config import (
+                resolve_endpoint_profile_override,
+            )
+
+            inferred_profile = resolve_endpoint_profile_override(
+                client_config.get("api_base") or client_config.get("base_url")
+            )
+            if inferred_profile:
+                client_config["endpoint_profile"] = inferred_profile
         return client_config
 
     def model_request_kwargs(self) -> Dict[str, Any]:
@@ -112,7 +157,42 @@ class LLMConfig:
         request_config["model"] = self.model
         request_config["temperature"] = self.temperature
         request_config["top_p"] = self.top_p
+        # 兜底:部分厂商(如 Moonshot api.moonshot.cn 的 kimi-k2.6)对采样参数有
+        # 硬性约束,传默认值(此处 0.0/1.0)会 400。symphony 路径不经
+        # reasoning_injector,故在此按 api_base 识别后强制覆盖,与主路径同源规则。
+        # 见 common.reasoning_config.resolve_sampling_override。
+        from jiuwenswarm.common.reasoning_config import resolve_sampling_override
+
+        override = resolve_sampling_override(self.base_url)
+        if override:
+            request_config.update(override)
         return request_config
+
+    def create_model(self):
+        """Create the native openJiuwen model used by orchestration."""
+
+        from openjiuwen.core.foundation.llm import (
+            Model,
+            ModelClientConfig,
+            ModelRequestConfig,
+        )
+
+        return Model(
+            model_client_config=ModelClientConfig(**self.model_client_kwargs()),
+            model_config=ModelRequestConfig(**self.model_request_kwargs()),
+        )
+
+    def identity_digest(self) -> str:
+        """Hash every effective client/request setting without exposing values."""
+
+        return _stable_identity_sha256(
+            {
+                "schema_version": LLM_IDENTITY_SCHEMA_VERSION,
+                "backend": self.backend,
+                "client_config": self.model_client_kwargs(),
+                "request_config": self.model_request_kwargs(),
+            }
+        )
 
 
 @dataclass(frozen=True)
@@ -230,6 +310,55 @@ def create_llm_client(config: LLMConfig) -> "JiuwenSwarmChatClient":
     return JiuwenSwarmChatClient(config)
 
 
+async def probe_model_connection(config: LLMConfig) -> None:
+    """Verify the configured model with one bounded, low-cost request."""
+
+    from openjiuwen.core.common.exception.codes import StatusCode
+    from openjiuwen.core.common.exception.errors import BaseError, build_error
+
+    try:
+        await asyncio.wait_for(
+            config.create_model().invoke(
+                messages=[{"role": "user", "content": "Hi"}],
+                max_tokens=_MODEL_CONNECTION_PROBE_MAX_TOKENS,
+                timeout=_MODEL_CONNECTION_PROBE_TIMEOUT_SECONDS,
+            ),
+            timeout=_MODEL_CONNECTION_PROBE_TIMEOUT_SECONDS,
+        )
+    except BaseError:
+        raise
+    except TimeoutError as exc:
+        raise build_error(
+            StatusCode.MODEL_CALL_FAILED,
+            error_msg=(
+                "model connection test timed out after "
+                f"{_MODEL_CONNECTION_PROBE_TIMEOUT_SECONDS}s"
+            ),
+            cause=exc,
+        ) from exc
+    except Exception as exc:
+        reason = str(exc).strip() or type(exc).__name__
+        raise build_error(
+            StatusCode.MODEL_CALL_FAILED,
+            error_msg=reason,
+            cause=exc,
+        ) from exc
+
+
+def create_model_response_observer(config: LLMConfig):
+    """Bridge native orchestration model responses to the existing usage tracker."""
+
+    def observe(response: Any, stage: str, operation: str | None) -> None:
+        with llm_usage_context(stage, operation):
+            _record_usage_from_response(
+                config=config,
+                response=response,
+                operation=operation or "orchestration",
+            )
+
+    return observe
+
+
 def thinking_disabled_request_overrides() -> Dict[str, Any]:
     """Return isolated provider-compatible controls that disable thinking."""
     return {
@@ -309,19 +438,8 @@ class JiuwenSwarmChatClient:
         timeout: Optional[int],
         request_overrides: Optional[Dict[str, Any]],
     ) -> Any:
-        from openjiuwen.core.foundation.llm import (
-            Model,
-            ModelClientConfig,
-            ModelRequestConfig,
-        )
-
         if self._model is None:
-            self._model = Model(
-                model_client_config=ModelClientConfig(
-                    **self.config.model_client_kwargs()
-                ),
-                model_config=ModelRequestConfig(**self.config.model_request_kwargs()),
-            )
+            self._model = self.config.create_model()
 
         invoke_kwargs: Dict[str, Any] = {}
         if timeout is not None:
@@ -338,6 +456,41 @@ class JiuwenSwarmChatClient:
             ],
             **invoke_kwargs,
         )
+
+
+def _stable_identity_sha256(value: Any) -> str:
+    canonical = _canonical_identity_value(value)
+    serialized = json.dumps(
+        canonical,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
+def _canonical_identity_value(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {
+            str(key): _canonical_identity_value(item)
+            for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))
+        }
+    if isinstance(value, (list, tuple)):
+        return [_canonical_identity_value(item) for item in value]
+    if isinstance(value, (set, frozenset)):
+        normalized = [_canonical_identity_value(item) for item in value]
+        return sorted(
+            normalized,
+            key=lambda item: json.dumps(
+                item,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+        )
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    return str(value)
 
 
 def _record_usage_from_response(

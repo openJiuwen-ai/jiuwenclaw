@@ -4,7 +4,7 @@ JiuwenSwarm supports integration with multiple Chinese chat platforms. Below are
 
 ## Xiaoyi
 
-[Demo video](../assets/videos/xiaoyi_channel.mp4)
+[Demo video: Xiaoyi channel setup and conversation demo](../assets/videos/xiaoyi_channel.mp4) (Covers: creating an agent on Xiaoyi Open Platform, configuring credentials and whitelist, publishing the agent, connecting to JiuwenSwarm channel, and end-to-end device conversation demo)
 
 ### 1. Create a Xiaoyi Agent
 
@@ -71,21 +71,34 @@ Edit `~/.jiuwenswarm/config/config.yaml`:
 ``````yaml
 channels:
   xiaoyi:
-    mode: xiaoyi_channel
-    ak: "<ak from platform>"
-    sk: "<sk from platform>"
-    agent_id: "<your agent id>"
-    api_id: "<trigger apiId>"
-    push_id: "<trigger push_id (required when push notifications are enabled)>"
-    uid: ""
-    api_key: ""
-    push_url: ""
-    file_upload_url: ""
-    phone_tools_enabled: false
     send_file_allowed: true
-    enable_streaming: true
-    enabled: true
+    apps:
+      - name: Default Xiaoyi App
+        mode: xiaoyi_channel
+        ak: "<ak from platform>"
+        sk: "<sk from platform>"
+        api_id: "<trigger apiId>"
+        push_id: "<trigger push_id (required when push notifications are enabled)>"
+        agent_id: "<your agent id>"
+        ws_url1: "<wss://ws-endpoint-1>"
+        ws_url2: "<wss://ws-endpoint-2>"
+        enable_streaming: true
+        enabled: true
 ``````
+
+#### Fields
+
+| Field | Description |
+|:------|:------------|
+| `name` | App display name, used to distinguish multiple instances |
+| `mode` | Channel mode, fixed value `xiaoyi_channel` |
+| `ak` / `sk` | Huawei Xiaoyi platform credentials |
+| `api_id` | Trigger API ID |
+| `push_id` | Trigger Push ID (required when push notifications are enabled) |
+| `agent_id` | Created Agent ID |
+| `ws_url1` / `ws_url2` | Huawei WebSocket endpoints |
+| `enable_streaming` | Enable streaming responses, default `true` |
+| `enabled` | Enable this app instance, default `false` |
 
 If the service is already running it will auto-reload; otherwise run `jiuwenswarm-start`.
 
@@ -221,13 +234,21 @@ You can also configure via `~/.jiuwenswarm/config/config.yaml`:
 ``````yaml
 channels:
   feishu:
-    app_id: "your App ID"
-    app_secret: "your App Secret"
-    enabled: true
-    group_digital_avatar: true
-    my_user_id: "ou_xxxx"
-    bot_name: "bot name"
-    enable_memory: false
+    send_file_allowed: true
+    apps:
+      - name: Default Feishu App
+        app_id: "your App ID"
+        app_secret: "your App Secret"
+        encrypt_key: "event subscription encrypt key"
+        verification_token: "event subscription token"
+        allow_from: []
+        enable_streaming: false
+        enabled: true
+        group_digital_avatar: true
+        my_user_id: "ou_xxxx"
+        bot_name: "bot name"
+        enable_memory: false
+        api_base: https://open.feishu.cn
 
 permissions:
   owner_scopes:
@@ -245,6 +266,23 @@ permissions:
             "*": "deny"
   deny_guidance_message: "This tool is not authorized in digital avatar mode."
 ``````
+
+#### Fields
+
+| Field | Description |
+|:------|:------------|
+| `name` | App display name, used to distinguish multiple instances |
+| `app_id` / `app_secret` | Feishu Open Platform credentials |
+| `encrypt_key` | Event subscription encrypt key (optional) |
+| `verification_token` | Event subscription verification token (optional) |
+| `allow_from` | User whitelist; empty allows all users |
+| `enable_streaming` | Enable streaming responses, default `false` |
+| `enabled` | Enable this app instance, default `false` |
+| `group_digital_avatar` | Enable group digital avatar |
+| `my_user_id` | Represented user ID (ou_ prefix) |
+| `bot_name` | Bot display name in groups (for @ mention detection) |
+| `enable_memory` | Enable group chat memory |
+| `api_base` | Feishu API domain; empty uses official default |
 
 6\. The Feishu bot needs the following additional permissions:
 
@@ -364,11 +402,23 @@ On the **Permission management** page, enable the following permissions as neede
 
 ### 5. Configure DingTalk Channel
 
-Copy **Client ID** and **Client Secret** from **Credentials & basic info**.
+Copy **client_id** and **client_secret** from **Credentials & basic info** (config keys match DingTalk console naming, both lowercase).
 
-In JiuwenSwarm, open **Channels → DingTalk**, enable it, and configure **client_id** and **client_secret**, then save:
+In JiuwenSwarm, open **Channels → DingTalk**, enable it, and configure **client_id** and **client_secret**, then save.
 
 ![DingTalk channel](../assets/images/dingding_channel_enable.png)
+
+#### Fields
+
+| Field | Description |
+|:------|:------------|
+| `client_id` | DingTalk app credential Client ID |
+| `client_secret` | DingTalk app credential Client Secret |
+| `allow_from` | User whitelist, array format |
+| `enabled` | Enable this channel |
+| `send_file_allowed` | Allow sending files |
+| `api_base` | v1.0 API domain, default `https://api.dingtalk.com` |
+| `oapi_base` | Legacy media API domain, default `https://oapi.dingtalk.com` |
 
 ---
 
@@ -461,6 +511,10 @@ channels:
   wecom:
     bot_id: "your Bot ID"
     secret: "your Secret"
+    ws_url: "wss://openws.work.weixin.qq.com"
+    allow_from: []
+    enable_streaming: true
+    send_thinking_message: false
     send_file_allowed: true
     enabled: true
     group_digital_avatar: true
@@ -489,9 +543,17 @@ permissions:
 
 | Field | Description |
 |:------|:------------|
+| `bot_id` | WeCom Smart bot Bot ID |
+| `secret` | WeCom app Secret |
+| `ws_url` | Long-connection endpoint, default `wss://openws.work.weixin.qq.com` |
+| `allow_from` | User whitelist; empty allows all users |
+| `enable_streaming` | Enable streaming responses, default `true` |
+| `send_thinking_message` | Send thinking-message indicator, default `false` |
+| `send_file_allowed` | Allow sending files |
+| `enabled` | Enable this channel |
 | `group_digital_avatar` | Enable group digital avatar |
-| `my_user_id` | **Required**: WeCom account of the represented user |
-| `bot_name` | Optional: bot display name in the group |
+| `my_user_id` | **Required when digital avatar is on**: WeCom account of the represented user |
+| `bot_name` | Optional: bot display name in the group (for @ mention detection) |
 | `enable_memory` | Enable group chat memory |
 | `owner_scopes` | Tool permissions scoped by `channel_id` + `user_id` |
 

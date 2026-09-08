@@ -160,6 +160,8 @@ Best for:
 2. **Local import (web UI)**
 
    Left sidebar → **Skills** → **Import local skill** in the top-right, enter the server-side local skill path (a `SKILL.md` file or a skill directory) in the dialog, then confirm.
+
+   > **Requirements**: the source must be an **absolute path** or a `~/...` path; `~` is expanded against the JiuwenClaw service process user's home directory on the server, not the browser user's local machine. Other relative paths are rejected. The resolved source must not be under a system/sensitive directory (e.g. `/etc`, `~/.ssh`, `C:\Windows`) or contain symbolic links. Operators may tighten the built-in blacklist via the `IMPORT_LOCAL_FORBIDDEN_DIRS` env var (comma-separated absolute paths). The `SKILL.md` must start with a `---` YAML frontmatter block containing both `name` and `description` — bare `.md` files or directories without a valid `SKILL.md` frontmatter are not importable.
    ![Local skill import](../assets/images/current-ui-en/12-Skills-My-Skills.png)
 
 3. **Manual copy (optional)**
@@ -167,8 +169,12 @@ Best for:
    Copy skill folder into:
 
    ```text
-   C:\Users\<username>\.jiuwenswarm\service_default\agent_default\jiuwenswarm_workspace\skills\
+   ~/.jiuwenswarm/agent/workspace/skills/
    ```
+
+   > **Path note**: `~` represents the user home directory. On Windows, the actual path is `C:\Users\<username>\.jiuwenswarm\agent\workspace\skills\`; on Linux/macOS, it's `/home/<username>/.jiuwenswarm/agent/workspace/skills/`. In container deployment mode, the path may vary depending on mount configuration.
+
+   > **Agent Team mode shares this same library**: teams and team members keep no `skills/` directory and no copies of their own, only a visibility declaration stating which skills of this library they may see (by default, all of them). Installing a skill once therefore makes it available to single agents and team members alike. See the "Team Skills" section of [Agent Team](AgentTeam.md) for how to narrow a member's visibility.
 
 4. **Verify**
 
@@ -257,10 +263,12 @@ The agent lists installed skill names, sources, versions, and related info.
 **Method 3: File path**
 
 ```text
-C:\Users\<username>\.jiuwenswarm\service_default\agent_default\jiuwenswarm_workspace\skills\
+~/.jiuwenswarm/agent/workspace/skills/
 ```
 
 Each subfolder is one skill.
+
+> **Path note**: `~` represents the user home directory. On Windows, the actual path is `C:\Users\<username>\.jiuwenswarm\agent\workspace\skills\`; on Linux/macOS, it's `/home/<username>/.jiuwenswarm/agent/workspace/skills/`. In container deployment mode, the path may vary depending on mount configuration.
 
 #### View skill details
 

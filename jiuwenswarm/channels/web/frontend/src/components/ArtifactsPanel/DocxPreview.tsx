@@ -86,13 +86,13 @@ export function DocxPreview({ url, title }: { url: string; title: string }) {
       <div ref={styleRef} className="shrink-0" />
       <div ref={bodyRef} className="min-h-0 flex-1 overflow-auto bg-secondary" />
       {state === 'loading' && (
-        <div className="absolute inset-0 flex items-center justify-center gap-2 bg-secondary text-sm text-text-muted">
+        <div className="absolute inset-0 flex items-center justify-center gap-2 bg-secondary text-sm text-text-muted" data-testid="artifact-docx-preview-overlay" data-variant="loading">
           <LoaderCircle className="animate-spin" size={16} />
           {t('common.loading')}
         </div>
       )}
       {state === 'error' && (
-        <div className="absolute inset-0 flex items-center justify-center bg-secondary p-6 text-sm text-danger" role="alert">
+        <div className="absolute inset-0 flex items-center justify-center bg-secondary p-6 text-sm text-danger" role="alert" data-testid="artifact-docx-preview-overlay" data-variant="error">
           {t('artifacts.docxPreviewFailed')}
         </div>
       )}

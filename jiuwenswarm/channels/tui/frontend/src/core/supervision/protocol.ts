@@ -68,7 +68,7 @@ export interface HandoffPort {
   checkHandoff(target: HandoffTarget): HandoffCheckResult;
   /**
    * 请求 handoff：二次校验后调用统一顶层关闭路径，以 launcher 注入的动作退出码退出。
-   * switchContent 是原始命令文本（如 "switch claude"），会在退出前以 handoff JSON
+   * switchContent 是原始命令文本（如 "switch <agent_type>"），会在退出前以 handoff JSON
    * 输出到 stdout，供 launcher 读取并解析后发起 3rdagent.switch RPC。
    * 成功路径不会返回（process.exit）。
    */

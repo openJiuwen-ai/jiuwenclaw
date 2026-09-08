@@ -64,6 +64,7 @@ function VirtualizedTextViewer({ text }: { text: string }) {
       ref={measure}
       className="w-full h-full min-h-[280px] overflow-auto rounded-lg border border-border bg-card p-3 text-sm text-text mono"
       onScroll={(event) => setScrollTop(event.currentTarget.scrollTop)}
+      data-testid="agent-panel-file-viewer-text-viewer-scroll"
     >
       <div style={{ height: totalHeight, position: 'relative' }}>
         <pre
@@ -253,28 +254,29 @@ export function FileViewer({ filePath, fileName, reloadNonce = 0 }: FileViewerPr
   };
 
   return (
-    <div className="h-full min-h-0 flex flex-col overflow-hidden">
-      <div className="flex-shrink-0 px-4 py-3 bg-secondary/30 border-b border-border">
+    <div className="h-full min-h-0 flex flex-col overflow-hidden" data-testid="agent-panel-file-viewer-root">
+      <div className="flex-shrink-0 px-4 py-3 bg-secondary/30 border-b border-border" data-testid="agent-panel-file-viewer-toolbar">
         <div className="flex items-stretch justify-between gap-4">
           <div className="flex items-center gap-3 min-w-0 flex-1">
-            <span className="h-9 w-9 rounded-lg border border-border bg-card flex items-center justify-center text-text-muted flex-shrink-0">
+            <span className="h-9 w-9 rounded-lg border border-border bg-card flex items-center justify-center text-text-muted flex-shrink-0" data-testid="agent-panel-file-viewer-icon">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.6} className="h-7 w-7">
                 <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5a3.375 3.375 0 00-3.375-3.375H8.25m0 12.75h7.5m-7.5 3H12M10.5 2.25H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 00-9-9z" />
               </svg>
             </span>
             <div className="min-w-0 flex-1">
-              <h3 className="text-sm font-medium text-text truncate">{fileName}</h3>
-              <p className="text-xs text-text-muted mono truncate mt-1" title={filePath}>
+              <h3 className="text-sm font-medium text-text truncate" data-testid="agent-panel-file-viewer-file-name">{fileName}</h3>
+              <p className="text-xs text-text-muted mono truncate mt-1" title={filePath} data-testid="agent-panel-file-viewer-file-path">
                 {filePath}
               </p>
             </div>
           </div>
           <div className="flex items-center gap-2">
-            <label className="text-xs text-text-muted">Encoding:</label>
+            <label className="text-xs text-text-muted" data-testid="agent-panel-file-viewer-encoding-label">Encoding:</label>
             <select
               value={fileEncoding}
               onChange={(e) => setFileEncoding(e.target.value)}
               className="rounded border border-border bg-bg px-2 py-1 text-xs text-text"
+              data-testid="agent-panel-file-viewer-encoding-select"
             >
               <option value="auto">Auto Detect</option>
               <option value="utf-8">UTF-8</option>
@@ -298,6 +300,7 @@ export function FileViewer({ filePath, fileName, reloadNonce = 0 }: FileViewerPr
                     className="btn !px-3 !py-1.5 disabled:opacity-50 disabled:cursor-not-allowed"
                     onClick={handleCancelEdit}
                     disabled={saving}
+                    data-testid="agent-panel-file-viewer-edit-cancel-button"
                   >
                     {t('common.cancel')}
                   </button>
@@ -306,6 +309,7 @@ export function FileViewer({ filePath, fileName, reloadNonce = 0 }: FileViewerPr
                     className="btn primary !px-3 !py-1.5 disabled:opacity-50 disabled:cursor-not-allowed"
                     onClick={handleSave}
                     disabled={saving}
+                    data-testid="agent-panel-file-viewer-edit-save-button"
                   >
                     {saving ? t('common.saving') : t('common.save')}
                   </button>
@@ -315,6 +319,7 @@ export function FileViewer({ filePath, fileName, reloadNonce = 0 }: FileViewerPr
                   type="button"
                   className="btn !px-3 !py-1.5"
                   onClick={handleStartEdit}
+                  data-testid="agent-panel-file-viewer-edit-button"
                 >
                   {t('fileViewer.edit')}
                 </button>
@@ -323,7 +328,7 @@ export function FileViewer({ filePath, fileName, reloadNonce = 0 }: FileViewerPr
           ) : null}
           {isHistoryJson && isJson && !loading ? (
             <div className="flex flex-shrink-0 items-center gap-2 self-stretch">
-              <span className="inline-flex items-center gap-1 text-xs leading-snug text-text-muted whitespace-nowrap">
+              <span className="inline-flex items-center gap-1 text-xs leading-snug text-text-muted whitespace-nowrap" data-testid="agent-panel-file-viewer-chat-preview-label">
                 {t('fileViewer.chatPreview')}
               </span>
               <button
@@ -335,6 +340,7 @@ export function FileViewer({ filePath, fileName, reloadNonce = 0 }: FileViewerPr
                   historyChatPreview ? 'justify-end bg-accent' : 'justify-start bg-secondary'
                 }`}
                 title={t('fileViewer.chatPreview')}
+                data-testid="agent-panel-file-viewer-chat-preview-switch"
               >
                 <span className="pointer-events-none h-5 w-5 rounded-full bg-[var(--color-control-thumb)] shadow-sm ring-1 ring-control-ring" />
               </button>
@@ -342,25 +348,25 @@ export function FileViewer({ filePath, fileName, reloadNonce = 0 }: FileViewerPr
           ) : null}
         </div>
         {error ? (
-          <div className="mt-2 rounded-md border border-danger/30 bg-danger/10 px-2.5 py-1.5 text-xs text-danger">
+          <div className="mt-2 rounded-md border border-danger/30 bg-danger/10 px-2.5 py-1.5 text-xs text-danger" data-testid="agent-panel-file-viewer-error">
             {error}
           </div>
         ) : null}
         {fileNotFound ? (
-          <div className="mt-2 rounded-md border border-warn/30 bg-warn/10 px-2.5 py-1.5 text-xs text-warn">
+          <div className="mt-2 rounded-md border border-warn/30 bg-warn/10 px-2.5 py-1.5 text-xs text-warn" data-testid="agent-panel-file-viewer-file-missing">
             {t('fileViewer.fileMissingPrefix')} <span className="mono">{filePath}</span> {t('fileViewer.fileMissingSuffix')}
           </div>
         ) : null}
         {saveError ? (
-          <div className="mt-2 rounded-md border border-danger/30 bg-danger/10 px-2.5 py-1.5 text-xs text-danger">
+          <div className="mt-2 rounded-md border border-danger/30 bg-danger/10 px-2.5 py-1.5 text-xs text-danger" data-testid="agent-panel-file-viewer-save-error">
             {saveError}
           </div>
         ) : null}
       </div>
 
-      <div className="flex-1 min-h-0 overflow-auto p-5">
+      <div className="flex-1 min-h-0 overflow-auto p-5" data-testid="agent-panel-file-viewer-body">
         {loading ? (
-          <div className="h-full flex items-center justify-center">
+          <div className="h-full flex items-center justify-center" data-testid="agent-panel-file-viewer-loading">
             <div className="w-7 h-7 rounded-full border-4 border-border border-t-accent animate-spin" />
           </div>
         ) : isMarkdown ? (
@@ -370,15 +376,16 @@ export function FileViewer({ filePath, fileName, reloadNonce = 0 }: FileViewerPr
               value={draftContent}
               onChange={(event) => setDraftContent(event.target.value)}
               disabled={saving}
+              data-testid="agent-panel-file-viewer-edit-textarea"
             />
           ) : (
-            <article className="chat-text max-w-none">
+            <article className="chat-text max-w-none" data-testid="agent-panel-file-viewer-markdown">
               <ReactMarkdown>{content || ' '}</ReactMarkdown>
             </article>
           )
         ) : isJson ? (
           isTodoJson && todoItems.length > 0 ? (
-            <div className="w-full min-h-[280px] rounded-lg border border-border bg-card p-4 space-y-4">
+            <div className="w-full min-h-[280px] rounded-lg border border-border bg-card p-4 space-y-4" data-testid="agent-panel-file-viewer-todo-preview">
               {(() => {
                 const inProgress = todoItems.filter((i) => i.status === 'in_progress');
                 const pending = todoItems.filter((i) => i.status === 'pending');
@@ -387,17 +394,17 @@ export function FileViewer({ filePath, fileName, reloadNonce = 0 }: FileViewerPr
 
                 const renderGroup = (title: string, items: TodoPreviewItem[], colorClass: string, icon: string) => (
                   items.length > 0 ? (
-                    <div key={title}>
+                    <div key={title} data-testid="agent-panel-file-viewer-todo-group" data-variant={title}>
                       <div className="flex items-center gap-2 mb-2">
-                        <span className={`text-xs font-medium ${colorClass}`}>{title}</span>
-                        <span className="text-xs px-1.5 py-0.5 rounded bg-secondary text-text-muted">{items.length}</span>
+                        <span className={`text-xs font-medium ${colorClass}`} data-testid="agent-panel-file-viewer-todo-group-title">{title}</span>
+                        <span className="text-xs px-1.5 py-0.5 rounded bg-secondary text-text-muted" data-testid="agent-panel-file-viewer-todo-group-count">{items.length}</span>
                       </div>
                       <div className="space-y-1.5">
                         {items.map((item) => (
-                          <div key={item.id} className="flex items-center gap-2 text-sm py-1.5 px-2 rounded bg-secondary/30">
+                          <div key={item.id} className="flex items-center gap-2 text-sm py-1.5 px-2 rounded bg-secondary/30" data-testid="agent-panel-file-viewer-todo-item" data-variant={item.id}>
                             <span className={`shrink-0 ${colorClass}`}>{icon}</span>
-                            <span className="flex-1 text-text truncate">{item.content}</span>
-                            <span className="mono text-xs text-text-muted shrink-0 bg-secondary px-1.5 py-0.5 rounded">{item.id}</span>
+                            <span className="flex-1 text-text truncate" data-testid="agent-panel-file-viewer-todo-item-content">{item.content}</span>
+                            <span className="mono text-xs text-text-muted shrink-0 bg-secondary px-1.5 py-0.5 rounded" data-testid="agent-panel-file-viewer-todo-item-id">{item.id}</span>
                           </div>
                         ))}
                       </div>
@@ -419,11 +426,11 @@ export function FileViewer({ filePath, fileName, reloadNonce = 0 }: FileViewerPr
             historyInvalid ? (
               <VirtualizedTextViewer text={content} />
             ) : historyMessages.length === 0 ? (
-              <div className="h-full min-h-[280px] flex items-center justify-center rounded-lg border border-border bg-card px-4 text-sm text-text-muted text-center">
+              <div className="h-full min-h-[280px] flex items-center justify-center rounded-lg border border-border bg-card px-4 text-sm text-text-muted text-center" data-testid="agent-panel-file-viewer-history-empty">
                 {t('fileViewer.historyPreviewEmpty')}
               </div>
             ) : (
-              <div className="w-full min-h-[280px] rounded-lg border border-border bg-card p-3 chat-content">
+              <div className="w-full min-h-[280px] rounded-lg border border-border bg-card p-3 chat-content" data-testid="agent-panel-file-viewer-history-timeline">
                 <ChatTimelineList
                   messages={historyMessages}
                   executions={historyExecutions}
@@ -435,10 +442,12 @@ export function FileViewer({ filePath, fileName, reloadNonce = 0 }: FileViewerPr
               </div>
             )
           ) : (
-            <VirtualizedTextViewer text={isHistoryJson ? content : formattedJson} />
+            <div data-testid="agent-panel-file-viewer-text-viewer">
+              <VirtualizedTextViewer text={isHistoryJson ? content : formattedJson} />
+            </div>
           )
         ) : (
-          <div className="h-full flex items-center justify-center text-text-muted text-sm">
+          <div className="h-full flex items-center justify-center text-text-muted text-sm" data-testid="agent-panel-file-viewer-not-previewable">
             {t('fileViewer.notPreviewable')}
           </div>
         )}

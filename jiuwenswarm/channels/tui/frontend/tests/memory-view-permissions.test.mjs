@@ -3,7 +3,37 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import { createMemoryCommand } from "../dist/core/commands/builtins/memory.js";
 import { MemoryViewController } from "../dist/ui/memory-view.js";
+
+function stripAnsi(value) {
+  return value.replace(/\u001b\[[0-9;]*m/g, "");
+}
+
+function makeMemoryState(filePath, projectDir, render = () => ["  User memory  Saved in .jiuwen/JIUWENSWARM.md"]) {
+  return {
+    tab: "edit",
+    list: { render },
+    mode: "code.normal",
+    files: [
+      {
+        path: filePath,
+        relative_path: "JIUWENSWARM.md",
+        kind: "user",
+        exists: true,
+        size: 0,
+        mtime: 0,
+        lines: 0,
+      },
+    ],
+    statusPayload: null,
+    openPayload: null,
+    projectDir,
+    gitRoot: null,
+    userMemoryPath: filePath,
+    loading: false,
+  };
+}
 
 const tempRoot = mkdtempSync(join(tmpdir(), "jiuwenswarm-memory-view-"));
 const memoryDir = join(tempRoot, ".jiuwen");
@@ -47,6 +77,27 @@ controller.state = {
 };
 
 try {
+  const [projectMemoryItem] = controller.buildEditItems(
+    [
+      {
+        path: join(tempRoot, "JIUWENSWARM.md"),
+        relative_path: "JIUWENSWARM.md",
+        kind: "project",
+        exists: false,
+        size: 0,
+        mtime: 0,
+        lines: 0,
+      },
+    ],
+    tempRoot,
+    null,
+  );
+  assert.match(
+    projectMemoryItem.description,
+    /^Saved in /,
+    "project memory in a non-Git directory must be described as saved",
+  );
+
   chmodSync(memoryDir, 0o444);
 
   // Windows does not enforce chmod write bits on directories. In that case,
@@ -110,4 +161,147 @@ try {
   rmSync(tempRoot, { recursive: true, force: true });
 }
 
-console.log("memory view permission tests passed");
+// Editor lifecycle coverage lives in this existing memory-view test entry so
+// package.json does not need a separate test command for another test file.
+const lifecycleRoot = mkdtempSync(join(tmpdir(), "jiuwenswarm-memory-edit-lifecycle-"));
+const lifecycleMemoryDir = join(lifecycleRoot, ".jiuwen");
+const lifecycleFilePath = join(lifecycleMemoryDir, "JIUWENSWARM.md");
+const previousEditor = process.env.EDITOR;
+const previousVisual = process.env.VISUAL;
+
+try {
+  mkdirSync(lifecycleMemoryDir, { recursive: true });
+  writeFileSync(lifecycleFilePath, "");
+
+  process.env.EDITOR = "code --wait";
+  delete process.env.VISUAL;
+
+  const historyItems = [];
+  const renderCalls = [];
+  let disabledStatePainted = false;
+  let editorDone;
+  let lifecycleEditorOpenCount = 0;
+  const lifecycleAppState = {
+    getSnapshot: () => ({ sessionId: "session-1" }),
+    addItem: (item) => historyItems.push(item),
+  };
+  const lifecycleTui = {
+    requestRender: (immediate) => {
+      renderCalls.push(immediate);
+      if (immediate) {
+        process.nextTick(() => {
+          disabledStatePainted = true;
+        });
+      }
+    },
+  };
+  const lifecycleController = new MemoryViewController(
+    lifecycleAppState,
+    lifecycleTui,
+    (_tui, _path, onDone) => {
+      assert.equal(disabledStatePainted, true, "the disabled list must paint before the editor blocks");
+      lifecycleEditorOpenCount += 1;
+      editorDone = onDone;
+    },
+  );
+  lifecycleController.state = makeMemoryState(lifecycleFilePath, lifecycleRoot);
+
+  await lifecycleController.handleSelect(
+    "edit",
+    { value: lifecycleFilePath, label: "User memory" },
+    "code.normal",
+    lifecycleRoot,
+  );
+
+  assert.equal(lifecycleEditorOpenCount, 1);
+  assert.equal(lifecycleController.isOpen, true, "the memory panel remains mounted while editing");
+  assert.equal(renderCalls.at(-1), true, "the disabled state must render before a blocking editor starts");
+  const editingView = stripAnsi(lifecycleController.buildLines(120).join("\n"));
+  assert.match(editingView, /User memory/, "the original list remains visible");
+  assert.match(editingView, /Memory list disabled until the editor closes/);
+  assert.equal(lifecycleController.handleInput("\u001b"), true, "all panel input is consumed while editing");
+  assert.equal(lifecycleController.isOpen, true, "Esc cannot close the disabled panel");
+  assert.equal(historyItems.length, 0, "success is not reported before the editor exits");
+
+  editorDone(true);
+
+  assert.equal(lifecycleController.isOpen, false, "the memory list exits after editing completes");
+  assert.equal(historyItems.length, 1);
+  assert.match(historyItems[0].content, /Memory file edited successfully:/);
+  assert.match(historyItems[0].content, /Using \$EDITOR="code --wait"/);
+  assert.match(historyItems[0].content, /set the \$EDITOR or \$VISUAL environment variable/);
+
+  const failedController = new MemoryViewController(
+    lifecycleAppState,
+    lifecycleTui,
+    (_tui, _path, onDone) => {
+      onDone(false);
+    },
+  );
+  failedController.state = makeMemoryState(lifecycleFilePath, lifecycleRoot);
+  await failedController.handleSelect(
+    "edit",
+    { value: lifecycleFilePath, label: "User memory" },
+    "code.normal",
+    lifecycleRoot,
+  );
+  const failedView = stripAnsi(failedController.buildLines(120).join("\n"));
+  assert.equal(failedController.isOpen, true, "launch failures return the list to an operable state");
+  assert.match(failedView, /Failed to open editor: configured editor and fallback editor both failed/);
+  assert.doesNotMatch(failedView, /Memory list disabled/);
+} finally {
+  if (previousEditor === undefined) delete process.env.EDITOR;
+  else process.env.EDITOR = previousEditor;
+  if (previousVisual === undefined) delete process.env.VISUAL;
+  else process.env.VISUAL = previousVisual;
+  rmSync(lifecycleRoot, { recursive: true, force: true });
+}
+
+const directEditRoot = mkdtempSync(join(tmpdir(), "jiuwenswarm-memory-direct-edit-"));
+const directEditPath = join(directEditRoot, "JIUWENSWARM.md");
+
+try {
+  const addedItems = [];
+  let editorOpenCount = 0;
+  const memoryCommand = createMemoryCommand();
+  const editCommand = memoryCommand.subCommands.find((command) => command.name === "edit");
+  assert.ok(editCommand, "the memory edit subcommand must be registered");
+
+  await editCommand.action(
+    {
+      sessionId: "session-direct-edit",
+      mode: "code.normal",
+      getTrustedDirs: () => [],
+      getCurrentProjectDir: () => directEditRoot,
+      getWorkspaceDir: () => directEditRoot,
+      request: async (method, params) => {
+        assert.equal(method, "memory.edit");
+        assert.equal(params.path, directEditPath, "missing relative paths resolve against the project");
+        return {
+          path: directEditPath,
+          exists: false,
+          content_preview: "",
+          kind: "project",
+          editable: true,
+        };
+      },
+      openInEditor: async (filePath, onDone) => {
+        assert.equal(filePath, directEditPath);
+        assert.equal(existsSync(filePath), true, "the memory file must exist before the editor opens");
+        editorOpenCount += 1;
+        onDone?.(true);
+      },
+      addItem: (item) => addedItems.push(item),
+    },
+    "JIUWENSWARM.md",
+  );
+
+  assert.equal(existsSync(directEditPath), true);
+  assert.equal(editorOpenCount, 1);
+  assert.equal(addedItems.length, 1);
+  assert.match(addedItems[0].content, /Memory file edited successfully:/);
+} finally {
+  rmSync(directEditRoot, { recursive: true, force: true });
+}
+
+console.log("memory view and direct edit tests passed");

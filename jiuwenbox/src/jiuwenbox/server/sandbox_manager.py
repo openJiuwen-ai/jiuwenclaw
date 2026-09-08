@@ -57,7 +57,7 @@ def _is_daemon_ipc_file_op_failure(result: RuntimeFileOpResult) -> bool:
 
 from jiuwenbox.logging_config import configure_logging
 from jiuwenbox.models.common import AuditEventType
-from jiuwenbox.models.policy import SecurityPolicy, TimeoutPolicy
+from jiuwenbox.models.policy import NetworkMode, NetworkRulePolicy, SecurityPolicy, TimeoutPolicy
 from jiuwenbox.models.sandbox import (
     BackgroundExecResult,
     BackgroundJobStatus,
@@ -74,7 +74,7 @@ from jiuwenbox.models.sandbox import (
     validate_custom_sandbox_id,
 )
 from jiuwenbox.server.audit_logger import AuditLogger
-from jiuwenbox.server.policy_engine import PolicyEngine
+from jiuwenbox.server.policy_engine import PolicyEngine, PolicyValidationError
 from jiuwenbox.server.policy_reader import PolicyReader
 from jiuwenbox.server.runtime.base import (
     RuntimeAdapter,
@@ -487,6 +487,18 @@ class SandboxManager:
             return
         unregister(loop)
 
+    async def _resolve_sandbox_ip_address(self, sandbox_id: str) -> str | None:
+        """Best-effort IPv4 snapshot after create/start. Failures yield None."""
+        try:
+            return await self.runtime.get_sandbox_ip_address(sandbox_id)
+        except Exception:
+            logger.debug(
+                "Failed to resolve IP address for sandbox %s",
+                sandbox_id,
+                exc_info=True,
+            )
+            return None
+
     def _save_state(self, sandbox: SandboxRef) -> None:
         """Persist a single sandbox's state to disk."""
         path = self.state_dir / f"{sandbox.id}.json"
@@ -559,6 +571,7 @@ class SandboxManager:
                 policy_path=policy_path,
                 env=ref.env,
             )
+            ip_address = await self._resolve_sandbox_ip_address(sandbox_id)
             cleanup_after_create = False
             async with self._lock:
                 current_ref = self._sandboxes.get(sandbox_id)
@@ -567,6 +580,7 @@ class SandboxManager:
                 else:
                     ref.phase = SandboxPhase.READY
                     ref.pid = pid
+                    ref.ip_address = ip_address
                     now = datetime.now(timezone.utc)
                     ref.started_at = now
                     # 沙箱刚创建即视为最近一次活跃, 避免在第一次 exec 到来之前就被
@@ -582,6 +596,7 @@ class SandboxManager:
                     return ref
                 ref.phase = SandboxPhase.ERROR
                 ref.error_message = str(e)
+                ref.ip_address = None
                 logger.error("Failed to create sandbox %s: %s", sandbox_id, e)
                 self._save_state(ref)
 
@@ -632,8 +647,10 @@ class SandboxManager:
                 policy_path=policy_path,
                 env=ref.env,
             )
+            ip_address = await self._resolve_sandbox_ip_address(sandbox_id)
             ref.phase = SandboxPhase.READY
             ref.pid = pid
+            ref.ip_address = ip_address
             now = datetime.now(timezone.utc)
             ref.started_at = now
             ref.last_active_at = now
@@ -642,6 +659,7 @@ class SandboxManager:
             logger.error("Failed to start sandbox %s: %s", sandbox_id, e, exc_info=True)
             ref.phase = SandboxPhase.ERROR
             ref.error_message = str(e)
+            ref.ip_address = None
 
         self._save_state(ref)
         self.audit.log(AuditEventType.SANDBOX_STARTED, sandbox_id)
@@ -1363,3 +1381,246 @@ class SandboxManager:
             policy = self.policy_engine.load_policy_from_file(policy_path)
             self._policies[sandbox_id] = policy
             return policy
+
+    _NETWORK_UPDATE_KEYS = frozenset({"egress", "ingress"})
+
+    @classmethod
+    def validate_network_policy_update(
+        cls,
+        policy_data: Mapping[str, object] | None,
+    ) -> tuple[dict[str, object] | None, dict[str, object] | None]:
+        """Validate a partial policy update payload for network rules.
+
+        Returns ``(egress, ingress)`` dict fragments (either may be ``None``
+        when that direction was omitted). Raises
+        :class:`PolicyValidationError` when the payload is out of scope for
+        the current dynamic-update API.
+        """
+        if policy_data is None:
+            raise PolicyValidationError("'policy' is required")
+        if not isinstance(policy_data, Mapping):
+            raise PolicyValidationError("'policy' must be an object")
+
+        unexpected = sorted(set(policy_data.keys()) - {"network"})
+        if unexpected:
+            raise PolicyValidationError(
+                "Only 'policy.network' updates are supported in this API; "
+                f"unsupported fields: {unexpected}"
+            )
+        if "network" not in policy_data:
+            raise PolicyValidationError("'policy.network' is required")
+
+        network = policy_data["network"]
+        if not isinstance(network, Mapping):
+            raise PolicyValidationError("'policy.network' must be an object")
+
+        unexpected_net = sorted(set(network.keys()) - cls._NETWORK_UPDATE_KEYS)
+        if unexpected_net:
+            raise PolicyValidationError(
+                "Only network.egress/ingress can be updated dynamically; "
+                f"unsupported fields: {unexpected_net}"
+            )
+        if "egress" not in network and "ingress" not in network:
+            raise PolicyValidationError(
+                "At least one of network.egress or network.ingress is required"
+            )
+
+        egress_raw = network.get("egress")
+        ingress_raw = network.get("ingress")
+        egress: dict[str, object] | None = None
+        ingress: dict[str, object] | None = None
+        rule_fields = set(NetworkRulePolicy.model_fields)
+
+        if egress_raw is not None:
+            if not isinstance(egress_raw, Mapping):
+                raise PolicyValidationError("'network.egress' must be an object")
+            try:
+                NetworkRulePolicy.model_validate(egress_raw)
+            except Exception as exc:
+                raise PolicyValidationError(f"Invalid network.egress: {exc}") from exc
+            # Keep only caller-provided keys so append does not invent defaults
+            # (e.g. flipping ``default`` to deny when the client only appended
+            # an allowed_domains entry). Override still model_validates later
+            # and fills omitted fields for a full directional replace.
+            egress = {key: egress_raw[key] for key in egress_raw if key in rule_fields}
+        if ingress_raw is not None:
+            if not isinstance(ingress_raw, Mapping):
+                raise PolicyValidationError("'network.ingress' must be an object")
+            try:
+                NetworkRulePolicy.model_validate(ingress_raw)
+            except Exception as exc:
+                raise PolicyValidationError(f"Invalid network.ingress: {exc}") from exc
+            ingress = {
+                key: ingress_raw[key] for key in ingress_raw if key in rule_fields
+            }
+
+        return egress, ingress
+
+    def _merge_network_rules_update(
+        self,
+        current: SecurityPolicy,
+        egress: dict[str, object] | None,
+        ingress: dict[str, object] | None,
+        policy_mode: PolicyMode,
+    ) -> SecurityPolicy:
+        """Apply egress/ingress update onto a sandbox's current effective policy."""
+        if policy_mode == PolicyMode.APPEND:
+            network_fragment: dict[str, object] = {}
+            if egress is not None:
+                network_fragment["egress"] = egress
+            if ingress is not None:
+                network_fragment["ingress"] = ingress
+            fragment: dict[str, object] = {"network": network_fragment}
+            return self.policy_engine.merge_policy(current, fragment)
+
+        new_network = current.network.model_copy(deep=True)
+        if egress is not None:
+            new_network.egress = NetworkRulePolicy.model_validate(egress)
+        if ingress is not None:
+            new_network.ingress = NetworkRulePolicy.model_validate(ingress)
+        return current.model_copy(deep=True, update={"network": new_network})
+
+    async def _load_sandbox_policy_unlocked(self, sandbox_id: str) -> SecurityPolicy:
+        policy = self._policies.get(sandbox_id)
+        if policy is not None:
+            return policy
+        policy_path = self.policy_engine.get_sandbox_policy_path(sandbox_id)
+        if policy_path is None:
+            raise SandboxStateError(f"No policy found for sandbox {sandbox_id}")
+        policy = self.policy_engine.load_policy_from_file(policy_path)
+        self._policies[sandbox_id] = policy
+        return policy
+
+    async def _apply_network_policy_update_unlocked(
+        self,
+        sandbox_id: str,
+        egress: dict[str, object] | None,
+        ingress: dict[str, object] | None,
+        policy_mode: PolicyMode,
+        *,
+        reject_host: bool,
+    ) -> SecurityPolicy | None:
+        """Merge, persist, and optionally hot-apply network rules for one sandbox.
+
+        Returns the updated policy, or ``None`` when ``reject_host`` is False
+        and the sandbox is in host networking mode (caller should treat as
+        skipped).
+        """
+        ref = self._get_sandbox(sandbox_id)
+        current = await self._load_sandbox_policy_unlocked(sandbox_id)
+
+        if current.network.mode != NetworkMode.ISOLATED:
+            if reject_host:
+                raise PolicyValidationError(
+                    f"Cannot update network rules for sandbox '{sandbox_id}': "
+                    f"network.mode is '{current.network.mode.value}' "
+                    "(only isolated sandboxes support dynamic network updates)"
+                )
+            return None
+
+        updated = self._merge_network_rules_update(
+            current, egress, ingress, policy_mode,
+        )
+        self.policy_engine.validate_policy(updated)
+        self.policy_engine.write_sandbox_policy(sandbox_id, updated)
+        self._policies[sandbox_id] = updated
+        self.audit.log(
+            AuditEventType.POLICY_APPLIED,
+            sandbox_id,
+            policy_name=updated.name,
+        )
+
+        hot_apply = (
+            ref.phase == SandboxPhase.READY
+            and await self.runtime.is_running(sandbox_id)
+        )
+        if hot_apply:
+            update_fn = getattr(self.runtime, "update_network_policy", None)
+            if update_fn is None:
+                raise SandboxStateError(
+                    f"Runtime cannot hot-update network policy for sandbox '{sandbox_id}'"
+                )
+            await update_fn(sandbox_id, updated.network)
+
+        return updated
+
+    async def update_policy(
+        self,
+        sandbox_id: str,
+        policy_data: Mapping[str, object] | None,
+        policy_mode: PolicyMode = PolicyMode.OVERRIDE,
+    ) -> SecurityPolicy:
+        """Update network ingress/egress for a single sandbox."""
+        egress, ingress = self.validate_network_policy_update(policy_data)
+        async with self._lock:
+            updated = await self._apply_network_policy_update_unlocked(
+                sandbox_id,
+                egress,
+                ingress,
+                policy_mode,
+                reject_host=True,
+            )
+            if updated is None:
+                raise SandboxStateError(
+                    f"Failed to update network policy for sandbox '{sandbox_id}'"
+                )
+            return updated
+
+    async def update_all_policies(
+        self,
+        policy_data: Mapping[str, object] | None,
+        policy_mode: PolicyMode = PolicyMode.OVERRIDE,
+    ) -> dict[str, object]:
+        """Apply the same network update to every registered sandbox.
+
+        Request-body validation failures raise before any sandbox is touched.
+        Per-sandbox host-mode sandboxes are skipped; other failures are
+        collected without aborting the batch.
+        """
+        egress, ingress = self.validate_network_policy_update(policy_data)
+
+        async with self._lock:
+            sandbox_ids = list(self._sandboxes.keys())
+
+        updated_ids: list[str] = []
+        skipped: list[dict[str, str]] = []
+        failed: list[dict[str, str]] = []
+
+        for sandbox_id in sandbox_ids:
+            try:
+                async with self._lock:
+                    result = await self._apply_network_policy_update_unlocked(
+                        sandbox_id,
+                        egress,
+                        ingress,
+                        policy_mode,
+                        reject_host=False,
+                    )
+                if result is None:
+                    skipped.append({
+                        "sandbox_id": sandbox_id,
+                        "reason": "network.mode is host",
+                    })
+                else:
+                    updated_ids.append(sandbox_id)
+            except SandboxNotFoundError:
+                # Deleted between snapshot and update — treat as skip.
+                skipped.append({
+                    "sandbox_id": sandbox_id,
+                    "reason": "sandbox no longer exists",
+                })
+            except Exception as exc:
+                logger.exception(
+                    "Failed to update network policy for sandbox %s",
+                    sandbox_id,
+                )
+                failed.append({
+                    "sandbox_id": sandbox_id,
+                    "error": str(exc) or exc.__class__.__name__,
+                })
+
+        return {
+            "updated": updated_ids,
+            "skipped": skipped,
+            "failed": failed,
+        }

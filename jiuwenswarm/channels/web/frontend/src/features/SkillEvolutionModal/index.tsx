@@ -183,25 +183,27 @@ export function SkillEvolutionModal({
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+    <div data-testid="skill-evolution-modal-overlay" className="fixed inset-0 z-50 flex items-center justify-center p-4">
       <button
         type="button"
+        data-testid="skill-evolution-modal-backdrop"
         className="absolute inset-0 bg-black/60"
         onClick={onClose}
         aria-label={t("skills.evolution.closeAria")}
       />
-      <div className="relative w-full max-w-4xl max-h-[88vh] overflow-hidden rounded-[8px] border border-border bg-card shadow-2xl animate-rise">
-        <div className="flex items-center justify-between gap-3 px-5 py-3 border-b border-border bg-panel">
+      <div data-testid="skill-evolution-modal-dialog" className="relative w-full max-w-4xl max-h-[88vh] overflow-hidden rounded-[8px] border border-border bg-card shadow-2xl animate-rise">
+        <div data-testid="skill-evolution-modal-header" className="flex items-center justify-between gap-3 px-5 py-3 border-b border-border bg-panel">
           <div>
-            <h3 className="text-base font-semibold text-text">
+            <h3 data-testid="skill-evolution-modal-title" className="text-base font-semibold text-text">
               {t("skills.evolution.title", { name: skillName })}
             </h3>
-            <p className="text-xs text-text-muted">{t("skills.evolution.subtitle")}</p>
+            <p data-testid="skill-evolution-modal-subtitle" className="text-xs text-text-muted">{t("skills.evolution.subtitle")}</p>
           </div>
-          <div className="flex items-center gap-2">
+          <div data-testid="skill-evolution-modal-header-actions" className="flex items-center gap-2">
             <button
               type="button"
               onClick={() => void fetchEntries()}
+              data-testid="skill-evolution-modal-refresh-button"
               className="w-7 h-7 flex items-center justify-center rounded-lg text-text hover:text-text-strong "
               title={t("common.refresh")}
             >
@@ -212,6 +214,7 @@ export function SkillEvolutionModal({
             <button
               type="button"
               onClick={onClose}
+              data-testid="skill-evolution-modal-close-button"
               className="w-7 h-7 flex items-center justify-center rounded-lg text-text hover:text-text-strong "
               aria-label={t("skills.evolution.closeAria")}
             >
@@ -222,9 +225,10 @@ export function SkillEvolutionModal({
           </div>
         </div>
 
-        <div className="p-5 overflow-auto max-h-[calc(88vh-64px)]">
+        <div data-testid="skill-evolution-modal-body" className="p-5 overflow-auto max-h-[calc(88vh-64px)]">
           {message && (
             <div
+              data-testid="skill-evolution-modal-message" data-variant={messageType}
               className={`mb-3 px-3 py-2 rounded-md text-sm ${
                 messageType === "error"
                   ? "bg-secondary text-danger"
@@ -236,35 +240,36 @@ export function SkillEvolutionModal({
           )}
 
           {formatError && (
-            <div className="mb-3 px-3 py-2 rounded-md bg-secondary text-sm text-danger">
+            <div data-testid="skill-evolution-modal-format-error" className="mb-3 px-3 py-2 rounded-md bg-secondary text-sm text-danger">
               {formatError}
             </div>
           )}
 
           {listState === "loading" && (
-            <div className="flex items-center justify-center h-full text-text-muted">{t("common.loading")}</div>
+            <div data-testid="skill-evolution-modal-loading" className="flex items-center justify-center h-full text-text-muted">{t("common.loading")}</div>
           )}
           {listState === "error" && (
-            <div className="text-sm text-text-muted">
+            <div data-testid="skill-evolution-modal-load-error" className="text-sm text-text-muted">
               {t("skills.evolution.errors.loadFailed")}
             </div>
           )}
           {listState === "success" && !formatError && sortedEntries.length === 0 && (
-            <div className="text-sm text-text-muted">
+            <div data-testid="skill-evolution-modal-empty" className="text-sm text-text-muted">
               {t("skills.evolution.empty")}
             </div>
           )}
 
           {listState === "success" && !formatError && sortedEntries.length > 0 && (
-            <div className="space-y-3">
+            <div data-testid="skill-evolution-modal-entry-list" className="space-y-3">
               {sortedEntries.map((entry) => (
                 <div
                   key={entry.id}
+                  data-testid="skill-evolution-modal-entry-card"
                   className="rounded-lg border border-border bg-panel p-4"
                 >
                   <div className="flex items-start justify-between gap-3">
                     <div className="flex min-w-0 flex-1 flex-wrap items-center gap-x-3 gap-y-2">
-                      <div className="rounded-md bg-card px-2 py-1 text-sm">
+                      <div data-testid="skill-evolution-modal-entry-section" className="rounded-md bg-card px-2 py-1 text-sm">
                         <span className="text-text-muted">
                           {t("skills.evolution.fields.section")}:
                         </span>{" "}
@@ -276,7 +281,7 @@ export function SkillEvolutionModal({
                             : "-"}
                         </span>
                       </div>
-                      <div className="rounded-md bg-card px-2 py-1 text-sm">
+                      <div data-testid="skill-evolution-modal-entry-target" className="rounded-md bg-card px-2 py-1 text-sm">
                         <span className="text-text-muted">
                           {t("skills.evolution.fields.target")}:
                         </span>{" "}
@@ -297,6 +302,7 @@ export function SkillEvolutionModal({
                     <button
                       type="button"
                       onClick={() => handleDeleteEntry(entry.id)}
+                      data-testid="skill-evolution-modal-entry-delete-button"
                       className="w-7 h-7 flex items-center justify-center rounded-lg text-danger hover:text-danger/80 "
                       title={t("skills.evolution.actions.delete")}
                     >
@@ -309,6 +315,7 @@ export function SkillEvolutionModal({
                   <div className="mt-3">
                     <textarea
                       aria-label={t("skills.evolution.fields.content")}
+                      data-testid="skill-evolution-modal-entry-content"
                       value={entry.change?.content || ""}
                       onChange={(event) => handleChangeContent(entry.id, event.target.value)}
                       className="w-full min-h-28 px-3 py-2 rounded-md bg-card border border-border text-sm text-text placeholder:text-text-muted"
@@ -319,10 +326,11 @@ export function SkillEvolutionModal({
             </div>
           )}
 
-          <div className="mt-4 flex items-center justify-end gap-2">
+          <div data-testid="skill-evolution-modal-footer" className="mt-4 flex items-center justify-end gap-2">
             <button
               type="button"
               onClick={handleSave}
+              data-testid="skill-evolution-modal-save-button"
               className={`w-[72px] h-[28px] rounded-[16px] text-sm  ${
                 saving || !!formatError
                   ? "bg-gray-400 text-text-muted cursor-not-allowed"

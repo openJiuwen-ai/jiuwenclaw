@@ -2,11 +2,12 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { UNTRUSTED_STATIC_PREVIEW_SANDBOX } from '../isolatedPreview';
 import { DiagramViewer, type DiagramViewMode } from './DiagramViewer';
-import { getSvgMarkupStatus, SVG_PREVIEW_DOCUMENT, updateSvgPreview, type SvgMarkupStatus } from './svgPreview';
+import { getSvgMarkupStatus, getSvgPreview, SVG_PREVIEW_DOCUMENT, updateSvgPreview, type SvgMarkupStatus } from './svgPreview';
 
 interface SvgDiagramProps {
   code: string;
   complete: boolean;
+  isStreaming: boolean;
 }
 
 function getStatusText(status: SvgMarkupStatus, translate: (key: string) => string): string | undefined {
@@ -15,52 +16,51 @@ function getStatusText(status: SvgMarkupStatus, translate: (key: string) => stri
   return undefined;
 }
 
-export function SvgDiagram({ code, complete }: SvgDiagramProps): JSX.Element {
+export function SvgDiagram({ code, complete, isStreaming }: SvgDiagramProps): JSX.Element {
   const { t } = useTranslation();
   const previewRef = useRef<HTMLIFrameElement>(null);
-  const [viewMode, setViewMode] = useState<DiagramViewMode>('image');
-  const status = useMemo(() => getSvgMarkupStatus(code, complete), [code, complete]);
-  const ready = status === 'ready';
+  const [requestedViewMode, setRequestedViewMode] = useState<DiagramViewMode>('image');
+  const preview = useMemo(() => getSvgPreview(code), [code]);
+  const status = useMemo(() => getSvgMarkupStatus(preview, complete, isStreaming), [complete, isStreaming, preview]);
+  const imageViewDisabled = preview === null;
+  const viewMode: DiagramViewMode = imageViewDisabled ? 'code' : requestedViewMode;
+  const previewMarkup = preview?.markup ?? code;
 
   useEffect(() => {
-    if (viewMode === 'image') updateSvgPreview(previewRef.current, code);
-  }, [code, viewMode]);
-
-  useEffect(() => {
-    if (status === 'invalid') setViewMode('code');
-  }, [status]);
+    if (viewMode === 'image') updateSvgPreview(previewRef.current, previewMarkup);
+  }, [previewMarkup, viewMode]);
 
   return (
     <DiagramViewer
       className="svg-diagram"
       data-svg-status={status}
       viewMode={viewMode}
-      onViewModeChange={setViewMode}
+      onViewModeChange={setRequestedViewMode}
+      imageViewDisabled={imageViewDisabled}
       statusText={getStatusText(status, t)}
-      statusTone={status === 'invalid' ? 'danger' : 'default'}
+      statusTone={status === 'invalid' ? 'warning' : 'default'}
       feedbackPosition="start"
       exportConfig={{
         sourceCode: code,
-        sourceFilename: 'diagram.svg',
-        sourceMimeType: 'image/svg+xml;charset=utf-8',
-        renderedSvg: code,
+        renderedSvg: previewMarkup,
         imageFilename: 'diagram.png',
-        downloadEnabled: ready,
       }}
     >
       {viewMode === 'image' ? (
-        <div className="svg-diagram__canvas" aria-busy={status === 'streaming'}>
+        <div className="svg-diagram__canvas" aria-busy={status === 'streaming'} data-testid="markdown-svg-canvas">
           <iframe
             ref={previewRef}
             className="svg-diagram__frame"
+            style={preview?.aspectRatio ? { aspectRatio: preview.aspectRatio } : undefined}
             title={t('svg.previewTitle')}
             sandbox={UNTRUSTED_STATIC_PREVIEW_SANDBOX}
             srcDoc={SVG_PREVIEW_DOCUMENT}
-            onLoad={() => updateSvgPreview(previewRef.current, code)}
+            data-testid="markdown-svg-frame"
+            onLoad={() => updateSvgPreview(previewRef.current, previewMarkup)}
           />
         </div>
       ) : (
-        <div className="svg-diagram__code-view">
+        <div className="svg-diagram__code-view" data-testid="markdown-svg-code-view">
           <pre>
             <code>{code}</code>
           </pre>

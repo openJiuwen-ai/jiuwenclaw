@@ -50,6 +50,7 @@ export function TodoItem({ todo }: TodoItemProps) {
       <div className="flex items-start gap-2">
         {getStatusIcon()}
         <span
+          data-testid="todo-item-content"
           className={clsx(
             'flex-1 leading-tight',
             todo.status === 'completed' && 'line-through text-text-muted',
@@ -62,13 +63,13 @@ export function TodoItem({ todo }: TodoItemProps) {
       </div>
       {/* 任务依赖 */}
       {todo.depends && todo.depends.length > 0 && (
-        <div className="text-xs text-text-muted ml-6">
+        <div data-testid="todo-item-depends" className="text-xs text-text-muted ml-6">
           依赖: {todo.depends.join(', ')}
         </div>
       )}
       {/* 被认领信息 */}
       {todo.claimedBy && (
-        <div className="text-xs text-info ml-6">
+        <div data-testid="todo-item-claimed-by" className="text-xs text-info ml-6">
           被认领: {todo.claimedBy}
         </div>
       )}

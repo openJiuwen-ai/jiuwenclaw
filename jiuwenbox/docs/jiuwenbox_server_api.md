@@ -152,6 +152,7 @@ JIUWENBOX_URL=unix:///tmp/jiuwenbox-sock/jiuwenbox.sock jiuwenbox health
 | `started_at` | string/null | 启动时间 |
 | `error_message` | string/null | 错误信息 |
 | `env` | object | 创建沙箱时注入的环境变量 |
+| `ip_address` | string/null | 最近一次成功 create/start 后确认的 IPv4 快照。`network.mode=isolated` 时为沙箱 veth 地址；`host` 时为 jiuwenbox 与沙箱共享网络命名空间的出口 IPv4（若服务运行在 Docker/WSL 中，可能是容器或 WSL 地址，不承诺物理宿主机 LAN 地址）。`provisioning`、创建/启动失败的 `error` 为 `null`；`stopped` 保留停止前最后一次有效地址。get/list 不重新探测，只返回该快照 |
 
 示例：
 
@@ -166,7 +167,8 @@ JIUWENBOX_URL=unix:///tmp/jiuwenbox-sock/jiuwenbox.sock jiuwenbox health
   "error_message": null,
   "env": {
     "DEMO_KEY": "demo-value"
-  }
+  },
+  "ip_address": "100.64.12.34"
 }
 ```
 
@@ -277,7 +279,8 @@ print(resp.json())
   "error_message": null,
   "env": {
     "DEMO_KEY": "demo-value"
-  }
+  },
+  "ip_address": "100.64.12.34"
 }
 ```
 
@@ -309,7 +312,8 @@ print(resp.json())
     "created_at": "2026-04-25T11:30:00.000000",
     "started_at": "2026-04-25T11:30:01.000000+00:00",
     "error_message": null,
-    "env": {}
+    "env": {},
+    "ip_address": "100.64.12.34"
   }
 ]
 ```
@@ -342,7 +346,8 @@ print(resp.json())
   "created_at": "2026-04-25T11:30:00.000000",
   "started_at": "2026-04-25T11:30:01.000000+00:00",
   "error_message": null,
-  "env": {}
+  "env": {},
+  "ip_address": "100.64.12.34"
 }
 ```
 
@@ -396,7 +401,8 @@ print(resp.json())
   "created_at": "2026-04-25T11:30:00.000000",
   "started_at": "2026-04-25T11:31:00.000000+00:00",
   "error_message": null,
-  "env": {}
+  "env": {},
+  "ip_address": "100.64.12.34"
 }
 ```
 
@@ -428,7 +434,8 @@ print(resp.json())
   "created_at": "2026-04-25T11:30:00.000000",
   "started_at": "2026-04-25T11:31:00.000000+00:00",
   "error_message": null,
-  "env": {}
+  "env": {},
+  "ip_address": "100.64.12.34"
 }
 ```
 
@@ -460,7 +467,8 @@ print(resp.json())
   "created_at": "2026-04-25T11:30:00.000000",
   "started_at": "2026-04-25T11:32:00.000000+00:00",
   "error_message": null,
-  "env": {}
+  "env": {},
+  "ip_address": "100.64.12.34"
 }
 ```
 
@@ -863,6 +871,98 @@ print(resp.json())
 }
 ```
 
+### 更新单个沙箱网络策略
+
+接口：`PUT /api/v1/policies/{sandbox_id}`
+
+用途：动态更新指定沙箱的 `network.egress` / `network.ingress`。
+请求体字段与创建沙箱一致（`policy` + `policy_mode`）。
+本期仅支持改 ingress/egress；`network.mode` / `uplink` 以及其它 policy 段会返回 400。
+对 `network.mode: isolated` 且正在运行的沙箱会热更新 netns 内 iptables；已停止的沙箱只落盘，下次 start 生效。`host` 模式返回 400。
+
+请求字段：
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `policy` | object | 是 | 本期须含 `network`，且 `egress` / `ingress` 至少提供一个 |
+| `policy_mode` | string | 否 | `override`（默认）或 `append`，语义与创建沙箱相同 |
+
+Python 请求示例：
+
+```python
+import requests
+
+sandbox_id = "abc123def456"
+resp = requests.put(
+    f"http://127.0.0.1:8321/api/v1/policies/{sandbox_id}",
+    json={
+        "policy_mode": "override",
+        "policy": {
+            "network": {
+                "egress": {
+                    "default": "allow",
+                    "blocked_ips": ["198.51.100.10/32"],
+                },
+                "ingress": {
+                    "default": "allow",
+                    "blocked_ports": [8080],
+                },
+            },
+        },
+    },
+    timeout=30,
+)
+print(resp.status_code)
+print(resp.json())
+```
+
+成功时返回更新后的完整 `SecurityPolicy` JSON（与 `GET /policies/{sandbox_id}` 同形）。
+
+### 批量更新所有沙箱网络策略
+
+接口：`PUT /api/v1/policies`
+
+用途：对当前所有已注册沙箱应用与单沙箱接口相同的网络规则更新。
+不修改 server 默认 policy。请求体非法时整请求 400，不落任何沙箱。
+`host` 模式沙箱记入 `skipped`；单个沙箱热更新失败记入 `failed`，不阻断其余沙箱。
+
+请求体与 `PUT /api/v1/policies/{sandbox_id}` 相同。
+
+Python 请求示例：
+
+```python
+import requests
+
+resp = requests.put(
+    "http://127.0.0.1:8321/api/v1/policies",
+    json={
+        "policy_mode": "append",
+        "policy": {
+            "network": {
+                "egress": {
+                    "blocked_ips": ["203.0.113.50/32"],
+                },
+            },
+        },
+    },
+    timeout=30,
+)
+print(resp.status_code)
+print(resp.json())
+```
+
+响应示例：
+
+```json
+{
+  "updated": ["sb-1", "sb-2"],
+  "skipped": [
+    {"sandbox_id": "sb-host", "reason": "network.mode is host"}
+  ],
+  "failed": []
+}
+```
+
 ### 查询 timeout 配置
 
 接口：`GET /api/v1/timeout`
@@ -946,8 +1046,19 @@ print(resp.json())
 | --- | --- | --- | --- |
 | `path_prefix` | string | 是 | 路由前缀，如 `/openai` |
 | `target_endpoint` | string | 是 | 目标服务地址 |
-| `api_key` | string | 否 | 注入到上游的 API Key |
+| `api_key` | string | 否 | 注入到上游的 API Key（Bearer / X-Api-Key）。与 `basic_auth` 互斥 |
+| `basic_auth` | object | 否 | HTTP Basic 凭据。与 `api_key` 互斥。见下 |
 | `skip_cert_verify` | boolean | 否 | 是否跳过证书校验 |
+
+`basic_auth` 对象字段：
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `username` | string | 是 | Basic 认证用户名，禁止 CR/LF/NUL 等控制字符 |
+| `password` | string | 否 | 内联密码，**仅用于开发测试**（明文存储于策略/请求中）。与 `password_file` 二选一 |
+| `password_file` | string | 否 | 服务端可读的密码文件路径（推荐 K8s Secret / Docker Secret / `0600` 文件）。与 `password` 二选一。读取时仅去除结尾换行 |
+
+约束：`api_key` 与 `basic_auth` 互斥；`password` 与 `password_file` 必须二选一；`password_file` 必须存在、为普通文件且当前进程可读（`0640`/`0644` 不阻断，仅告警）；空文件或仅换行的文件会被拒绝（`password_file is empty`）。仅支持 HTTP Basic，不支持 Digest/OAuth/Neo4j Bolt。任何接口都不返回明文密码（仅返回 `username` / `password_configured` / `password_file`）。完整部署示例（Linux / Docker / K8s Secret）与 CLI / 沙箱脚本用法见下文「Basic 认证部署与使用」。
 
 Python 请求示例：
 
@@ -978,6 +1089,20 @@ print(resp.json())
 }
 ```
 
+创建 HTTP Basic 路由示例（Neo4j，密码从 Secret 文件读取）：
+
+```python
+resp = requests.post(
+    "http://127.0.0.1:8321/api/v1/proxies",
+    json={
+        "path_prefix": "/neo4j",
+        "target_endpoint": "http://neo4j.internal:7474",
+        "basic_auth": {"username": "neo4j", "password_file": "/run/secrets/neo4j_password"}
+    },
+    timeout=30,
+)
+```
+
 ### 查询代理列表
 
 接口：`GET /api/v1/proxies`
@@ -1005,7 +1130,28 @@ print(resp.json())
     "route": {
       "path_prefix": "/openai",
       "target_endpoint": "https://api.openai.com",
-      "api_key": "sk-demo..."
+      "api_key": "sk-demo...",
+      "auth_type": "api_key",
+      "basic_auth": null
+    },
+    "created_at": "2026-04-25T11:40:00.000000",
+    "started_at": "2026-04-25T11:41:00.000000",
+    "error_message": null
+  },
+  {
+    "name": "neo4j",
+    "state": "running",
+    "listen_port": 18080,
+    "route": {
+      "path_prefix": "/neo4j",
+      "target_endpoint": "http://neo4j.internal:7474",
+      "api_key": "",
+      "auth_type": "basic",
+      "basic_auth": {
+        "username": "neo4j",
+        "password_configured": true,
+        "password_file": "/run/secrets/neo4j_password"
+      }
     },
     "created_at": "2026-04-25T11:40:00.000000",
     "started_at": "2026-04-25T11:41:00.000000",
@@ -1045,7 +1191,9 @@ print(resp.json())
     "skip_cert_verify": false,
     "target_host": "api.openai.com",
     "target_port": 443,
-    "use_tls": true
+    "use_tls": true,
+    "auth_type": "api_key",
+    "basic_auth": null
   },
   "created_at": "2026-04-25T11:40:00.000000",
   "started_at": "2026-04-25T11:41:00.000000",
@@ -1205,6 +1353,188 @@ print(resp.text)
 ```text
 [2026-04-25T11:41:00.000000] Global proxy started on port 18080
 [2026-04-25T11:41:00.100000] Route 'openai' enabled for routing
+```
+
+### Basic 认证部署与使用
+
+> 本节补充 Basic 路由的端到端部署与用法。字段定义、REST 创建 / 更新示例见上文「创建代理」「更新代理」。
+
+**安全模型要点：**
+
+- 真实密码**只存在于服务端**：内联 `password`（明文，仅开发测试）或服务端可读的 `password_file`（生产推荐）。
+- `password_file` 由 JiuwenBox 服务进程在**装配路由时**一次性读入内存；运行时转发不再触发文件 IO；CLI **不读取**该文件。
+- 任何接口（列表 / 详情 / 日志 / 错误响应）都**不返回明文密码**，仅返回 `username` / `password_configured` / `password_file`。
+- `api_key` 与 `basic_auth` 互斥；`password` 与 `password_file` 二选一。
+- 客户端任何 `Authorization` 头（Bearer / Basic / 其他，大小写不敏感）都会被覆盖为唯一的 `Authorization: Basic ...`；`X-Api-Key` 不受影响。
+
+**password_file 部署示例：**
+
+Linux `0600` 文件：
+
+```bash
+install -m 0600 /dev/stdin /etc/jiuwenbox/secrets/neo4j_password <<'EOF'
+replace-with-real-password
+EOF
+chown root:root /etc/jiuwenbox/secrets/neo4j_password
+```
+
+```yaml
+inference_privacy_proxies:
+  listen_port: 8322
+  listen_host: "127.0.0.1"
+  routes:
+    - path_prefix: "neo4j"
+      target_endpoint: "http://neo4j.internal:7474"
+      basic_auth:
+        username: "neo4j"
+        password_file: "/etc/jiuwenbox/secrets/neo4j_password"
+```
+
+> 读取时仅去除结尾的一个换行；密码内部的空格 / 冒号等字符保留。CR / LF / NUL / 控制字符会被拒绝；空文件或仅换行的文件会被拒绝（`password_file is empty`）。
+
+Docker Secret：
+
+```bash
+printf '%s' "replace-with-real-password" | docker secret create neo4j_password -
+```
+
+```yaml
+# docker-compose.yml
+services:
+  jiuwenbox:
+    image: jiuwenbox:latest
+    secrets:
+      - neo4j_password
+    environment:
+      JIUWENBOX_POLICY_PATH: /etc/jiuwenbox/policy.yaml
+    volumes:
+      - ./policy.yaml:/etc/jiuwenbox/policy.yaml:ro
+secrets:
+  neo4j_password:
+    external: true
+```
+
+```yaml
+# policy.yaml 引用 Secret 在容器内的挂载路径（默认 0444，服务端仍可读）
+inference_privacy_proxies:
+  listen_port: 8322
+  listen_host: "0.0.0.0"
+  routes:
+    - path_prefix: "neo4j"
+      target_endpoint: "http://neo4j.internal:7474"
+      basic_auth:
+        username: "neo4j"
+        password_file: "/run/secrets/neo4j_password"
+```
+
+Kubernetes Secret：
+
+```yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: neo4j-basic-auth
+type: Opaque
+stringData:
+  password: "replace-with-real-password"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: jiuwenbox
+spec:
+  template:
+    spec:
+      containers:
+        - name: jiuwenbox
+          image: jiuwenbox:latest
+          env:
+            - name: JIUWENBOX_POLICY_PATH
+              value: /etc/jiuwenbox/policy.yaml
+          volumeMounts:
+            - name: policy
+              mountPath: /etc/jiuwenbox/policy.yaml
+              readOnly: true
+            - name: neo4j-secret
+              mountPath: /run/secrets
+              readOnly: true
+      volumes:
+        - name: policy
+          configMap: { name: jiuwenbox-policy }
+        - name: neo4j-secret
+          secret:
+            secretName: neo4j-basic-auth
+            defaultMode: 0400
+```
+
+```yaml
+# policy.yaml 引用（K8s Secret 默认 0644，JiuwenBox 接受但记告警，建议 defaultMode: 0400）
+inference_privacy_proxies:
+  listen_port: 8322
+  listen_host: "0.0.0.0"
+  routes:
+    - path_prefix: "neo4j"
+      target_endpoint: "http://neo4j.internal:7474"
+      basic_auth:
+        username: "neo4j"
+        password_file: "/run/secrets/password"
+```
+
+**CLI 创建 / 更新 Basic 路由：**
+
+```bash
+# --password-file（生产推荐；CLI 不读取文件，由服务端读取）
+jiuwenbox proxy create \
+  --prefix /neo4j --target http://neo4j.internal:7474 \
+  --username neo4j --password-file /run/secrets/neo4j_password
+
+# --password-stdin（密码走标准输入，不出现在进程参数中）
+printf '%s' "$NEO4J_PASSWORD" | jiuwenbox proxy create \
+  --prefix /neo4j --target http://neo4j.internal:7474 \
+  --username neo4j --password-stdin
+
+# --password（仅开发测试；可能暴露在 shell history / 进程参数中）
+jiuwenbox proxy create \
+  --prefix /neo4j --target http://neo4j.internal:7474 \
+  --username neo4j --password dev-only-password
+
+# 更新（同样支持三个密码来源，三选一；与 --api-key 互斥）
+jiuwenbox proxy update neo4j \
+  --prefix /neo4j --target http://neo4j.internal:7474 \
+  --username neo4j --password-file /run/secrets/neo4j_password
+
+# 查看脱敏详情
+jiuwenbox proxy get neo4j
+```
+
+规则：`--password` / `--password-file` / `--password-stdin` 三选一；使用任一 Basic 选项时 `--username` 必填；`--api-key` 与 Basic 选项互斥。CLI 列表 / 详情 / 错误输出均不显示明文密码。
+
+**沙箱内脚本调用上游 Neo4j：**
+
+沙箱脚本**不携带任何凭据**，直接请求 Proxy；Proxy 注入 Basic 头后转发到上游。以 Neo4j 2026.06 HTTP 事务接口为例（`POST /db/{database}/tx/commit`，**不使用 Bolt 协议**）：
+
+```python
+# sandbox script: query_neo4j.py（无任何用户名/密码/Authorization）
+import json, urllib.request
+
+url = "http://127.0.0.1:8322/neo4j/db/neo4j/tx/commit"  # 经 JiuwenBox Proxy
+payload = json.dumps({"statements": [{"statement": "RETURN 1 AS value"}]}).encode()
+req = urllib.request.Request(
+    url, data=payload, method="POST",
+    headers={"Content-Type": "application/json", "Accept": "application/json"},
+)
+# 注意：不要设置 Authorization —— Proxy 会注入正确的 Basic 头并覆盖任意客户端 Authorization。
+with urllib.request.urlopen(req, timeout=10) as resp:
+    print(resp.status, resp.read().decode())
+```
+
+等价 `curl`（沙箱内）：
+
+```bash
+curl -s -X POST http://127.0.0.1:8322/neo4j/db/neo4j/tx/commit \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json' \
+  -d '{"statements":[{"statement":"RETURN 1 AS value"}]}'
 ```
 
 ## 说明

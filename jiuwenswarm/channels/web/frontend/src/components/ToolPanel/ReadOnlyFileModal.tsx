@@ -106,7 +106,7 @@ export function ReadOnlyFileModal({ open, filePath, fileName, onClose }: ReadOnl
   const renderContent = () => {
     if (loading) {
       return (
-        <div className="h-full flex items-center justify-center">
+        <div data-testid="tool-panel-readonly-modal-loading" className="h-full flex items-center justify-center">
           <div className="w-7 h-7 rounded-full border-4 border-border border-t-accent animate-spin" />
         </div>
       );
@@ -114,7 +114,7 @@ export function ReadOnlyFileModal({ open, filePath, fileName, onClose }: ReadOnl
 
     if (error) {
       return (
-        <div className="h-full flex items-center justify-center text-danger text-sm">
+        <div data-testid="tool-panel-readonly-modal-error" className="h-full flex items-center justify-center text-danger text-sm">
           {error}
         </div>
       );
@@ -122,7 +122,7 @@ export function ReadOnlyFileModal({ open, filePath, fileName, onClose }: ReadOnl
 
     if (!previewable) {
       return (
-        <div className="h-full flex items-center justify-center text-text-muted text-sm">
+        <div data-testid="tool-panel-readonly-modal-not-previewable" className="h-full flex items-center justify-center text-text-muted text-sm">
           {t('toolPanel.fileNotPreviewable')}
         </div>
       );
@@ -130,7 +130,7 @@ export function ReadOnlyFileModal({ open, filePath, fileName, onClose }: ReadOnl
 
     if (isMarkdown) {
       return (
-        <article className="chat-text max-w-none">
+        <article data-testid="tool-panel-readonly-modal-markdown" className="chat-text max-w-none">
           <ReactMarkdown>{content || ' '}</ReactMarkdown>
         </article>
       );
@@ -141,13 +141,13 @@ export function ReadOnlyFileModal({ open, filePath, fileName, onClose }: ReadOnl
         const parsed = JSON.parse(content);
         const formatted = JSON.stringify(parsed, null, 2);
         return (
-          <pre className="text-sm text-text mono whitespace-pre-wrap break-all overflow-auto">
+          <pre data-testid="tool-panel-readonly-modal-json" className="text-sm text-text mono whitespace-pre-wrap break-all overflow-auto">
             {formatted || ' '}
           </pre>
         );
       } catch {
         return (
-          <pre className="text-sm text-text mono whitespace-pre-wrap break-all overflow-auto">
+          <pre data-testid="tool-panel-readonly-modal-json" className="text-sm text-text mono whitespace-pre-wrap break-all overflow-auto">
             {content || ' '}
           </pre>
         );
@@ -156,31 +156,33 @@ export function ReadOnlyFileModal({ open, filePath, fileName, onClose }: ReadOnl
 
     // Other previewable files (py, yaml, txt)
     return (
-      <pre className="text-sm text-text mono whitespace-pre-wrap break-all overflow-auto">
+      <pre data-testid="tool-panel-readonly-modal-text" className="text-sm text-text mono whitespace-pre-wrap break-all overflow-auto">
         {content || ' '}
       </pre>
     );
   };
 
   return (
-    <div className="fixed inset-0 z-[2100] flex items-center justify-center p-4">
+    <div data-testid="tool-panel-readonly-modal" className="fixed inset-0 z-[2100] flex items-center justify-center p-4">
       <button
         type="button"
+        data-testid="tool-panel-readonly-modal-overlay"
         className="absolute inset-0 bg-black/60"
         onClick={onClose}
         aria-label={t('common.close')}
       />
-      <div className="relative w-full max-w-5xl max-h-[85vh] overflow-hidden rounded-xl border border-border bg-card shadow-2xl animate-rise">
-        <div className="flex items-center justify-between gap-3 px-5 py-3 border-b border-border bg-panel">
+      <div data-testid="tool-panel-readonly-modal-dialog" className="relative w-full max-w-5xl max-h-[85vh] overflow-hidden rounded-xl border border-border bg-card shadow-2xl animate-rise">
+        <div data-testid="tool-panel-readonly-modal-header" className="flex items-center justify-between gap-3 px-5 py-3 border-b border-border bg-panel">
           <div className="min-w-0 flex-1">
-            <h3 className="text-base font-semibold text-text truncate">{fileName}</h3>
-            <p className="text-xs text-text-muted mono truncate mt-1" title={filePath}>
+            <h3 data-testid="tool-panel-readonly-modal-filename" className="text-base font-semibold text-text truncate">{fileName}</h3>
+            <p data-testid="tool-panel-readonly-modal-filepath" className="text-xs text-text-muted mono truncate mt-1" title={filePath}>
               {filePath}
             </p>
           </div>
           <div className="flex items-center gap-2">
-            <label className="text-xs text-text-muted">Encoding:</label>
+            <label data-testid="tool-panel-readonly-modal-encoding-label" className="text-xs text-text-muted">Encoding:</label>
             <select
+              data-testid="tool-panel-readonly-modal-encoding"
               value={fileEncoding}
               onChange={(e) => setFileEncoding(e.target.value)}
               className="rounded border border-border bg-bg px-2 py-1 text-xs text-text"
@@ -200,13 +202,14 @@ export function ReadOnlyFileModal({ open, filePath, fileName, onClose }: ReadOnl
           </div>
           <button
             type="button"
+            data-testid="tool-panel-readonly-modal-close"
             onClick={onClose}
             className="px-2.5 py-1.5 rounded-md border border-border bg-secondary/50 text-text-muted hover:text-text hover:bg-secondary "
           >
             {t('common.close')}
           </button>
         </div>
-        <div className="p-5 overflow-auto max-h-[calc(85vh-64px)]">
+        <div data-testid="tool-panel-readonly-modal-content" className="p-5 overflow-auto max-h-[calc(85vh-64px)]">
           {renderContent()}
         </div>
       </div>

@@ -142,8 +142,12 @@ class TestStructuredAskUserToolSchema:
         assert _QUESTIONS_ITEM_SCHEMA["required"] == ["question"]
         assert props["question"]["minLength"] == 1
         options_schema = props["options"]
-        assert options_schema["maxItems"] == 4
-        assert options_schema["anyOf"] == [{"maxItems": 0}, {"minItems": 2}]
+        # Moonshot/Kimi flavored schema：type 必须落在 anyOf 分支内，父级不得
+        # 同置 type；数量约束（0 个或 2-4 个）由两个分支各自声明。
+        assert options_schema["anyOf"] == [
+            {"type": "array", "maxItems": 0},
+            {"type": "array", "minItems": 2, "maxItems": 4},
+        ]
         option_schema = options_schema["items"]
         assert option_schema["required"] == ["label"]
         assert option_schema["properties"]["label"]["minLength"] == 1
@@ -499,6 +503,25 @@ class TestConfirmAndPermissionInterrupts:
         assert result is not None
         assert result["source"] == "permission_interrupt"
         assert "write_file" in result["questions"][0]["question"]
+        assert result["questions"][0]["header"].startswith("权限审批")
+
+    @staticmethod
+    def test_query_tool_permission_interrupt_is_not_ask_user():
+        """A query argument does not make a non-ask_user tool an ask-user interrupt."""
+        message = "**工具 `memory_search` 需要授权才能执行**\n\n请确认是否允许该操作。"
+        result = convert_interactions_to_ask_user_question([
+            {
+                "id": "req_memory_search",
+                "value": {
+                    "tool_name": "memory_search",
+                    "message": message,
+                    "tool_args": {"query": "篮球"},
+                },
+            }
+        ])
+        assert result is not None
+        assert result["source"] == "permission_interrupt"
+        assert "memory_search" in result["questions"][0]["question"]
         assert result["questions"][0]["header"].startswith("权限审批")
 
     @staticmethod

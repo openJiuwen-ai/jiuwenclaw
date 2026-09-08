@@ -16,7 +16,7 @@ symphony:
   enabled: false
   paths:
     skills_root: ""
-    score_dir: ""
+    graph_dir: ""
 
   fingerprint:
     scan:
@@ -195,6 +195,8 @@ models:
         api_key: ${API_KEY}
         model_name: ${MODEL_NAME}
         client_provider: ${MODEL_PROVIDER}
+        # endpoint_profile：仅 OpenAI 协议生效的端点方言；Anthropic 时忽略。
+        endpoint_profile: ${ENDPOINT_PROFILE:-openai}
         timeout: 1800
         verify_ssl: false
         custom_headers: {}
@@ -237,6 +239,8 @@ models:
         api_key: ${IMAGE_GEN_API_KEY}
         model_name: ${IMAGE_GEN_MODEL_NAME}
         client_provider: ${IMAGE_GEN_PROVIDER}
+        # 多模态生图走 DashScope SDK 需 endpoint_profile=dashscope。
+        endpoint_profile: ${IMAGE_GEN_ENDPOINT_PROFILE:-dashscope}
         verify_ssl: false
         timeout: 1800
       model_config_obj:
@@ -371,7 +375,6 @@ react:
   stream_chunk_threshold: 50
   stream_character_threshold: 2000
   context_engine_config:
-    enable_kv_cache_release: false
     enable_openrouter_model_context_window_tokens: true
     enable_reload: true
     enabled: true
@@ -393,11 +396,9 @@ react:
       keep_recent_messages: 4
   # Skills 在线自演进配置
   evolution:
-    enabled: true             # true = 启用在线 Skills 自演进
-    auto_scan: false           # true = 每轮对话后自动扫描（建议先用手动 /evolve）
-    auto_save: false           # true = 自演进审批无需用户点击自动通过（内部开关）
-    skill_create: false        # true = 注册 SkillCreateRail（单 agent）及 TeamSkillCreateRail（leader）
-    skill_base_dir: "agent/skills"  # Skill 根目录
+    skill_evolution: false     # true = 启用技能演进与创建（自动及手动）
+    auto_save: false           # true = 自演进审批无需用户点击自动通过
+    review_feedback_min_confidence: 0.70
   a2x_registry:
     base_url: "http://127.0.0.1:8000"
     timeout: 30.0
@@ -471,6 +472,10 @@ gateway:
     agent_key_fields:
       - user_id
       - agent_type
+    # Web/TUI 连接建立后后台预热内置 jiuwenswarm 沙箱并打通 instance WS，
+    # 避免首条 chat 卡在 create + 冷启动 502 重试。失败不影响连接。
+    # agent_key_fields 含 session_id 时无法在握手阶段确定 key，自动跳过。
+    connect_warmup_enabled: true
     # 空闲沙箱回收：agent 无持有任务（chat/SSH 均已结束）且空闲超过该时长后，
     # 自动 DELETE /api/agent 释放 YuanRong 实例；<= 0 表示不回收。
     # 存活的 SSH 连接（即使不发消息）全程持有任务计数，不会被回收。
@@ -478,9 +483,14 @@ gateway:
     sandbox_idle_timeout_seconds: 600
     # 空闲扫描周期（秒）
     sandbox_idle_check_interval_seconds: 30
+    # 连接断开清理：用户连接数归零后，等待该时长再删除 jiuwenswarm agent
+    # （给重连与 in-flight 的 chat/SSH 留出时间）。与 idle 回收共用 READY +
+    # task_count==0 + 空闲超阈值的安全检查，不会误杀活动中的 agent。
+    # 也可通过环境变量 DISCONNECT_CLEANUP_TIMEOUT_SECONDS 覆盖（优先于本配置）。
+    disconnect_cleanup_timeout_seconds: 60
     registry:
-      # Agent OS 注册中心：host 来自 --hosts / CLUSTER_HOSTS 的 master IP
-      endpoint: http://<<MASTER_NODE_IP>>:<<REGISTRY_PORT>>
+      # Agent OS 注册中心：endpoint 绑定 ingress_virtual_ip(VIP)（与本机注册中心绑定一致）
+      endpoint: http://<<INGRESS_VIP>>:<<REGISTRY_PORT>>
       request_timeout_s: 10
       # 本机 nodeIP，供 POST /api/nodes/{node}/heartbeat
       node: <<MASTER_NODE_IP>>
@@ -491,9 +501,13 @@ gateway:
       port: 2222
       user_template: "yr:instance:{instance}"
       connect_timeout_s: 30
-    auth_service_url: ${AGENTOS_AUTH_SERVICE_URL:-http://iam-agentos:8080}
-    timeout: ${AGENTOS_AUTH_TIMEOUT:-10}
-    auth_enabled: bool = True
+    # agentos_router.load_router_config 不会解析 ${VAR}，部署时用 <<>> 替换进 yaml。
+    # 部署脚本空值默认 http://<<MASTER_NODE_IP>>:8090；可用 AGENTOS_AUTH_SERVICE_URL 覆盖。
+    auth_service_url: <<AGENTOS_AUTH_SERVICE_URL>>
+    timeout: <<AGENTOS_AUTH_TIMEOUT>>
+    # TUI token 鉴权；本 template 默认开启。true 时创建 AgentOSAuthenticator 校验 TUI 连接。
+    # Web 不挂鉴权 hook（浏览器 WS 无法带 Authorization）。
+    auth_enabled: true
 
 heartbeat:
   # 心跳间隔（秒），默认 3600
@@ -660,11 +674,20 @@ channels:
     # 客户端: ssh -p <listen_port> user@<gateway-host>
     # 南向连接参数见 gateway.agentos.ssh；agent_type 跟随用户当前值（3rdagent.switch）。
     enabled: true
-    # 监听 IP：host 来自 --hosts / CLUSTER_HOSTS 的 master IP
-    listen_host: <<MASTER_NODE_IP>>
+    # 监听 IP：绑定 ingress_virtual_ip(VIP)，使 SSH 通道可通过统一入口访问
+    listen_host: <<INGRESS_VIP>>
     listen_port: <<SSH_PORT>>
     host_key_path: ~/.jiuwenswarm/config/ssh_host_key
     relay_timeout_sec: 3600
+    auth:
+      # 公钥认证开关。true 时校验客户端公钥并签发临时密钥；false 为宽松认证。
+      enabled: true
+      # TUI 场景: 临时密钥有效期（秒）
+      ephemeral_key_ttl_sec: 300
+      # 临时密钥类型
+      ephemeral_key_type: "ssh-ed25519"
+      # 过期清理间隔（秒）
+      cleanup_interval_sec: 60
 
 # ========== 细粒度权限管控（tiered_policy）==========
 #
@@ -685,9 +708,10 @@ permissions:
     "*": "allow"
 
   tools:
-    bash: ask
-    mcp_exec_command: ask
-    create_terminal: ask
+    bash: allow
+    powershell: allow
+    mcp_exec_command: allow
+    create_terminal: allow
     write: ask
     write_file: ask
     edit_file: ask
@@ -733,87 +757,168 @@ permissions:
 
   rules:
     - id: shell_allow_dir
-      tools: [bash, mcp_exec_command, create_terminal]
+      tools: [bash, powershell, mcp_exec_command, create_terminal]
       pattern: "dir *"
       severity: LOW
     - id: shell_allow_ls
-      tools: [bash, mcp_exec_command, create_terminal]
+      tools: [bash, powershell, mcp_exec_command, create_terminal]
       pattern: "ls *"
       severity: LOW
     - id: shell_allow_pwd
-      tools: [bash, mcp_exec_command, create_terminal]
+      tools: [bash, powershell, mcp_exec_command, create_terminal]
       pattern: "pwd *"
       severity: LOW
     - id: shell_allow_cd
-      tools: [bash, mcp_exec_command, create_terminal]
+      tools: [bash, powershell, mcp_exec_command, create_terminal]
       pattern: "cd *"
       severity: LOW
     - id: shell_allow_echo
-      tools: [bash, mcp_exec_command, create_terminal]
+      tools: [bash, powershell, mcp_exec_command, create_terminal]
       pattern: "echo *"
       severity: LOW
     - id: shell_allow_cat
-      tools: [bash, mcp_exec_command, create_terminal]
+      tools: [bash, powershell, mcp_exec_command, create_terminal]
       pattern: "cat *"
       severity: LOW
     - id: shell_allow_type
-      tools: [bash, mcp_exec_command, create_terminal]
+      tools: [bash, powershell, mcp_exec_command, create_terminal]
       pattern: "type *"
       severity: LOW
     - id: shell_allow_head
-      tools: [bash, mcp_exec_command, create_terminal]
+      tools: [bash, powershell, mcp_exec_command, create_terminal]
       pattern: "head *"
       severity: LOW
     - id: shell_allow_tail
-      tools: [bash, mcp_exec_command, create_terminal]
+      tools: [bash, powershell, mcp_exec_command, create_terminal]
       pattern: "tail *"
       severity: LOW
     - id: shell_allow_git_status
-      tools: [bash, mcp_exec_command, create_terminal]
+      tools: [bash, powershell, mcp_exec_command, create_terminal]
       pattern: "git status *"
       severity: LOW
     - id: shell_allow_git_log
-      tools: [bash, mcp_exec_command, create_terminal]
+      tools: [bash, powershell, mcp_exec_command, create_terminal]
       pattern: "git log *"
       severity: LOW
     - id: shell_allow_git_diff
-      tools: [bash, mcp_exec_command, create_terminal]
+      tools: [bash, powershell, mcp_exec_command, create_terminal]
       pattern: "git diff *"
       severity: LOW
     - id: shell_allow_git_branch
-      tools: [bash, mcp_exec_command, create_terminal]
+      tools: [bash, powershell, mcp_exec_command, create_terminal]
       pattern: "git branch *"
       severity: LOW
+    # PowerShell cmdlet / alias counterparts of cd, pwd, ls/dir, cat/type, echo, head/tail
+    - id: shell_allow_set_location
+      tools: [bash, powershell, mcp_exec_command, create_terminal]
+      pattern: "Set-Location *"
+      severity: LOW
+    - id: shell_allow_push_location
+      tools: [bash, powershell, mcp_exec_command, create_terminal]
+      pattern: "Push-Location *"
+      severity: LOW
+    - id: shell_allow_pop_location
+      tools: [bash, powershell, mcp_exec_command, create_terminal]
+      pattern: "Pop-Location *"
+      severity: LOW
+    - id: shell_allow_sl
+      tools: [bash, powershell, mcp_exec_command, create_terminal]
+      pattern: "sl *"
+      severity: LOW
+    - id: shell_allow_chdir
+      tools: [bash, powershell, mcp_exec_command, create_terminal]
+      pattern: "chdir *"
+      severity: LOW
+    - id: shell_allow_get_location
+      tools: [bash, powershell, mcp_exec_command, create_terminal]
+      pattern: "Get-Location *"
+      severity: LOW
+    - id: shell_allow_gl
+      tools: [bash, powershell, mcp_exec_command, create_terminal]
+      pattern: "gl *"
+      severity: LOW
+    - id: shell_allow_get_childitem
+      tools: [bash, powershell, mcp_exec_command, create_terminal]
+      pattern: "Get-ChildItem *"
+      severity: LOW
+    - id: shell_allow_gci
+      tools: [bash, powershell, mcp_exec_command, create_terminal]
+      pattern: "gci *"
+      severity: LOW
+    - id: shell_allow_get_item
+      tools: [bash, powershell, mcp_exec_command, create_terminal]
+      pattern: "Get-Item *"
+      severity: LOW
+    - id: shell_allow_gi
+      tools: [bash, powershell, mcp_exec_command, create_terminal]
+      pattern: "gi *"
+      severity: LOW
+    - id: shell_allow_get_content
+      tools: [bash, powershell, mcp_exec_command, create_terminal]
+      pattern: "Get-Content *"
+      severity: LOW
+    - id: shell_allow_gc
+      tools: [bash, powershell, mcp_exec_command, create_terminal]
+      pattern: "gc *"
+      severity: LOW
+    - id: shell_allow_write_output
+      tools: [bash, powershell, mcp_exec_command, create_terminal]
+      pattern: "Write-Output *"
+      severity: LOW
+    - id: shell_allow_write_host
+      tools: [bash, powershell, mcp_exec_command, create_terminal]
+      pattern: "Write-Host *"
+      severity: LOW
+    - id: shell_allow_select_object
+      tools: [bash, powershell, mcp_exec_command, create_terminal]
+      pattern: 're:(?i)^Select-Object\b'
+      severity: LOW
     - id: shell_ask_rm
-      tools: [bash, mcp_exec_command, create_terminal]
+      tools: [bash, powershell, mcp_exec_command, create_terminal]
       pattern: "rm *"
       severity: HIGH
     - id: shell_ask_del
-      tools: [bash, mcp_exec_command, create_terminal]
+      tools: [bash, powershell, mcp_exec_command, create_terminal]
       pattern: "del *"
       severity: HIGH
     - id: shell_ask_rd
-      tools: [bash, mcp_exec_command, create_terminal]
+      tools: [bash, powershell, mcp_exec_command, create_terminal]
       pattern: "rd *"
       severity: HIGH
+    - id: shell_ask_remove_item
+      tools: [bash, powershell, mcp_exec_command, create_terminal]
+      pattern: "Remove-Item *"
+      severity: HIGH
+    - id: shell_ask_ri
+      tools: [bash, powershell, mcp_exec_command, create_terminal]
+      pattern: "ri *"
+      severity: HIGH
+    - id: shell_ask_rmdir
+      tools: [bash, powershell, mcp_exec_command, create_terminal]
+      pattern: "rmdir *"
+      severity: HIGH
+    - id: shell_ask_erase
+      tools: [bash, powershell, mcp_exec_command, create_terminal]
+      pattern: "erase *"
+      severity: HIGH
     - id: shell_ask_mv
-      tools: [bash, mcp_exec_command, create_terminal]
+      tools: [bash, powershell, mcp_exec_command, create_terminal]
       pattern: "mv *"
       severity: HIGH
     - id: shell_ask_cp
-      tools: [bash, mcp_exec_command, create_terminal]
+      tools: [bash, powershell, mcp_exec_command, create_terminal]
       pattern: "cp *"
       severity: HIGH
     - id: shell_ask_chmod
-      tools: [bash, mcp_exec_command, create_terminal]
+      tools: [bash, powershell, mcp_exec_command, create_terminal]
       pattern: "chmod *"
       severity: HIGH
     - id: shell_ask_chown
-      tools: [bash, mcp_exec_command, create_terminal]
+      tools: [bash, powershell, mcp_exec_command, create_terminal]
       pattern: "chown *"
       severity: HIGH
     - id: shell_ask_sensitive_file_reads
-      tools: [bash, mcp_exec_command, create_terminal]
+      tools: [bash, powershell, mcp_exec_command, create_terminal]
       pattern: 're:(?i)(^|[\s;&|()])((cat|type|less|more|head|tail|grep|find|Get-Content|Select-String)\b[^;&|]*(id_rsa|id_ed25519|\.pem\b|\.pfx\b|\.key\b|\.kube/config|\.aws/(credentials|config)|\.npmrc\b|\.env(\.[A-Za-z0-9_-]+)?\b|authorized_keys|\.ssh/))'
       severity: HIGH
     - id: path_ask_ssh
@@ -852,10 +957,8 @@ updater:
   repo_owner: openJiuwen
   repo_name: jiuwenswarm
   release_api_url: ""
-  asset_name_pattern_windows: "JiuwenSwarm-setup-{version}.exe"
-  asset_name_pattern_macos: "JiuwenSwarm-{version}.dmg"
+  # Windows / macOS installers are selected by their unique .exe / .dmg suffix.
   asset_name_pattern_linux: "JiuwenSwarm-{version}.tar.gz"
-  sha256_name_pattern: "JiuwenSwarm-setup-{version}.exe.sha256"
   timeout_seconds: 20
   pypi_mirror: "https://mirrors.aliyun.com/pypi"
 

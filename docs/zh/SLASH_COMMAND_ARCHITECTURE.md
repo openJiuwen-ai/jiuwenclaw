@@ -141,3 +141,9 @@
 ## 10. 当前命令现状表（基于 `gateway/slash_command.py`）
 
 当前命令清单已拆分到独立文档：[`Slash命令表.md`](./Slash命令表.md)。
+---
+
+## 返回导航
+
+- [返回文档首页](../README.md)
+- [返回项目首页](../../README_CN.md)

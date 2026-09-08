@@ -9,10 +9,66 @@ import threading
 
 import pytest
 
+from jiuwenswarm.server.runtime import team_binding_store
 from jiuwenswarm.server.runtime.team_binding_store import (
     TeamBindingStore,
     TeamBindingStoreError,
 )
+
+
+def test_default_store_uses_agent_teams_home(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(
+        team_binding_store,
+        "get_user_workspace_dir",
+        lambda: tmp_path,
+    )
+    monkeypatch.setattr(
+        team_binding_store,
+        "get_agent_root_dir",
+        lambda: tmp_path / "agent",
+    )
+
+    store = TeamBindingStore()
+
+    assert store.path == tmp_path / ".agent_teams" / "bindings.json"
+
+
+def test_default_store_migrates_legacy_bindings(monkeypatch, tmp_path) -> None:
+    legacy_path = tmp_path / "agent" / "teams" / "bindings.json"
+    legacy_path.parent.mkdir(parents=True)
+    legacy_path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "teams": {
+                    "research_team": {
+                        "team_name": "research_team",
+                        "template_id": "default",
+                        "created_at": 1,
+                        "updated_at": 1,
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        team_binding_store,
+        "get_user_workspace_dir",
+        lambda: tmp_path,
+    )
+    monkeypatch.setattr(
+        team_binding_store,
+        "get_agent_root_dir",
+        lambda: tmp_path / "agent",
+    )
+
+    store = TeamBindingStore()
+
+    assert store.path == tmp_path / ".agent_teams" / "bindings.json"
+    assert store.get("research_team") is not None
+    assert store.path.is_file()
+    assert not legacy_path.exists()
 
 
 def test_team_binding_store_creates_and_persists_binding(tmp_path) -> None:

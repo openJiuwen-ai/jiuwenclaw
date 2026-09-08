@@ -66,6 +66,7 @@ export type RenderItem =
       key: string;
       showAvatar: boolean;
       executions: ToolExecution[];
+      agentTemplateName?: string;
       notices: string[];
       collapseSkillTreeWhenContentStarts: boolean;
       turnId: number;
@@ -89,6 +90,8 @@ export type RenderItem =
       workEndMs: number;
       isLastTurn: boolean;
       hasWork: boolean;
+      /** 时间行插在本轮内容顶部，接管了本轮顶部头像时为 true */
+      showAvatar: boolean;
     };
 
 /**
@@ -231,9 +234,19 @@ function consolidateReasoning(items: RenderItem[], isTeamMode: boolean): RenderI
         const mergedText = [prev.segment.text, item.segment.text]
           .filter((text) => text.trim())
           .join('\n\n');
+        // 合并时推进末帧时刻，避免后一段较新的 updatedAt 被前一段覆盖导致耗时少算
+        const mergedUpdatedAt =
+          Math.max(prev.segment.updatedAt ?? 0, item.segment.updatedAt ?? 0) || undefined;
         out[out.length - 1] = {
           ...prev,
-          segment: { ...prev.segment, text: mergedText, closed: item.segment.closed },
+          segment: {
+            ...prev.segment,
+            text: mergedText,
+            closed: item.segment.closed,
+            agentTemplateName:
+              prev.segment.agentTemplateName ?? item.segment.agentTemplateName,
+            updatedAt: mergedUpdatedAt,
+          },
         };
         continue;
       }
@@ -257,6 +270,9 @@ export function buildRenderItems(items: TimelineItem[], isTeamMode: boolean, isP
       key: `tool-group-${pendingToolExecutions[0].toolCallId}`,
       showAvatar: true,
       executions: pendingToolExecutions,
+      agentTemplateName: pendingToolExecutions
+        .map((execution) => execution.agentTemplateName?.trim())
+        .find((name): name is string => Boolean(name)),
       notices: [],
       collapseSkillTreeWhenContentStarts,
       turnId: currentTurnId,
@@ -266,6 +282,16 @@ export function buildRenderItems(items: TimelineItem[], isTeamMode: boolean, isP
   };
 
   const pushMessage = (item: Extract<TimelineItem, { type: 'message' }>) => {
+    // 主动推荐消息是系统后台触发的主 agent 话术，不是用户这一轮的回复。
+    // assistant 消息默认沿用 currentTurnId（与上一轮同 turn），会让推荐消息并入
+    // 上一轮 turn——既存 proactive 补丁（buildTurnWorkMeta）据此把该 turn 的
+    // hasWork 置 false，误伤上一轮：上一轮 reasoning 从折叠的 turn chip
+    // （「已完成」）变成展开的 ReasoningBlock（「已完成思考」+ team_leader avatar）。
+    // 给 proactive 消息推进一个独立 turnId，自成一块。insertTurnSummaries 里
+    // 对 proactive 消息做了同样的 flush+turnId+1，两者保持同步。
+    if (item.message.role !== 'user' && item.message.isProactiveRecommendation) {
+      currentTurnId += 1;
+    }
     renderItems.push({
       type: 'message',
       key: item.key,
@@ -330,7 +356,13 @@ export function buildRenderItems(items: TimelineItem[], isTeamMode: boolean, isP
     if (isAssistantReply) {
       const inRunningTurn = isProcessing && renderItem.turnId === activeTurnId;
       renderItem.hideMeta = laterAssistantInTurn || inRunningTurn;
-      laterAssistantInTurn = true;
+      // 主动推荐消息是系统后台插入的推荐卡片，不是用户这一轮的后续回复。
+      // 若让它置 laterAssistantInTurn=true，会把它前面的上一轮回复当成「中间文字」
+      // 折叠进 turn chip，导致上一轮 agent 回复正文被整个收起（只剩「已完成」）。
+      // proactive 消息自成一块，不影响其前方回复的折叠判定。
+      if (!renderItem.message.isProactiveRecommendation) {
+        laterAssistantInTurn = true;
+      }
     }
   }
 
@@ -408,6 +440,12 @@ function assignTurnTopAvatars(items: RenderItem[], isTeamMode: boolean): void {
   }
 }
 
+/**
+ * 空窗轮起点透传规则：仅当下一轮 user 消息是「设目标」消息（isGoalObjectiveMessage）时并入。
+ * goal 插队场景里「上一个提问」和「设目标」同属一次交互流程，真正承载回答的那一轮耗时
+ * 要从上一提问算起；普通新提问与上一条空窗提问无关（如隔天再来提问），不继承起点，
+ * 避免把跨会话闲置时间算进新一轮「已完成」耗时。
+ */
 function insertTurnSummaries(items: RenderItem[], isProcessing: boolean): RenderItem[] {
   const out: RenderItem[] = [];
   let startMs = Number.POSITIVE_INFINITY;
@@ -418,6 +456,11 @@ function insertTurnSummaries(items: RenderItem[], isProcessing: boolean): Render
   let hasWork = false;
   let turnId = 0;
   let seq = 0;
+  // 时间行插入点：本轮首条 assistant 内容之前（视觉上位于头像下第一行）。
+  let turnContentStart = 0;
+  // 空窗轮（只有 user 消息、无任何活动）透传给下一轮的起点。
+  // 先挂起，仅并入下一轮「设目标」消息开启的轮次（见 user 消息分支），其余轮次丢弃。
+  let carriedStartMs = Number.POSITIVE_INFINITY;
 
   const acc = (value: number, asWork = false) => {
     if (!Number.isFinite(value) || value <= 0) return;
@@ -431,11 +474,11 @@ function insertTurnSummaries(items: RenderItem[], isProcessing: boolean): Render
   const flush = (isLastTurn: boolean) => {
     const shouldShow = (isLastTurn && isProcessing) || hasActivity;
     // 整段没有任何活动（goal 插队时「上一个提问」和「设目标」两条 user 消息紧挨着，中间
-    // 空窗）：不出耗时条，起止时刻也别丢，留给真正承载这段回答的那一轮当起点，否则那一轮
-    // 从首次思考才开始算，耗时显示成 0s。
+    // 空窗）：不出耗时条，起点先挂起，仅并入下一轮「设目标」消息开启的轮次（见 user 消息
+    // 分支），否则那一轮从首次思考才开始算，耗时显示成 0s。
     const carryTimestamps = !hasActivity;
     if (shouldShow && Number.isFinite(startMs) && Number.isFinite(endMs)) {
-      out.push({
+      const summary: Extract<RenderItem, { type: 'turnSummary' }> = {
         type: 'turnSummary',
         key: `turn-summary-${seq}`,
         turnId,
@@ -445,13 +488,31 @@ function insertTurnSummaries(items: RenderItem[], isProcessing: boolean): Render
         workEndMs: Number.isFinite(workEndMs) ? workEndMs : endMs,
         isLastTurn,
         hasWork,
-      });
+        showAvatar: false,
+      };
       seq += 1;
+      // 时间行统一挂到本轮内容顶部：接管首条 leader/助手内容的顶部头像（与折叠条同规则）；
+      // 成员自己的头像不动，时间行不带头像直接排在成员消息上方。
+      const firstContent = out[turnContentStart];
+      if (
+        firstContent &&
+        (firstContent.type === 'reasoning' ||
+          firstContent.type === 'toolGroup' ||
+          (firstContent.type === 'message' && firstContent.message.role === 'assistant')) &&
+        firstContent.showAvatar
+      ) {
+        summary.showAvatar = true;
+        firstContent.showAvatar = false;
+      }
+      out.splice(turnContentStart, 0, summary);
     }
-    if (!carryTimestamps) {
-      startMs = Number.POSITIVE_INFINITY;
-      endMs = Number.NEGATIVE_INFINITY;
+    if (carryTimestamps && Number.isFinite(startMs)) {
+      carriedStartMs = startMs;
+    } else {
+      carriedStartMs = Number.POSITIVE_INFINITY;
     }
+    startMs = Number.POSITIVE_INFINITY;
+    endMs = Number.NEGATIVE_INFINITY;
     workStartMs = Number.POSITIVE_INFINITY;
     workEndMs = Number.NEGATIVE_INFINITY;
     hasActivity = false;
@@ -462,9 +523,38 @@ function insertTurnSummaries(items: RenderItem[], isProcessing: boolean): Render
     if (item.type === 'message' && item.message.role === 'user') {
       flush(false);
       turnId += 1;
+      // 空窗起点仅并入「设目标」消息开启的轮次：goal 插队时上一提问与设目标同属一次
+      // 交互流程，本轮耗时从上一提问算起；普通新提问（哪怕只隔几分钟）与上一条空窗
+      // 提问无关，不继承起点，避免把无关/跨会话等待算进本轮「已完成」耗时。
+      if (Number.isFinite(carriedStartMs) && item.message.isGoalObjectiveMessage) {
+        acc(carriedStartMs, false);
+      }
+      carriedStartMs = Number.POSITIVE_INFINITY;
       acc(toTimestampMs(item.message.timestamp), false);
       out.push(item);
+      turnContentStart = out.length;
       continue;
+    }
+    // slash 命令结果不属于上一轮 assistant 工作，也不应产生自己的「任务用时」。
+    // 先收束上一轮，再把 compact 等命令结果作为独立时间线块插入。
+    if (item.type === 'message' && item.message.isCommandOutput) {
+      flush(false);
+      out.push(item);
+      turnContentStart = out.length;
+      continue;
+    }
+    // 主动推荐消息自成一块（与 buildRenderItems 里推进 currentTurnId 对齐）：
+    // 先 flush 掉上一轮，再 +1 进入新 turn，避免推荐消息并入上一轮导致
+    // buildTurnWorkMeta 的 proactive 补丁误把上一轮 hasWork 置 false。
+    let startsOwnBlock = false;
+    if (
+      item.type === 'message' &&
+      item.message.role !== 'user' &&
+      item.message.isProactiveRecommendation
+    ) {
+      flush(false);
+      turnId += 1;
+      startsOwnBlock = true;
     }
     if (item.type === 'toolGroup') {
       hasActivity = true;
@@ -491,11 +581,19 @@ function insertTurnSummaries(items: RenderItem[], isProcessing: boolean): Render
       if (item.segment.startedAt > 1_000_000_000_000) {
         acc(item.segment.startedAt, true);
       }
+      // 每个 delta 到达都推进 updatedAt，作为不依赖收尾事件的耗时终点兜底
+      if (typeof item.segment.updatedAt === 'number' && item.segment.updatedAt > 1_000_000_000_000) {
+        acc(item.segment.updatedAt, true);
+      }
       if (typeof item.segment.closedAt === 'number' && item.segment.closedAt > 1_000_000_000_000) {
         acc(item.segment.closedAt, true);
       }
     }
     out.push(item);
+    if (startsOwnBlock) {
+      // 主动推荐卡自成一块：时间行插在卡片之后、后续内容之前。
+      turnContentStart = out.length;
+    }
   }
   flush(true);
   return out;
@@ -670,9 +768,22 @@ export function buildTurnWorkMeta(items: RenderItem[], isProcessing: boolean): M
       map.set(item.turnId, next);
     }
   }
+  // 收集含主动推荐消息的 turnId：proactive 消息是系统插入的推荐（带
+  // isProactiveRecommendation 标记），不该和用户那轮混在一起触发 turn 折叠——
+  // 否则 proactive 触发的主 agent 这轮（带工具/思考）会让用户上一轮回复被收起。
+  // 把含 proactive 的 turn 的 hasWork 置 false，让它不 foldable，上一轮回复保持展开。
+  const proactiveTurnIds = new Set<number>();
+  for (const item of items) {
+    if (item.type === 'message' && item.message?.isProactiveRecommendation) {
+      proactiveTurnIds.add(item.turnId);
+    }
+  }
   for (const meta of map.values()) {
     if (meta.thinkingCount > 0 || meta.toolCount > 0) {
       meta.hasWork = true;
+    }
+    if (proactiveTurnIds.has(meta.turnId)) {
+      meta.hasWork = false;
     }
     const isLast = Number.isFinite(lastTurnId) && meta.turnId === lastTurnId;
     meta.completed = !(isProcessing && isLast);

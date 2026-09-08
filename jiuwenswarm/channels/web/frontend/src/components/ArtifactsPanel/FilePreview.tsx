@@ -59,7 +59,7 @@ function TextPreview({ artifact, kind }: { artifact: PreviewArtifact; kind: Text
   }, [artifact.downloadUrl, artifact.path]);
   if (state.loading)
     return (
-      <div className="flex min-h-[240px] items-center justify-center gap-2 text-sm text-text-muted">
+      <div className="flex min-h-[240px] items-center justify-center gap-2 text-sm text-text-muted" data-testid="artifact-text-preview-status" data-variant="loading">
         <LoaderCircle className="animate-spin" size={16} />
         {t('common.loading')}
       </div>
@@ -125,7 +125,7 @@ export function FilePreview({
       );
     case 'image':
       return (
-        <div className="flex h-full min-h-0 w-full items-center justify-center overflow-hidden">
+        <div className="flex h-full min-h-0 w-full items-center justify-center overflow-hidden" data-testid="artifact-image-preview-frame">
           <img src={url} alt={artifact.name} className="h-full w-full object-contain" data-testid="artifact-image-preview" />
         </div>
       );

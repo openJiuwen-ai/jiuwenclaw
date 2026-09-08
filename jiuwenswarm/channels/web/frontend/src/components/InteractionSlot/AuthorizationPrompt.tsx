@@ -71,6 +71,7 @@ function HoverTip({ text, children }: { text: string; children: React.ReactNode 
             className="auth-tip-portal"
             role="tooltip"
             style={{ left: pos.left, top: pos.top }}
+            data-testid="interaction-slot-auth-action-tip"
           >
             {text}
           </span>,
@@ -143,12 +144,13 @@ export function AuthorizationPrompt({ pending, onSubmit }: AuthorizationPromptPr
   const title = (primary.header || '').trim() || fallbackTitle;
 
   return (
-    <div className="auth-prompt" role="alertdialog" aria-label={title}>
+    <div className="auth-prompt" role="alertdialog" aria-label={title} data-testid="interaction-slot-auth-prompt">
       <div
         className="auth-prompt__bar"
         role="button"
         tabIndex={0}
         aria-expanded={expanded}
+        data-testid="interaction-slot-auth-bar"
         onClick={() => setExpanded((v) => !v)}
         onKeyDown={(e) => {
           if (e.key === 'Enter' || e.key === ' ') {
@@ -157,19 +159,20 @@ export function AuthorizationPrompt({ pending, onSubmit }: AuthorizationPromptPr
           }
         }}
       >
-        <div className="auth-prompt__head">
-          <ShieldCheck className="auth-prompt__icon" size={15} strokeWidth={2} />
-          <span className="auth-prompt__title" title={title}>{title}</span>
-          {count > 1 && <span className="auth-prompt__count">({count})</span>}
+        <div className="auth-prompt__head" data-testid="interaction-slot-auth-head">
+          <ShieldCheck className="auth-prompt__icon" size={15} strokeWidth={2} data-testid="interaction-slot-auth-icon" />
+          <span className="auth-prompt__title" title={title} data-testid="interaction-slot-auth-title">{title}</span>
+          {count > 1 && <span className="auth-prompt__count" data-testid="interaction-slot-auth-count">({count})</span>}
           <ChevronDown
             className={`auth-prompt__chevron${expanded ? ' auth-prompt__chevron--open' : ''}`}
             size={14}
             strokeWidth={2}
+            data-testid="interaction-slot-auth-chevron"
           />
         </div>
 
         {/* 动作按钮区不触发展开/收起 */}
-        <div className="auth-prompt__actions" onClick={(e) => e.stopPropagation()}>
+        <div className="auth-prompt__actions" onClick={(e) => e.stopPropagation()} data-testid="interaction-slot-auth-actions">
           {actions.map((action) => (
             <HoverTip text={action.tip} key={action.semantic + action.option.label}>
               <button
@@ -177,6 +180,8 @@ export function AuthorizationPrompt({ pending, onSubmit }: AuthorizationPromptPr
                 className={`auth-prompt__btn auth-prompt__btn--${action.semantic}`}
                 disabled={submitting}
                 onClick={() => handlePick(action)}
+                data-testid="interaction-slot-auth-action-button"
+                data-variant={action.semantic}
               >
                 {action.label}
               </button>
@@ -192,12 +197,14 @@ export function AuthorizationPrompt({ pending, onSubmit }: AuthorizationPromptPr
             : 'auth-prompt__body auth-prompt__body--collapsed'
         }
         style={{ color: 'var(--color-text-primary)' }}
+        data-testid="interaction-slot-auth-body"
+        data-variant={expanded ? 'expanded' : 'collapsed'}
       >
         {expanded ? (
           questions.map((q, i) => (
-            <div className="auth-prompt__body-item" key={i}>
+            <div className="auth-prompt__body-item" key={i} data-testid="interaction-slot-auth-body-item" data-variant={i}>
               {count > 1 && q.header && (
-                <div className="auth-prompt__body-header">{q.header}</div>
+                <div className="auth-prompt__body-header" data-testid="interaction-slot-auth-body-item-header">{q.header}</div>
               )}
               <ReactMarkdown remarkPlugins={[remarkGfm]}>{q.question}</ReactMarkdown>
             </div>

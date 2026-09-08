@@ -14,14 +14,12 @@ import {
   ToolExecution,
   ToolExecutionStatus,
   InterruptResultPayload,
-  SubtaskUpdatePayload,
   AskUserQuestionPayload,
   EvolutionStatusPayload,
   UsageSummary,
   FileDownloadItem,
   ContextCompressionRuntime,
   ContextCompressionSummary,
-  TodoItem,
   MediaItem,
 } from '../types';
 import { useTodoStore } from './todoStore';
@@ -50,25 +48,13 @@ function computeTimeoutAt(baseIso: string): string {
 }
 
 function resolveExecutionStatus(result: ToolResult): ToolExecutionStatus {
+  if (result.pending) {
+    return 'pending';
+  }
   if (result.timedOut) {
     return 'timeout';
   }
   return result.success ? 'completed' : 'error';
-}
-
-/**
- * 子任务状态
- */
-export interface SubtaskState {
-  task_id: string;
-  description: string;
-  status: string;
-  index: number;
-  total: number;
-  tool_name?: string;
-  tool_count: number;
-  message?: string;
-  is_parallel: boolean;
 }
 
 interface TaskItem {
@@ -93,6 +79,10 @@ export interface ReasoningSegment {
   text: string;
   startedAt: number;
   closed: boolean;
+  /** 当前流式 reasoning 所属的 Web 单 Agent 专家。 */
+  agentTemplateName?: string;
+  /** 最近一个 delta 到达时刻；即使 final 丢失，耗时终点也能落在最后一个真实帧。 */
+  updatedAt?: number;
   /** 收尾时刻；用于延迟折进 streak。历史可省略。 */
   closedAt?: number;
 }
@@ -121,7 +111,6 @@ export interface ChatRuntime {
   /** 最近一次 chat.error 的错误信息，用于会话列表展示异常标记 */
   error: string | null;
   streamBuffers: Map<string, string>;
-  activeSubtasks: Map<string, SubtaskState>;
   toolExecutions: Map<string, ToolExecution>;
   toolExecutionOrder: string[];
   orphanResults: Map<string, ToolResult>;
@@ -168,7 +157,6 @@ function createEmptyRuntime(): ChatRuntime {
     messageRenderKeySeq: 0,
     error: null,
     streamBuffers: new Map(),
-    activeSubtasks: new Map(),
     toolExecutions: new Map(),
     toolExecutionOrder: [],
     orphanResults: new Map(),
@@ -224,9 +212,16 @@ interface ChatState {
   replaceHistoryMessages: (sessionId: string, messages: Message[]) => void;
   updateMessage: (sessionId: string, id: string, updates: Partial<Message>) => void;
   appendStreamContent: (sessionId: string, content: string, streamKey?: string) => void;
-  appendReasoning: (sessionId: string, content: string, options?: { atMs?: number }) => void;
+  appendReasoning: (
+    sessionId: string,
+    content: string,
+    options?: { atMs?: number; agentTemplateName?: string },
+  ) => void;
   closeReasoning: (sessionId: string, options?: { atMs?: number }) => void;
-  restoreReasoningSegments: (sessionId: string, items: { at: string; text: string }[]) => void;
+  restoreReasoningSegments: (
+    sessionId: string,
+    items: { at: string; text: string; agentTemplateName?: string; updatedAt?: number }[],
+  ) => void;
   startStreaming: (sessionId: string, messageId: string, streamKey?: string) => void;
   stopStreaming: (sessionId: string, streamKey?: string) => void;
   finalizeStreamSegment: (sessionId: string, streamKey?: string) => void;
@@ -234,7 +229,13 @@ interface ChatState {
   clearStreamSplit: (sessionId: string) => void;
   collapseTurnFinal: (
     sessionId: string,
-    opts: { kind: 'agent' | 'team'; content: string; finalId: string; timestampIso: string }
+    opts: {
+      kind: 'agent' | 'team';
+      content: string;
+      finalId: string;
+      timestampIso: string;
+      agentTemplateName?: string;
+    }
   ) => void;
   bumpThinkingAnchor: (sessionId: string) => void;
   setExecutionError: (sessionId: string, error: string | null) => void;
@@ -248,14 +249,16 @@ interface ChatState {
   setInterruptResult: (sessionId: string, result: InterruptResultPayload | null) => void;
   setSwitchingMode: (sessionId: string, switching: boolean) => void;
   setNewSession: (sessionId: string, isNew: boolean) => void;
-  addToolCall: (sessionId: string, toolCall: ToolCall, options?: { startedAt?: string; requestId?: string }) => void;
+  addToolCall: (
+    sessionId: string,
+    toolCall: ToolCall,
+    options?: { startedAt?: string; requestId?: string; agentTemplateName?: string },
+  ) => void;
   updateToolProgress: (sessionId: string, toolCallId: string, progress: Partial<ToolResult>) => void;
   addToolResult: (sessionId: string, toolResult: ToolResult, options?: { updatedAt?: string }) => void;
   markTimedOutExecutions: (sessionId: string) => void;
   /** 历史回放常只有 tool_call、无 tool_result：把仍 pending 的工具按 startedAt 结算，避免超时巡检用 now 污染耗时 */
   settleHistoricalToolExecutions: (sessionId: string) => void;
-  updateSubtask: (sessionId: string, payload: SubtaskUpdatePayload) => void;
-  clearSubtasks: (sessionId: string) => void;
   clearMessages: (sessionId: string) => void;
   clearCurrentTurnData: (sessionId: string, requestId?: string) => void;
   prependMessages: (sessionId: string, olderFirst: Message[]) => void;
@@ -338,8 +341,20 @@ export const useChatStore = create<ChatState>()(subscribeWithSelector((set, get)
             ...runtime,
             messages: [...runtime.messages, ...messages],
             messageRenderKeySeq,
-            ...(message.role === 'user' ? { assistantStreamSplit: false, reasoningSegments: [] } : {}),
-          },
+            ...(message.role === 'user'
+              ? {
+                  assistantStreamSplit: false,
+                  // 上一轮被中断（暂停/停止）时思考段可能永远等不到 closeReasoning；
+                  // 新一轮开始只把它冻结收尾，不能整段丢弃——否则上一轮思考块连同头像
+                  // 会凭空消失（刷新后历史又能恢复）。closedAt 落在最后一个真实 delta 帧。
+                  reasoningSegments: runtime.reasoningSegments.map((segment) =>
+                    segment.closed
+                      ? segment
+                      : { ...segment, closed: true, closedAt: segment.updatedAt ?? Date.now() }
+                  ),
+                }
+              : {}),
+          },  
         },
       };
     });
@@ -371,7 +386,6 @@ export const useChatStore = create<ChatState>()(subscribeWithSelector((set, get)
             pausedTask: null,
             interruptResult: null,
             switchingMode: false,
-            activeSubtasks: new Map(),
             toolExecutions: new Map(),
             toolExecutionOrder: [],
             orphanResults: new Map(),
@@ -447,13 +461,23 @@ export const useChatStore = create<ChatState>()(subscribeWithSelector((set, get)
           : Date.now();
       let next: ReasoningSegment[];
       if (last && !last.closed) {
-        next = segments.slice(0, -1).concat({ ...last, text: last.text + content });
+        // 每个 delta 都推进 updatedAt，使耗时终点不依赖 closeReasoning 收尾事件
+        next = segments.slice(0, -1).concat({
+          ...last,
+          text: last.text + content,
+          updatedAt: atMs,
+          ...(options?.agentTemplateName && !last.agentTemplateName
+            ? { agentTemplateName: options.agentTemplateName }
+            : {}),
+        });
       } else {
         next = segments.concat({
           id: createReasoningSegmentId(),
           text: content,
           startedAt: atMs,
+          updatedAt: atMs,
           closed: false,
+          ...(options?.agentTemplateName ? { agentTemplateName: options.agentTemplateName } : {}),
         });
       }
       return {
@@ -485,6 +509,7 @@ export const useChatStore = create<ChatState>()(subscribeWithSelector((set, get)
               ...last,
               closed: true,
               closedAt: atMs,
+              updatedAt: atMs,
             }),
           },
         },
@@ -510,13 +535,22 @@ export const useChatStore = create<ChatState>()(subscribeWithSelector((set, get)
           return;
         }
         const startedAt = parsed - 1;
+        // updatedAt 取落盘的 reasoning_updated_at（末帧时刻）；缺失/非法时回退 startedAt，
+        // 使异常结束的耗时终点也能落在最后一个真实帧。
+        const replayUpdatedAt = parseTimestampToMs(item.updatedAt);
+        const updatedAt =
+          Number.isFinite(replayUpdatedAt) && replayUpdatedAt > 1_000_000_000_000
+            ? replayUpdatedAt
+            : startedAt;
         segments.push({
           id: `hist-rsn-${sessionId}-${index}-${createReasoningSegmentId()}`,
           text,
           startedAt,
           closed: true,
+          ...(item.agentTemplateName ? { agentTemplateName: item.agentTemplateName } : {}),
           // 历史已结束：closedAt 用 startedAt，立刻 settled，且比魔法 0 更可解释。
           closedAt: startedAt,
+          updatedAt,
         });
       });
       segments.sort((a, b) => a.startedAt - b.startedAt);
@@ -643,7 +677,7 @@ export const useChatStore = create<ChatState>()(subscribeWithSelector((set, get)
     });
   },
 
-  collapseTurnFinal: (sessionId, { kind, content, finalId, timestampIso }) => {
+  collapseTurnFinal: (sessionId, { kind, content, finalId, timestampIso, agentTemplateName }) => {
     set((state) => {
       const runtime = state.runtimes[sessionId];
       if (!runtime) return state;
@@ -680,6 +714,7 @@ export const useChatStore = create<ChatState>()(subscribeWithSelector((set, get)
         timestamp: timestampIso,
         completedAt: timestampIso,
         isStreaming: false,
+        ...(kind === 'agent' && agentTemplateName ? { agentTemplateName } : {}),
       });
       return {
         runtimes: {
@@ -1000,6 +1035,7 @@ export const useChatStore = create<ChatState>()(subscribeWithSelector((set, get)
         updatedAt: startedAt,
         timeoutAt,
         requestId: options?.requestId,
+        agentTemplateName: options?.agentTemplateName,
       });
 
       const nextOrder = [...runtime.toolExecutionOrder, toolCall.id];
@@ -1261,82 +1297,6 @@ export const useChatStore = create<ChatState>()(subscribeWithSelector((set, get)
     });
   },
 
-  updateSubtask: (sessionId, payload) => {
-    set((state) => {
-      const runtime = state.runtimes[sessionId];
-      if (!runtime) return state;
-      const newSubtasks = new Map(runtime.activeSubtasks);
-
-      if (payload.status === 'completed' || payload.status === 'error') {
-        newSubtasks.delete(payload.task_id);
-      } else {
-        newSubtasks.set(payload.task_id, {
-          task_id: payload.task_id,
-          description: payload.description,
-          status: payload.status,
-          index: payload.index,
-          total: payload.total,
-          tool_name: payload.tool_name,
-          tool_count: payload.tool_count || 0,
-          message: payload.message,
-          is_parallel: payload.is_parallel || false,
-        });
-      }
-
-      return {
-        runtimes: {
-          ...state.runtimes,
-          [sessionId]: { ...runtime, activeSubtasks: newSubtasks },
-        },
-      };
-    });
-
-    const todoState = useTodoStore.getState();
-    const todoRuntime = todoState.getRuntime(sessionId);
-    const todos = todoRuntime?.todos ?? [];
-    const setTodos = todoState.setTodos;
-
-    const matchingTodo = todos.find(
-      (todo: TodoItem) =>
-        todo.status === 'in_progress' &&
-        (todo.content.includes(payload.description) ||
-         payload.description.includes(todo.content.slice(0, 20)))
-    );
-
-    if (matchingTodo) {
-      let activeForm = '';
-      if (payload.status === 'starting') {
-        activeForm = `正在${payload.description}...`;
-      } else if (payload.status === 'tool_call') {
-        activeForm = `正在调用 ${payload.tool_name}...`;
-      } else if (payload.status === 'completed') {
-        activeForm = '';
-      }
-
-      if (activeForm || payload.status === 'completed') {
-        const updatedTodos = todos.map((todo: TodoItem) =>
-          todo.id === matchingTodo.id
-            ? { ...todo, activeForm }
-            : todo
-        );
-        setTodos(sessionId, updatedTodos);
-      }
-    }
-  },
-
-  clearSubtasks: (sessionId) => {
-    set((state) => {
-      const runtime = state.runtimes[sessionId];
-      if (!runtime) return state;
-      return {
-        runtimes: {
-          ...state.runtimes,
-          [sessionId]: { ...runtime, activeSubtasks: new Map() },
-        },
-      };
-    });
-  },
-
   clearCurrentTurnData: (sessionId, requestId) => {
     set((state) => {
       const runtime = state.runtimes[sessionId];
@@ -1360,7 +1320,6 @@ export const useChatStore = create<ChatState>()(subscribeWithSelector((set, get)
               toolExecutions: nextExecutions,
               toolExecutionOrder: nextOrder,
               orphanResults: new Map(),
-              activeSubtasks: new Map(),
               interruptResult: null,
               pendingQuestion: null,
               toolMetrics: {
@@ -1379,7 +1338,6 @@ export const useChatStore = create<ChatState>()(subscribeWithSelector((set, get)
             toolExecutions: new Map(),
             toolExecutionOrder: [],
             orphanResults: new Map(),
-            activeSubtasks: new Map(),
             interruptResult: null,
             pendingQuestion: null,
             toolMetrics: {
@@ -1434,7 +1392,6 @@ export const useChatStore = create<ChatState>()(subscribeWithSelector((set, get)
             pausedTask: null,
             interruptResult: null,
             switchingMode: false,
-            activeSubtasks: new Map(),
             toolExecutions: new Map(),
             toolExecutionOrder: [],
             orphanResults: new Map(),
@@ -1606,7 +1563,14 @@ export const useChatStore = create<ChatState>()(subscribeWithSelector((set, get)
       return;
     }
     const runtime = get().runtimes[sessionId] ?? createEmptyRuntime();
-    const busy = Boolean(runtime.isProcessing || runtime.currentStreamId);
+    // 暂存的目的是"避免插进当前回答中间拆轮"——只有存在可被拆的 assistant 轮次时才有意义。
+    // 后端 _should_defer_goal_objective_history 也是精确判断"有无活跃 user round / 并发任务"，
+    // idle 时不 defer（test_should_not_defer_when_idle）。这里用"已有 assistant 消息且仍在处理"
+    // 对齐该语义：新会话首次设目标时 messages 里没有 assistant 消息，即便
+    // registerCreatedConversation 把 isProcessing 乐观置 true 也不暂存，立即落地，避免用户
+    // 气泡被推迟到 agent 回复完成之后才 append 到末尾（顺序错乱、时间戳变落地时刻）。
+    const hasAssistantTurn = (runtime.messages ?? []).some((message) => message.role === 'assistant');
+    const busy = hasAssistantTurn && Boolean(runtime.isProcessing || runtime.currentStreamId);
     if (busy) {
       get().setPendingGoalObjectiveBubble(sessionId, trimmed);
       return;

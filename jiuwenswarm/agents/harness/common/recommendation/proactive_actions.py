@@ -18,7 +18,11 @@ import time
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    # 仅类型注解用，避免与 proactive_adapter（函数级 import 本模块）形成运行时循环。
+    from jiuwenswarm.server.runtime.proactive_adapter import ProactiveTriggerRequest
 
 logger = logging.getLogger(__name__)
 
@@ -56,34 +60,12 @@ def _prune_daily_counts() -> None:
             _daily_counts.pop(k, None)
 
 
-# ── Cooldown ─────────────────────────────────────────────────────
-
-_COOLDOWN_HOURS = 24
-_COOLDOWN_SECONDS = _COOLDOWN_HOURS * 3600
-
-
-def _is_cooled_down(target: str, profile: Any, hours: int = _COOLDOWN_HOURS) -> bool:
-    """Check if target is cooled down, using persisted cooldown records from profile."""
-    cooldown_records = getattr(profile, "cooldown_records", {})
-    last = cooldown_records.get(target, 0.0)
-    return (time.time() - last) >= hours * 3600  # hours*3600 而非 _COOLDOWN_SECONDS：保留 hours 参数可被外部覆盖
-
-
-def _mark_recommended(target: str, profile: Any) -> None:
-    """Mark target as recommended, persisting to profile's cooldown records."""
-    if not hasattr(profile, "cooldown_records"):
-        profile.cooldown_records = {}
-    profile.cooldown_records[target] = time.time()
-
-
-def _prune_cooldown_records(profile: Any) -> None:
-    """Remove entries past their cooldown window from profile."""
-    if not hasattr(profile, "cooldown_records"):
-        return
-    cutoff = time.time() - _COOLDOWN_SECONDS
-    keys_to_remove = [k for k, v in profile.cooldown_records.items() if v < cutoff]
-    for k in keys_to_remove:
-        profile.cooldown_records.pop(k, None)
+# ── Cooldown（已完全移除）─────────────────────────────────────────
+# 去重改由决策 LLM 看 recommendation_history 承担（cooldown 字面精确去重对
+# skill/task/exploration 三类语义均错配）。bug A 修后假送达不再写 cooldown，
+# 并发由 _proactive_push_inflight 去重、总量由 max_recommend_per_day 限。
+# cooldown_records 字段、_is_cooled_down/_mark_recommended/_prune_cooldown_records
+# 函数、_COOLDOWN_* 常量全部移除——不再有读写，recommendation.json 不再有该键。
 
 
 # ── Recommendation decision ──────────────────────────────────────
@@ -149,7 +131,16 @@ def _parse_skill_md(path: Path) -> dict[str, Any] | None:
 
 
 def _get_all_skills() -> tuple[set[str], list[dict[str, Any]]]:
-    """Discover all available skills (local + builtin) by scanning disk."""
+    """Discover available skills by scanning disk, filtered to "usable now".
+
+    只暴露用户当下能真正使用的 skill = 已安装且 enabled=true。具体剔除：
+    - 未安装：已卸载的目录磁盘上不在（不进集合）；builtin 目录里尚未安装的
+      跳过（installed=False，不进候选池，也不进校验集合）。
+    - 已安装但被禁用：skill 级禁用（enabled=false）与"插件禁用但未 reload"
+      两种状态只动 state、目录仍在原位，磁盘扫描会照扫到，故交叉 state 把
+      它们一并剔除。插件级禁用并 reload 过的目录被物理移进 _disabled_plugins
+      （下划线开头），已被 startswith("_") 跳过，这里不重复处理。
+    """
     try:
         from jiuwenswarm.common.utils import get_agent_skills_dir, get_builtin_skills_dir
         skills_dir = get_agent_skills_dir()
@@ -180,6 +171,25 @@ def _get_all_skills() -> tuple[set[str], list[dict[str, Any]]]:
                 skills.append(meta)
                 if is_installed:
                     installed_names.add(meta["name"])
+
+        # 只推"能用"的：候选池与校验集合都只保留已安装的 skill。builtin 未安装
+        # 的不进候选池（用户当下用不了），也不进校验集合（LLM 即便选了也会被 reject）。
+        skills = [s for s in skills if s.get("installed")]
+
+        # 交叉 state：剔除已安装但被禁用（enabled=false）的 skill。涵盖 skill 级
+        # 禁用与"插件禁用但未 reload"两种目录仍在原位的状态。
+        try:
+            from jiuwenswarm.server.runtime.skill.skilldev import (
+                load_execution_disabled_skills,
+            )
+            disabled = set(load_execution_disabled_skills())
+        except Exception as exc:
+            logger.debug("[ProactiveEngine] load disabled skills failed: %s", exc)
+            disabled = set()
+        if disabled:
+            skills = [s for s in skills if s.get("name") not in disabled]
+
+        installed_names = {s.get("name") for s in skills if s.get("name")}
         return installed_names, skills
     except Exception as exc:
         logger.warning("[ProactiveEngine] skill list load failed: %s", exc)
@@ -276,11 +286,11 @@ class AnalysisResult:
 
 async def _analyze_and_decide(
     report_text: str,
-    profile: Any,
     skills: list[dict[str, Any]],
     proactive_agent: Any,
+    decision_rules_text: str = "（暂无）",
 ) -> AnalysisResult:
-    """Single call via the proactive agent: update profile + decide whether to recommend.
+    """Single call via the proactive agent: decide whether to recommend.
 
     ``proactive_agent`` is a lightweight DeepAgent (no tools, no task_loop,
     single-round) built by app_agentserver. It replaces the old bare
@@ -294,9 +304,13 @@ async def _analyze_and_decide(
     calendar events, and candidate skills. The prompt therefore takes only
     ``conversation_summary`` — re-formatting those sections here would
     duplicate them in the LLM context.
+
+    ``decision_rules_text`` is the decision-layer strategy gradients (target/relation),
+    injected into UNIFIED_ANALYSIS_PROMPT to influence type/target/reason selection.
     """
     prompt = UNIFIED_ANALYSIS_PROMPT.format(
         conversation_summary=report_text,
+        decision_rules_text=decision_rules_text,
     )
 
     # conversation_id 每次 tick 用唯一值——若用固定 id，DeepAgent 的 context
@@ -323,7 +337,6 @@ async def _analyze_and_decide(
             return AnalysisResult()
 
         # Extract decision (画像已废弃——所有推荐基于当前对话)
-        decision = None
         decision = None
         raw_decision = delta.get("decision")
         if isinstance(raw_decision, dict) and raw_decision.get("type") and raw_decision.get("target"):
@@ -378,11 +391,8 @@ async def _analyze_and_decide(
 
 
 async def _trigger_main_agent(
-    session_id: str,
-    channel_id: str | None,
-    decision: RecommendationDecision,
     trigger_callback: Any,
-    on_delivered: Any = None,
+    request: ProactiveTriggerRequest,
 ) -> bool:
     """Trigger the main agent to run one round and generate the recommendation message.
 
@@ -397,21 +407,28 @@ async def _trigger_main_agent(
     避让：trigger_callback 内部检查 ``is_deep_agent_executing_for_session``，
     目标 session 正忙时返回 False（跳过本次 tick，下个 tick 再来）。
 
-    ``on_delivered``: fire-and-forget 后台 task 真正跑完（推荐确实送达）时回调。
+    ``request.on_delivered``: fire-and-forget 后台 task 真正跑完（推荐确实送达）时回调。
     用于让调用方在"推荐确实送达"时再做计数/状态持久化，避免后台失败却已计数。
+
+    ``request.style_rules_section`` is the style-layer strategy gradients (tone/structure),
+    injected into DIRECTIVE_PROMPT to influence message generation.
+
+    ``request.rec_id`` is the unique recommendation ID, passed to frontend for feedback.
 
     Returns:
         True if the main agent was triggered (后台异步跑), False if the session was busy
         or delivery failed.
     """
+    decision = request.decision
     query = DIRECTIVE_PROMPT.format(
         rec_type=decision.type,
         target=decision.target,
         reason=decision.reason,
+        style_rules_section=request.style_rules_section,
     )
+    request.query = query
     try:
-        return bool(await trigger_callback(session_id, channel_id, query, decision,
-                                           on_delivered=on_delivered))
+        return bool(await trigger_callback(request))
     except Exception as exc:
         logger.warning("[ProactiveEngine] trigger_main_agent failed: %s", exc, exc_info=True)
         return False

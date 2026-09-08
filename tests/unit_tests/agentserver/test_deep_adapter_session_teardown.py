@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 
 import pytest
 
@@ -45,6 +46,19 @@ class _BlockingCleanupChildAdapter(_IdleChildAdapter):
         await super().cleanup()
 
 
+class _EvolutionRail:
+    def __init__(self) -> None:
+        self.cleaned = False
+
+    async def cleanup_background_tasks(self) -> None:
+        self.cleaned = True
+
+
+class _FailingEvolutionRail:
+    async def cleanup_background_tasks(self) -> None:
+        raise RuntimeError("background evolution remains active")
+
+
 def test_other_active_sessions_treats_subagent_as_related() -> None:
     adapter = _make_adapter(
         _active_session_ids={
@@ -55,6 +69,24 @@ def test_other_active_sessions_treats_subagent_as_related() -> None:
 
     assert getattr(adapter, "_other_active_sessions")("tui_main") == 0
     assert getattr(adapter, "_other_active_sessions")("tui_main_sub_explore") == 0
+
+
+@pytest.mark.asyncio
+async def test_adapter_cleanup_drains_detached_evolution_tasks() -> None:
+    rail = _EvolutionRail()
+    adapter = _make_adapter(_skill_evolution_rail=rail)
+
+    await getattr(adapter, "_cleanup_evolution_background_tasks")()
+
+    assert rail.cleaned is True
+
+
+@pytest.mark.asyncio
+async def test_adapter_cleanup_propagates_evolution_cleanup_failure() -> None:
+    adapter = _make_adapter(_skill_evolution_rail=_FailingEvolutionRail())
+
+    with pytest.raises(RuntimeError, match="background evolution remains active"):
+        await getattr(adapter, "_cleanup_evolution_background_tasks")()
 
 
 def test_other_active_sessions_counts_unrelated_sessions() -> None:
@@ -388,3 +420,92 @@ async def test_idle_eviction_skips_locked_adapter_without_waiting() -> None:
     assert getattr(parent, "_session_adapter_locks")["sess_locked_idle"] is lock
 
     lock.release()
+
+
+class _LiveSubagentControl:
+    """Stand-in for openjiuwen SubagentControl with live instances."""
+
+    @staticmethod
+    def list_live() -> list[object]:
+        return [object()]
+
+
+class _EmptySubagentControl:
+    """Stand-in for openjiuwen SubagentControl without live instances."""
+
+    @staticmethod
+    def list_live() -> list[object]:
+        return []
+
+
+class _SubagentChildAdapter(_IdleChildAdapter):
+    """Child adapter whose DeepAgent owns a per-session subagent control."""
+
+    def __init__(self, control: object) -> None:
+        super().__init__()
+        self._control = control
+
+    def get_live_session_instance(self, _session_id: str) -> object:
+        return SimpleNamespace(_subagent_controls={"sess_subagents": self._control})
+
+
+def _make_subagent_adapter(
+    control: object | None,
+) -> tuple[JiuWenSwarmDeepAdapter, _SubagentChildAdapter]:
+    child = _SubagentChildAdapter(control or _EmptySubagentControl())
+    parent = _make_adapter(
+        _is_session_scoped_adapter=False,
+        _session_adapters={"sess_subagents": child},
+        _session_adapter_locks={},
+        _session_adapter_last_used={"sess_subagents": 1.0},
+        _session_adapter_versions={"sess_subagents": 1},
+        _session_adapter_reload_failures={},
+        SESSION_ADAPTER_EVICT_BATCH_SIZE=8,
+        SESSION_ADAPTER_IDLE_TTL_SEC=1.0,
+    )
+    return parent, child
+
+
+@pytest.mark.asyncio
+async def test_idle_eviction_keeps_adapter_with_live_subagents() -> None:
+    # issue #3625: idle TTL eviction must not cancel_all live subagents.
+    parent, child = _make_subagent_adapter(_LiveSubagentControl())
+
+    await getattr(parent, "_evict_idle_session_adapters")()
+
+    assert child.cleaned is False
+    assert getattr(parent, "_session_adapters") == {"sess_subagents": child}
+
+
+@pytest.mark.asyncio
+async def test_idle_eviction_removes_adapter_without_live_subagents() -> None:
+    parent, child = _make_subagent_adapter(None)
+
+    await getattr(parent, "_evict_idle_session_adapters")()
+
+    assert child.cleaned is True
+    assert getattr(parent, "_session_adapters") == {}
+
+
+def test_session_has_live_subagents_without_agent_or_controls() -> None:
+    child = _IdleChildAdapter()
+    parent = _make_adapter(
+        _is_session_scoped_adapter=False,
+        _session_adapters={"sess_no_agent": child},
+        _session_adapter_last_used={"sess_no_agent": 1.0},
+    )
+
+    # _IdleChildAdapter has no get_live_session_instance -> no DeepAgent.
+    assert getattr(parent, "_session_has_live_subagents")("sess_no_agent") is False
+    assert getattr(parent, "_session_has_live_subagents")("sess_missing") is False
+
+
+def test_subagent_control_attr_name_contract() -> None:
+    # Contract test: _session_has_live_subagents hardcodes the openjiuwen
+    # private attribute name "_subagent_controls" (getattr-based, so an
+    # upstream rename silently disables the idle-eviction guard and
+    # regresses issue #3625). Pin the upstream constant so a rename fails
+    # loudly here first — fix by syncing the string in interface_deep.py.
+    from openjiuwen.harness.tools.subagent._control_registry import _CONTROL_ATTR
+
+    assert _CONTROL_ATTR == "_subagent_controls"

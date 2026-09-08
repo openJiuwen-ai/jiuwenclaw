@@ -138,4 +138,9 @@ python -m jiuwenswarm.app
 完成上述配置后，在 ACP Client 中连接 jiuwenswarm Agent 即可开始使用。
 
 ![ACP配置完成](../assets/images/ACP配置完成.png)
+---
 
+## 返回导航
+
+- [返回文档首页](../README.md)
+- [返回项目首页](../../README_CN.md)

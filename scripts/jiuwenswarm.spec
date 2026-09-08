@@ -1,15 +1,18 @@
 # -*- mode: python ; coding: utf-8 -*-
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 r"""JiuwenSwarm PyInstaller 打包配置。
 
 构建前请先：
 1. 安装依赖: uv sync --extra dev
 2. 构建前端: cd jiuwenswarm/channels/web/frontend && npm run build
-3. 执行打包: .\scripts\build-exe.ps1  或  uv run pyinstaller scripts/jiuwenswarm.spec
+3. 执行平台 wrapper: .\scripts\build-exe.ps1 或 bash scripts/build-macos.sh
 """
 
 import glob
 import os
+import runpy
 import sys
+from pathlib import Path
 
 from PyInstaller.utils.hooks import collect_all, collect_data_files, collect_submodules, copy_metadata
 
@@ -17,6 +20,14 @@ block_cipher = None
 
 SPEC_DIR = os.path.abspath(globals().get("SPECPATH", os.getcwd()))
 project_root = os.path.abspath(os.path.join(SPEC_DIR, os.pardir))
+build_config_module = runpy.run_path(os.path.join(project_root, "scripts", "build_config.py"))
+build_config = build_config_module["load_build_config"](Path(project_root))
+runtime_config_path = Path(project_root, "jiuwenswarm", "common", "_build_config.py")
+expected_runtime_config = build_config_module["render_runtime_python"](build_config)
+if not runtime_config_path.is_file() or runtime_config_path.read_text(encoding="utf-8") != expected_runtime_config:
+    raise SystemExit(
+        "错误: Python 运行时构建配置未同步，请通过 build.sh、build-macos.sh 或 build-exe wrapper 构建"
+    )
 symphony_root = os.path.join(project_root, "jiuwenswarm", "symphony")
 if symphony_root not in sys.path:
     sys.path.insert(0, symphony_root)
@@ -134,9 +145,53 @@ if not os.path.isdir(web_dist) or not os.listdir(web_dist):
 datas = webview_datas + [
     (os.path.join(project_root, "jiuwenswarm", "channels", "web", "frontend", "dist"), "jiuwenswarm/channels/web/frontend/dist"),
 ]
-datas += collect_resources_data_files(
+_playwright_mcp_resource_dir = os.path.join(
+    project_root,
+    "jiuwenswarm",
+    "resources",
+    "runtime",
+    "playwright-mcp",
+)
+_playwright_mcp_zip = os.path.join(
+    _playwright_mcp_resource_dir,
+    "playwright-mcp-0.0.78.zip",
+)
+_playwright_mcp_manifest = os.path.join(_playwright_mcp_resource_dir, "manifest.json")
+for _required_playwright_resource in (_playwright_mcp_zip, _playwright_mcp_manifest):
+    if not os.path.isfile(_required_playwright_resource):
+        raise SystemExit(
+            "ERROR: bundled Playwright MCP resource is missing: "
+            f"{_required_playwright_resource}. Run scripts/update_playwright_mcp_runtime.py."
+        )
+
+_resource_datas = collect_resources_data_files(
     os.path.join(project_root, "jiuwenswarm", "resources"),
     "jiuwenswarm/resources",
+)
+# Keep the ZIP explicit: generic PyInstaller resource patterns historically
+# covered only text data, while the browser runtime must remain a real file.
+datas += [
+    (
+        _playwright_mcp_zip,
+        "jiuwenswarm/resources/runtime/playwright-mcp",
+    )
+]
+datas += [
+    item
+    for item in _resource_datas
+    if os.path.normcase(os.path.abspath(item[0]))
+    != os.path.normcase(os.path.abspath(_playwright_mcp_zip))
+]
+datas += [
+    (
+        os.path.join(project_root, "OPEN_SOURCE_SOFTWARE_NOTICE.md"),
+        ".",
+    )
+]
+datas += collect_data_files(
+    "certifi",
+    include_py_files=False,
+    includes=["cacert.pem"],
 )
 datas += copy_metadata("fastmcp", recursive=True)
 datas += copy_metadata("mcp", recursive=True)
@@ -157,6 +212,13 @@ datas += collect_data_files(
     include_py_files=False,
     includes=DATA_FILE_PATTERNS,
 )
+# DesignRail 的 config.yaml + skills/ 树（SKILL.md / workflows / references / scripts）
+# 含 .mjs 脚本和 _templates/ 模板（脚本运行时读取），需额外 pattern
+datas += collect_data_files(
+    "jiuwenswarm.agents.harness.code.rails.sdd.design_rail",
+    include_py_files=False,
+    includes=["**/*.yaml", "**/*.yml", "**/*.json", "**/*.md", "**/*.mjs"],
+)
 for package_root in DISPATCH_PACKAGE_ROOTS:
     datas += collect_tree_data_files(
         os.path.join(symphony_root, package_root),
@@ -167,11 +229,35 @@ for package_root in DISPATCH_PACKAGE_ROOTS:
 # openjiuwen 使用动态导入，需要收集全部子模块
 openjiuwen_submodules = collect_submodules("openjiuwen")
 symphony_submodules = collect_submodules("jiuwenswarm.symphony")
+# TeamManager imports this lifecycle hook while its parent package is being
+# initialized.  Keep it explicit because PyInstaller cannot reliably infer
+# this package-attribute import from the frozen entry point.
+team_kv_cache_hiddenimports = [
+    "jiuwenswarm.agents.harness.team.kv_cache_team_delete_guard",
+]
 dispatch_submodules = collect_tree_python_modules(symphony_root, DISPATCH_PACKAGE_ROOTS)
+http2_submodules = [
+    *collect_submodules("h2"),
+    *collect_submodules("hpack"),
+    *collect_submodules("hyperframe"),
+]
 
 # 部分包需要显式声明隐藏导入
-hiddenimports = webview_hiddenimports + [
+hiddenimports = webview_hiddenimports + http2_submodules + [
     "pandas",  # pymilvus 依赖
+    # ``--doctor`` imports these targets dynamically before business imports.
+    # Keep them explicit so the installed executable can diagnose a broken
+    # native dependency instead of reporting a PyInstaller collection gap.
+    "tiktoken._tiktoken",
+    "grpc._cython.cygrpc",
+    "cryptography.hazmat.bindings._rust",
+    "numpy",
+    "pandas._libs.lib",
+    "lxml.etree",
+    "PIL._imaging",
+    "bcrypt._bcrypt",
+    "faiss",
+    "chromadb_rust_bindings",
     "tiktoken_ext",  # tiktoken 编码插件（cl100k_base 等）
     "tiktoken_ext.openai_public",
     "ruamel.yaml",
@@ -188,7 +274,7 @@ hiddenimports = webview_hiddenimports + [
     "webview",
     "jiuwenswarm.channels.web.app_web",  # 静态文件服务
     "jiuwenswarm.channels.web.desktop_app",  # 桌面入口
-] + openjiuwen_submodules + symphony_submodules + dispatch_submodules
+] + openjiuwen_submodules + symphony_submodules + team_kv_cache_hiddenimports + dispatch_submodules
 
 # 排除不需要的模块以减小体积（pandas 为 pymilvus/openjiuwen 所需，不可排除）
 excludes = [
@@ -196,6 +282,12 @@ excludes = [
     "matplotlib",
     "scipy",
     "numpy.tests",
+    # External CLI SDKs and their native executables are optional runtimes.
+    # Frozen Windows builds install verified wheels under the application directory on demand.
+    # Other platforms keep their managed optional runtimes in the user data directory.
+    "claude_agent_sdk",
+    "openai_codex",
+    "codex_cli_bin",
     # 测试框架辅助包（pytest 本体已 collect 进 PYZ）
     "tox",
     "hypothesis",
@@ -205,6 +297,7 @@ excludes = [
 
 # 入口脚本位于 scripts 目录
 entry_script = os.path.join(project_root, "scripts", "jiuwenswarm_exe_entry.py")
+mcp_entry_script = os.path.join(project_root, "scripts", "openjiuwen_team_mcp_exe_entry.py")
 
 # 图标路径（Windows 用 .ico，macOS 用 .icns）
 icon_path = os.path.join(
@@ -309,13 +402,30 @@ a = Analysis(
     noarchive=False,
 )
 
+mcp_a = Analysis(
+    [mcp_entry_script],
+    pathex=[project_root, symphony_root],
+    binaries=[],
+    datas=[],
+    hiddenimports=hiddenimports,
+    hookspath=[],
+    hooksconfig={},
+    runtime_hooks=[],
+    excludes=excludes,
+    win_no_prefer_redirects=False,
+    win_private_assemblies=False,
+    cipher=block_cipher,
+    noarchive=False,
+)
+
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
+mcp_pyz = PYZ(mcp_a.pure, mcp_a.zipped_data, cipher=block_cipher)
 
 exe = EXE(
     pyz,
     a.scripts,
     [],
-    name="jiuwenswarm",
+    name=build_config.executable_name,
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -335,28 +445,49 @@ exe = EXE(
     uac_admin=False,
 )
 
+mcp_exe = EXE(
+    mcp_pyz,
+    mcp_a.scripts,
+    [],
+    name="openjiuwen-team-mcp",
+    debug=False,
+    bootloader_ignore_signals=False,
+    strip=False,
+    upx=True,
+    upx_exclude=[],
+    runtime_tmpdir=None,
+    exclude_binaries=True,
+    console=False,
+    disable_windowed_traceback=False,
+    target_arch=None,
+    codesign_identity=None,
+    entitlements_file=None,
+)
+
 coll = COLLECT(
     exe,
+    mcp_exe,
     a.binaries,
     a.zipfiles,
     a.datas,
     strip=False,
     upx=True,
     upx_exclude=[],
-    name="jiuwenswarm",
+    name=build_config.dist_dir_name,
 )
 
 if sys.platform == "darwin":
     app = BUNDLE(
         coll,
-        name="JiuwenSwarm.app",
+        name=build_config.app_bundle_name,
         icon=icon_path,
-        bundle_identifier="com.jiuwenswarm.desktop",
+        bundle_identifier=build_config.bundle_identifier,
         info_plist={
-            "CFBundleName": "JiuwenSwarm",
-            "CFBundleDisplayName": "JiuwenSwarm",
-            "CFBundleShortVersionString": "0.2.4.beta3",
-            "CFBundleVersion": "0.2.4.beta3",
+            "CFBundleName": build_config.display_name,
+            "CFBundleDisplayName": build_config.display_name,
+            "CFBundleExecutable": build_config.executable_name,
+            "CFBundleShortVersionString": build_config.version,
+            "CFBundleVersion": build_config.version,
             "NSHighResolutionCapable": "True",
         },
     )

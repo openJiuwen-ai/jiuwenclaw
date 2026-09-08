@@ -41,10 +41,10 @@ channels:
   web:
     enabled: true
 
-evolution:
-  enabled: true
-  auto_scan: false
-  skill_base_dir: "workspace/agent/skills"
+react:
+  evolution:
+    skill_evolution: true
+    auto_save: false
 
 heartbeat:
   every: "30 * * * *"

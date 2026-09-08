@@ -42,7 +42,7 @@ export function CheckBoxWithDefaults({
   );
 
   return (
-    <div className="a2ui-checkbox" style={hostWeightStyle(node.weight)}>
+    <div className="a2ui-checkbox" data-testid="a2ui-checkbox" style={hostWeightStyle(node.weight)}>
       <section
         className={classMapToString(theme.components.CheckBox.container)}
         style={stylesToObject(theme.additionalStyles?.CheckBox)}
@@ -53,11 +53,13 @@ export function CheckBoxWithDefaults({
           checked={checked}
           onChange={updateFromInput}
           className={classMapToString(theme.components.CheckBox.element)}
+          data-testid="a2ui-checkbox-input"
         />
         {label && (
           <label
             htmlFor={id}
             className={classMapToString(theme.components.CheckBox.label)}
+            data-testid="a2ui-checkbox-label"
           >
             {label}
           </label>
