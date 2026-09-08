@@ -113,17 +113,17 @@ def main() -> None:
     async def _run() -> int:
         engine = LoopEngine(options, log=log)
         report = await engine.run()
-        print("\n========== Loop Engineering 结果 ==========")
-        print(f"循环终态     : {report.final}")
-        print(f"机器验证     : {'✅ PASS' if report.verify_pass else '❌ FAIL'}")
-        print(f"迭代轮数     : {report.iterations}")
-        print(f"maker tokens : {report.maker_tokens}")
-        print(f"耗时         : {report.wall_seconds}s")
-        print(f"状态文件     : {report.state_path}")
-        print("rubric        :")
+        logging.info("\n========== Loop Engineering 结果 ==========")
+        logging.info("循环终态     : %s", report.final)
+        logging.info("机器验证     : %s", "✅ PASS" if report.verify_pass else "❌ FAIL")
+        logging.info("迭代轮数     : %s", report.iterations)
+        logging.info("maker tokens : %s", report.maker_tokens)
+        logging.info("耗时         : %ss", report.wall_seconds)
+        logging.info("状态文件     : %s", report.state_path)
+        logging.info("rubric        :")
         for r in report.rubric:
-            print(f"  - {r}")
-        print("=============================================")
+            logging.info("  - %s", r)
+        logging.info("=============================================")
         if report.final == "satisfied" and report.verify_pass:
             return 0
         if report.final == "max_iterations_reached":
