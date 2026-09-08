@@ -6894,7 +6894,7 @@ class JiuWenSwarmDeepAdapter:
                 prebuilt_dirs_provider=self._prebuilt_skill_dirs_snapshot,
                 builtin_dirs_provider=lambda: [get_builtin_skills_dir()],
                 skill_identity_refresher=self._refresh_skill_identity,
-                config_provider=get_effective_permissions_config,
+                config_provider=self._resolve_skill_authorization_base_config,
                 session_config_merger=lambda config, session_id: (
                     merge_session_permissions_overlay(
                         config,
@@ -8280,6 +8280,14 @@ class JiuWenSwarmDeepAdapter:
         if is_enterprise() and session_id is None:
             return get_base_permissions_config()
         return get_effective_permissions_config(session_id=session_id)
+
+    def _resolve_skill_authorization_base_config(self) -> dict[str, Any]:
+        """Return this Agent's permission baseline without relying on ContextVar propagation.
+
+        An empty explicit session id keeps session overlays out of the provider result;
+        ``SkillAuthorizationRail`` merges the target session overlay separately.
+        """
+        return self._resolve_permission_config_for_agent(session_id="")
 
     def _build_permission_rail_for_agent(
         self,
