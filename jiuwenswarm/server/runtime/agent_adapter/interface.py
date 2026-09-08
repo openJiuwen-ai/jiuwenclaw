@@ -3240,7 +3240,7 @@ class JiuWenSwarm:
 
         # Team 模式: 后续请求直接执行，绕过 Session Manager 队列
         # 因为 Team 是长期运行的(persistent)，interact 调用不需要等待前一个任务完成
-        # 且 team_helpers 内部已有请求锁保证同一 session 的请求串行执行
+        # team_helpers 只串行化同一 session 的首次启动，已有流上的输入可并发提交
         if is_team_mode and not is_team_first_request:
             logger.info(
                 "[JiuWenSwarm] Team模式后续请求，直接执行: request_id=%s session_id=%s",
