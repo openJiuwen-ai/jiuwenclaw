@@ -46,6 +46,9 @@ from jiuwenswarm.agents.harness.common.rails.permissions._auto_permission.models
     ToolInvocation,
 )
 from jiuwenswarm.agents.harness.common.rails.permissions.native_path_context import NATIVE_PATH_ACCESS
+from jiuwenswarm.agents.harness.common.rails.permissions.tool_permission_context import (
+    PUBLIC_HTTPS_FETCH_CONTEXT_ATTR,
+)
 from jiuwenswarm.agents.harness.common.rails.permissions._auto_permission.reviewer_audit import (
     _contains_retired_task_scope_confirmation,
     _is_allow_once_confirmation,
@@ -192,6 +195,8 @@ class AutoPermissionBeforeToolMixin:
         clear_trusted_search_producer()
         invocation = _extract_invocation(args, kwargs)
         context_extra = getattr(invocation.ctx, "extra", None)
+        if invocation.ctx is not None and invocation.tool_name == "mcp_fetch_webpage":
+            setattr(invocation.ctx, PUBLIC_HTTPS_FETCH_CONTEXT_ATTR, True)
         if (
             isinstance(context_extra, Mapping)
             and context_extra.get("_skip_tool") is True
