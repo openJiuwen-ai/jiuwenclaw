@@ -165,8 +165,11 @@ async def generate_visual(
         mime = header[len("data:"):].split(";")[0] if header.startswith("data:") else "image/png"
         ext = _extension_for_mime(mime)
         filename = f"image_{int(time.time())}_{index}.{ext}"
-        target = _resolve_save_path(save_dir, filename)
-        target.write_bytes(base64.b64decode(b64data))
+        try:
+            target = _resolve_save_path(save_dir, filename)
+            target.write_bytes(base64.b64decode(b64data))
+        except OSError as exc:
+            return f"[ERROR]: failed to save image ({filename}) to {save_dir or 'agent workspace'}: {exc!r}"
         saved_paths.append(str(target))
 
     return "Image generated successfully!\nSaved to: " + ", ".join(saved_paths)

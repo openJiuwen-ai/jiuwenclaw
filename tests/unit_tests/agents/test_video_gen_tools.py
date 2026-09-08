@@ -343,6 +343,34 @@ async def test_generate_video_success_downloads_and_saves_video(
 
 
 @pytest.mark.asyncio
+async def test_generate_video_save_failure_returns_error_not_crash(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    """A disk-full/permission-denied write must surface as a clean [ERROR]
+    string, not an unhandled OSError - save_dir is agent-controlled input."""
+    _set_video_model_config(monkeypatch)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/v1/videos" and request.method == "POST":
+            return httpx.Response(200, json={"id": "job-123", "status": "completed"})
+        if request.url.path == "/api/v1/videos/job-123/content":
+            return httpx.Response(200, content=b"fake-mp4-bytes")
+        raise AssertionError(f"unexpected request: {request.method} {request.url}")
+
+    _patch_async_client(monkeypatch, handler)
+
+    def _raise_disk_full(self, data):
+        raise OSError("No space left on device")
+
+    monkeypatch.setattr(Path, "write_bytes", _raise_disk_full)
+
+    result = await generate_video(prompt="a puppy running", save_dir=str(tmp_path))
+
+    assert result.startswith("[ERROR]: failed to save video")
+    assert "No space left on device" in result
+
+
+@pytest.mark.asyncio
 async def test_generate_video_includes_frame_images_for_image_to_video(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ):

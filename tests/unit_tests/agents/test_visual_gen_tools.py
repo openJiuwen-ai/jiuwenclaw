@@ -216,6 +216,33 @@ async def test_generate_visual_success_saves_data_uri_image(monkeypatch: pytest.
 
 
 @pytest.mark.asyncio
+async def test_generate_visual_save_failure_returns_error_not_crash(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    """A disk-full/permission-denied write must surface as a clean [ERROR]
+    string, not an unhandled OSError - save_dir is agent-controlled input."""
+    _set_visual_gen_config(monkeypatch)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"images": [{"image_url": {"url": _data_uri("image/png", b"x")}}]}}]},
+        )
+
+    _patch_async_client(monkeypatch, handler)
+
+    def _raise_disk_full(self, data):
+        raise OSError("No space left on device")
+
+    monkeypatch.setattr(Path, "write_bytes", _raise_disk_full)
+
+    result = await generate_visual(prompt="a cat", save_dir=str(tmp_path))
+
+    assert result.startswith("[ERROR]: failed to save image")
+    assert "No space left on device" in result
+
+
+@pytest.mark.asyncio
 async def test_generate_visual_uses_defaults_when_unspecified(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     _set_visual_gen_config(monkeypatch)
     requests_seen: list[httpx.Request] = []

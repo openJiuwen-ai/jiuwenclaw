@@ -117,8 +117,12 @@ async def _download_video(ctx: _JobContext, api_base: str, save_dir: str | None)
     if content.status_code != 200:
         return f"[ERROR]: video job {ctx.job_id} completed but downloading content failed: {content.status_code}"
 
-    target = _resolve_save_path(save_dir, f"video_{ctx.job_id}.mp4")
-    target.write_bytes(content.content)
+    filename = f"video_{ctx.job_id}.mp4"
+    try:
+        target = _resolve_save_path(save_dir, filename)
+        target.write_bytes(content.content)
+    except OSError as exc:
+        return f"[ERROR]: failed to save video ({filename}) to {save_dir or 'agent workspace'}: {exc!r}"
     return (
         "Video generated successfully!\n"
         f"Saved to: {target}\n"
