@@ -661,7 +661,7 @@ export function formatGain(gain: number | null): { text: string; kind: 'up' | 'd
 
 // token 用量格式化：万 tokens
 export function formatTokens(tokens: { input: number; output: number; cache_hit: number }): string {
-  const total = tokens.input + tokens.output + tokens.cache_hit;
+  const total = tokens.input + tokens.output;
   const wan = total / 10000;
   if (wan >= 1) return `${wan.toFixed(1)} 万tokens`;
   return `${total}tokens`;
@@ -669,7 +669,8 @@ export function formatTokens(tokens: { input: number; output: number; cache_hit:
 
 // token 用量格式化（K 单位）：示例 123K tokens（对齐样式概要）
 export function formatTokensK(tokens: { input: number; output: number; cache_hit: number }): string {
-  const total = tokens.input + tokens.output + tokens.cache_hit;
+  // cache_hit 是 input 的子集，不应重复计入总量。
+  const total = tokens.input + tokens.output;
   if (total >= 1000) return Math.round(total / 1000) + 'K tokens';
   return total + ' tokens';
 }
@@ -882,6 +883,7 @@ export const RSI_NODE_BAR_H = 32;
 export const RSI_SCORE_LINE_H = 26; // 分数行行高
 export const RSI_EVAL_LINE_H = 24; // 评测中/文本行高
 export const RSI_SUMMARY_LINE_H = 20; // 节点摘要行高
+export const RSI_STAGE_LINE_H = 16; // 根节点评测阶段提示行高
 export const RSI_BODY_PAD = 8; // 下层上下 padding 合计
 export const RSI_BODY_MIN_H = 42; // 下层最小高度（与节点高保真 32 + 42 对齐）
 export const RSI_NODE_MIN_W = 180;
@@ -912,6 +914,7 @@ export function nodeMetrics(node: RsiTreeNode, kind: NodeRuntimeKind, scoreExpan
   let bodyH = RSI_BODY_PAD;
   const summary = nodeSummaryText(node);
   const stage = nodeStageLabel(node);
+  const rootStageRunning = node.type === 'ROOT' && nodeStageSpec(node)?.status === 'running';
   if (kind === 'evaluating') {
     const text = stage ?? summary ?? '正在处理';
     const secondary = stage && summary ? summary : null;
@@ -924,7 +927,8 @@ export function nodeMetrics(node: RsiTreeNode, kind: NodeRuntimeKind, scoreExpan
     const linesArr = nodeScoreLines(node);
     const shown = scoreExpanded ? Math.min(linesArr.length, 5) : Math.min(linesArr.length, 3);
     const summaryH = summary ? summaryRows(summary, RSI_NODE_MIN_W) * RSI_SUMMARY_LINE_H : 0;
-    bodyH = Math.max(RSI_BODY_MIN_H, RSI_BODY_PAD + summaryH + shown * RSI_SCORE_LINE_H);
+    const stageH = rootStageRunning ? RSI_STAGE_LINE_H : 0;
+    bodyH = Math.max(RSI_BODY_MIN_H, RSI_BODY_PAD + stageH + summaryH + shown * RSI_SCORE_LINE_H);
     if (linesArr.length > 3) bodyH += RSI_SCORE_TOGGLE_H;
   } else if (kind === 'pending') {
     bodyH = Math.max(RSI_BODY_MIN_H, RSI_BODY_PAD + RSI_SUMMARY_LINE_H);

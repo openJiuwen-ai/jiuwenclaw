@@ -4,7 +4,9 @@
  * 数据集路径复用 path.select_files（单文件），产物路径沿用 path.select_directory。
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import clsx from 'clsx';
+import { Check, Copy } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { rsiDatasetValidate, rsiTaskCreate, rsiTaskList, rsiTrainingStart } from '../rsiApi';
 import type { RsiArtifactType, RsiScenario, RsiTaskCreateParams, RsiTaskListItem, RsiTaskStatus } from '../types';
@@ -16,6 +18,69 @@ import TipIcon from '../../../assets/tip.svg?react';
 import type { ModelEntry } from '../../../types';
 import { pluginPackagesApi } from '../../../services/pluginPackagesApi';
 import { localizedText, type PluginPackageSummary } from '../../../types/pluginPackage';
+
+const RSI_DATASET_FIELD_SCHEMA = `{
+  "dataset_id": "string",
+  "source": "string",
+  "split": "string",
+  "cases": [
+    {
+      "case_id": "string",
+      "source": "string",
+      "task_type": "string",
+      "difficulty": "string",
+      "dimension": "string",
+      "input": "string",
+      "reference": {
+        "answer": "string | number | boolean | object | array | null",
+        "required_behaviors": [
+          {
+            "id": "string",
+            "description": "string",
+            "weight": "number"
+          }
+        ],
+        "forbidden_behaviors": [
+          {
+            "id": "string",
+            "description": "string",
+            "penalty": "number"
+          }
+        ]
+      }
+    }
+  ]
+}`;
+
+function DatasetFieldTipContent({ title, content }: { title: string; content: string }) {
+  const [copied, setCopied] = useState(false);
+  const handleCopy = useCallback(async () => {
+    try {
+      await navigator.clipboard.writeText(content);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1500);
+    } catch {
+      setCopied(false);
+    }
+  }, [content]);
+
+  return (
+    <>
+      <div className="rsi-create-dialog__rich-tip__title">
+        <span>{title}</span>
+        <button
+          type="button"
+          className={'rsi-create-dialog__rich-tip__copy' + (copied ? ' rsi-create-dialog__rich-tip__copy--copied' : '')}
+          onClick={handleCopy}
+          aria-label={copied ? '已复制' : '复制'}
+        >
+          {copied ? <Check size={14} aria-hidden /> : <Copy size={14} aria-hidden />}
+        </button>
+      </div>
+      <pre>{content}</pre>
+    </>
+  );
+}
 
 interface CreateExperimentDialogProps {
   open: boolean;
@@ -377,7 +442,17 @@ export function CreateExperimentDialog({ open, onClose, onCreated }: CreateExper
         )}
 
         {branch === 'HARNESS' && (
-          <Field label={t('rsi.createDialog.datasetLabel')} tip={t('rsi.createDialog.datasetTip')}>
+          <Field
+            label={t('rsi.createDialog.datasetLabel')}
+            tip={t('rsi.createDialog.datasetTip')}
+            tipAriaLabel={t('rsi.createDialog.datasetFieldTipTitle')}
+            tipContent={
+              <DatasetFieldTipContent
+                title={t('rsi.createDialog.datasetFieldTipTitle')}
+                content={RSI_DATASET_FIELD_SCHEMA}
+              />
+            }
+          >
             <PathInput
               value={form.datasetFile}
               placeholder={t('rsi.createDialog.datasetPlaceholder')}
@@ -459,21 +534,140 @@ export function CreateExperimentDialog({ open, onClose, onCreated }: CreateExper
   );
 }
 
-function Field({ label, tip, children }: { label: string; tip?: string; children: React.ReactNode }) {
+function Field({
+  label,
+  tip,
+  tipAriaLabel,
+  tipContent,
+  children,
+}: {
+  label: string;
+  tip?: string;
+  tipAriaLabel?: string;
+  tipContent?: React.ReactNode;
+  children: React.ReactNode;
+}) {
   return (
     <div style={{ marginBottom: 14 }}>
       <label style={{ display: 'block', fontSize: 13, marginBottom: 6, color: 'var(--color-text-primary)' }}>
         <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
           {label}
-          {tip && (
+          {tipContent ? (
+            <FieldTip ariaLabel={tipAriaLabel ?? label}>{tipContent}</FieldTip>
+          ) : tip ? (
             <span className="rsi-create-dialog__label-tip" title={tip} aria-label={tip}>
               <TipIcon className="w-3.5 h-3.5 shrink-0" />
             </span>
-          )}
+          ) : null}
         </span>
       </label>
       {children}
     </div>
+  );
+}
+
+function FieldTip({ ariaLabel, children }: { ariaLabel: string; children: React.ReactNode }) {
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const panelRef = useRef<HTMLDivElement>(null);
+  const closeTimerRef = useRef<number | null>(null);
+  const [open, setOpen] = useState(false);
+  const [position, setPosition] = useState<{ left: number; top: number } | null>(null);
+
+  const clearCloseTimer = useCallback(() => {
+    if (closeTimerRef.current !== null) {
+      window.clearTimeout(closeTimerRef.current);
+      closeTimerRef.current = null;
+    }
+  }, []);
+
+  const openTip = useCallback(() => {
+    clearCloseTimer();
+    const trigger = triggerRef.current;
+    if (!trigger) return;
+    const rect = trigger.getBoundingClientRect();
+    const panelWidth = 480;
+    const panelHeight = Math.min(400, window.innerHeight - 24);
+    const gap = 8;
+    const left = Math.max(12, Math.min(rect.left, window.innerWidth - panelWidth - 12));
+    const top =
+      rect.bottom + gap + panelHeight <= window.innerHeight - 12
+        ? rect.bottom + gap
+        : Math.max(12, rect.top - panelHeight - gap);
+    setPosition({ left, top });
+    setOpen(true);
+  }, [clearCloseTimer]);
+
+  const closeTip = useCallback(() => setOpen(false), []);
+
+  const scheduleClose = useCallback(() => {
+    clearCloseTimer();
+    closeTimerRef.current = window.setTimeout(closeTip, 160);
+  }, [clearCloseTimer, closeTip]);
+
+  useEffect(() => {
+    if (!open) return;
+    const handlePointerDown = (event: PointerEvent) => {
+      if (triggerRef.current?.contains(event.target as Node)) return;
+      if (panelRef.current?.contains(event.target as Node)) return;
+      closeTip();
+    };
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') closeTip();
+    };
+    const handleScroll = (event: Event) => {
+      // 滚动弹层内部的 JSON 代码块时保持展示；只有外部页面滚动才关闭。
+      if (panelRef.current?.contains(event.target as Node)) return;
+      closeTip();
+    };
+    document.addEventListener('pointerdown', handlePointerDown);
+    document.addEventListener('keydown', handleKeyDown);
+    window.addEventListener('scroll', handleScroll, true);
+    return () => {
+      document.removeEventListener('pointerdown', handlePointerDown);
+      document.removeEventListener('keydown', handleKeyDown);
+      window.removeEventListener('scroll', handleScroll, true);
+      clearCloseTimer();
+    };
+  }, [open, closeTip, clearCloseTimer]);
+
+  return (
+    <>
+      <span className="rsi-create-dialog__label-tip-wrap">
+        <button
+          ref={triggerRef}
+          type="button"
+          className="rsi-create-dialog__label-tip"
+          aria-label={ariaLabel}
+          aria-expanded={open}
+          onMouseEnter={openTip}
+          onMouseLeave={scheduleClose}
+          onFocus={openTip}
+          onBlur={scheduleClose}
+          onClick={(event) => {
+            event.preventDefault();
+            if (open) closeTip();
+            else openTip();
+          }}
+        >
+          <TipIcon className="w-3.5 h-3.5 shrink-0" />
+        </button>
+      </span>
+      {open && position
+        ? createPortal(
+            <div
+              ref={panelRef}
+              className="rsi-create-dialog__rich-tip"
+              role="tooltip"
+              style={{ left: position.left, top: position.top }}
+              onMouseEnter={clearCloseTimer}
+              onMouseLeave={scheduleClose}
+            >
+              {children}
+            </div>,
+            triggerRef.current?.closest('dialog') ?? document.body
+          )
+        : null}
+    </>
   );
 }
 

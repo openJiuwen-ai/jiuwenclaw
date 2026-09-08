@@ -114,6 +114,15 @@ class RsiEventConsumer:
                 if self._on_tree_delta is not None:
                     await self._on_tree_delta(self.task_id, {"nodes": [node.to_dict()]})
             return
+        if provider_event_type == "progress.usage":
+            self.usage_recorder.record_engine_event(
+                self.task_id,
+                {
+                    "node_ref": getattr(event, "node_ref", None),
+                    "model_call": getattr(event, "model_call", None),
+                },
+            )
+            return
         if getattr(event, "is_progress_metric", False):
             self.projector.on_progress_metric(self.task_id, event.payload)
             progress = self.projector.derive_progress(self.task_id)

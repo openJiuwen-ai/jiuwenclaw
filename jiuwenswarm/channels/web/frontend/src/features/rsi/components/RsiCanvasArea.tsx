@@ -23,6 +23,7 @@ import {
   runtimeKindColorClass,
   nodeScoreLines,
   nodeStageLocalizedLabel,
+  nodeStageSpec,
   type RsiNodePresentation,
 } from '../rsiPresentation';
 import { layoutTree, type LayoutNode, type TreeLayout } from '../rsiTreeLayout';
@@ -374,6 +375,8 @@ function RsiNodeCard({
   const label = presentation.runtimeLabel;
   const icon = presentation.runtimeIcon;
   const stageLabel = nodeStageLocalizedLabel(ln.node, t) ?? presentation.stageLabel;
+  const rootStageRunning = presentation.lifecycle === 'baseline' && nodeStageSpec(ln.node)?.status === 'running';
+  const rootStageHint = rootStageRunning && stageLabel ? <div className="rsi-node__stage">{stageLabel}</div> : null;
 
   const scoreLines = nodeScoreLines(ln.node);
   // 折叠态最多 3 行，展开最多 5 行（超出滚动）
@@ -420,12 +423,16 @@ function RsiNodeCard({
         ) : scoreLines.length === 0 && presentation.summary ? (
           <div className="rsi-node__summary">{presentation.summary}</div>
         ) : scoreLines.length === 0 ? (
-          <div className="rsi-node__score-line">
-            <span className="rsi-node__score-num">--</span>
-            <span className="rsi-node__score-label">分数</span>
-          </div>
+          <>
+            {rootStageHint}
+            <div className="rsi-node__score-line">
+              <span className="rsi-node__score-num">--</span>
+              <span className="rsi-node__score-label">分数</span>
+            </div>
+          </>
         ) : (
           <>
+            {rootStageHint}
             {presentation.summary && <div className="rsi-node__summary">{presentation.summary}</div>}
             {shown.map((sl, i) => (
               <div className="rsi-node__score-line" key={i}>
@@ -470,6 +477,7 @@ function RsiNodeCard({
         <button
           type="button"
           className={`rsi-node__toggle${collapsed ? ' rsi-node__toggle--collapsed' : ''}`}
+          style={{ top: ln.height / 2 - 1 }}
           onClick={(e) => {
             e.stopPropagation();
             onToggle(ln.node.node_id);
@@ -671,12 +679,8 @@ export function RsiCanvasArea({ task, tree }: RsiCanvasAreaProps) {
   const completedWithBest = task.status === 'COMPLETED' && Boolean(bestArtifactId);
   const statusText = completedWithBest
     ? t('rsi.detail.bestArtifactPrefix', { defaultValue: '最优产物' })
-    : running && activePresentation
-      ? (nodeStageLocalizedLabel(provisionalNode, t) ??
-        activePresentation.stageLabel ??
-        (activePresentation.lifecycle === 'evaluating'
-          ? t('rsi.detail.evaluating', { defaultValue: '正在评测' })
-          : t('rsi.detail.runningStage', { defaultValue: '优化中' })))
+    : running
+      ? t('rsi.detail.evaluating', { defaultValue: '正在评测' })
       : t('rsi.detail.' + statusInfo.labelKey);
   const candidate = running
     ? activePresentation

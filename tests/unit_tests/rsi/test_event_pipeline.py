@@ -5,7 +5,9 @@ import json
 from pathlib import Path
 
 import pytest
-from openjiuwen.rsi.events import EventStatus
+from openjiuwen.rsi.events import EventStatus, EventUsage
+from openjiuwen.rsi.schema import RsiModelCall as EngineRsiModelCall
+from openjiuwen.rsi.schema import RsiUsageTokens
 
 from jiuwenswarm.agents.harness.common.rsi.artifact_service import RsiArtifactService
 from jiuwenswarm.agents.harness.common.rsi.event_consumer import RsiEventConsumer
@@ -72,6 +74,23 @@ class TestProjectorProgress:
         # 统一动态阶段语义：description 覆盖为当前阶段文案，而不是追加历史。
         assert node.description == "验证中"
         assert node.extra["stage"]["name"] == "验证中"
+
+    def test_harness_h0_node_normalizes_to_root(self, projector):
+        projector.register_root("rsi-t1")
+        node = projector.on_provider_node("rsi-t1", {
+            "node_id": "h0",
+            "iteration": 0,
+            "parent_id": None,
+            "type": "ROOT",
+            "adopted": True,
+            "summary": "Initial Harness",
+            "extra": {},
+        })
+
+        assert node is not None
+        assert node.node_id == "ROOT"
+        tree = projector.derive_tree("rsi-t1")
+        assert len(tree["nodes"]) == 1
 
     def test_tree_persist_reload(self, projector, tmp_path):
         projector.register_root("rsi-t1")
@@ -196,6 +215,28 @@ class TestEventConsumer:
         asyncio.run(consumer.on_engine_event(event))
         data = usage.get("rsi-t1")
         assert data["usage"]["tokens"]["input"] == 3
+
+    def test_agent_core_usage_dataclass_event(self, projector, usage, artifacts):
+        consumer = RsiEventConsumer("rsi-t1", usage, projector, artifacts)
+        event = EventUsage(
+            event_id=1,
+            task_id="rsi-t1",
+            ts="2026-09-07T01:00:00+00:00",
+            call_id="call-1",
+            model_call=EngineRsiModelCall(
+                model="m",
+                call_count=1,
+                tokens=RsiUsageTokens(input=7, output=3, cache_hit=2),
+            ),
+            node_ref="epoch-001",
+        )
+        import asyncio
+
+        asyncio.run(consumer.on_engine_event(event))
+        data = usage.get("rsi-t1")
+        assert data["usage"]["tokens"]["input"] == 7
+        assert data["usage"]["tokens"]["output"] == 3
+        assert data["usage"]["tokens"]["cache_hit"] == 2
 
     def test_node_created_with_artifacts(self, projector, usage, artifacts, tmp_path):
         task_dir = tmp_path / "rsi-t1"

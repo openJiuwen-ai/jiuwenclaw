@@ -55,9 +55,13 @@ class RsiUsageRecorder:
     def record_engine_event(self, task_id: str, payload: dict[str, Any]) -> None:
         """从 ``progress.usage`` 事件载荷归一记录（内部 v3 §3.3）。"""
         model_call_raw = payload.get("model_call")
+        if is_dataclass(model_call_raw):
+            model_call_raw = asdict(model_call_raw)
         if not isinstance(model_call_raw, dict):
             return
         tokens_raw = model_call_raw.get("tokens") or {}
+        if is_dataclass(tokens_raw):
+            tokens_raw = asdict(tokens_raw)
         tokens = Tokens(
             input=int(tokens_raw.get("input") or 0),
             output=int(tokens_raw.get("output") or 0),
