@@ -13,6 +13,7 @@ from jiuwenswarm.server.runtime.skill_turbo.skill_codes.ppt.ppt_page_gen import 
     PageWorkerNode,
     _build_content_template_fill_prompt,
     _build_content_template_fill_system_prompt,
+    _count_agenda_items,
     _build_page_gen_rewrite_hint,
     _extract_chart_scaffold_region,
     _extract_designer_section,
